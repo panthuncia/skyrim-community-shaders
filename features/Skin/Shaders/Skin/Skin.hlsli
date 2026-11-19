@@ -8,6 +8,9 @@
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 
+#include "Common/DCLFObjects.hlsli"
+#include "Common/NamespacedCBuffer.hlsli"
+
 namespace Skin
 {
 	float CalculateCurvature(float3 N)
@@ -18,17 +21,33 @@ namespace Skin
 	}
 
 #if defined(PSHADER)
-	cbuffer SkinPerGeometry : register(b7)
-	{
-		float4 skinPerGeometry;
-		float4 skinMaterialFlags;
-		SharedData::SkinData skinPerGeometryProfile;
-	};
+#	if defined(DCLF_BINDLESS_DRAW)
+	// Drawcall Limit Fix: per object, from its shading row rather than a buffer of its own, so that b7 is not part
+	// of what makes a draw's binding record unique.
+	// Read where used: a plain draw's object index (DCLF_PULLED) is set by its main, after statics are initialised.
+#		define skinPerGeometry (DCLFShading[DCLFObjectIndex].SkinPerGeometry)
+	// The shading row has no per-geometry material yet: no extra, wetness or detail textures, and the common profile.
+	static const float4 skinMaterialFlags = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
 	SharedData::SkinData GetSkinData()
 	{
-		return skinPerGeometryProfile;
+		return SharedData::skinData;
 	}
+#	else
+	cbuffer SkinPerGeometry : register(b7)
+	{
+		float4 NSCB(Skin, skinPerGeometry);
+		float4 NSCB(Skin, skinMaterialFlags);
+		SharedData::SkinData NSCB(Skin, skinPerGeometryProfile);
+	};
+	NSCB_ALIAS(Skin, float4, skinPerGeometry)
+	NSCB_ALIAS(Skin, float4, skinMaterialFlags)
+
+	SharedData::SkinData GetSkinData()
+	{
+		return NSCB(Skin, skinPerGeometryProfile);
+	}
+#	endif
 #else
 	SharedData::SkinData GetSkinData()
 	{

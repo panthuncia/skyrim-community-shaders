@@ -1,0 +1,49 @@
+// Skylighting: its probe array (t50) and shadow visibility (t53), frame textures. The render thread's callbacks read the feature live.
+
+#include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
+
+#include "State.h"
+
+#include "Features/Skylighting.h"
+#include "Features/Skylighting/ORGSkylighting.h"
+
+namespace DCLF::Integrations::Skylighting
+{
+	namespace
+	{
+		// Whether this frame's Prepass binds t50 and t53: outside the map menu under the full sky. Otherwise the captured views.
+		bool Binds()
+		{
+			if (!globals::features::skylighting.loaded || globals::state->isMapMenuOpen)
+				return false;
+			const auto* sky = globals::game::sky;
+			return sky && sky->mode.get() == RE::Sky::Mode::kFull;
+		}
+
+		// Persistent textures that Prepass updates before binding: D3D11 ones, or the graph's exports while CS_ORG_SKYLIGHTING=1.
+		void* ProbeArrayView()
+		{
+			return Binds() ? globals::features::skylighting.ProbeArraySRV() : nullptr;
+		}
+
+		void* ShadowVisibilityView()
+		{
+			return Binds() ? globals::features::skylighting.ShadowVisibilitySRV() : nullptr;
+		}
+
+		// While the probe update runs on the graph, commits read the published volumes ordered after the update at the Prepass anchor.
+		void Install(Api::InstallContext& a_context)
+		{
+			a_context.RegisterFrameTexture({ .name = "skylighting probes", .textureRegister = kProbeArrayRegister, .view = &ProbeArrayView,
+				.capturedWhenNull = true, .graphResources = { ORGSkylighting::kProbeArrayId } });
+			a_context.RegisterFrameTexture({ .name = "skylighting shadow visibility", .textureRegister = kShadowVisibilityRegister,
+				.view = &ShadowVisibilityView, .capturedWhenNull = true, .graphResources = { ORGSkylighting::kShadowVisibilityId } });
+		}
+	}
+
+	Api::Feature Integration()
+	{
+		return { .name = "skylighting", .install = &Install, .status = [] { return FeatureStatus(globals::features::skylighting); } };
+	}
+}

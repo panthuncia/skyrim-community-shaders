@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 
 #include "Buffer.h"
 
@@ -67,8 +68,9 @@ public:
 		float3 Scale;
 		float2 ZRange;
 		float2 Offset;
-		float ZBlur;  // world-space half-width of the shadow transition
-		float3 pad0;
+		float ZBlur;   // world-space half-width of the shadow transition
+		float2 UVMax;  // the heightmap's extent in the shadow height map's UVs: 1 on D3D11, less when the graph's larger texture holds it
+		float pad0;
 	};
 	STATIC_ASSERT_ALIGNAS_16(PerFrame);
 
@@ -79,6 +81,11 @@ public:
 
 	std::unique_ptr<Texture2D> texHeightMap = nullptr;
 	std::unique_ptr<Texture2D> texShadowHeight = nullptr;
+	uint heightMapWidth = 0;
+	uint heightMapHeight = 0;
+
+	/** @brief The shadow height map's view that t60 binds, on whichever path holds it; null before one exists. */
+	ID3D11ShaderResourceView* GetShadowHeightSRV() const;
 
 	/** @brief Checks whether a valid heightmap is loaded for the current worldspace. */
 	bool IsHeightMapReady();
@@ -121,6 +128,12 @@ public:
 	 * @return True when the compute dispatch was submitted.
 	 */
 	bool UpdateShadow(bool a_refreshImmediately);
+
+	/**
+	 * @brief Runs the shadow update's stripes on D3D11, one dispatch a stripe, when the D3D11 textures hold the heightmap.
+	 * @return True when the dispatches were issued.
+	 */
+	bool DispatchShadowUpdate(std::span<const ShadowUpdateCB> a_dispatches, uint a_groups);
 
 	/** @brief Binds the shadow height texture to shader resource slots for reflection rendering. */
 	virtual void ReflectionsPrepass() override;

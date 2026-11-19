@@ -6,6 +6,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/DeveloperTools.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
@@ -20,6 +21,7 @@
 #include "Features/IBL.h"
 #include "Features/InteriorSun.h"
 #include "Features/LODBlending.h"
+#include "Features/DrawcallLimitFix.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
@@ -45,11 +47,14 @@
 #include "Features/ViewAtmosphere.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricShadows.h"
+#include "Features/TextureStreaming.h"
+#include "Features/VRAMBudget.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Utils/Format.h"
+#include "Vram/Attribution.h"
 
 #include "State.h"
 #include "TruePBR.h"
@@ -194,48 +199,6 @@ void Feature::Save(json& o_json)
 		SaveSettings(o_json[GetName()]);
 }
 
-bool Feature::ValidateCache(CSimpleIniA& a_ini)
-{
-	auto name = GetName();
-	auto ini_name = GetShortName();
-
-	logger::info("Validating {}", name);
-
-	auto enabledInCache = a_ini.GetBoolValue(ini_name.c_str(), "Enabled", false);
-	if (enabledInCache && !loaded) {
-		logger::info("Feature was uninstalled");
-		return false;
-	}
-	if (!enabledInCache && loaded) {
-		logger::info("Feature was installed");
-		return false;
-	}
-
-	if (loaded) {
-		auto versionInCache = a_ini.GetValue(ini_name.c_str(), "Version");
-		if (!versionInCache) {
-			logger::info("No cached version found. Installed {}", version);
-			return false;
-		}
-		if (strcmp(versionInCache, version.c_str()) != 0) {
-			logger::info("Change in version detected. Installed {} but {} in Disk Cache", version, versionInCache);
-			return false;
-		} else {
-			logger::info("Installed version and cached version match.");
-		}
-	}
-
-	logger::info("Cached feature is valid");
-	return true;
-}
-
-void Feature::WriteDiskCacheInfo(CSimpleIniA& a_ini)
-{
-	auto ini_name = GetShortName();
-	a_ini.SetBoolValue(ini_name.c_str(), "Enabled", loaded);
-	a_ini.SetValue(ini_name.c_str(), "Version", version.c_str());
-}
-
 /**
  * @brief Provides access to the registry of all known features.
  * @return A constant reference to the vector of all known feature instances.
@@ -252,6 +215,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::extendedMaterials,
 		&globals::features::wetnessEffects,
 		&globals::features::lightLimitFix,
+		&globals::features::drawcallLimitFix,
 		&globals::features::dynamicCubemaps,
 		&globals::features::cloudShadows,
 		&globals::features::waterEffects,
@@ -274,6 +238,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::extendedTranslucency,
 		&globals::features::upscaling,
 		&globals::features::developerTools,
+		&globals::features::graphicsAPI,
 		&globals::features::csEditor,
 		&globals::features::sceneManager,
 		&globals::features::screenshotFeature,
@@ -283,6 +248,8 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::unifiedWater,
 		&globals::features::horizonFix,
 		&globals::features::treeWind,
+		&globals::features::vramBudget,
+		&globals::features::textureStreaming,
 		&globals::features::exponentialHeightFog,
 		&globals::features::hdrDisplay,
 		&globals::features::physicalSky,
@@ -330,6 +297,21 @@ bool Feature::ToggleAtBootSetting()
 	state->CheckCoreSettingsChanged();
 
 	return state->IsFeatureDisabled(featureName);  // Return the new state
+}
+
+const char* Feature::GetVramOwner()
+{
+	// Cached outside the class: a member would change every feature's layout (and padding). Read on every feature callback.
+	static std::shared_mutex mutex;
+	static std::unordered_map<const Feature*, const char*> owners;
+	{
+		std::shared_lock lock(mutex);
+		if (const auto it = owners.find(this); it != owners.end())
+			return it->second;
+	}
+	const char* owner = Vram::FeatureOwner(GetShortName());
+	std::unique_lock lock(mutex);
+	return owners.emplace(this, owner).first->second;
 }
 
 void Feature::DrawUnloadedUI()

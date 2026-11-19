@@ -1,12 +1,16 @@
 #include "Common/Color.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
 
-TextureCube<float4> EnvTexture : register(t0);
-RWTexture2D<sh2> IBLTexture : register(u0);
-
-SamplerState LinearSampler : register(s0);
+// D3D11: t0, u0, s0. ORG: three handles in the push block (Common/OrgResources.hlsli).
+#define DIFFUSE_IBL_RESOURCES(X)               \
+	X(SRV, TextureCube<float4>, EnvTexture, 0) \
+	X(UAV, RWTexture2D<sh2>, IBLTexture, 0)    \
+	X(SAMPLER, SamplerState, LinearSampler, 0)
+ORG_PUSH_BLOCK(DIFFUSE_IBL_RESOURCES(ORG_HANDLE))
+DIFFUSE_IBL_RESOURCES(ORG_RESOURCE)
 
 // Performance optimization: Use 16x16 samples (256 total) instead of 32x32 (1024)
 // Quality difference is negligible but performance gain is ~4x

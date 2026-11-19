@@ -1,0 +1,37 @@
+# Converted from tools/cs-ab/scenarios/rx6600-blurshots.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600: two shots a frame apart at the newest save (the pair tells motion from difference), to compare the reflection and
+# volumetric blurs between builds: vanilla's ISBlurCS (move ISBlurCS.hlsl out of the mod), FXC (-Env CS_SHADER_DXC=^$) and DXC
+# (the default). Shots now land in each run's own folder, so the names no longer carry the label.
+# tgm first: a wolf attacks the player at the newest save.
+extends = ["guest"]
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1470
+do = "shot"
+arg = "blur-a"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+arg = "blur-b"
+
+[[steps]]
+at = "previous"
+frames = 98
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["blur-a", "blur-b"]

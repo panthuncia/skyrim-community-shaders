@@ -1,11 +1,14 @@
 #include "D3D.h"
+#include "Utils/FxcShaderStore.h"
+#include "Utils/SharedShaderStore.h"
 
 #include "Deferred.h"
 #include "Feature.h"
 #include "Features/TerrainBlending.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
-#include "Utils/CompileDedupe.h"
+#include "Utils/FileRename.h"
 #include "Utils/Format.h"
 #include "Utils/Logging.h"
 #include <DDSTextureLoader.h>
@@ -13,7 +16,6 @@
 #include <d3dcompiler.h>
 #include <fstream>
 #include <mutex>
-#include <optional>
 #include <unordered_set>
 
 namespace Util
@@ -55,17 +57,19 @@ namespace Util
 		auto renderer = globals::game::renderer;
 		if (!renderer)
 			return nullptr;
-		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+		// The field can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES). Callers bind it on DXVK's context, so they get the
+		// wrapped view.
+		auto* zPrepassCopy = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV);
 		if (globals::deferred && globals::deferred->sceneDepthFinal)
-			return zPrepassCopy.depthSRV;
+			return zPrepassCopy;
 
 		auto& tb = globals::features::terrainBlending;
 		if (tb.loaded && tb.settings.Enabled) {
-			auto* srv = prefer16bit ? (tb.blendedDepthTexture16 ? tb.blendedDepthTexture16->srv.get() : nullptr) : (tb.blendedDepthTexture ? tb.blendedDepthTexture->srv.get() : nullptr);
-			if (srv)
+			// The graph's export on Terrain Blending's ORG path, else its D3D11 texture.
+			if (auto* srv = tb.GetBlendedDepthSRV(prefer16bit))
 				return srv;
 		}
-		return zPrepassCopy.depthSRV;
+		return zPrepassCopy;
 	}
 
 	ID3D11ShaderResourceView* GetSRVFromRTV(const ID3D11RenderTargetView* a_rtv)
@@ -218,40 +222,6 @@ namespace Util
 	namespace
 	{
 		/**
-		 * @brief CompileDedupe key for one compile, built like the main shader cache's: the preprocessed source
-		 *        (without #line unless compiling with debug info), the entry point, the target and the flags.
-		 * @return The key, or nullopt when the source cannot be read or preprocessed.
-		 */
-		std::optional<Util::ContentHash::Hash128> GetStoreKey(const wchar_t* filePath, const D3D_SHADER_MACRO* macros, ID3DInclude* include, const char* program, const char* programType, uint32_t flags)
-		{
-			std::ifstream file(filePath, std::ios::binary);
-			if (!file.is_open())
-				return std::nullopt;
-			const std::string source{ std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
-
-			winrt::com_ptr<ID3DBlob> preprocessed;
-			winrt::com_ptr<ID3DBlob> errors;
-			const auto sourceName = Util::WStringToString(filePath);
-			if (FAILED(D3DPreprocess(source.data(), source.size(), sourceName.c_str(), macros, include, preprocessed.put(), errors.put())) || !preprocessed)
-				return std::nullopt;
-
-			std::string_view text(static_cast<const char*>(preprocessed->GetBufferPointer()), preprocessed->GetBufferSize());
-			if (text.ends_with('\0'))
-				text.remove_suffix(1);
-			const auto keyText = (flags & D3DCOMPILE_DEBUG) ? std::string(text) : Util::CompileDedupe::StripLineDirectives(text);
-			return Util::CompileDedupe::MakeKey({ keyText, program, programType, flags });
-		}
-
-		/** @brief True for the targets CreateShaderObject can turn into a shader: only those are read from or written to the cache. */
-		bool IsCacheableTarget(const char* programType)
-		{
-			for (const auto* target : { "ps_5_0", "vs_5_0", "hs_5_0", "ds_5_0", "cs_5_0", "cs_4_0" })
-				if (!_stricmp(programType, target))
-					return true;
-			return false;
-		}
-
-		/**
 		 * @brief Creates the shader object for a CompileShader target.
 		 * @return The device's result; a target without a creation path returns S_OK and no shader.
 		 */
@@ -286,13 +256,30 @@ namespace Util
 		}
 	}
 
+	std::vector<std::pair<std::string, std::string>> GetCommonShaderDefines(std::span<const std::string_view> a_explicit)
+	{
+		std::vector<std::pair<std::string, std::string>> defines;
+		const auto shaderDefines = globals::state->GetDefines();
+		defines.assign(shaderDefines->begin(), shaderDefines->end());
+		const auto present = [&](std::string_view a_name) {
+			return std::ranges::find(a_explicit, a_name) != a_explicit.end() ||
+			       std::ranges::any_of(defines, [&](const auto& a_define) { return a_define.first == a_name; });
+		};
+		for (auto* feature : Feature::GetFeatureList()) {
+			if (!feature->loaded)
+				continue;
+			for (const auto& [name, value] : feature->GetCommonShaderDefines())
+				if (!present(name))
+					defines.emplace_back(name, value);
+		}
+		return defines;
+	}
+
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program, ID3DBlob** OutBlob)
 	{
 		if (OutBlob)
 			*OutBlob = nullptr;
 		auto device = globals::d3d::device;
-
-		CustomInclude include;
 
 		// Build defines (aka convert vector->D3DCONSTANT array)
 		std::vector<D3D_SHADER_MACRO> macros;
@@ -311,20 +298,12 @@ namespace Util
 			macros.push_back({ "D3DCOMPILE_SKIP_OPTIMIZATION", "" });
 			macros.push_back({ "D3DCOMPILE_DEBUG", "" });
 		}
-		auto shaderDefines = globals::state->GetDefines();
-		if (!shaderDefines->empty()) {
-			for (unsigned int i = 0; i < shaderDefines->size(); i++)
-				macros.push_back({ shaderDefines->at(i).first.c_str(), shaderDefines->at(i).second.c_str() });
-		}
-
-		for (auto* feature : Feature::GetFeatureList()) {
-			if (!feature->loaded)
-				continue;
-			for (const auto& [name, value] : feature->GetCommonShaderDefines()) {
-				if (std::ranges::none_of(macros, [&](const auto& macro) { return name == macro.Name; }))
-					macros.push_back({ name.data(), value.empty() ? nullptr : value.data() });
-			}
-		}
+		std::vector<std::string_view> explicitNames;
+		for (const auto& macro : macros)
+			explicitNames.push_back(macro.Name);
+		const auto commonDefines = GetCommonShaderDefines(explicitNames);
+		for (const auto& [name, value] : commonDefines)
+			macros.push_back({ name.c_str(), value.c_str() });
 		if (!_stricmp(ProgramType, "ps_5_0"))
 			macros.push_back({ "PSHADER", "" });
 		else if (!_stricmp(ProgramType, "vs_5_0"))
@@ -348,19 +327,7 @@ namespace Util
 		macros.push_back({ nullptr, nullptr });
 
 		// Compiler setup
-		uint32_t flags = !debugCompile ? (D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3) : D3DCOMPILE_DEBUG;
-		if (globals::state->enablePartialPrecision.load(std::memory_order_relaxed))
-			flags |= D3DCOMPILE_PARTIAL_PRECISION;
-		if (globals::state->enableAvoidFlowControl.load(std::memory_order_relaxed))
-			flags |= D3DCOMPILE_AVOID_FLOW_CONTROL;
-		// Disk cache on = user is running shipped, known-good shaders — skip the fxc
-		// validation pass to trim compile time. Disk cache off = dev workflow, keep
-		// validation so malformed source produces a clean error instead of UB.
-		if (globals::shaderCache->IsDiskCache())
-			flags |= D3DCOMPILE_SKIP_VALIDATION;
-
-		winrt::com_ptr<ID3DBlob> shaderBlob;
-		winrt::com_ptr<ID3DBlob> shaderErrors;
+		const uint32_t flags = Util::FxcCompileFlags(debugCompile);
 
 		const auto failureKey = std::format("{}|{}|{}|{}|{}", str, ProgramType, Program, flags, DefinesToString(macros));
 		{
@@ -373,44 +340,39 @@ namespace Util
 			shaderCompileFailures.insert(failureKey);
 		};
 
-		if (!std::filesystem::exists(FilePath)) {
-			logger::error("Failed to compile shader; {} does not exist", str);
-			recordFailure();
-			return nullptr;
-		}
-		std::optional<Util::ContentHash::Hash128> storeKey;
-		if (globals::state->enableContentStore.load(std::memory_order_relaxed) && IsCacheableTarget(ProgramType))
-			storeKey = GetStoreKey(FilePath, macros.data(), &include, Program, ProgramType, flags);
+		Util::FxcRequest request;
+		request.root = FilePath;
+		request.includeBase = L"Data\\Shaders";
+		request.defines = macros.data();
+		request.entryPoint = Program;
+		request.profile = ProgramType;
+		request.flags = flags;
+		request.debug = debugCompile;
 
-		if (const auto cachedBlob = storeKey ? SIE::SShaderCache::ReadContentStore(*storeKey) : nullptr) {
-			ID3D11DeviceChild* shader = nullptr;
-			if (SUCCEEDED(CreateShaderObject(device, ProgramType, cachedBlob.get(), &shader))) {
-				Util::SetResourceName(shader, "%s:%s", str.c_str(), Program);
-				logger::debug("Loaded {}:{} from the shader store", str, Program);
-				if (OutBlob)
-					cachedBlob.copy_to(OutBlob);
-				return shader;
-			}
-			// An intact container can still hold bytecode the runtime rejects; compile from source, which overwrites the entry.
-			logger::warn("Recompiling {}:{}: stored shader rejected by the device", str, Program);
-		}
-
-		logger::debug("Compiling {} with {}", str, DefinesToString(macros));
-		if (FAILED(D3DCompileFromFile(FilePath, macros.data(), &include, Program, ProgramType, flags, 0, shaderBlob.put(), shaderErrors.put()))) {
-			logger::warn("Shader compilation failed:\n\n{}", shaderErrors ? static_cast<char*>(shaderErrors->GetBufferPointer()) : "Unknown error");
-			recordFailure();
-			return nullptr;
-		}
-		if (shaderErrors)
-			logger::debug("Shader logs:\n{}", static_cast<char*>(shaderErrors->GetBufferPointer()));
-		if (storeKey)
-			SIE::SShaderCache::WriteContentStore(*storeKey, shaderBlob.get());
-
+		logger::debug("Building {} with {}", str, DefinesToString(macros));
+		auto built = Util::ResolveFxcShader(request);
 		ID3D11DeviceChild* shader = nullptr;
-		DX::ThrowIfFailed(CreateShaderObject(device, ProgramType, shaderBlob.get(), &shader));
-		Util::SetResourceName(shader, "%s:%s", str.c_str(), Program);
-		if (OutBlob && shader)
-			shaderBlob.copy_to(OutBlob);
+		if (built.blob && FAILED(CreateShaderObject(device, ProgramType, built.blob.get(), &shader)) && built.store.outcome != org::services::ShaderStoreOutcome::Compiled) {
+			// A whole artifact can still hold bytecode the device rejects. Drop it and build from source once.
+			logger::warn("Discarding the stored copy of {}, rejected by the device", str);
+			Util::SharedShaderStore()->RemoveArtifact(built.store.compileKey);
+			built = Util::ResolveFxcShader(request);
+			shader = nullptr;
+			if (built.blob)
+				DX::ThrowIfFailed(CreateShaderObject(device, ProgramType, built.blob.get(), &shader));
+		}
+		if (!built.blob) {
+			logger::warn("Shader compilation failed:\n\n{}", built.store.diagnostics.empty() ? "Unknown error" : built.store.diagnostics);
+			recordFailure();
+			return nullptr;
+		}
+		if (!built.store.diagnostics.empty())
+			logger::debug("Shader logs:\n{}", built.store.diagnostics);
+		if (shader) {
+			Util::SetResourceName(shader, "%s:%s", str.c_str(), Program);
+			if (OutBlob)
+				built.blob.copy_to(OutBlob);
+		}
 		return shader;
 	}
 
@@ -643,39 +605,50 @@ namespace Util
 			return E_INVALIDARG;
 		}
 
-		namespace fs = std::filesystem;
-
 		DirectX::ScratchImage cpuImage;
 		if (const auto hr = CaptureTexture(device, context, tex, cpuImage); FAILED(hr))
 			return hr;
+
+		return SaveImageToFile(path, cpuImage);
+	}
+
+	HRESULT SaveImageToFile(const std::filesystem::path& path, const DirectX::ScratchImage& image)
+	{
+		if (path.empty()) {
+			logger::error("SaveImageToFile: path parameter is empty");
+			return E_INVALIDARG;
+		}
+
+		namespace fs = std::filesystem;
 
 		const auto parent = path.parent_path();
 		std::error_code ec;
 		if (!parent.empty() && !fs::exists(parent, ec)) {
 			if (!fs::create_directories(parent, ec)) {
-				logger::error("SaveTextureToFile: failed to create directories");
+				logger::error("SaveImageToFile: failed to create directories");
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
 		}
 
 		const std::wstring tmp = path.wstring().append(L".tmp");
-		if (const auto hr = SaveToDDSFile(cpuImage.GetImages(), cpuImage.GetImageCount(), cpuImage.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
-			logger::error("SaveTextureToFile: failed to save to file");
+		if (const auto hr = SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
+			logger::error("SaveImageToFile: failed to save to file");
 			fs::remove(tmp);
 			return hr;
 		}
 
-		fs::rename(tmp, path, ec);
+		Util::RenameSerialized(tmp, path, ec);
 		if (ec) {
 			fs::remove(path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to remove existing file");
+				logger::error("SaveImageToFile: failed to remove existing file");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
-			fs::rename(tmp, path, ec);
+			Util::RenameSerialized(tmp, path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to rename file");
+				logger::error("SaveImageToFile: failed to rename {} onto {}: {} {} ({})", Util::WStringToString(tmp), Util::WStringToString(path.wstring()),
+					ec.value(), ec.message(), Util::UnderUsvfs() ? "under usvfs" : "no usvfs");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}

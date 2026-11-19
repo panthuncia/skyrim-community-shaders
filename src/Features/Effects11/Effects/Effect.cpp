@@ -311,6 +311,7 @@ void Effect::Unload()
 
 	filePresent = false;
 	errors.clear();
+	preprocessedSource.clear();
 
 	logger::info("[EFFECTS11] Unloaded effect '{}'", GetName());
 }
@@ -403,6 +404,13 @@ bool Effect::LoadFXFile()
 		return { static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize() };
 	};
 
+	// The ORG FX runtime parses the text that compiled. D3DPreprocess's blob ends with the string's terminator, which is not text.
+	auto keepPreprocessed = [&](std::string a_text) {
+		while (!a_text.empty() && a_text.back() == '\0')
+			a_text.pop_back();
+		preprocessedSource = std::move(a_text);
+	};
+
 	auto tryPreprocessAndCompile = [&](const std::string& source, ID3DInclude* include,
 									   const std::vector<std::string>& extraStringifyMacros = {}) -> bool {
 		auto pp = preprocess(source, include);
@@ -412,7 +420,10 @@ bool Effect::LoadFXFile()
 			ENBExtender::ExpandStringifyMacros(pp, extraStringifyMacros);
 		ENBExtender::ParseSourceGroupScopes(pp, *this);
 		ENBExtender::StripLineDirectives(pp);
-		return compile(pp, nullptr);
+		if (!compile(pp, nullptr))
+			return false;
+		keepPreprocessed(std::move(pp));
+		return true;
 	};
 
 	bool compiled = false;
@@ -429,6 +440,8 @@ bool Effect::LoadFXFile()
 			ENBExtender::ParseSourceGroupScopes(pp, *this);
 			ENBExtender::StripLineDirectives(pp);
 			compiled = compile(pp, nullptr);
+			if (compiled)
+				keepPreprocessed(std::move(pp));
 		}
 	}
 
@@ -468,6 +481,12 @@ bool Effect::LoadFXFile()
 				compiledShader->GetBufferSize(), 0, globals::d3d::device, effect.put()))) {
 			errors.push_back("Failed to create effect from compiled shader");
 			return false;
+		}
+		// The ORG FX runtime parses the text FXC compiled here: the raw source through the same include handler.
+		ENBExtender::PresetInclude ppInclude(enbseriesPath, uiDefines, iniPathStr, iniSection);
+		if (auto pp = preprocess(sourceCode, &ppInclude); !pp.empty()) {
+			ENBExtender::StripLineDirectives(pp);
+			keepPreprocessed(std::move(pp));
 		}
 	}
 

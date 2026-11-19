@@ -1,0 +1,77 @@
+# Converted from tools/cs-ab/scenarios/rx6600-cullshots.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600: one view GPU-driven under each cull mode (2 frustum + occlusion, 1 frustum, 0 none), then CPU-driven; shots in
+# the run folder. tgm first: a wolf attacks the player at the newest save.
+extends = ["guest"]
+
+[dclf]
+stats = true
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1470
+do = "shot"
+arg = "rx-c2"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "dclf:cull"
+arg = "frustum"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "rx-c1"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "dclf:cull"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "rx-c0"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "dclf:cull"
+arg = "occlusion"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "dclf:pipeline"
+arg = "cpu"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "rx-cpu"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 50
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["rx-c2", "rx-c1", "rx-c0", "rx-cpu"]

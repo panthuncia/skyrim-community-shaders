@@ -1,3 +1,17 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t2 and s0-s2 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's
+// fullscreen triangle.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSNOWSSS_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, depthTex, 0) X(SRV, Texture2D<float4>, snowDiffuseTex, 1) X(SRV, Texture2D<float4>, snowAlphaSpecTex, 2) X(SAMPLER, SamplerState, depthSampler, 0) X(SAMPLER, SamplerState, snowDiffuseSampler, 1) X(SAMPLER, SamplerState, snowAlphaSpecSampler, 2) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISSNOWSSS_ORG_RESOURCES(ORG_HANDLE))
+ISSNOWSSS_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
@@ -10,6 +24,10 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 g_SSSDarkColor = OrgEngineRow(PerGeometryAt, 0);
+static float4 g_SSSParameters = OrgEngineRow(PerGeometryAt, 1);
+#	else
 SamplerState depthSampler : register(s0);
 SamplerState snowDiffuseSampler : register(s1);
 SamplerState snowAlphaSpecSampler : register(s2);
@@ -23,6 +41,7 @@ cbuffer PerGeometry : register(b2)
 	float4 g_SSSDarkColor : packoffset(c0);   // fSnowSSSColorR in x, fSnowSSSColorG in y, fSnowSSSColorB in z, fSnowSSSDarkColorIntensity in w
 	float4 g_SSSParameters : packoffset(c1);  // fSnowSSSStrength in x, fSnowSSSDepthDiff in y
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {

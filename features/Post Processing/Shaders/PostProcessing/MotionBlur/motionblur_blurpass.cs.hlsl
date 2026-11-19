@@ -7,25 +7,30 @@
 
 #include "Common/FrameBuffer.hlsli"
 #include "Common/MotionBlur.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
-// Textures and buffers
-Texture2D<float4> TexColor : register(t0);        // Color buffer
-Texture2D<float4> TexVelocity : register(t1);     // Motion vectors
-Texture2D<float4> TexNeighborMax : register(t2);  // Neighborhood velocities (20×20 grid)
-Texture2D<float> TexDepth : register(t3);         // Depth buffer
-RWTexture2D<float4> RWTexOut : register(u0);      // Output
-
-// Samplers
-SamplerState LinearSampler : register(s0);
-SamplerState PointSampler : register(s1);
-
-// Constants
-cbuffer MotionBlurCB : register(b0)
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (MotionBlur::MotionBlurConstantBuffer at b0).
+// The ORG chain (ORG/ORGMotionBlur.cpp) gives heap handles in the push block and the constants from its latch.
+struct BlurConstants
 {
-	float4 g_VelocityParams;  // x: velocity multiplier, yz: motion-vector source/display scale
-	int g_SampleCount;        // Number of samples
-}
+	float4 VelocityParams;  // x: velocity multiplier, yz: motion-vector source/display scale
+	int SampleCount;        // Number of samples
+};
+
+// TexColor: the colour. TexVelocity: the motion vectors. TexNeighborMax: the neighbourhood velocities (20 x 20 grid).
+// TexDepth: the depth. RWTexOut: the output.
+#define BLUR_RESOURCES(X)                       \
+	X(SRV, Texture2D<float4>, TexColor, 0)       \
+	X(SRV, Texture2D<float4>, TexVelocity, 1)    \
+	X(SRV, Texture2D<float4>, TexNeighborMax, 2) \
+	X(SRV, Texture2D<float>, TexDepth, 3)        \
+	X(UAV, RWTexture2D<float4>, RWTexOut, 0)     \
+	X(SAMPLER, SamplerState, LinearSampler, 0)   \
+	X(SAMPLER, SamplerState, PointSampler, 1)    \
+	X(LATCH, BlurConstants, Blur, 0)
+ORG_PUSH_BLOCK(BLUR_RESOURCES(ORG_HANDLE))
+BLUR_RESOURCES(ORG_RESOURCE)
 
 // Fixed parameters
 static const uint GRID_SIZE = 20;  // Fixed grid size
@@ -89,7 +94,7 @@ float2 GetVelocityTexCoord(float2 targetTexCoord)
 	uint2 velocityDimensions;
 	TexVelocity.GetDimensions(velocityDimensions.x, velocityDimensions.y);
 
-	float2 targetToVelocityScale = g_VelocityParams.yz;
+	float2 targetToVelocityScale = Blur.VelocityParams.yz;
 	float2 sourceDimensions = max(float2(1.0f, 1.0f), float2(targetDimensions) * targetToVelocityScale);
 	sourceDimensions = min(sourceDimensions, float2(velocityDimensions));
 
@@ -117,7 +122,7 @@ float2 GetVelocityTexCoord(float2 targetTexCoord)
 	float centerDepth = TexDepth.SampleLevel(PointSampler, texCoord, 0);
 	float2 centerVelocity = TexVelocity.SampleLevel(PointSampler, GetVelocityTexCoord(texCoord), 0).xy;
 
-	centerVelocity *= g_VelocityParams.x;
+	centerVelocity *= Blur.VelocityParams.x;
 
 	// Calculate tile coordinates
 	uint2 gridCoord;
@@ -136,7 +141,7 @@ float2 GetVelocityTexCoord(float2 targetTexCoord)
 	// Determine blur direction and length
 	float2 blurDir = length(neighborMaxVelocity) > 0.001f ? normalize(neighborMaxVelocity) : float2(0.0f, 0.0f);
 	// Scale blur length down for higher velocity scales to prevent over-blurring
-	float blurLength = min(length(neighborMaxVelocity) / sqrt(g_VelocityParams.x / 300.0f), g_MaxBlurRadius);
+	float blurLength = min(length(neighborMaxVelocity) / sqrt(Blur.VelocityParams.x / 300.0f), g_MaxBlurRadius);
 
 	// Skip if no motion
 	if (blurLength < 0.5f) {
@@ -148,9 +153,9 @@ float2 GetVelocityTexCoord(float2 targetTexCoord)
 
 	// Initialize for sampling
 	float4 sum = float4(0.0f, 0.0f, 0.0f, 0.0f);
-	uint sampleCount = uint(g_SampleCount);
+	uint sampleCount = uint(Blur.SampleCount);
 	uint halfSampleCount = sampleCount / 2u;
-	float pixelToSampleUnitsScale = float(g_SampleCount) / blurLength;
+	float pixelToSampleUnitsScale = float(Blur.SampleCount) / blurLength;
 
 	// Sample in pairs (mirrored)
 	for (uint i = 0; i < halfSampleCount; i++) {
@@ -172,8 +177,8 @@ float2 GetVelocityTexCoord(float2 targetTexCoord)
 		float4 rawVelocityDepthFwd = TexVelocity.SampleLevel(PointSampler, GetVelocityTexCoord(sampleTexCoordsFwd), 0);
 		float4 rawVelocityDepthBck = TexVelocity.SampleLevel(PointSampler, GetVelocityTexCoord(sampleTexCoordsBck), 0);
 
-		float2 sampleVelocityFwd = rawVelocityDepthFwd.xy * g_VelocityParams.x;
-		float2 sampleVelocityBck = rawVelocityDepthBck.xy * g_VelocityParams.x;
+		float2 sampleVelocityFwd = rawVelocityDepthFwd.xy * Blur.VelocityParams.x;
+		float2 sampleVelocityBck = rawVelocityDepthBck.xy * Blur.VelocityParams.x;
 
 		float sampleVelocityLenFwd = length(sampleVelocityFwd);
 		float sampleVelocityLenBck = length(sampleVelocityBck);

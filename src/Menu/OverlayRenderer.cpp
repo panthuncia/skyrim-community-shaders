@@ -4,7 +4,6 @@
 
 #include <dxgi.h>
 #include <imgui.h>
-#include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <unordered_map>
@@ -22,13 +21,16 @@
 #include "Menu/CursorLoader.h"
 #include "Menu/FontAtlasState.h"
 #include "Menu/SettingsTabRenderer.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
 #include "Utils/Notifications.h"
 #include "Utils/UISurface.h"
+#include "Vram/DxvkMemory.h"
 
+#include "Features/DrawcallLimitFix.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PerformanceOverlay/ABTesting/ABTesting.h"
 namespace
@@ -360,11 +362,17 @@ void OverlayRenderer::HandleFontReload(Menu& menu, float& cachedFontSize, float 
 void OverlayRenderer::InitializeImGuiFrame(Menu& menu)
 {
 	// Start the Dear ImGui frame
-	ImGui_ImplDX11_NewFrame();
-	ImGui_ImplWin32_NewFrame();
+	{
+		ZoneScopedN("CS.Present.Overlay.ImplNewFrame");
+		ImGuiRenderer::NewFrame();
+		ImGui_ImplWin32_NewFrame();
+	}
 
 	DXGI_SWAP_CHAIN_DESC desc{};
-	globals::d3d::swapChain->GetDesc(&desc);
+	{
+		ZoneScopedN("CS.Present.Overlay.SwapChainDesc");
+		globals::d3d::swapChain->GetDesc(&desc);
+	}
 
 	const float displayW = static_cast<float>(desc.BufferDesc.Width);
 	const float displayH = static_cast<float>(desc.BufferDesc.Height);
@@ -515,7 +523,12 @@ void OverlayRenderer::FinalizeImGuiFrame()
 
 	// Apply background blur behind ImGui windows before rendering them
 
-	ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+	{
+		ZoneScopedN("CS.Present.Overlay.RenderDrawData");
+		// The backend grows its vertex and index buffers, and uploads font atlas pages, here.
+		Vram::OwnerScope vramScope("CS/Menu");
+		ImGuiRenderer::RenderDrawData(ImGui::GetDrawData());
+	}
 }
 
 void OverlayRenderer::RenderFirstTimeSetupOverlay()

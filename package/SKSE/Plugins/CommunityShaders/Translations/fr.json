@@ -4,8 +4,6 @@
         "locale": "fr",
         "auto_generated": true
     },
-    "common.active": "Active",
-    "common.inactive": "Inactive",
     "cs_editor.add_new_marker": "Ajouter un nouveau marqueur",
     "cs_editor.ambient_color": "Couleur ambiante",
     "cs_editor.apply": "Appliquer",

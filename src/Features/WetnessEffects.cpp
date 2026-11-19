@@ -1,8 +1,10 @@
 #include "WetnessEffects.h"
+#include "Features/DrawcallLimitFix.h"
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Utils/DebugSection.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #define I18N_KEY_PREFIX "feature.wetness_effects."
 
@@ -378,7 +380,7 @@ namespace Ripples
 			for (auto& waterObject : a_waterSystem->waterObjects) {
 				if (waterObject) {
 					if (const auto& rippleObject = waterObject->waterRippleObject; rippleObject) {
-						rippleObject->SetAppCulled(!a_enabled);
+						DrawcallLimitFix::WriteHidden(rippleObject.get(), !a_enabled);
 					}
 				}
 			}
@@ -1016,7 +1018,9 @@ void WetnessEffects::Prepass()
 
 	auto context = globals::d3d::context;
 
-	context->PSSetShaderResources(70, 1, &precipOcclusionTexture.depthSRV);
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	ID3D11ShaderResourceView* precipOcclusionSRV = RenderGraph::Engine::Tripwire::Unwrap(precipOcclusionTexture.depthSRV);
+	context->PSSetShaderResources(70, 1, &precipOcclusionSRV);
 }
 
 void WetnessEffects::LoadSettings(json& o_json)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Features/LightLimitFix.h"
 
 struct ExponentialHeightFog : Feature
 {
@@ -27,7 +28,7 @@ public:
 
 	/** @brief Draws the ImGui settings UI for fog parameters and volumetric fog options. */
 	virtual void DrawSettings() override;
-	/** @brief Creates samplers and the volumetric fog constant buffer. */
+	/** @brief Sets up the render-graph path when requested; the D3D11 path makes its objects when it first runs. */
 	virtual void SetupResources() override;
 	/** @brief Releases all cached volumetric fog compute shaders so they can be recompiled. */
 	virtual void ClearShaderCache() override;
@@ -36,10 +37,15 @@ public:
 	 * light scattering, and front-to-back integration.
 	 */
 	virtual void Prepass() override;
+	/** @brief Reserves the Prepass anchor for the render-graph path (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1). */
+	virtual void PostPostLoad() override;
 
 	virtual void RestoreDefaultSettings() override;
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
+
+	/** @brief Keeps a_shadowMap, the directional shadow map (the shadow mask's t4), for the render-graph fog path. */
+	void CaptureDirectionalShadowMap(ID3D11ShaderResourceView* a_shadowMap);
 
 	struct alignas(16) Settings
 	{
@@ -86,7 +92,15 @@ public:
 	/** @brief Reports whether height fog contributes in the current scene. */
 	bool IsActive() const { return loaded && settings.enabled && !IsSuppressed(); }
 
-private:
+	/** @brief The view Prepass binds at t19: the render graph's when it ran the last frame, else D3D11's (null before it exists). Render thread. */
+	ID3D11ShaderResourceView* IntegratedLightScatteringView() const;
+
+	/** @brief The view Prepass binds at t22, the far volume's, chosen as IntegratedLightScatteringView chooses. Render thread. */
+	ID3D11ShaderResourceView* IntegratedLightScatteringFarView() const;
+
+	// The volumetric fog's frame description, shared by the D3D11 path and the render-graph path (ORGExponentialHeightFog).
+
+	/** @brief The volumetric fog passes' constants (VolumetricFogCB, b0; the shaders' VolumetricFogConstants). */
 	struct VolumetricFogCB
 	{
 		DirectX::XMUINT4 gridSizeAndFlags = {};
@@ -104,8 +118,58 @@ private:
 	};
 	STATIC_ASSERT_ALIGNAS_16(VolumetricFogCB);
 
+	/** @brief The two volumes' grid sizes (x, y, slices) and whether their conservative depth reduces a cell per thread group. */
+	struct GridSizes
+	{
+		DirectX::XMUINT4 nearSize = {};
+		DirectX::XMUINT4 farSize = {};
+		bool nearGroupReduce = false;
+		bool farGroupReduce = false;
+	};
+
+	/** @brief What a frame's constants depend on besides the settings: the inputs present and the history state. */
+	struct ConstantInputs
+	{
+		GridSizes sizes;
+		bool directionalShadow = false;
+		bool depth = false;
+		bool ibl = false;
+		bool skylighting = false;
+		bool localLights = false;
+		bool localShadows = false;
+		bool engineLocalShadows = false;
+		bool temporal = false;
+		bool historyValid = false;
+		bool historyValidFar = false;
+		bool depthHistory = false;
+		bool depthHistoryFar = false;
+	};
+
+	/** @brief The engine's local shadow lights, one per shadow mask channel (EngineLocalShadowCB, b1). */
+	using EngineLocalShadows = std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT>;
+
+private:
+	friend class ORGExponentialHeightFog;
+
+	/** @brief The volumes' grid sizes for the current render size and settings. */
+	GridSizes ComputeGridSizes() const;
+
+	/** @brief The frame's volumetric fog constants; a_farGridEnabled says whether the far volume covers any depth. */
+	VolumetricFogCB BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const;
+
+	/**
+	 * @brief Fills a_shadows with the engine's local shadow lights.
+	 * @return The engine's shadow map array view they index, or null when there is none (a_shadows untouched).
+	 */
+	ID3D11ShaderResourceView* BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const;
+
+	/** @brief The D3D11 path's samplers (s0 linear clamp, s1 the shadow comparison), which the render-graph path converts. */
+	static D3D11_SAMPLER_DESC SamplerDesc(bool a_comparison);
+
 	/** @brief Shaders see height fog as disabled: an ENB preset replaces it without handing it back to CS, or the flat world map is open. */
 	bool IsSuppressed() const;
+	/** @brief The D3D11 path's samplers and constant buffer, made the first time it runs. */
+	void EnsureD3D11Objects();
 	void EnsureVolumetricResources();
 	void ReleaseVolumetricResources();
 	void BindIntegratedLightScattering();
@@ -133,6 +197,8 @@ private:
 	std::unique_ptr<ConstantBuffer> volumetricFogCB;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 	winrt::com_ptr<ID3D11SamplerState> shadowSampler;
+	// The render-graph path's directional shadow map (CaptureDirectionalShadowMap). The D3D11 path reads Deferred::GetDirectionalShadowMap.
+	winrt::com_ptr<ID3D11ShaderResourceView> directionalShadowMap;
 	ID3D11ComputeShader* materialSetupCS = nullptr;
 	ID3D11ComputeShader* farMaterialSetupCS = nullptr;
 	ID3D11ComputeShader* conservativeDepthCS = nullptr;

@@ -1,8 +1,26 @@
 #include "Upscaling/UpscaleVS.hlsl"
 
 #if defined(PSHADER)
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgResources.hlsli"
+
+// Must match Upscaling::JitterCB.
+struct JitterConstants
+{
+	float2 jitter;
+	float useWideKernel;
+	float pad0;
+};
+
+// Jitter: D3D11 updates the constant buffer every frame; ORG reads it from the execution's latch
+// region (Upscaling/ORGUpscaling.cpp).
+#	define DEPTH_REFRACTION_UPSCALE_RESOURCES(X)   		X(SHARED, ConstantBuffer, Shared, 0)            		X(SRV, Texture2D<float4>, RefractionNormals, 0) 		X(SRV, Texture2D<float>, DepthTex, 1)           		X(SAMPLER, SamplerState, LinearSampler, 0)      		X(LATCH, JitterConstants, Jitter, 0)
+ORG_PUSH_BLOCK(DEPTH_REFRACTION_UPSCALE_RESOURCES(ORG_HANDLE))
+
 #	include "Common/FrameBuffer.hlsli"
 #	include "Common/SharedData.hlsli"
+
+DEPTH_REFRACTION_UPSCALE_RESOURCES(ORG_RESOURCE)
 
 typedef VS_OUTPUT PS_INPUT;
 
@@ -11,18 +29,6 @@ struct PS_OUTPUT
 	float4 RefractionNormals: SV_TARGET0;
 	float SAOCameraZ: SV_TARGET1;
 	float Depth: SV_Depth;
-};
-
-SamplerState LinearSampler : register(s0);
-
-Texture2D<float4> RefractionNormals : register(t0);
-Texture2D<float> DepthTex : register(t1);
-
-cbuffer JitterCB : register(b0)
-{
-	float2 jitter;
-	float useWideKernel;
-	float pad0;
 };
 
 float SampleMinDepth2x2(float2 uv)
@@ -53,7 +59,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float2 originalUV = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(input.TexCoord);
 
 	// Remove jitter offset to get the correct sampling coordinates
-	float2 uv = originalUV - (jitter * SharedData::BufferDim.zw);
+	float2 uv = originalUV - (Jitter.jitter * SharedData::BufferDim.zw);
 
 	// Clamp within dynamic-resolution bounds.
 	uv = FrameBuffer::ClampDynamicResolutionAdjustedScreenPosition(uv, input.TexCoord);

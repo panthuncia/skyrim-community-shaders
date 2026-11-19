@@ -1,6 +1,10 @@
 #include "GrassOptimizations.h"
 
+#include "GrassShared/GrassCapture.h"
+#include "GrassShared/GrassFrame.h"
+
 #include "Profiler.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "TruePBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
@@ -33,6 +37,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 void GrassOptimizations::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	PublishSettings();
 }
 
 void GrassOptimizations::SaveSettings(json& o_json)
@@ -43,6 +48,32 @@ void GrassOptimizations::SaveSettings(json& o_json)
 void GrassOptimizations::RestoreDefaultSettings()
 {
 	settings = {};
+	PublishSettings();
+}
+
+void GrassOptimizations::PublishSettings()
+{
+	GrassShared::CullSettings published;
+	published.MinPixelSize = settings.MinPixelSize;
+	published.FullDetailPixelSize = settings.FullDetailPixelSize;
+	published.MinDensity = settings.MinDensity;
+	published.MeshCostBias = settings.MeshCostBias;
+	published.CostBiasStartDistance = settings.CostBiasStartDistance;
+	published.InvisibleFadeCull = settings.InvisibleFadeCull;
+	published.RenderDistanceOverride = settings.RenderDistanceOverride;
+	published.EdgeFadeStart = settings.EdgeFadeStart;
+	published.EnableOcclusionCulling = settings.EnableOcclusionCulling;
+	published.SimpleShadingPixelSize = settings.SimpleShadingPixelSize;
+	published.OcclusionDepthBias = settings.OcclusionDepthBias;
+	published.OcclusionTightness = settings.OcclusionTightness;
+	published.CollisionDistance = settings.CollisionDistance;
+	published.EnableMeshLOD = settings.EnableMeshLOD;
+	published.EnableMidLOD = settings.EnableMidLOD;
+	published.MidLODPixelSize = settings.MidLODPixelSize;
+	published.EnableFarLOD = settings.EnableFarLOD;
+	published.FarLODPixelSize = settings.FarLODPixelSize;
+	published.MeshLODBandPixels = settings.MeshLODBandPixels;
+	GrassShared::PublishSettings(published);
 }
 
 void GrassOptimizations::DrawSettings()
@@ -182,6 +213,9 @@ void GrassOptimizations::DrawSettings()
 	}
 
 	ImGui::EndDisabled();
+
+	// The sliders edit the settings in place, so republish after every draw of the panel.
+	PublishSettings();
 }
 
 bool GrassOptimizations::HasShaderDefine(RE::BSShader::Type shaderType)
@@ -191,6 +225,8 @@ bool GrassOptimizations::HasShaderDefine(RE::BSShader::Type shaderType)
 
 void GrassOptimizations::PostPostLoad()
 {
+	GrassShared::AddSink({ .model = &OnModel, .group = &OnGroup, .attached = &OnAttached, .removeGroup = &OnRemoveGroup, .remove = &OnRemove });
+	GrassShared::InstallCapture();
 	Hooks::Install();
 }
 
@@ -315,8 +351,9 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 {
 	auto* ctx = globals::d3d::context;
 	const uint64_t vertexDesc = b.drawResources.key.vertexDesc;
-	auto* meshVB = b.drawResources.vertexBuffer.get();
-	auto* indexB = b.drawResources.indexBuffer.get();
+	// The engine's buffers may be tripwire handles (CS_ORG_ENGINE_BUFFERS=1): DXVK's own context is given what they wrap.
+	auto* meshVB = RenderGraph::Engine::Tripwire::Unwrap(b.drawResources.vertexBuffer.get());
+	auto* indexB = RenderGraph::Engine::Tripwire::Unwrap(b.drawResources.indexBuffer.get());
 	const UINT vertexStride = VertexStrideFromDesc(vertexDesc);
 	if (!meshVB || !indexB || !vertexStride)
 		return;
@@ -364,7 +401,11 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 	if (materialTextures) {
 		const uint32_t firstTexture = std::countr_zero(materialTextures);
 		const uint32_t textureCount = std::bit_width(materialTextures) - firstTexture;
-		ctx->PSSetShaderResources(firstTexture, textureCount, reinterpret_cast<ID3D11ShaderResourceView* const*>(&shadowState.PSTexture[firstTexture]));
+		// The engine's slots can hold tripwire handles (its textures and targets): DXVK's own context is given what they wrap.
+		std::array<ID3D11ShaderResourceView*, 7> views{};
+		for (uint32_t i = 0; i < textureCount; ++i)
+			views[i] = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11ShaderResourceView*>(shadowState.PSTexture[firstTexture + i]));
+		ctx->PSSetShaderResources(firstTexture, textureCount, views.data());
 	}
 
 	// Share complexity and canopy constants across LOD tiers.
@@ -423,19 +464,9 @@ void GrassOptimizations::Hooks::BSGrassShader_RestoreTechnique::thunk(RE::BSShad
 	func(This, technique);
 }
 
-void GrassOptimizations::Hooks::BSMultiStreamInstanceTriShape_dtor::thunk(RE::BSMultiStreamInstanceTriShape* shape)
-{
-	globals::features::grassOptimizations.bucketStore.StageRemoval(shape);
-	func(shape);
-}
-
-GrassOptimizations::Hooks::CPUBufferScope::CPUBufferScope() :
-	previous(std::exchange(active, globals::features::grassOptimizations.OwnsGrass()))
-{}
-
 RE::BSGraphics::VertexBuffer* GrassOptimizations::Hooks::CreateVertexBuffer::thunk(void* manager, std::uint32_t byteWidth, void* data, std::uint64_t vertexDesc)
 {
-	if (!CPUBufferScope::active || !globals::features::grassOptimizations.OwnsGrass() || !data)
+	if (!GrassShared::InGroupAdd() || !globals::features::grassOptimizations.OwnsGrass() || !data)
 		return func(manager, byteWidth, data, vertexDesc);
 
 	// The engine accepts a null GPU buffer and frees both CPU allocations.
@@ -454,87 +485,37 @@ RE::BSGraphics::VertexBuffer* GrassOptimizations::Hooks::CreateVertexBuffer::thu
 	return vertexBuffer;
 }
 
-std::uint32_t GrassOptimizations::Hooks::AddGroup::thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t count, std::uint16_t* instanceData, std::uint32_t instanceShorts, float boundPadding)
+void GrassOptimizations::OnModel(RE::BSMultiStreamInstanceTriShape* shape, const char* modelPath)
 {
-	const auto index = WithOwnedGroups([&] { return func(shape, count, instanceData, instanceShorts, boundPadding); });
-	globals::features::grassOptimizations.bucketStore.CaptureEngineGroup(shape, index);
-	return index;
-}
-
-void GrassOptimizations::Hooks::DoneAddingInstances::thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSTArray<std::uint32_t>& groupIndices)
-{
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-	WithOwnedGroups([&] { func(shape, groupIndices); });
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-}
-
-void GrassOptimizations::Hooks::RemoveGroup::thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t index)
-{
-	globals::features::grassOptimizations.bucketStore.RemoveEngineGroup(shape, index, func.get());
-}
-
-std::uint32_t GrassOptimizations::Hooks::AddGroupGIDBuffer::thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSMultiStreamInstanceTriShape::GroupHeader* a2, std::uint16_t* a3)
-{
-	const auto index = WithOwnedGroups([&] { return func(a1, a2, a3); });
-	globals::features::grassOptimizations.bucketStore.CaptureEngineGroup(a1, index);
-	return index;
-}
-
-void GrassOptimizations::Hooks::AddQueuedGroupGIDBuffer::thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSMultiStreamInstanceTriShape::GroupHeader* header, std::uint16_t* instanceData, RE::BSTArray<std::uint32_t>& groupIndices)
-{
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-	WithOwnedGroups([&] { func(shape, header, instanceData, groupIndices); });
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-}
-
-void GrassOptimizations::Hooks::AddQueuedGroupGIDFile::thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSStream* stream, RE::BSTArray<std::uint32_t>& groupIndices)
-{
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-	WithOwnedGroups([&] { func(shape, stream, groupIndices); });
-	AttachQueuedGroups::pendingCapture.store(true, std::memory_order_release);
-}
-
-void GrassOptimizations::Hooks::AttachQueuedGroups::thunk()
-{
-	const bool pending = pendingCapture.exchange(false, std::memory_order_acq_rel);
-	func();
-
-	// Preserve captures queued while attachment was running.
-	if (pending || pendingCapture.load(std::memory_order_acquire))
-		globals::features::grassOptimizations.bucketStore.CaptureQueuedGroups();
-}
-
-void GrassOptimizations::Hooks::AddGroupGIDFile::thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSStream* a2)
-{
-	// The file loader does not return a group index, so identify the first changed slot.
-	static thread_local std::vector<void*> groupsBefore;
-	const auto& groups = a1->GetMultiStreamTrishapeRuntimeData().instanceGroups;
-	groupsBefore.assign(groups.begin(), groups.end());
-
-	WithOwnedGroups([&] { func(a1, a2); });
-
-	uint32_t index = 0;
-	while (index < groups.size() && (!groups[index] || (index < groupsBefore.size() && groups[index] == groupsBefore[index])))
-		++index;
-
-	if (index < groups.size())
-		globals::features::grassOptimizations.bucketStore.CaptureEngineGroup(a1, index);
-}
-
-RE::BSMultiStreamInstanceTriShape* GrassOptimizations::Hooks::LoadGrassType::thunk(RE::BGSGrassManager* grassManager, RE::GrassParam* a_param, uint32_t CellXDivided, uint32_t CellYDivided, uint64_t* typeKey, RE::BSFixedString* modelPath)
-{
-	auto* shape = func(grassManager, a_param, CellXDivided, CellYDivided, typeKey, modelPath);
-
 	if (auto& self = globals::features::grassOptimizations; self.OwnsGrass() && shape && modelPath)
-		self.bucketStore.RegisterModel(shape, modelPath->c_str());
+		self.bucketStore.RegisterModel(shape, modelPath);
+}
 
-	return shape;
+void GrassOptimizations::OnGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t group)
+{
+	globals::features::grassOptimizations.bucketStore.CaptureEngineGroup(shape, group);
+}
+
+void GrassOptimizations::OnAttached()
+{
+	globals::features::grassOptimizations.bucketStore.CaptureQueuedGroups();
+}
+
+void GrassOptimizations::OnRemoveGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t group, [[maybe_unused]] uint64_t seq)
+{
+	globals::features::grassOptimizations.bucketStore.RemoveEngineGroup(shape, group);
+}
+
+void GrassOptimizations::OnRemove(RE::BSMultiStreamInstanceTriShape* shape, [[maybe_unused]] uint64_t seq)
+{
+	globals::features::grassOptimizations.bucketStore.StageRemoval(shape);
 }
 
 void GrassOptimizations::Hooks::NiNode_OnVisible::thunk(RE::NiNode* This, RE::NiCullingProcess* process, std::int32_t alphaGroupIndex)
 {
 	auto& self = globals::features::grassOptimizations;
-	if (This != grassRoot.load(std::memory_order_relaxed) || !self.OwnsGrass())
+	// Drawcall Limit Fix culls and draws grass itself; the engine's shape list must stay whole for it to withhold.
+	if (This != grassRoot.load(std::memory_order_relaxed) || !self.OwnsGrass() || GrassShared::DclfOwned())
 		return func(This, process, alphaGroupIndex);
 
 	// Preserve the engine's zero-radius visibility gate.
@@ -559,6 +540,13 @@ void GrassOptimizations::Hooks::NiNode_OnVisible::thunk(RE::NiNode* This, RE::Ni
 
 void GrassOptimizations::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* a2, std::uint32_t flags)
 {
+	// Drawcall Limit Fix owns grass this frame: no update and no sampler override; only the engine's own setup runs. Without this
+	// frame's cull, a pass it does not withhold takes the engine's draw (HasCurrentCull).
+	if (GrassShared::DclfOwned()) {
+		func(This, a2, flags);
+		return;
+	}
+
 	auto& self = globals::features::grassOptimizations;
 
 	// Cull with main-camera PerFrame data so shadows cannot change occlusion or fades.
@@ -628,6 +616,7 @@ void GrassOptimizations::Hooks::DrawVanilla(RE::BSMultiStreamInstanceTriShape* g
 
 void GrassOptimizations::Hooks::DrawInstanceTriShape::thunk(RE::BSRenderPass*, RE::BSMultiStreamInstanceTriShape* geometry)
 {
+	GrassShared::CountNativeDraw();
 	auto& self = globals::features::grassOptimizations;
 	const auto* snapshot = self.ActiveSnapshot();
 
@@ -653,28 +642,14 @@ void GrassOptimizations::Hooks::Install()
 {
 	auto& trampoline = SKSE::GetTrampoline();
 
-	stl::write_vfunc<0x0, BSMultiStreamInstanceTriShape_dtor>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
+	// The instance capture hooks (shape dtor, AddGroup, RemoveGroup, the GID buffer and file thunks and LoadGrassType) are GrassShared's.
 	stl::write_vfunc<0x34, NiNode_OnVisible>(RE::VTABLE_NiNode[0]);
-	stl::write_vfunc<0x3A, DoneAddingInstances>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
-	stl::write_vfunc<0x3C, AddGroup>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
-	stl::write_vfunc<0x3D, RemoveGroup>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 
 	stl::write_vfunc<0x1E, CreateVertexBuffer>(RE::VTABLE_BSShaderResourceManager[0]);
 
 	stl::write_vfunc<0x6, BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
 	stl::write_vfunc<0x4, BSGrassShader_SetupMaterial>(RE::VTABLE_BSGrassShader[0]);
 	stl::write_vfunc<0x3, BSGrassShader_RestoreTechnique>(RE::VTABLE_BSGrassShader[0]);
-
-	// Queued cache groups receive their indices during attachment.
-	stl::write_thunk_call<AddQueuedGroupGIDBuffer>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x7FF, 0x756, 0x768));
-	stl::write_thunk_call<AddQueuedGroupGIDFile>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x394, 0x384));
-	stl::detour_thunk<AttachQueuedGroups>(REL::RelocationID(74603, 76335));
-
-	stl::write_thunk_call<AddGroupGIDBuffer>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x806, 0x75D, 0x76F));
-	stl::write_thunk_call<AddGroupGIDFile>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x39B, 0x38B));
-
-	// NGIO can call the loader outside the engine's grass tasks.
-	stl::detour_thunk<LoadGrassType>(REL::RelocationID(15214, 15383));
 
 	std::uint8_t patch[] = { 0x4C, 0x89, 0xF2 };  // mov rdx, r14
 	REL::safe_write(REL::RelocationID(100847, 107637).address() + REL::Relocate(0x660, 0x648), patch, sizeof(patch));

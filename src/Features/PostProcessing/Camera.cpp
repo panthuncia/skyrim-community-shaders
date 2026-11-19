@@ -201,6 +201,7 @@ void Camera::ClearShaderCache()
 			}
 	}
 
+	globals::shaderCache->ReloadShaderSources();
 	CompileRasterShaders();
 }
 
@@ -212,6 +213,21 @@ void Camera::CompileRasterShaders()
 	};
 
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\Camera", {}, shaderInfos);
+}
+
+Camera::CameraCB Camera::Constants(float2 a_res) const
+{
+	const float aspect = a_res.x / a_res.y;
+	const float cornerRadius = sqrt(aspect * aspect * 0.25f + 0.25f);
+	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
+	const float lensFOV = std::clamp(cam ? cam->HorizontalFOVDeg : settings.LensFOV, 20.0f, 160.0f);
+	return {
+		.Screen = { a_res.x, a_res.y, 1.0f / a_res.x, 1.0f / a_res.y },
+		.Lens = { settings.LensDistortion, aspect, cornerRadius, lensFOV },
+		.Aberration = { settings.ChromaticAberration.x, settings.ChromaticAberration.y, settings.ChromaticAberration.z, settings.AberrationFalloff },
+		.Softness = { settings.BlurRadius, settings.BlurStrength, settings.BlurFalloff, 0.0f },
+		.Grain = { settings.GrainSize, settings.GrainColor, settings.GrainIntensity, 0.0f }
+	};
 }
 
 void Camera::Draw(TextureInfo& inout_tex)
@@ -227,20 +243,7 @@ void Camera::Draw(TextureInfo& inout_tex)
 	auto context = globals::d3d::context;
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
-	const float aspect = res.x / res.y;
-	const float cornerRadius = sqrt(aspect * aspect * 0.25f + 0.25f);
-	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
-	const float lensFOV = std::clamp(cam ? cam->HorizontalFOVDeg : settings.LensFOV, 20.0f, 160.0f);
-
-	CameraCB data = {
-		.Screen = { res.x, res.y, 1.0f / res.x, 1.0f / res.y },
-		.Lens = { settings.LensDistortion, aspect, cornerRadius, lensFOV },
-		.Aberration = { settings.ChromaticAberration.x, settings.ChromaticAberration.y, settings.ChromaticAberration.z, settings.AberrationFalloff },
-		.Softness = { settings.BlurRadius, settings.BlurStrength, settings.BlurFalloff, 0.0f },
-		.Grain = { settings.GrainSize, settings.GrainColor, settings.GrainIntensity, 0.0f }
-	};
-
-	cameraCB->Update(data);
+	cameraCB->Update(Constants(res));
 
 	{
 		PostProcessingRaster::RasterPass pass(context);

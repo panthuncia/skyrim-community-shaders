@@ -2,8 +2,12 @@
 
 #include <cstdint>
 #include <d3d11.h>
+#include <string>
+#include <vector>
 
-// Streamline and community upscalers run on DXVK's Vulkan device through full interposition.
+// Streamline and community upscalers. DXVK mode: on DXVK's Vulkan device through full interposition. Native mode: on the native
+// device (Vulkan or D3D12), which BasicRHI creates through Streamline's manual hooking (DeviceCreateInfo::streamlineHost), with the
+// evaluate as a pass of the post stage (Upscaling's evaluate pass, ORGUpscaling::QueueEvaluate).
 
 class Streamline
 {
@@ -18,6 +22,25 @@ public:
 
 	/** @brief Resolves feature support after the DXVK device is available. */
 	void SetVulkanDevice();
+
+	/**
+	 * @brief Native mode, before the native device exists: loads the interposer and initializes Streamline for the native backend
+	 * (manual hooking). False, logged, when Streamline cannot run; the device is then made without it.
+	 */
+	bool InitializeForNative();
+
+	/** @brief The interposer CS loaded (an HMODULE), after Initialize. Null before or without it. */
+	[[nodiscard]] void* InterposerModule() const;
+	/** @brief The sl::Feature values slInit loaded. */
+	[[nodiscard]] const std::vector<uint32_t>& LoadedFeatures() const { return loadedFeatures; }
+	/** @brief The plugins' directory (sl.common.dll's), after Initialize. */
+	[[nodiscard]] const std::wstring& PluginDirectory() const { return pluginDirectory; }
+
+	/**
+	 * @brief Native mode, once the native device exists: resolves feature support on its adapter (a_vkPhysicalDevice on Vulkan, else
+	 * the adapter a_luid names). Frame generation stays off in native mode.
+	 */
+	void SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid);
 
 	/** @brief Returns whether feature support is final for this session. */
 	[[nodiscard]] bool IsFeatureSupportResolved() const { return vulkanDeviceSet || unavailable; }
@@ -157,6 +180,9 @@ private:
 
 	bool triedInit = false;
 	bool initialized = false;
+	bool native = false;  // initialized for the native device (InitializeForNative): manual hooking, evaluates as external work
+	std::vector<uint32_t> loadedFeatures;
+	std::wstring pluginDirectory;
 	bool vulkanDeviceSet = false;
 	// Set when Streamline genuinely cannot be brought up (no plugin dir, missing sl.interposer.dll,
 	// unresolvable exports, slInit failure). Never a configuration choice: the interposer is always

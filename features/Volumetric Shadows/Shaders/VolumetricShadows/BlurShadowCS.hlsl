@@ -2,8 +2,11 @@
 // BLUR_HORIZONTAL - horizontal pass
 // BLUR_VERTICAL - vertical pass
 
-Texture2D<float2> InputTexture : register(t0);
-RWTexture2D<float2> OutputTexture : register(u0);
+#include "Common/OrgResources.hlsli"
+
+#define BLUR_SHADOW_RESOURCES(X)                	X(SRV, Texture2D<float2>, InputTexture, 0) 	X(UAV, RWTexture2D<float2>, OutputTexture, 0)
+ORG_PUSH_BLOCK(BLUR_SHADOW_RESOURCES(ORG_HANDLE))
+BLUR_SHADOW_RESOURCES(ORG_RESOURCE)
 
 // Gaussian weights for 11-tap kernel (sigma ~= 2.5)
 static const float weights[6] = {

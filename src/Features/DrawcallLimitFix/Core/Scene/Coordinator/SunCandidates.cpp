@@ -1,0 +1,313 @@
+// The coordinator's sun and point-light candidate sets. Dirty entries are judged across the preparation pool, written into
+// their EntrySpaceTable, and published when an entry moved.
+
+#include "Internal.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+
+#include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
+#include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+
+#include <map>
+#include <numeric>
+
+namespace DCLF::Scene
+{
+	namespace
+	{
+		/** @brief Runs across the pool from the scene task, since nothing writes the coordinator's state meanwhile. */
+		template <class Scope, class Verdict>
+		void DirtyVerdicts(bool a_parallel, std::size_t a_count, std::vector<std::pair<bool, std::uint64_t>>& a_out, Scope&& a_scope, Verdict&& a_verdict)
+		{
+			a_out.resize(a_count);
+			auto run = [&](std::size_t a_begin, std::size_t a_end) {
+				DCLF_ZONE("CS.DCLF.Scene.SunCandidates.Verdicts");
+				const auto scope = a_scope();
+				for (std::size_t i = a_begin; i < a_end; ++i)
+					a_out[i] = a_verdict(i);
+			};
+			if (a_parallel)
+				SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.SunCandidates.Verdicts", a_count, 128, run);
+			else
+				run(0, a_count);
+		}
+
+		/** @brief Gives a released geometry a row again in the entry that holds its root. Repeats until none is left. */
+		template <class RootOf, class Write>
+		void WriteReleasedRoots(EntrySpaceTable& a_table, RootOf&& a_rootOf, Write&& a_write)
+		{
+			for (auto released = a_table.TakeReleased(); !released.empty(); released = a_table.TakeReleased()) {
+				std::vector<const RE::NiAVObject*> roots;
+				for (const auto* geometry : released)
+					if (const auto* root = a_rootOf(geometry); root && a_table.index.contains(root))
+						roots.push_back(root);
+				std::sort(roots.begin(), roots.end());
+				roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+				a_table.rowsTakenBack += roots.size();
+				for (const auto* root : roots)
+					a_write(root);
+			}
+		}
+	}
+
+	void Coordinator::DropSunCandidates()
+	{
+		sunCandidateSet.clear();
+		primarySignature.clear();
+		sunEntriesDirty.clear();
+		sunTable.Reset(candidateVersions);
+		sunCandidates.reset();
+		++sunCandidatesGeneration;
+		lightCandidateSet.clear();
+		lightSignature.clear();
+		lightEntriesDirty.clear();
+		lightTable.Reset(candidateVersions);
+		lightCandidates.reset();
+		++lightCandidatesGeneration;
+	}
+
+	std::uint8_t Coordinator::PrimaryVerdictOf(RE::BSGeometry* a_geometry) const
+	{
+		const auto entry = tracked.find(a_geometry);
+		return entry != tracked.end() ? Eligibility::PrimaryVerdict(VerdictOf(entry->second), [&] { return mirror.Leaf(a_geometry); }) : Eligibility::kPrimaryEngine;
+	}
+
+	const std::vector<RE::BSGeometry*>* Coordinator::LightDependentsOf(const RE::NiAVObject* a_root) const
+	{
+		const auto it = lightDependents.find(a_root);
+		if (it == lightDependents.end() || it->second.empty() || CategoryNodeOwn(a_root))
+			return nullptr;
+		return &it->second;
+	}
+
+	void Coordinator::UpdateLightCandidates(bool a_full)
+	{
+		bool changed = a_full;
+		if (a_full) {
+			lightTable.Reset(candidateVersions);
+			lightCandidateSet.clear();
+			lightSignature.clear();
+			lightEntriesDirty.clear();
+			for (const auto& [root, dependents] : lightDependents)
+				lightEntriesDirty.push_back(root);
+		}
+		if (!lightEntriesDirty.empty()) {
+			std::sort(lightEntriesDirty.begin(), lightEntriesDirty.end());
+			lightEntriesDirty.erase(std::unique(lightEntriesDirty.begin(), lightEntriesDirty.end()), lightEntriesDirty.end());
+			const bool switchNodes = Extensions::ParentAdmits(ActiveToggles(), Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
+			std::vector<std::pair<bool, std::uint64_t>> verdicts;
+			DirtyVerdicts(inSceneTask, lightEntriesDirty.size(), verdicts, [this] { return ShardScope(*this, true); }, [&](std::size_t a_index) {
+				const auto* dependents = LightDependentsOf(lightEntriesDirty[a_index]);
+				bool candidate = dependents != nullptr;
+				std::uint64_t signature = 0;
+				if (dependents)
+					for (auto* geometry : *dependents) {
+						const auto entry = tracked.find(geometry);
+						if (entry == tracked.end() || !Eligibility::Light(VerdictOf(entry->second), switchNodes, [&] { return mirror.Leaf(geometry); })) {
+							candidate = false;
+							break;
+						}
+						Fnv1a member;
+						member.Mix(reinterpret_cast<std::uintptr_t>(geometry));
+						member.Mix(entry->second.slot);
+						signature += member.value;
+					}
+				return std::pair{ candidate, signature };
+			});
+			for (std::size_t i = 0; i < lightEntriesDirty.size(); ++i) {
+				const auto* root = lightEntriesDirty[i];
+				const auto [candidate, signature] = verdicts[i];
+				bool written = false;
+				if (candidate ? lightCandidateSet.insert(root).second : lightCandidateSet.erase(root) != 0) {
+					changed = true;
+					written = true;
+				}
+				if (candidate) {
+					const auto [slot, inserted] = lightSignature.try_emplace(root, signature);
+					if (!inserted && slot->second != signature) {
+						slot->second = signature;
+						changed = true;
+						written = true;
+					}
+				} else {
+					lightSignature.erase(root);
+				}
+				if (written)
+					lightTable.Set(root, candidate ? LightDependentsOf(root) : nullptr, candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), std::uint8_t{ 0 } }; });
+			}
+			lightEntriesDirty.clear();
+		}
+		// A geometry moved between entries, its new entry written before the old one let go of it.
+		WriteReleasedRoots(
+			lightTable, [this](const RE::BSGeometry* a_geometry) {
+				const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+				return it != tracked.end() ? it->second.lightRoot : nullptr;
+			},
+			[this](const RE::NiAVObject* a_root) {
+				lightTable.Set(a_root, LightDependentsOf(a_root), candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), std::uint8_t{ 0 } }; });
+			});
+		if (lightTable.changed || !lightCandidates)
+			lightCandidates = lightTable.Publish(lightCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
+		for (auto& root : lightTable.TakeRetiredRoots())
+			HandBack(std::move(root));
+		Diagnostics::Notify(Diagnostics::CandidatesUpdated{ *this, false });
+		(void)changed;
+	}
+
+	void Coordinator::NoteEngineCaster(RE::BSGeometry* a_geometry, Ineligible a_reason)
+	{
+		using Subset = EngineOnlySubset;
+		std::uint8_t views = 0;
+		ShadowReject reject = ShadowReject::None;
+		if (Eligibility::EngineCasterReason(a_reason)) {
+			const auto leaf = mirror.Leaf(a_geometry);
+			reject = leaf ? ShadowCasterReject(leaf) : ShadowReject::None;
+			if (leaf && (reject == ShadowReject::None || reject == ShadowReject::VolumetricOnly))
+				views |= Subset::ViewBit(Subset::kCaster);
+		}
+		if (Eligibility::EngineColourReason(a_reason))
+			if (const auto entry = tracked.find(a_geometry); entry != tracked.end() && entry->second.categoryNode)
+				for (const auto categoryRoot : Extensions::RegisteredCategoryRoots())
+					if (categoryRoot && categoryRoot() == entry->second.categoryNode) {
+						views |= Subset::ViewBit(Subset::kColour);
+						break;
+					}
+		if (!views) {
+			engineCasterGeometries.erase(a_geometry);
+			return;
+		}
+		const auto [it, inserted] = engineCasterGeometries.insert_or_assign(a_geometry, EngineOnlyEntry{ a_reason, views });
+		static std::uint32_t logged = 0;
+		if (inserted && logged++ < 16)
+			logger::info("[DCLF] '{}' stays the engine's ({}, caster rule {}): the engine culls its root for {}{} ({} such)", a_geometry->name.c_str(),
+				kIneligibleNames[static_cast<std::size_t>(a_reason)], ShadowRejectName(reject), (views & Subset::ViewBit(Subset::kCaster)) ? "shadows" : "",
+				(views & Subset::ViewBit(Subset::kColour)) ? ((views & 1u) ? " and the LOD views" : "the LOD views") : "", engineCasterGeometries.size());
+	}
+
+	std::shared_ptr<const EngineOnlySubset> Coordinator::PublishEngineCasters()
+	{
+		if (engineCasterGeometries.empty())
+			return nullptr;
+		// A root is safe to name only while it is owned now, so this is made again for every publication. Every caster gets a root,
+		// so no view falls back to a whole cull.
+		auto out = std::make_shared<EngineOnlySubset>();
+		bool any = false;
+		for (const auto& [geometry, engineOnly] : engineCasterGeometries) {
+			const auto entry = tracked.find(geometry);
+			if (entry == tracked.end())
+				continue;
+			const RE::NiAVObject* root = geometry;
+			if (entry->second.lightRoot && rootOwners.contains(entry->second.lightRoot))
+				root = entry->second.lightRoot;
+			else if (entry->second.listedRoot && rootOwners.contains(entry->second.listedRoot))
+				root = entry->second.listedRoot;
+			++out->geometries;
+			for (std::uint8_t v = 0; v < EngineOnlySubset::kViewCount; ++v) {
+				if (!(engineOnly.views & (1u << v)))
+					continue;
+				auto& view = out->views[v];
+				if (!view.rootSet.insert(root).second)
+					continue;
+				any = true;
+				view.roots.push_back(root);
+				view.category.push_back(entry->second.categoryNode);
+				out->geometryRoots += root == geometry ? 1 : 0;
+				for (const void* parent = mirror.Parent(root); parent && view.ancestors.insert(parent).second; parent = mirror.Parent(parent)) {
+				}
+			}
+		}
+		return any ? out : nullptr;
+	}
+
+	std::string Coordinator::DescribeSunCandidate(const void* a_geometry) const
+	{
+		const auto it = tracked.find(static_cast<RE::BSGeometry*>(const_cast<void*>(a_geometry)));
+		if (it == tracked.end() || !it->second.geometry)
+			return "not tracked";
+		const auto& entry = it->second;
+		const auto leaf = mirror.Leaf(entry.geometry.get());
+		const auto* rtti = leaf.property ? static_cast<const RE::NiRTTI*>(leaf.property->rtti) : nullptr;
+		return fmt::format("{}, {} (classified at frame {}), {} property, caster rule {}", entry.slot != kNoObjectSlot ? "record" : "no record",
+			kIneligibleNames[static_cast<std::size_t>(entry.candidateReason)], entry.candidateFrame, rtti ? rtti->name : "no", ShadowRejectName(ShadowCasterReject(leaf)));
+	}
+
+	void Coordinator::UpdateSunCandidates(bool a_full)
+	{
+		bool changed = a_full;
+		if (a_full) {
+			sunTable.Reset(candidateVersions);
+			sunCandidateSet.clear();
+			primarySignature.clear();
+			sunEntriesDirty.clear();
+			for (const auto& [root, dependents] : rootDependents)
+				sunEntriesDirty.push_back(root);
+		}
+		if (!sunEntriesDirty.empty()) {
+			std::sort(sunEntriesDirty.begin(), sunEntriesDirty.end());
+			sunEntriesDirty.erase(std::unique(sunEntriesDirty.begin(), sunEntriesDirty.end()), sunEntriesDirty.end());
+			const bool switchNodes = Extensions::ParentAdmits(ActiveToggles(), Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
+			std::vector<std::pair<bool, std::uint64_t>> verdicts;
+			DirtyVerdicts(inSceneTask, sunEntriesDirty.size(), verdicts, [this] { return ShardScope(*this, true); }, [&](std::size_t a_index) {
+				bool candidate = false;
+				// A sum of hashes, so a geometry listed again at the end changes nothing.
+				std::uint64_t signature = 0;
+				if (const auto it = rootDependents.find(sunEntriesDirty[a_index]); it != rootDependents.end() && !it->second.empty()) {
+					candidate = true;
+					for (auto* geometry : it->second) {
+						const auto entry = tracked.find(geometry);
+						if (entry == tracked.end() || !Eligibility::Sun(VerdictOf(entry->second), switchNodes, [&] { return mirror.Leaf(geometry); })) {
+							candidate = false;
+							break;
+						}
+						const std::uint64_t allows = Eligibility::PrimaryVerdict(VerdictOf(entry->second), [&] { return mirror.Leaf(geometry); });
+						Fnv1a member;
+						member.Mix(reinterpret_cast<std::uintptr_t>(geometry) * 4 + allows);
+						member.Mix(entry->second.slot);
+						signature += member.value;
+					}
+				}
+				return std::pair{ candidate, signature };
+			});
+			for (std::size_t i = 0; i < sunEntriesDirty.size(); ++i) {
+				const auto* root = sunEntriesDirty[i];
+				const auto [candidate, signature] = verdicts[i];
+				bool written = false;
+				if (candidate ? sunCandidateSet.insert(root).second : sunCandidateSet.erase(root) != 0) {
+					changed = true;
+					written = true;
+				}
+				if (candidate) {
+					const auto [slot, inserted] = primarySignature.try_emplace(root, signature);
+					if (!inserted && slot->second != signature) {
+						slot->second = signature;
+						changed = true;
+						written = true;
+					}
+				} else {
+					primarySignature.erase(root);
+				}
+				written = written || (candidate && sunEntriesForced.contains(root));
+				if (written) {
+					const auto dependents = candidate ? rootDependents.find(root) : rootDependents.end();
+					sunTable.Set(root, dependents != rootDependents.end() ? &dependents->second : nullptr, candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), PrimaryVerdictOf(a_geometry) }; });
+				}
+			}
+			sunEntriesDirty.clear();
+			sunEntriesForced.clear();
+		}
+		WriteReleasedRoots(
+			sunTable, [this](const RE::BSGeometry* a_geometry) {
+				const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
+				return it != tracked.end() ? it->second.listedRoot : nullptr;
+			},
+			[this](const RE::NiAVObject* a_root) {
+				const auto dependents = rootDependents.find(a_root);
+				sunTable.Set(a_root, dependents != rootDependents.end() ? &dependents->second : nullptr, candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), PrimaryVerdictOf(a_geometry) }; });
+			});
+		if (sunTable.changed || !sunCandidates)
+			sunCandidates = sunTable.Publish(sunCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
+		for (auto& root : sunTable.TakeRetiredRoots())
+			HandBack(std::move(root));
+		Diagnostics::Notify(Diagnostics::CandidatesUpdated{ *this, true });
+		(void)changed;
+	}
+}

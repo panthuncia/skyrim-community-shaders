@@ -2,9 +2,17 @@
 #	define TERRAIN_SHADOW_REGISTER t60
 #endif
 
+#include "Common/OrgResources.hlsli"
+
 namespace TerrainShadows
 {
+	// A shader that binds the shadow heights elsewhere (TERRAIN_SHADOW_REGISTER, the Physical Sky passes) declares the register
+	// itself; that override is D3D11-only.
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+	ORG_HEADER_SRV(Texture2D<float2>, ShadowHeightTexture, 60)
+#else
 	Texture2D<float2> ShadowHeightTexture : register(TERRAIN_SHADOW_REGISTER);
+#endif
 
 	// Lowers shadow heights to hide self-shadowing from the coarse heightmap.
 	static const float SelfShadowBias = 256.0;
@@ -29,8 +37,14 @@ namespace TerrainShadows
 		if (!SharedData::terraOccSettings.EnableTerrainShadow)
 			return 1.0;
 		float2 uv = GetTerrainShadowUV(worldPos.xy);
-		if (any(uv < 0.0) || any(uv > 1.0))
+		// The heightmap may cover only the texture's top-left corner (UVMax): stop at its last texel centre, so filtering never
+		// reads the texels past it.
+		float2 uvMax = SharedData::terraOccSettings.UVMax;
+		if (any(uv < 0.0) || any(uv > uvMax))
 			return 1.0;
+		float2 dims;
+		ShadowHeightTexture.GetDimensions(dims.x, dims.y);
+		uv = min(uv, uvMax - 0.5 / dims);
 		float2 shadowHeight = GetTerrainZ(ShadowHeightTexture.SampleLevel(samp, uv, 0));
 		// Blurring in z hides the heightmap's xy resolution; capped by the bias so lit flat terrain stays lit.
 		float zBlur = min(SharedData::terraOccSettings.ZBlur, SelfShadowBias);

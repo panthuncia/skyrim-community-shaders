@@ -2,9 +2,11 @@
 
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/DebugSection.h"
+#include "VolumetricShadows/ORGVolumetricShadows.h"
 
 #define I18N_KEY_PREFIX "feature.volumetric_shadows."
 
@@ -40,6 +42,9 @@ void VolumetricShadows::SetupResources()
 	defines.clear();
 	defines.push_back({ "BLUR_VERTICAL", nullptr });
 	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
+
+	// The render graph's passes, when requested.
+	ORGVolumetricShadows::Get().Setup();
 }
 
 void VolumetricShadows::ClearShaderCache()
@@ -76,7 +81,7 @@ void VolumetricShadows::ClearShaderCache()
 	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
 }
 
-void VolumetricShadows::CopyShadowLightData()
+void VolumetricShadows::CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMap)
 {
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "VolumetricShadows::CopyShadowLightData");
@@ -89,7 +94,24 @@ void VolumetricShadows::CopyShadowLightData()
 			return;
 		}
 
-		context->PSGetShaderResources(4, 1, &shadowView);
+		// The render graph path (CS_ORG_VOLUMETRIC_SHADOWS=1): its passes ran at EarlyPrepass; only the binding happens here.
+		if (auto& orgPath = ORGVolumetricShadows::Get(); orgPath.IsActive()) {
+			ID3D11ShaderResourceView* shadowMap = a_shadowMap;
+			if (shadowMap)
+				shadowMap->AddRef();
+			orgPath.CheckShadowMaskInput(shadowMap);
+			const bool active = orgPath.IsActive();
+			if (active)
+				SetSharedShadowMapSRV(context, shadowMap ? orgPath.SharedShadowMapSRV() : nullptr);
+			if (shadowMap)
+				shadowMap->Release();
+			if (active)
+				return;
+		}
+
+		shadowView = a_shadowMap;
+		if (shadowView)
+			shadowView->AddRef();
 
 		// Downsample shadow texture array to fixed 512x512 (mip1: 256x256)
 		if (shadowView) {
@@ -194,7 +216,8 @@ void VolumetricShadows::CopyShadowLightData()
 					auto renderer = globals::game::renderer;
 					auto& esramDepthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM];
 
-					ID3D11ShaderResourceView* csSrvs[2]{ shadowView, esramDepthStencil.depthSRV };
+					// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+					ID3D11ShaderResourceView* csSrvs[2]{ shadowView, RenderGraph::Engine::Tripwire::Unwrap(esramDepthStencil.depthSRV) };
 					context->CSSetShaderResources(0, 2, csSrvs);
 
 					context->CSSetSamplers(0, 1, &linearSampler);
@@ -328,6 +351,7 @@ void VolumetricShadows::CopyShadowLightData()
 
 void VolumetricShadows::SetSharedShadowMapSRV(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_srv)
 {
+	boundSharedShadowMap = a_srv;
 	a_context->PSSetShaderResources(kSharedShadowMapShaderSlot, 1, &a_srv);
 }
 
@@ -358,6 +382,7 @@ void VolumetricShadows::DrawDebugSection()
 	// Mip 0 holds cascade 1, mip 1 holds cascade 0.
 	DisplayRT(T(TKEY("buffer_cascade_0"), "VSM Cascade 0"), shadowCopyTexture, shadowCopyMip1SRV, 1);
 	DisplayRT(T(TKEY("buffer_cascade_1"), "VSM Cascade 1"), shadowCopyTexture, shadowCopyMip0SRV, 0);
+	DisplayRT(T(TKEY("buffer_render_graph"), "VSM (render graph)"), ORGVolumetricShadows::Get().SharedShadowMapTexture(), ORGVolumetricShadows::Get().SharedShadowMapSRV(), 0);
 }
 
 void VolumetricShadows::LoadSettings(json&)
@@ -387,8 +412,14 @@ struct CreateDepthStencil_VolumetricLighting
 	static inline REL::Relocation<decltype(thunk)> func;
 };
 
+void VolumetricShadows::EarlyPrepass()
+{
+	ORGVolumetricShadows::Get().UpdateImports();
+}
+
 void VolumetricShadows::PostPostLoad()
 {
+	ORGVolumetricShadows::Reserve();
 	stl::write_thunk_call<CreateDepthStencil_VolumetricLighting>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x9DC, 0x9DC));
 }
 

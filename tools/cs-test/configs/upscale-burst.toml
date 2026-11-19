@@ -1,0 +1,112 @@
+# Upscaling settings changed in quick succession with the CS menu open: TAA long enough for its routed build, then the method and
+# the quality on consecutive frames and a few frames apart, frame generation on and off. Compose it: native-d3d12+upscale-burst,
+# native-vulkan+upscale-burst, guest+upscale-burst (add --set features.HDRDisplay=true for HDR Display).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "upscale"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=0"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "taa2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "upscale"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "fg"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "fg"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "burst"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "closed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["taa", "taa2", "burst", "closed"]

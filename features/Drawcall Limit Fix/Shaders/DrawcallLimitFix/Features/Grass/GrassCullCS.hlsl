@@ -1,0 +1,397 @@
+// Drawcall Limit Fix. Culls grass instances for the main camera in the depth segment's two phases, like every other object.
+//
+// Phase 1 runs one thread per instance slot. Free slots and slots past the draw row's count draw nothing. The rest take Grass
+// Optimizations' tests, write the instance's frame values for the vertex stage, then test last frame's HZB. Occluded instances
+// go on the retest list. Visible ones are appended to their bucket tier's range, draw slot bucket * 3 + tier.
+// Phase 2 retests each list entry against the rebuilt HZB and appends survivors after phase 1's draws.
+// The depth commit zeroes the header. GrassArgsCS's colour mode zeroes the counts after reading them.
+#include "DrawcallLimitFix/CullEye.hlsli"
+#include "DrawcallLimitFix/HzbTest.hlsli"
+
+// Must match GrassCullConstants (Features/Grass/GrassTables.h).
+cbuffer GrassCullConstants : register(b0)
+{
+	uint DrawIndex;       // ByteAddressBuffer: GrassInstances::DrawRow
+	uint InstancesIndex;  // ByteAddressBuffer: GrassInstances::Instance per instance slot
+	uint OwnersIndex;     // ByteAddressBuffer, the slot's shape slot, ~0u when free
+	uint ShapesIndex;     // ByteAddressBuffer: GrassInstances::ShapeRow per shape slot
+	uint BucketsIndex;    // ByteAddressBuffer: GrassInstances::BucketRow per bucket slot
+	uint FrameIndex;      // RWByteAddressBuffer: GrassInstances::InstanceFrame per instance slot
+	uint VisibleIndex;    // RWByteAddressBuffer: the visible entries, then the retest list
+	uint DrawsIndex;      // RWByteAddressBuffer, the draws buffer
+	uint LatchIndex;      // ByteAddressBuffer, the depth segment's BuildDrawsLatch
+	uint LatchOffset;
+	uint Phase;           // 1 or 2
+	uint RetestOffset;    // bytes to the retest list's first entry
+	uint HzbIndex;        // Texture2D<float>, 0 when there is no HZB
+	uint HzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
+	uint HzbMips;
+	uint Padding0;
+}
+
+// GrassLayout.h.
+static const uint kInstanceBytes = 32;
+static const uint kShapeRowBytes = 32;
+static const uint kBucketRowBytes = 224;
+static const uint kFrameBytes = 8;  // GrassInstances::InstanceFrame, the wind halfs, then fade unorm16 and flags in the high 16
+static const uint kTiers = 3;
+static const uint kBucketTierOne = 4;
+static const uint kBucketTierTwo = 8;
+static const uint kFrameCollision = 4;
+static const uint kFrameSimpleShading = 8;
+static const uint kCullMidLod = 1;
+static const uint kCullFarLod = 2;
+static const uint kCullOcclusion = 4;
+// DrawsHeader.
+static const uint kRetests = 16;
+static const uint kTested = 20;
+static const uint kPhaseOneInstances = 24;
+static const uint kPhaseTwoInstances = 28;
+static const uint kStatLive = 32;
+static const uint kStatOutside = 36;
+static const uint kStatThinned = 40;
+static const uint kStatFaded = 44;
+static const uint kStatFar = 48;
+static const uint kCountsOffset = 64;
+// DrawRow.
+static const uint kRowInstanceSlots = 56;
+static const uint kRowTimeBase = 80;
+static const uint kRowEye = 224;
+static const uint kRowCull = 256;
+
+static const float kPi = 3.1415926535897932;
+static const float kTau = 6.2831853071795864;
+
+// The depth segment's camera-relative view-projection. A world position projects less the latch's eye.
+float4x4 LatchViewProj()
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	return float4x4(asfloat(latch.Load4(LatchOffset + 32)), asfloat(latch.Load4(LatchOffset + 48)),
+		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
+}
+
+// The sphere test against the main camera's frustum, as TreeLodCullCS's InView. NoNearPlane drops the near plane.
+bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint cullFlags = latch.Load(LatchOffset + 16);
+	const float4 r0 = a_viewProj[0], r1 = a_viewProj[1], r2 = a_viewProj[2], r3 = a_viewProj[3];
+	const precise float3 centre = a_centre - LatchCullEye(latch, LatchOffset).xyz;
+	float4 planes[6] = { r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2 };
+	[unroll] for (uint p = 0; p < 6; ++p) {
+		if (p == 4 && (cullFlags & 0x200u) != 0)
+			continue;
+		const float length = sqrt(dot(planes[p].xyz, planes[p].xyz));
+		if (length <= 0.0f)
+			continue;
+		if ((dot(planes[p].xyz, centre) + planes[p].w) / length < -a_radius)
+			return false;
+	}
+	return true;
+}
+
+// Tests the HZB only in cull mode 2, with an HZB bound and Grass Optimizations' occlusion on.
+bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullFlags)
+{
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint hzbState = (a_cullFlags & kCullOcclusion) != 0 ? (latch.Load(LatchOffset + 16) & 0xFu) : 0u;
+	if (hzbState < 2)
+		return false;
+	HzbView view;
+	view.ViewProj = a_viewProj;
+	view.Eye = LatchCullEye(latch, LatchOffset).xyz;
+	view.Index = HzbIndex;
+	view.BaseSize = HzbUnpackSize(HzbSizePacked);
+	view.Mips = HzbMips;
+	view.UvScale = HzbUnpackUvScale(latch.Load(LatchOffset + 24));
+	return HzbTest(view, a_centre, a_radius).Occluded;
+}
+
+// Common/Random.hlsli's pcg2d, seeded by the global instance slot so it is stable while the shape lives.
+uint2 Pcg2d(uint2 v)
+{
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v = v ^ (v >> 16u);
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v = v ^ (v >> 16u);
+	return v;
+}
+
+// Hashed bits to a uniform value in [0, 1).
+float RandFloat(uint a_bits)
+{
+	return asfloat((a_bits & 0x007FFFFFu) | 0x3F800000u) - 1.0;
+}
+
+// The per-instance wind term the vertex stage takes (Grass Optimizations' WindScalar).
+float WindScalar(float a_basis, float a_timer)
+{
+	const float a = 0.4 * (a_basis + a_timer);
+	float sa, ca;
+	sincos(a, sa, ca);
+	const float t3 = 0.2 * cos(kPi * ca);
+	const float t1 = sin(kPi * sa);
+	const float t2 = sin(kTau * sa);
+	return (t1 + t2) * 0.3 + t3;
+}
+
+float2 Halfs(uint a_word)
+{
+	return float2(f16tof32(a_word & 0xFFFF), f16tof32(a_word >> 16));
+}
+
+// The cull's frame values (GrassInstances::CullRow).
+struct Cull
+{
+	float MinPixelSize, FullDetailPx, MinKeep, FadeBand;
+	float CostBias, CostBiasStart, ProjScale, MaxDistSq;
+	float EdgeFadeStart, AlphaParam1, AlphaParam2, InvisibleFadeCull;
+	float SimpleShadingPx, CollisionDistSq, MidLodPx, FarLodPx;
+	float LodBandPx;
+	uint Flags;
+	float DensityDistanceRcp;
+};
+
+Cull LoadCull(ByteAddressBuffer a_draw)
+{
+	const float4 a = asfloat(a_draw.Load4(kRowCull));
+	const float4 b = asfloat(a_draw.Load4(kRowCull + 16));
+	const float4 c = asfloat(a_draw.Load4(kRowCull + 32));
+	const float4 d = asfloat(a_draw.Load4(kRowCull + 48));
+	const uint3 e = a_draw.Load3(kRowCull + 64);
+	Cull cull;
+	cull.MinPixelSize = a.x;
+	cull.FullDetailPx = a.y;
+	cull.MinKeep = a.z;
+	cull.FadeBand = a.w;
+	cull.CostBias = b.x;
+	cull.CostBiasStart = b.y;
+	cull.ProjScale = b.z;
+	cull.MaxDistSq = b.w;
+	cull.EdgeFadeStart = c.x;
+	cull.AlphaParam1 = c.y;
+	cull.AlphaParam2 = c.z;
+	cull.InvisibleFadeCull = c.w;
+	cull.SimpleShadingPx = d.x;
+	cull.CollisionDistSq = d.y;
+	cull.MidLodPx = d.z;
+	cull.FarLodPx = d.w;
+	cull.LodBandPx = asfloat(e.x);
+	cull.Flags = e.y;
+	cull.DensityDistanceRcp = asfloat(e.z);
+	return cull;
+}
+
+// An instance slot's owner: its shape's origin and spawn time, its bucket's row offset. False for a free slot.
+bool Owner(uint a_index, out float3 a_origin, out float a_spawnStart, out uint a_bucket)
+{
+	a_origin = float3(0, 0, 0);
+	a_spawnStart = 0;
+	a_bucket = 0;
+	ByteAddressBuffer owners = ResourceDescriptorHeap[OwnersIndex];
+	const uint shape = owners.Load(a_index * 4);
+	if (shape == 0xFFFFFFFFu)
+		return false;
+	ByteAddressBuffer shapes = ResourceDescriptorHeap[ShapesIndex];
+	const uint base = shape * kShapeRowBytes;
+	if (shapes.Load(base + 20) == 0)
+		return false;
+	a_origin = asfloat(shapes.Load3(base));
+	a_bucket = shapes.Load(base + 12);
+	a_spawnStart = asfloat(shapes.Load(base + 24));
+	return true;
+}
+
+// Grass Optimizations' occlusion sphere. The model bound turned by the instance's rotation and grown by its scale variance.
+void Bound(uint4 a_raw0, uint4 a_raw1, float3 a_world, float3 a_boundCenter, float a_modelRadius, out float3 a_centre, out float a_radius)
+{
+	const float sizeVariance = f16tof32(a_raw1.z >> 16);
+	const float3 rot0 = float3(Halfs(a_raw0.z), f16tof32(a_raw0.w & 0xFFFF));
+	const float3 rot1 = float3(Halfs(a_raw1.x), f16tof32(a_raw1.y & 0xFFFF));
+	const float3 rot2 = float3(f16tof32(a_raw1.z & 0xFFFF), f16tof32(a_raw0.w >> 16), f16tof32(a_raw1.y >> 16));
+	const float3 centre = a_boundCenter * (1.0 + max(sizeVariance, 0.0));
+	a_centre = a_world + float3(dot(rot0, centre), dot(rot1, centre), dot(rot2, centre));
+	a_radius = a_modelRadius * (1.0 + max(sizeVariance, 0.0)) + length(a_boundCenter) * abs(sizeVariance);
+}
+
+// Counts the draw and writes the visible entry. Tiers 0 and 1 grow up from their base, tier 2 down from the end it shares with tier 1.
+void Append(RWByteAddressBuffer a_draws, uint a_index, uint a_bucket, uint a_tier, uint a_counter)
+{
+	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
+	RWByteAddressBuffer visible = ResourceDescriptorHeap[VisibleIndex];
+	const uint slot = a_bucket * kTiers + a_tier;
+	uint at, scratch;
+	a_draws.InterlockedAdd(kCountsOffset + slot * 4, 1u, at);
+	a_draws.InterlockedAdd(a_counter, 1u, scratch);
+	const uint base = buckets.Load(a_bucket * kBucketRowBytes + 16 + a_tier * 4);
+	visible.Store((a_tier == 2 ? base - 1 - at : base + at) * 4, a_index);
+}
+
+// Phase 2. Retests an entry against the rebuilt HZB and appends it after phase 1's when it is in view now.
+void Retest(uint a_id, RWByteAddressBuffer a_draws, Cull a_cull)
+{
+	RWByteAddressBuffer visible = ResourceDescriptorHeap[VisibleIndex];
+	if (a_id >= a_draws.Load(kRetests))
+		return;
+	const uint index = visible.Load(RetestOffset + a_id * 4);
+	float3 origin;
+	float spawnStart;
+	uint bucket;
+	if (!Owner(index, origin, spawnStart, bucket))
+		return;
+	ByteAddressBuffer instances = ResourceDescriptorHeap[InstancesIndex];
+	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
+	RWByteAddressBuffer frames = ResourceDescriptorHeap[FrameIndex];
+	const uint4 raw0 = instances.Load4(index * kInstanceBytes);
+	const uint4 raw1 = instances.Load4(index * kInstanceBytes + 16);
+	const uint bucketBase = bucket * kBucketRowBytes;
+	const float3 world = origin + float3(Halfs(raw0.x), f16tof32(raw0.y & 0xFFFF));
+	float3 centre;
+	float radius;
+	Bound(raw0, raw1, world, asfloat(buckets.Load3(bucketBase + 48)), asfloat(buckets.Load(bucketBase + 60)), centre, radius);
+	if (Occluded(LatchViewProj(), centre, radius, a_cull.Flags))
+		return;
+	const uint tier = (frames.Load(index * kFrameBytes + 4) >> 16) & 3u;
+	Append(a_draws, index, bucket, tier, kPhaseTwoInstances);
+}
+
+// The LOD tier, dithering both transitions by one value, clamped to the tiers the bucket has a mesh for.
+uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
+{
+	const float halfBand = a_cull.LodBandPx * 0.5;
+	const float bandRcp = 1.0 / max(a_cull.LodBandPx, 1e-4);
+	uint tier = 0;
+	if ((a_cull.Flags & kCullMidLod) != 0 && a_dither < saturate((a_cull.MidLodPx + halfBand - a_projPx) * bandRcp))
+		tier = 1;
+	if ((a_cull.Flags & kCullFarLod) != 0 && a_dither < saturate((a_cull.FarLodPx + halfBand - a_projPx) * bandRcp))
+		tier = 2;
+	if (tier == 2 && (a_bucketFlags & kBucketTierTwo) == 0)
+		tier = 1;
+	if (tier == 1 && (a_bucketFlags & kBucketTierOne) == 0)
+		tier = 0;
+	return tier;
+}
+
+[numthreads(64, 1, 1)] void main(uint a_id : SV_DispatchThreadID)
+{
+	ByteAddressBuffer draw = ResourceDescriptorHeap[DrawIndex];
+	RWByteAddressBuffer draws = ResourceDescriptorHeap[DrawsIndex];
+	const Cull cull = LoadCull(draw);
+	if (Phase == 2) {
+		Retest(a_id, draws, cull);
+		return;
+	}
+	const uint index = a_id;
+	float3 origin;
+	float spawnStart;
+	uint bucket;
+	if (index >= draw.Load(kRowInstanceSlots) || !Owner(index, origin, spawnStart, bucket))
+		return;
+	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
+	const uint bucketBase = bucket * kBucketRowBytes;
+	if (buckets.Load(bucketBase + 28) == 0)
+		return;  // not drawable yet, no mesh or texture
+	uint scratch;
+	draws.InterlockedAdd(kStatLive, 1u, scratch);
+
+	ByteAddressBuffer instances = ResourceDescriptorHeap[InstancesIndex];
+	const uint4 raw0 = instances.Load4(index * kInstanceBytes);
+	const uint4 raw1 = instances.Load4(index * kInstanceBytes + 16);
+	const float2 localXY = Halfs(raw0.x);
+	const float3 local = float3(localXY, f16tof32(raw0.y & 0xFFFF));
+	const float3 world = origin + local;
+	const float3 eye = asfloat(draw.Load3(kRowEye));
+	// Subtract the eye from the origin first, so the distance skips the absolute position's rounding.
+	const float3 dv = (origin - eye) + local;
+	const float distSq = dot(dv, dv);
+	const float dist = sqrt(distSq);
+
+	float3 centre;
+	float radius;
+	Bound(raw0, raw1, world, asfloat(buckets.Load3(bucketBase + 48)), asfloat(buckets.Load(bucketBase + 60)), centre, radius);
+	const float4x4 viewProj = LatchViewProj();
+	if (distSq > cull.MaxDistSq) {
+		draws.InterlockedAdd(kStatFar, 1u, scratch);
+		return;
+	}
+	if (!InView(viewProj, centre, radius)) {
+		draws.InterlockedAdd(kStatOutside, 1u, scratch);
+		return;
+	}
+
+	// Pixel size by camera depth, so it stays consistent across the view.
+	const float sizeVariance = f16tof32(raw1.z >> 16);
+	const float instanceRadius = asfloat(buckets.Load(bucketBase + 60)) * (1.0 + max(sizeVariance, 0.0));
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const precise float3 worldRelative = world - LatchCullEye(latch, LatchOffset).xyz;
+	const float4 clip = mul(viewProj, float4(worldRelative, 1.0));
+	const float projPx = (instanceRadius * length(viewProj[3].xyz) / max(clip.w, 1e-4)) * cull.ProjScale;
+
+	// The tier first, then its mesh's cost bias ramped in past its start distance. A costlier mesh is drawn less far and must be larger.
+	const uint2 rand = Pcg2d(uint2(index, 0u));
+	const uint tier = Tier(cull, projPx, RandFloat(rand.y), buckets.Load(bucketBase + 12));
+	const float meshCost = asfloat(buckets.Load(bucketBase + (tier == 0 ? 72 : 152 + (tier - 1) * 4)));
+	const float costRamp = saturate((dist - cull.CostBiasStart) / max(cull.CostBiasStart, 1e-4));
+	const float effCostBias = cull.CostBias * costRamp;
+	const float dScale = lerp(1.0, tier == 0 ? asfloat(buckets.Load(bucketBase + 68)) : rcp(meshCost), effCostBias);
+	const float effMaxDistSq = cull.MaxDistSq * dScale * dScale;
+	if (distSq > effMaxDistSq) {
+		draws.InterlockedAdd(kStatFar, 1u, scratch);
+		return;
+	}
+
+	// The density thinning, ramped in over the INI grass distance.
+	const float pxScale = lerp(1.0, meshCost, effCostBias);
+	const float effMinPx = cull.MinPixelSize * pxScale;
+	float lodFade = 1.0;
+	const float effFullPx = cull.FullDetailPx * pxScale;
+	bool thinned = projPx < effMinPx;
+	if (!thinned && projPx < effFullPx) {
+		const float distanceRamp = saturate(dist * cull.DensityDistanceRcp);
+		const float t = saturate((effFullPx - projPx) / max(effFullPx - effMinPx, 1e-4)) * distanceRamp;
+		const float keep = lerp(1.0, cull.MinKeep, t);
+		const float h = RandFloat(rand.x);
+		thinned = h > keep + cull.FadeBand;
+		lodFade = saturate((keep + cull.FadeBand - h) / max(cull.FadeBand, 1e-4));
+	}
+	if (thinned) {
+		draws.InterlockedAdd(kStatThinned, 1u, scratch);
+		return;
+	}
+
+	// The edge of the cost-biased distance, the engine's distance fade, and the spawn fade-in.
+	const float maxDist = sqrt(effMaxDistSq);
+	const float edgeStart = maxDist * cull.EdgeFadeStart;
+	const float edgeFade = saturate((maxDist - dist) / max(maxDist - edgeStart, 1e-4));
+	const float distFade = 1.0 - saturate((length(clip.xyz) - cull.AlphaParam1) / cull.AlphaParam2);
+	const float4 times = asfloat(draw.Load4(kRowTimeBase));  // timeBase, prevTimeBase, fadeNow, fadeInTimeRcp
+	const float spawnFade = saturate((times.z - spawnStart) * times.w);
+	const float fade = distFade * spawnFade * lodFade * edgeFade;
+	if (fade <= cull.InvisibleFadeCull) {
+		draws.InterlockedAdd(kStatFaded, 1u, scratch);
+		return;
+	}
+
+	// Frame values for the vertex stage, whatever occlusion says, since phase 2 reads the tier.
+	const float wavePeriod = asfloat(buckets.Load(bucketBase + 64));
+	const float basis = (localXY.x + localXY.y) * -0.0078125;
+	uint flags = tier;
+	flags |= distSq < cull.CollisionDistSq ? kFrameCollision : 0u;
+	flags |= cull.SimpleShadingPx > 0.0 && projPx < cull.SimpleShadingPx ? kFrameSimpleShading : 0u;
+	RWByteAddressBuffer frames = ResourceDescriptorHeap[FrameIndex];
+	const uint wind = f32tof16(WindScalar(basis, times.x * wavePeriod)) | (f32tof16(WindScalar(basis, times.y * wavePeriod)) << 16);
+	frames.Store2(index * kFrameBytes, uint2(wind, uint(saturate(fade) * 65535.0 + 0.5) | (flags << 16)));
+
+	draws.InterlockedAdd(kTested, 1u, scratch);
+	if (Occluded(viewProj, centre, radius, cull.Flags)) {
+		RWByteAddressBuffer visible = ResourceDescriptorHeap[VisibleIndex];
+		uint at;
+		draws.InterlockedAdd(kRetests, 1u, at);
+		visible.Store(RetestOffset + at * 4, index);
+		return;
+	}
+	Append(draws, index, bucket, tier, kPhaseOneInstances);
+}

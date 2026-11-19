@@ -1,0 +1,14 @@
+# boot.env: just the boot, for a cold shader cache: exits once the shaders are ready.
+# Cold: cs-test run boot --stage X --set build.shader_cache=cold
+extends = ["base"]
+
+[timeouts]
+compile = 900
+
+[[steps]]
+at = "shaders-ready"
+frames = 0
+do = "exit"
+
+[expect]
+reach = "shaders-ready"

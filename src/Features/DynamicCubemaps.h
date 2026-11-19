@@ -138,6 +138,7 @@ public:
 
 	Texture2D* envTextureBC6H = nullptr;
 	Texture2D* envReflectionsTextureBC6H = nullptr;
+	ID3D11ShaderResourceView* boundReflectionsView = nullptr;  // the view PostDeferred last bound at t30 (DCLF names it to its views)
 	Texture2D* bc6hScratchTexture = nullptr;
 	Texture2D* bc6hTailScratchTexture = nullptr;
 
@@ -159,6 +160,25 @@ public:
 	Settings settings;
 	Settings GetCommonBufferData() const;
 	void UpdateCubemap();
+
+	/** @brief One frame's work of the update pipeline, the step of its state machine (nextTask). */
+	struct UpdateStep
+	{
+		bool reflections = false;      // the reflections cubemap; else the environment one
+		bool capture = false;          // capture and infer, then copy mip 0 and build the mips for the irradiance
+		uint32_t irradianceStart = 0;  // the specular irradiance mips [irradianceStart, irradianceEnd)
+		uint32_t irradianceEnd = 0;
+		bool publish = false;  // encode BC6H and publish
+	};
+
+	/** @brief Before a step, on both paths: resets the capture after a game time jump, and clears the reflections shader after a settings change. */
+	void BeginUpdate();
+
+	/** @brief The state machine's next step, advanced past it. Both paths. */
+	UpdateStep NextUpdateStep();
+
+	/** @brief The capture's constants for one cubemap, advancing its capture time, camera position and reset flag. Both paths. */
+	UpdateCubemapCB NextCaptureConstants(bool a_reflections);
 
 	void PostDeferred();
 
@@ -218,6 +238,12 @@ public:
 	void CompressToBC6H(bool a_reflections);
 
 	ID3D11ComputeShader* GetComputeShaderBC6HEncode();
+
+	/** @brief The D3D11 path's textures, views and buffers (the render-graph path makes its own: ORGDynamicCubemaps). */
+	void CreateD3D11Textures();
+
+	/** @brief The render-graph path failed: drops its exported views, makes the D3D11 textures, and restarts the state machine. */
+	void ReturnToD3D11();
 
 	virtual bool IsCore() const override { return true; };
 };

@@ -203,6 +203,7 @@ void LUT::ReadTexture(std::string requestedPath)
 		ID3D11ShaderResourceView* pSrv = nullptr;
 		try {
 			DX::ThrowIfFailed(DirectX::CreateDDSTextureFromFile(device, path.c_str(), &pRsrc, &pSrv));
+			Util::SetResourceName(pRsrc, "PostProcessing::LUT");
 		} catch (std::runtime_error& e) {
 			errMsg = I18n::GetSingleton()->Format(
 				"feature.post_processing.lut.failed_to_create_texture",
@@ -246,6 +247,7 @@ void LUT::ReadTexture(std::string requestedPath)
 		ID3D11Resource* pRsrc = nullptr;
 		try {
 			DX::ThrowIfFailed(CreateTexture(device, image.GetImages(), image.GetImageCount(), image.GetMetadata(), &pRsrc));
+			Util::SetResourceName(pRsrc, "PostProcessing::LUT");
 		} catch (std::runtime_error& e) {
 			errMsg = I18n::GetSingleton()->Format(
 				"feature.post_processing.lut.failed_to_create_texture",
@@ -286,6 +288,7 @@ void LUT::ClearShaderCache()
 			}
 	}
 
+	globals::shaderCache->ReloadShaderSources();
 	CompileRasterShaders();
 }
 
@@ -296,6 +299,15 @@ void LUT::CompileRasterShaders()
 	};
 
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\LUT", {}, shaderInfos);
+}
+
+LUT::LUTCB LUT::Constants() const
+{
+	return {
+		.InputMin = settings.InputMin,
+		.InputMax = settings.InputMax,
+		.LutType = LutType
+	};
 }
 
 void LUT::Draw(TextureInfo& inout_tex)
@@ -314,12 +326,7 @@ void LUT::Draw(TextureInfo& inout_tex)
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
 
-	LUTCB data = {
-		.InputMin = settings.InputMin,
-		.InputMax = settings.InputMax,
-		.LutType = LutType
-	};
-	lutCB->Update(data);
+	lutCB->Update(Constants());
 
 	{
 		PostProcessingRaster::RasterPass pass(context);

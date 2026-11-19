@@ -14,17 +14,21 @@
     },
     "default-features": ["commonlibsse-ng"],
     "dependencies": [
+        "boost-container-hash",
         "bshoshany-thread-pool",
         "clib-util",
         "cppwinrt",
+        "directx-headers",
         "directxtex",
         "effects11",
         "eastl",
         "efsw",
+        "flecs",
         {
             "name": "imgui",
             "features": ["dx11-binding", "win32-binding", "docking-experimental"]
         },
+        "implot",
         {
             "name": "libavif",
             "default-features": false,
@@ -36,6 +40,7 @@
         "pystring",
         "renderdoc",
         "stb",
+        "tbb",
         {
             "name": "tracy",
             "features": ["on-demand"]
@@ -85,11 +90,11 @@
         },
         {
             "name": "tracy",
-            "version-string": "0.14.2-20a293b3"
+            "version-string": "0.15.0"
         },
         {
             "name": "directx-headers",
-            "version": "1.614.1"
+            "version-string": "1.722.0-preview"
         }
     ],
     "builtin-baseline": "dddca6fa87f177e0678e2545c4b4636a44aa05bd"

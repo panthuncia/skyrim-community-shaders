@@ -6,65 +6,111 @@
 /// Purkinje effect is applied after compositing on the final perceived image.
 /// Uses #ifdef HAS_BLOOM / HAS_LENS_FLARE / HAS_GLARE / HAS_EXPOSURE / HAS_LOCAL_EXPOSURE to control behavior.
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
 
 #include "Common/Color.hlsli"
 
-Texture2D<float4> TexColor : register(t0);
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below: Composite::Draw binds Histogram Auto
+// Exposure's and Local Exposure's constant buffers at b1 and b2 and Composite::CompositeCB at b3. The ORG chain
+// (ORG/ORGComposite.cpp) gives heap handles in the push block; the exposure constants are the regions those effects
+// publish in the chain's latch, and the composite constants Composite's own region. Each permutation reads only the
+// entries its HAS_* defines name; the others are never read.
+
+// HistogramAutoExposure::AutoExposureCB (its padding is never read).
+struct AutoExposureConstants
+{
+	float2 AdaptArea;
+	float2 AdaptationRange;
+	float AdaptLerp;
+	float ExposureCompensation;
+	float PurkinjeStartEV;
+	float PurkinjeMaxEV;
+	float PurkinjeStrength;
+	float ExposureTarget;
+};
+
+// LocalExposure::LocalExposureCB, up to the last member read.
+struct LocalExposureConstants
+{
+	float ManualExposure;
+	float Strength;
+	float HighlightContrast;
+	float ShadowContrast;
+	float DetailStrength;
+	float BaseBlend;
+	float BlurRadius;
+	float MiddleGreyBias;
+	float HighlightThreshold;
+	float ShadowThreshold;
+	float HighlightThresholdStrength;
+	float ShadowThresholdStrength;
+	uint InputWidth;
+	uint InputHeight;
+	uint BlurredWidth;
+	uint BlurredHeight;
+	float LogLuminanceMin;
+	float LogLuminanceMax;
+};
+
+// Composite::CompositeCB: the final bloom/flare sampling parameters.
+struct CompositeConstants
+{
+	float2 OutputSize;
+	float2 FlareSize;
+	float3 FlareTint;
+	float FlareIntensity;
+	float BloomRadius;
+	float BloomIntensity;
 #ifdef HAS_PHYSICAL_LENS
+	float HasPhysicalFlare;
+	float HasPhysicalLens;
+#else
+	float2 CompositePadding;
+#endif
+};
+
+// TexBloom: the accumulated bloom mip 1. TexFlare: the half-resolution ghosts and halo. TexAdaptation: the adapted
+// luminance. TexLocalExposureLog: the original scene log luminance. TexLuminanceGrid: the edge-aware luminance grid.
+// TexBlurredLuminance: the broad base. LinearSampler: linear clamp (local exposure and flare). BloomSampler: linear
+// border (bloom).
+#define COMPOSITE_RESOURCES(X)                             \
+	X(SRV, Texture2D<float4>, TexColor, 0)                 \
+	X(SRV, Texture2D<float4>, TexBloom, 1)                 \
+	X(SRV, Texture2D<float4>, TexFlare, 2)                 \
+	X(SRV, Texture2D<float4>, TexGlare, 3)                 \
+	X(SRV, StructuredBuffer<float>, TexAdaptation, 4)      \
+	X(SRV, Texture2D<float>, TexLocalExposureLog, 5)       \
+	X(SRV, Texture3D<float2>, TexLuminanceGrid, 6)         \
+	X(SRV, Texture2D<float>, TexBlurredLuminance, 7)       \
+	X(SAMPLER, SamplerState, LinearSampler, 0)             \
+	X(SAMPLER, SamplerState, BloomSampler, 1)              \
+	X(LATCH, AutoExposureConstants, AutoExposure, 1)       \
+	X(LATCH, LocalExposureConstants, LocalExposure, 2)     \
+	X(LATCH, CompositeConstants, Composite, 3)
+ORG_PUSH_BLOCK(COMPOSITE_RESOURCES(ORG_HANDLE))
+COMPOSITE_RESOURCES(ORG_RESOURCE)
+
+// The physical lens inputs are D3D11 only: the ORG chain does not run the physical lens.
+#ifdef HAS_PHYSICAL_LENS
+#	if defined(CS_ORG_BINDLESS)
+#		error "HAS_PHYSICAL_LENS has no ORG bindings"
+#	endif
 Texture2DArray<float> TexPhysicalFlare : register(t8);
 Texture2DArray<float4> TexPhysicalLens : register(t9);
 #	include "PostProcessing/PhysicalLensImaging/diffraction_composite.hlsli"
 #	include "PostProcessing/PhysicalLensImaging/mapping.hlsli"
 #endif
 
-#ifdef HAS_BLOOM
-Texture2D<float4> TexBloom : register(t1);
-#endif
-
-#ifdef HAS_LENS_FLARE
-Texture2D<float4> TexFlare : register(t2);
-#endif
-
-#ifdef HAS_GLARE
-Texture2D<float4> TexGlare : register(t3);
-#endif
-
-#ifdef HAS_EXPOSURE
-StructuredBuffer<float> TexAdaptation : register(t4);
-#endif
-
 #ifdef HAS_LOCAL_EXPOSURE
-Texture2D<float> TexLocalExposureLog : register(t5);
-Texture3D<float2> TexLuminanceGrid : register(t6);
-Texture2D<float> TexBlurredLuminance : register(t7);
-
-cbuffer LocalExposureCB : register(b2)
-{
-	float ManualExposure : packoffset(c0.x);
-	float Strength : packoffset(c0.y);
-	float HighlightContrast : packoffset(c0.z);
-	float ShadowContrast : packoffset(c0.w);
-	float DetailStrength : packoffset(c1.x);
-	float BaseBlend : packoffset(c1.y);
-	float MiddleGreyBias : packoffset(c1.w);
-	float HighlightThreshold : packoffset(c2.x);
-	float ShadowThreshold : packoffset(c2.y);
-	float HighlightThresholdStrength : packoffset(c2.z);
-	float ShadowThresholdStrength : packoffset(c2.w);
-	uint InputWidth : packoffset(c3.x);
-	uint InputHeight : packoffset(c3.y);
-	float LogLuminanceMin : packoffset(c4.x);
-	float LogLuminanceMax : packoffset(c4.y);
-};
 
 float RemapBaseContrast(float centeredBase)
 {
 	bool isHighlight = centeredBase >= 0.0;
 	float magnitude = abs(centeredBase);
-	float contrast = isHighlight ? HighlightContrast : ShadowContrast;
-	float threshold = isHighlight ? HighlightThreshold : ShadowThreshold;
-	float thresholdStrength = isHighlight ? HighlightThresholdStrength : ShadowThresholdStrength;
+	float contrast = isHighlight ? LocalExposure.HighlightContrast : LocalExposure.ShadowContrast;
+	float threshold = isHighlight ? LocalExposure.HighlightThreshold : LocalExposure.ShadowThreshold;
+	float thresholdStrength = isHighlight ? LocalExposure.HighlightThresholdStrength : LocalExposure.ShadowThresholdStrength;
 
 	// Preserve tones near middle grey, then release smoothly into the selected
 	// base contrast. At full threshold strength the protected shoulder persists.
@@ -83,36 +129,22 @@ float ComputeLocalExposure(float3 sceneColor, float baseLogLuminance, float glob
 {
 	float logGlobalExposure = log2(max(globalExposure, FLT_MIN));
 	float exposedBase = baseLogLuminance + logGlobalExposure;
-	float middleGrey = log2(exposedMiddleGrey) + MiddleGreyBias;
+	float middleGrey = log2(exposedMiddleGrey) + LocalExposure.MiddleGreyBias;
 	float centeredBase = exposedBase - middleGrey;
 	float logAdjustment = RemapBaseContrast(centeredBase) - centeredBase;
 
-	[branch] if (DetailStrength != 1.0)
+	[branch] if (LocalExposure.DetailStrength != 1.0)
 	{
 		float sceneLuminance = Color::RGBToLuminance(max(sceneColor, 0.0));
-		float sceneLogLuminance = clamp(log2(max(sceneLuminance, exp2(LogLuminanceMin))), LogLuminanceMin, LogLuminanceMax);
-		logAdjustment += (sceneLogLuminance - baseLogLuminance) * (DetailStrength - 1.0);
+		float sceneLogLuminance = clamp(log2(max(sceneLuminance, exp2(LocalExposure.LogLuminanceMin))), LocalExposure.LogLuminanceMin, LocalExposure.LogLuminanceMax);
+		logAdjustment += (sceneLogLuminance - baseLogLuminance) * (LocalExposure.DetailStrength - 1.0);
 	}
 
-	return exp2(clamp(logAdjustment * Strength, -8.0, 8.0));
+	return exp2(clamp(logAdjustment * LocalExposure.Strength, -8.0, 8.0));
 }
 #endif
 
 #ifdef HAS_EXPOSURE
-cbuffer AutoExposureCB : register(b1)
-{
-	float2 AdaptArea;
-	float2 AdaptationRange;
-	float AdaptLerp;
-	float ExposureCompensation;
-	float PurkinjeStartEV;
-	float PurkinjeMaxEV;
-	float PurkinjeStrength;
-	float ExposureTarget;
-
-	float2 pad;
-};
-
 // ==================== Purkinje Effect ====================
 // https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2630540/pdf/nihms80286.pdf
 // Simulates the blue shift of human vision under low light conditions.
@@ -180,32 +212,14 @@ float3 PurkinjeShift(float3 c, float nightAdaptation)
 #endif  // HAS_EXPOSURE
 
 // The final upsample/mix/resolve run here to avoid full-resolution intermediates.
-SamplerState LinearSampler : register(s0);
-SamplerState BloomSampler : register(s1);
-cbuffer CompositeCB : register(b3)
-{
-	float2 OutputSize;
-	float2 FlareSize;
-	float3 FlareTint;
-	float FlareIntensity;
-	float BloomRadius;
-	float BloomIntensity;
-#ifdef HAS_PHYSICAL_LENS
-	float HasPhysicalFlare;
-	float HasPhysicalLens;
-#else
-	float2 CompositePadding;
-#endif
-};
-
 #ifdef HAS_BLOOM
 float3 SampleBloom(float2 uv, float2 pixelSize)
 {
 	float3 result = 0;
 	for (int x = -1; x <= 1; ++x)
 		for (int y = -1; y <= 1; ++y)
-			result += (1 << (!x + !y)) * 0.0625 * TexBloom.SampleLevel(BloomSampler, uv + float2(x, y) * pixelSize * BloomRadius, 0).rgb;
-	return f16tof32(f32tof16(result * BloomIntensity));
+			result += (1 << (!x + !y)) * 0.0625 * TexBloom.SampleLevel(BloomSampler, uv + float2(x, y) * pixelSize * Composite.BloomRadius, 0).rgb;
+	return f16tof32(f32tof16(result * Composite.BloomIntensity));
 }
 #endif
 
@@ -259,12 +273,12 @@ float3 SamplePhysicalFlare(float2 uv, float2 texSize)
 #ifdef HAS_LENS_FLARE
 float3 SampleFlare(uint2 tid)
 {
-	float2 uv = (float2(tid) + 0.5) / OutputSize;
-	float3 flares = SampleBicubicCatmullRom(TexFlare, LinearSampler, uv, FlareSize);
+	float2 uv = (float2(tid) + 0.5) / Composite.OutputSize;
+	float3 flares = SampleBicubicCatmullRom(TexFlare, LinearSampler, uv, Composite.FlareSize);
 	float gradientT = saturate(distance(uv, 0.5) * 2.0);
-	float3 gradient = lerp(1.0, FlareTint, gradientT);
+	float3 gradient = lerp(1.0, Composite.FlareTint, gradientT);
 	// Preserve the former RGBA16F mix output.
-	return f16tof32(f32tof16(flares * gradient * FlareIntensity));
+	return f16tof32(f32tof16(flares * gradient * Composite.FlareIntensity));
 }
 #endif
 
@@ -272,8 +286,8 @@ float3 SampleFlare(uint2 tid)
 float ResolveBaseLuminance(uint2 tid)
 {
 	float logLuminance = TexLocalExposureLog.Load(int3(tid, 0));
-	float normalizedLog = saturate((logLuminance - LogLuminanceMin) / (LogLuminanceMax - LogLuminanceMin));
-	float2 uv = (float2(tid) + 0.5) / float2(InputWidth, InputHeight);
+	float normalizedLog = saturate((logLuminance - LocalExposure.LogLuminanceMin) / (LocalExposure.LogLuminanceMax - LocalExposure.LogLuminanceMin));
+	float2 uv = (float2(tid) + 0.5) / float2(LocalExposure.InputWidth, LocalExposure.InputHeight);
 
 	uint gridWidth, gridHeight, gridDepth;
 	TexLuminanceGrid.GetDimensions(gridWidth, gridHeight, gridDepth);
@@ -285,10 +299,10 @@ float ResolveBaseLuminance(uint2 tid)
 	float broadBase = TexBlurredLuminance.SampleLevel(LinearSampler, uv, 0);
 	float bilateralBase = broadBase;
 	if (gridMoments.y >= 0.001)
-		bilateralBase = lerp(LogLuminanceMin, LogLuminanceMax, gridMoments.x / gridMoments.y);
+		bilateralBase = lerp(LocalExposure.LogLuminanceMin, LocalExposure.LogLuminanceMax, gridMoments.x / gridMoments.y);
 
 	// Preserve the former R16F base-luminance store.
-	return f16tof32(f32tof16(lerp(bilateralBase, broadBase, BaseBlend)));
+	return f16tof32(f32tof16(lerp(bilateralBase, broadBase, LocalExposure.BaseBlend)));
 }
 
 #endif
@@ -303,10 +317,10 @@ float4 PSComposite(FullscreenTriangleVSOutput input) :
 	float3 sceneColor;
 	[branch] if (DiffractionEnabled > 0)
 		sceneColor = SamplePhysicalLensWave(TexColor, TexPhysicalLens, LinearSampler, input.TexCoord, sceneUV);
-	else if (HasPhysicalLens > 0)
+	else if (Composite.HasPhysicalLens > 0)
 		sceneColor = SamplePhysicalLensImage(TexColor, TexPhysicalLens, LinearSampler, input.TexCoord, sceneUV);
 	else sceneColor = TexColor[tid].rgb;
-	uint2 sceneTid = min(uint2(saturate(sceneUV) * OutputSize), uint2(OutputSize) - 1);
+	uint2 sceneTid = min(uint2(saturate(sceneUV) * Composite.OutputSize), uint2(Composite.OutputSize) - 1);
 #else
 	float3 sceneColor = TexColor[tid].rgb;
 	uint2 sceneTid = tid;
@@ -333,7 +347,7 @@ float4 PSComposite(FullscreenTriangleVSOutput input) :
 #endif
 
 #ifdef HAS_PHYSICAL_LENS
-	[branch] if (HasPhysicalFlare > 0)
+	[branch] if (Composite.HasPhysicalFlare > 0)
 	{
 		uint w, h, layers;
 		TexPhysicalFlare.GetDimensions(w, h, layers);
@@ -345,13 +359,13 @@ float4 PSComposite(FullscreenTriangleVSOutput input) :
 #ifdef HAS_EXPOSURE
 	// Compute global exposure value
 	float avgLuma = TexAdaptation[0];
-	float globalExposure = ExposureTarget * ExposureCompensation / clamp(avgLuma, AdaptationRange.x, AdaptationRange.y);
+	float globalExposure = AutoExposure.ExposureTarget * AutoExposure.ExposureCompensation / clamp(avgLuma, AutoExposure.AdaptationRange.x, AutoExposure.AdaptationRange.y);
 
 	// Formula: SceneColor * GlobalExposure * LocalExposure + Bloom * GlobalExposure
 	// LocalExposure multiplier derived from the base luminance pass (1.0 if not enabled)
 #	ifdef HAS_LOCAL_EXPOSURE
 	float baseLogLuminance = ResolveBaseLuminance(sceneTid);
-	float localExposure = ComputeLocalExposure(sceneColor, baseLogLuminance, globalExposure, ExposureTarget * ExposureCompensation);
+	float localExposure = ComputeLocalExposure(sceneColor, baseLogLuminance, globalExposure, AutoExposure.ExposureTarget * AutoExposure.ExposureCompensation);
 #	else
 	float localExposure = 1.0;
 #	endif
@@ -359,10 +373,10 @@ float4 PSComposite(FullscreenTriangleVSOutput input) :
 	float3 result = sceneColor * globalExposure * localExposure + bloomContrib * globalExposure;
 
 	// Purkinje effect: applied on the final perceived (exposed + composited) image
-	if (PurkinjeStrength > 1e-3) {
+	if (AutoExposure.PurkinjeStrength > 1e-3) {
 		float avgEV100 = log2(avgLuma) + 3.0;
-		float mix_term = (avgEV100 - PurkinjeMaxEV) / (PurkinjeStartEV - PurkinjeMaxEV);
-		float purkinjeMix = lerp(PurkinjeStrength, 0.0, saturate(mix_term));
+		float mix_term = (avgEV100 - AutoExposure.PurkinjeMaxEV) / (AutoExposure.PurkinjeStartEV - AutoExposure.PurkinjeMaxEV);
+		float purkinjeMix = lerp(AutoExposure.PurkinjeStrength, 0.0, saturate(mix_term));
 
 		if (purkinjeMix > 1e-3)
 			result = PurkinjeShift(result, purkinjeMix);
@@ -371,8 +385,8 @@ float4 PSComposite(FullscreenTriangleVSOutput input) :
 	// No global exposure
 #	ifdef HAS_LOCAL_EXPOSURE
 	float baseLogLuminance = ResolveBaseLuminance(sceneTid);
-	float localExposure = ComputeLocalExposure(sceneColor, baseLogLuminance, ManualExposure, 0.18);
-	float3 result = (sceneColor * localExposure + bloomContrib) * ManualExposure;
+	float localExposure = ComputeLocalExposure(sceneColor, baseLogLuminance, LocalExposure.ManualExposure, 0.18);
+	float3 result = (sceneColor * localExposure + bloomContrib) * LocalExposure.ManualExposure;
 #	else
 	// No exposure at all: simple additive composite
 	float3 result = sceneColor + bloomContrib;

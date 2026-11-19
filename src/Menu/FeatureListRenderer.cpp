@@ -751,10 +751,10 @@ std::vector<FeatureListRenderer::MenuFuncInfo> FeatureListRenderer::BuildMenuLis
 	for (const auto& [category, features] : categorizedFeatures)
 		Menu::categoryCounts[category] = static_cast<int>(features.size());
 
-	// Categories start expanded, except Utility (debug and developer tools)
+	// Categories start expanded
 	const auto addCategory = [&](const std::string& category, const std::vector<Feature*>& features) {
 		menuList.push_back(CategoryHeader{ category });
-		if (categoryExpansionStates.try_emplace(category, category != FeatureCategories::kUtility).first->second)
+		if (categoryExpansionStates.try_emplace(category, true).first->second)
 			std::ranges::copy(features, std::back_inserter(menuList));
 	};
 	for (const auto categoryName : FeatureCategories::kMenuOrder) {
@@ -1605,7 +1605,16 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 			ImGui::PopStyleColor();
 		ImGui::EndGroup();
 
-		if (auto _tt = Util::HoverTooltipWrapper()) {
+		if (auto _tt = Util::HoverTooltipWrapper(); _tt && feat->loaded && feat->AppliesBootToggleLive()) {
+			if (!layout.bootLabel)
+				ImGui::TextUnformatted(bootLabel);
+			ImGui::Text(
+				T("menu.features.live_toggle_tooltip",
+					"Toggle this feature.\n"
+					"Current state: %s\n"
+					"Applies immediately, and is remembered for the next launch."),
+				bootEnabled ? T("menu.features.enabled", "Enabled") : T("menu.features.disabled", "Disabled"));
+		} else if (_tt) {
 			if (!layout.bootLabel)
 				ImGui::TextUnformatted(bootLabel);
 			ImGui::Text(

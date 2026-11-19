@@ -8,6 +8,7 @@
 #include "IconsFontAwesome5.h"
 #include "IconsGameIcons.h"
 #include "IconsTabler.h"
+#include "ImGuiRenderer.h"
 
 #include <algorithm>
 #include <array>
@@ -21,7 +22,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <imgui_impl_dx11.h>
 #include <imgui_internal.h>
 
 #include "RE/Skyrim.h"
@@ -670,9 +670,9 @@ bool ThemeManager::ReloadFont(const Menu& menu, float& cachedFontSize)
 		}
 	}
 
-	ImGui_ImplDX11_InvalidateDeviceObjects();
+	ImGuiRenderer::InvalidateDeviceObjects();
 
-	if (!ImGui_ImplDX11_CreateDeviceObjects()) {
+	if (!ImGuiRenderer::CreateDeviceObjects()) {
 		logger::error("ReloadFont: Failed to create device objects");
 
 		// Emergency fallback: restore with default font and retry device objects
@@ -684,8 +684,8 @@ bool ThemeManager::ReloadFont(const Menu& menu, float& cachedFontSize)
 
 		bool recoverySucceeded = false;
 		if (fallbackFont && io.Fonts->Build()) {
-			ImGui_ImplDX11_InvalidateDeviceObjects();
-			if (ImGui_ImplDX11_CreateDeviceObjects()) {
+			ImGuiRenderer::InvalidateDeviceObjects();
+			if (ImGuiRenderer::CreateDeviceObjects()) {
 				atlas.loadedFontRoles.fill(fallbackFont);
 				io.FontDefault = fallbackFont;
 				atlas.cachedFontName = "ImGui Default";

@@ -11,16 +11,21 @@
 #include <winrt/base.h>
 
 /**
- * @brief GPU and CPU profiler using D3D11 timestamp queries.
+ * @brief GPU and CPU profiler: named ranges per frame with rolling statistics (average, p95, p99).
  *
- * Maintains a ring buffer of frames with paired begin/end timestamp queries
- * and rolling statistics (average, p95, p99) per named pass.
+ * GPU times come from two sources (GpuTimingSource::SelectedTimers, CS_GPU_TIMERS):
+ * - d3d11 (default): a ring of frames with paired begin/end D3D11 timestamp queries around each range, plus the render
+ *   graph's pass times (AddExternalSample).
+ * - graph: the render graph's pass times only. Ranges keep their CPU times and have no GPU time. No D3D11 query is made,
+ *   so this works without a D3D11 device or DXVK.
  */
 class Profiler
 {
 public:
 	static constexpr uint32_t kMaxTimers = 128;
-	static constexpr uint32_t kFrameLatency = 6;
+	// Frames whose queries can be in flight at once. The render thread may run several frames ahead of the GPU
+	// (nothing in the frame waits for it), and a frame's queries are read only once all of them are done.
+	static constexpr uint32_t kFrameRing = 8;
 	static constexpr uint32_t kHistorySize = 300;
 	// Must exceed the longest legitimate gap between samples of a still-running pass;
 	// the DynamicCubemaps state machine spreads its passes over 6 frames.
@@ -76,6 +81,10 @@ public:
 		float cpuP95Ms = 0.0f;
 		float cpuP99Ms = 0.0f;
 		bool valid = false;
+		// Share of recent samples whose begin and end timestamps landed in different DXVK submissions.
+		// Such a span also counts any time the GPU sat idle waiting for the later submission, so it
+		// overstates the pass; see Profiler.cpp.
+		float splitFraction = 0.0f;
 
 		const float* historyBuffer = nullptr;
 		uint32_t historyHead = 0;
@@ -104,7 +113,8 @@ public:
 	};
 
 	/**
-	 * @brief Creates timestamp query objects and prepares the frame ring buffer.
+	 * @brief Creates timestamp query objects and prepares the frame ring buffer. With CS_GPU_TIMERS=graph it creates none,
+	 * and the device and context may be null.
 	 * @param device D3D11 device used to create query objects.
 	 * @param context Device context used for issuing and collecting queries.
 	 */
@@ -124,7 +134,7 @@ public:
 		endPerfEvent = std::move(endCb);
 	}
 
-	/** @brief Collects resolved frames; begins one unless the ring is full. */
+	/** @brief Begins a new profiling frame; collects results from the oldest in-flight frame. */
 	void BeginFrame();
 
 	/**
@@ -161,6 +171,16 @@ public:
 	/** @brief True while a consumer asked for timings within its KeepActive window. */
 	bool IsActive() const { return frameCounter.load(std::memory_order_relaxed) <= activeUntilFrame.load(std::memory_order_relaxed); }
 
+	/**
+	 * @brief Adds GPU time measured outside the D3D11 queries: the render graph's pass timestamps, and the
+	 * Streamline interop buffers' own timestamps. Work submitted outside DXVK's command lists must not also be
+	 * bracketed by a D3D11 timer, whose span would straddle the submission (see TimerResult::splitFraction).
+	 *
+	 * Samples accumulate until the next collected frame and are averaged over the frames that passed since the
+	 * last one, so a source that reports late or in bursts still yields a per-frame figure.
+	 */
+	void AddExternalSample(std::string_view a_name, float a_gpuMs);
+
 	/** @brief Gets the live timings and history from the last collected frame. Rolling statistics are left at zero; see GetStatistics. */
 	const std::vector<TimerResult>& GetResults() const { return results; }
 
@@ -192,6 +212,7 @@ public:
 		knownTimers.clear();
 		knownTimerIndex.clear();
 		collectedFrames = 0;
+		lastLoggedFrame = 0;
 		totalTimeMs = 0.0f;
 		cpuTotalTimeMs = 0.0f;
 	}
@@ -229,28 +250,43 @@ private:
 			std::string name;
 			LARGE_INTEGER cpuBegin{};
 			float cpuMs = 0.0f;
+			uint64_t submissionAtBegin = 0;
+			bool split = false;
 		};
 		std::vector<TimerPair> timers;
 		uint32_t activeCount = 0;
 		SkipMarks skipped;
 		// A pass began past kMaxTimers, so a marked pass may have run untimed.
 		bool overflowed = false;
+		bool inFlight = false;
 	};
 
 	ID3D11DeviceContext* context = nullptr;
+	// D3D11 timestamp queries around the ranges (CS_GPU_TIMERS=d3d11). Off, a range has its CPU time only.
+	bool d3d11Ranges = true;
+	// Without D3D11 queries: the open range, the CPU times of the frame being recorded, and those of the frames ended
+	// since the last collection.
+	std::string cpuRangeName;
+	LARGE_INTEGER cpuRangeBegin{};
+	std::unordered_map<std::string, float> cpuFrame;
+	// Graph mode: each closed frame's CPU times, one sample each at the next collection.
+	std::vector<std::unordered_map<std::string, float>> closedCpuFrames;
+	// Graph mode: the skip marks of the frame being recorded, and those of each closed frame, beside closedCpuFrames.
+	SkipMarks cpuSkipped;
+	std::vector<SkipMarks> closedCpuSkipped;
 
-	FrameQueries frames[kFrameLatency];
+	FrameQueries frames[kFrameRing];
 	uint32_t writeFrame = 0;
-	uint32_t readFrame = 0;
-	// Ended frames awaiting collection, oldest at readFrame.
-	uint32_t pendingFrames = 0;
+	uint32_t readFrame = 0;  // the oldest frame not yet collected
 	bool initialized = false;
 	bool frameActive = false;
 	bool passOpen = false;
-	// Ring was full at BeginFrame; the whole frame is unprofiled.
+	// The current frame is not timed: every slot of the ring still holds a frame the GPU has not finished.
+	// Its passes still emit their perf events.
 	bool frameSkipped = false;
 	static double QpcTicksToMs();
 
+	uint64_t lastLoggedFrame = 0;
 	double cpuTicksToMs = QpcTicksToMs();
 	std::atomic<uint64_t> frameCounter{ 0 };
 	std::atomic<uint64_t> activeUntilFrame{ 0 };
@@ -267,21 +303,34 @@ private:
 		std::string name;
 		RollingHistory gpu;
 		RollingHistory cpu;
+		RollingHistory split;
 		uint64_t lastSampleFrame = 0;
 	};
+	std::unordered_map<std::string, float> pendingExternal;
+	uint32_t framesSinceExternalMerge = 0;
 	std::vector<KnownTimer> knownTimers;
 	std::unordered_map<std::string, size_t> knownTimerIndex;
 	/** @brief Skip marks made before the frame's first BeginPass; they join that frame. */
 	SkipMarks pendingSkipped;
 	uint64_t collectedFrames = 0;
+	// DXVK's submission counter (dxvkGetSubmissionCounter), or null on native D3D11 or an older DXVK.
+	const volatile uint64_t* submissionCounter = nullptr;
 	float totalTimeMs = 0.0f;
 	float cpuTotalTimeMs = 0.0f;
 
-	/** @brief Pushes each resolved frame's samples into the rows and publishes the newest. */
+	/** @brief Without D3D11 queries: the CPU times of the frames ended since the last call; false when none ended. */
+	bool CollectCpuFrame(std::unordered_map<std::string, std::pair<float, float>>& activeTimers);
+	/** @brief Collects every frame the GPU has finished, oldest first, then rebuilds the results. */
 	void CollectResults();
+	/** @brief Reads one finished frame's queries into the timers' histories; false while the GPU is not done with it. */
+	bool CollectFrame(FrameQueries& frame, std::unordered_map<std::string, std::pair<float, float>>& activeTimers);
+
+	/** @brief Pushes a zero sample for each marked pass that has a row and did not run this frame (a_ran says whether it did). */
+	void PushSkipSamples(const SkipMarks& a_marks, const std::function<bool(const std::string&)>& a_ran);
 
 	/** @brief Drops timers that have not been sampled for kTimerRetireFrames, so disabled passes stop reporting stale values. */
 	void RetireStaleTimers();
+	void LogResultsIfRequested();
 
 	/** @brief Repoints knownTimerIndex at the current knownTimers positions after an erase. */
 	void RebuildTimerIndex();

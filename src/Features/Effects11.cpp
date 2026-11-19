@@ -5,6 +5,8 @@
 #include "Effects11/ENBHelper.h"
 #include "Effects11/Editor/Effects11Editor.h"
 #include "Effects11/EffectManager.h"
+#include "Effects11/ORG/ORGFxRuntime.h"
+#include "Effects11/ORGSunRays.h"
 #include "Effects11/PresetManager.h"
 #include "Effects11/SettingManager.h"
 #include "Effects11/WeatherManager.h"
@@ -17,6 +19,7 @@
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "ProceduralAurora.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "SkySync.h"
 #include "State.h"
@@ -124,25 +127,6 @@ namespace
 		float maskExponent = 0.0f;
 		bool isSun = false;
 	};
-
-	/** @brief Mirrors cbuffer SunRaysData in SunRaysPS.hlsl. */
-	struct SunRaysData
-	{
-		float2 lightUV;
-		float2 uvScale;
-		float2 uvMax;
-		float blurFactor;
-		uint32_t stepCount;
-		float3 lightDirection;
-		float lightBillboardTan;
-		float3 raysColor;
-		float maskBrightness;
-		float maskExponent;
-		uint32_t weightedSteps;
-		uint32_t useNoise;
-		float invScreenWidth;
-	};
-	static_assert(sizeof(SunRaysData) == 80);
 
 	/** @brief Picks the visible sun, else the Sky Sync moon when moon rays are on; false when neither qualifies. */
 	bool SelectSunRaysLight(RE::Sky* a_sky, const Effects11::PerFrame& a_perFrame, bool a_sunRays, bool a_moonRays, SunRaysLight& a_light)
@@ -481,6 +465,13 @@ void Effects11::SetupResources()
 	if (const auto presetId = UnifiedPresetCatalog::GetSingleton().GetActiveEffects11PresetId(); !presetId.empty())
 		presetManager.SetActivePreset(presetId);
 	EffectManager::GetSingleton().Initialize();
+	ORGSunRays::Get().Setup();
+}
+
+void Effects11::PostPostLoad()
+{
+	ORGSunRays::Reserve();
+	ORGFxRuntime::Reserve();
 }
 
 void Effects11::PostSetupResources()
@@ -541,6 +532,7 @@ void Effects11::ClearShaderCache()
 			*shader = nullptr;
 		}
 	}
+	ORGSunRays::Get().Release();
 
 	auto& effectManager = EffectManager::GetSingleton();
 	effectManager.enbAdaptation.ClearShaderCache();
@@ -1095,6 +1087,12 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 	if (!effectManager.IsInitialized())
 		return false;
 
+	// The ORG FX runtime (CS_ORG_FX=1) ran the chain in the Tonemap anchor's epoch, just before this.
+	if (ORGFxRuntime::Get().RanThisFrame()) {
+		tonemapReplacedFrame = globals::state->frameCount;
+		return true;
+	}
+
 	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
 	// Only report replacement after the effect chain actually wrote the output.
 	if (effectManager.ExecuteEffects(renderTargets[a_input], renderTargets[a_output])) {
@@ -1156,6 +1154,27 @@ void Effects11::DrawVolumetricRays()
 	if (!effectManager.IsInitialized() || !effectManager.copyVertexShader)
 		return;
 
+	auto context = globals::d3d::context;
+	auto renderer = globals::game::renderer;
+	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+
+	D3D11_TEXTURE2D_DESC mainTexDesc{};
+	main.texture->GetDesc(&mainTexDesc);
+	float2 resolution = { static_cast<float>(mainTexDesc.Width), static_cast<float>(mainTexDesc.Height) };
+	resolution = Util::ConvertToDynamic(resolution);
+	uint32_t dynWidth = static_cast<uint32_t>(resolution.x);
+	uint32_t dynHeight = static_cast<uint32_t>(resolution.y);
+
+	// Raymarch + blurs run at half resolution; the apply pass upsamples bilaterally.
+	const uint32_t halfTexWidth = (mainTexDesc.Width + 1) / 2;
+	const uint32_t halfTexHeight = (mainTexDesc.Height + 1) / 2;
+	const uint32_t halfDynWidth = (dynWidth + 1) / 2;
+	const uint32_t halfDynHeight = (dynHeight + 1) / 2;
+
+	// On the ORG path (CS_ORG_E11_RAYS=1) the PostComposite anchor draws them
+	if (ORGSunRays::Get().VolumetricRays({ halfTexWidth, halfTexHeight, halfDynWidth, halfDynHeight, dynWidth, dynHeight }))
+		return;
+
 	if (!raymarchVolumetricRaysPS) {
 		std::vector<std::pair<const char*, const char*>> defines;
 		if (globals::features::cloudShadows.loaded)
@@ -1188,23 +1207,6 @@ void Effects11::DrawVolumetricRays()
 
 	if (!EnsureAdditiveBlendState())
 		return;
-
-	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
-	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-
-	D3D11_TEXTURE2D_DESC mainTexDesc{};
-	main.texture->GetDesc(&mainTexDesc);
-	float2 resolution = { static_cast<float>(mainTexDesc.Width), static_cast<float>(mainTexDesc.Height) };
-	resolution = Util::ConvertToDynamic(resolution);
-	uint32_t dynWidth = static_cast<uint32_t>(resolution.x);
-	uint32_t dynHeight = static_cast<uint32_t>(resolution.y);
-
-	// Raymarch + blurs run at half resolution; the apply pass upsamples bilaterally.
-	const uint32_t halfTexWidth = (mainTexDesc.Width + 1) / 2;
-	const uint32_t halfTexHeight = (mainTexDesc.Height + 1) / 2;
-	const uint32_t halfDynWidth = (dynWidth + 1) / 2;
-	const uint32_t halfDynHeight = (dynHeight + 1) / 2;
 
 	if (!vlTexA || vlTexA->desc.Width != halfTexWidth || vlTexA->desc.Height != halfTexHeight) {
 		vlTexA = CreateScreenTexture(halfTexWidth, halfTexHeight, DXGI_FORMAT_R16_FLOAT, true, true, "Effects11::VLTexA");
@@ -1307,7 +1309,8 @@ void Effects11::DrawVolumetricRays()
 	// Pass 4: Apply blurred shadow with color → main RT (additive)
 	{
 		profiler->BeginPass("Effects11::VolumetricRays Pass 3");
-		ID3D11RenderTargetView* rtv = main.RTV;
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+		ID3D11RenderTargetView* rtv = RenderGraph::Engine::Tripwire::Unwrap(main.RTV);
 		context->OMSetRenderTargets(1, &rtv, nullptr);
 		context->RSSetViewports(1, &viewport);
 
@@ -1433,9 +1436,6 @@ void Effects11::DrawSunRays()
 	const uint32_t halfDynWidth = (static_cast<uint32_t>(resolution.x) + 1) / 2;
 	const uint32_t halfDynHeight = (static_cast<uint32_t>(resolution.y) + 1) / 2;
 
-	if (!EnsureSunRaysResources(halfTexWidth, halfTexHeight))
-		return;
-
 	// Step counts are indexed by [RAYS] Quality + 2, blur factors by Type, or MoonType for moon rays
 	static constexpr uint32_t blurSteps[3][5] = { { 7, 6, 5, 4, 4 }, { 7, 6, 6, 5, 4 }, { 7, 7, 6, 5, 4 } };
 	static constexpr uint32_t compositeSteps[5] = { 8, 8, 7, 6, 4 };
@@ -1444,6 +1444,8 @@ void Effects11::DrawSunRays()
 	const int qualityIndex = std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>("Quality", "RAYS"))) + 2, 0, 4);
 	const int type = std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>(light.isSun ? "Type" : "MoonType", "RAYS"))), 0, 4);
 
+	// Each pass's constants, in order: the mask, three blurs and the composite
+	std::array<SunRaysData, ORGSunRays::kSunRaysPasses> passes{};
 	SunRaysData data{};
 	data.lightUV = { lightNdc.x * 0.5f + 0.5f, 0.5f - lightNdc.y * 0.5f };
 	data.uvScale = { static_cast<float>(halfDynWidth) / halfTexWidth, static_cast<float>(halfDynHeight) / halfTexHeight };
@@ -1454,6 +1456,34 @@ void Effects11::DrawSunRays()
 	data.maskBrightness = lightPeak;
 	data.maskExponent = light.maskExponent;
 	data.invScreenWidth = 1.0f / std::max(resolution.x, 1.0f);
+	passes[0] = data;
+
+	data.blurFactor = shortBlur[type];
+	data.stepCount = blurSteps[0][qualityIndex];
+	passes[1] = data;
+
+	data.blurFactor = longBlur[type];
+	data.stepCount = blurSteps[1][qualityIndex];
+	data.weightedSteps = 1;
+	data.useNoise = 1;
+	passes[2] = data;
+
+	data.blurFactor = shortBlur[type];
+	data.stepCount = blurSteps[2][qualityIndex];
+	data.weightedSteps = 0;
+	passes[3] = data;
+
+	data.stepCount = compositeSteps[qualityIndex];
+	data.useNoise = qualityIndex == 4;
+	passes[4] = data;
+
+	// On the ORG path (CS_ORG_E11_RAYS=1) the PostComposite anchor draws them
+	const ORGSunRays::Sizes sizes{ halfTexWidth, halfTexHeight, halfDynWidth, halfDynHeight, static_cast<uint32_t>(resolution.x), static_cast<uint32_t>(resolution.y) };
+	if (ORGSunRays::Get().SunRays(sizes, passes))
+		return;
+
+	if (!EnsureSunRaysResources(halfTexWidth, halfTexHeight))
+		return;
 
 	Effects11Util::D3D11ScopedPostFxBackup stateBackup;
 	stateBackup.Save(context);
@@ -1466,9 +1496,9 @@ void Effects11::DrawSunRays()
 	context->PSSetSamplers(0, 1, &sampler);
 
 	auto* profiler = globals::profiler;
-	auto drawPass = [&](ID3D11PixelShader* a_shader, ID3D11RenderTargetView* a_rtv, ID3D11ShaderResourceView* a_srv, const D3D11_VIEWPORT& a_viewport, ID3D11BlendState* a_blendState, const char* a_name) {
+	auto drawPass = [&](const SunRaysData& a_data, ID3D11PixelShader* a_shader, ID3D11RenderTargetView* a_rtv, ID3D11ShaderResourceView* a_srv, const D3D11_VIEWPORT& a_viewport, ID3D11BlendState* a_blendState, const char* a_name) {
 		profiler->BeginPass(a_name);
-		sunRaysCB->Update(data);
+		sunRaysCB->Update(a_data);
 		ID3D11Buffer* cb = sunRaysCB->CB();
 		context->PSSetConstantBuffers(1, 1, &cb);
 		// Unbind the previous pass's input before it becomes this pass's target
@@ -1483,26 +1513,12 @@ void Effects11::DrawSunRays()
 		profiler->EndPass();
 	};
 
-	drawPass(sunRaysMaskPS, sunRaysTexA->rtv.get(), nullptr, halfViewport, nullptr, "Effects11::SunRays Mask");
-
-	data.blurFactor = shortBlur[type];
-	data.stepCount = blurSteps[0][qualityIndex];
-	drawPass(sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 1");
-
-	data.blurFactor = longBlur[type];
-	data.stepCount = blurSteps[1][qualityIndex];
-	data.weightedSteps = 1;
-	data.useNoise = 1;
-	drawPass(sunRaysBlurPS, sunRaysTexA->rtv.get(), sunRaysTexB->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 2");
-
-	data.blurFactor = shortBlur[type];
-	data.stepCount = blurSteps[2][qualityIndex];
-	data.weightedSteps = 0;
-	drawPass(sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 3");
-
-	data.stepCount = compositeSteps[qualityIndex];
-	data.useNoise = qualityIndex == 4;
-	drawPass(sunRaysCompositePS, main.RTV, sunRaysTexB->srv.get(), viewport, additiveBlendState.get(), "Effects11::SunRays Composite");
+	drawPass(passes[0], sunRaysMaskPS, sunRaysTexA->rtv.get(), nullptr, halfViewport, nullptr, "Effects11::SunRays Mask");
+	drawPass(passes[1], sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 1");
+	drawPass(passes[2], sunRaysBlurPS, sunRaysTexA->rtv.get(), sunRaysTexB->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 2");
+	drawPass(passes[3], sunRaysBlurPS, sunRaysTexB->rtv.get(), sunRaysTexA->srv.get(), halfViewport, nullptr, "Effects11::SunRays Blur 3");
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	drawPass(passes[4], sunRaysCompositePS, RenderGraph::Engine::Tripwire::Unwrap(main.RTV), sunRaysTexB->srv.get(), viewport, additiveBlendState.get(), "Effects11::SunRays Composite");
 
 	stateBackup.Restore(context);
 	stateBackup.Release();

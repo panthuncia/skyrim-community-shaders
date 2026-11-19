@@ -10,39 +10,15 @@
 // References:
 //   [1] Delavennat (2021), Physically-based Real-time Glare, LiU.
 
-// Input complex texture (RG32F: R=real, G=imaginary)
-Texture2D<float2> TexInput : register(t0);
+#include "Common/OrgResources.hlsli"
 
-// Output complex texture
-RWTexture2D<float2> RWTexOutput : register(u0);
-
-cbuffer GlareCB : register(b1)
-{
-	float Threshold;
-	float Intensity;
-	float ScatterStrength;
-	uint ApertureMode;
-
-	int ApertureBlades;
-	float ApertureRotation;
-	float AdaptSpeed;
-	float DeltaTime;
-
-	uint FFTResolution;
-	float PaddingRatio;
-	float ScreenWidth;
-	float ScreenHeight;
-
-	uint ChannelIndex;
-	float FresnelExponent;
-	float ChromaticSpread;
-	float ApertureSize;
-
-	float PSFSharpness;
-	float PSFNoiseFloor;
-	uint EnableEyelashes;
-	float EyelashCurvature;
-};
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below; the ORG chain (ORG/ORGPhysicalGlare.cpp)
+// gives heap handles in the push block. Complex values are RG32F: R is real, G imaginary.
+#define FFT_RESOURCES(X)                   \
+	X(SRV, Texture2D<float2>, TexInput, 0) \
+	X(UAV, RWTexture2D<float2>, RWTexOutput, 0)
+ORG_PUSH_BLOCK(FFT_RESOURCES(ORG_HANDLE))
+FFT_RESOURCES(ORG_RESOURCE)
 
 static const float PI = 3.14159265358979323846;
 

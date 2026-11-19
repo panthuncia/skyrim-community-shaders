@@ -1,0 +1,43 @@
+#include "Features/RemoteControl/GpuCountersHost.h"
+
+#include "Globals.h"
+#include "State.h"
+#include "Utils/FileSystem.h"
+
+namespace GpuCounters::Host
+{
+	ID3D11Device* Device()
+	{
+		return globals::d3d::device;
+	}
+
+	ID3D11DeviceContext* Context()
+	{
+		return globals::d3d::context;
+	}
+
+	std::uint64_t FrameCount()
+	{
+		return globals::state->frameCount;
+	}
+
+	bool FrameAnnotations()
+	{
+		return globals::state->frameAnnotations;
+	}
+
+	void SetFrameAnnotations(bool enabled)
+	{
+		globals::state->frameAnnotations = enabled;
+	}
+
+	std::filesystem::path LogDirectory()
+	{
+		return Util::PathHelpers::GetLogPath().parent_path();
+	}
+
+	const char* BuildHint()
+	{
+		return "configure with -DNVPERF_SUPPORT=ON -DNVPERF_SDK_ROOT=<sdk>";
+	}
+}

@@ -3,12 +3,19 @@
 
 // https://knarkowicz.wordpress.com/2014/04/16/octahedron-normal-vector-encoding/
 
+// A per-component choice: HLSL 2021 (DXC) takes no vector condition in ?:, and FXC has no select().
+#if defined(__hlsl_dx_compiler)
+#	define GBUFFER_SELECT(c, a, b) select(c, a, b)
+#else
+#	define GBUFFER_SELECT(c, a, b) ((c) ? (a) : (b))
+#endif
+
 namespace GBuffer
 {
 
 	half2 OctWrap(half2 v)
 	{
-		return (1.0h - abs(v.yx)) * (v.xy >= 0.0h ? 1.0h : -1.0h);
+		return (1.0h - abs(v.yx)) * GBUFFER_SELECT(v.xy >= 0.0h, 1.0h, -1.0h);
 	}
 
 	half2 EncodeNormal(half3 n)
@@ -26,7 +33,7 @@ namespace GBuffer
 		// https://twitter.com/Stubbesaurus/status/937994790553227264
 		half3 n = half3(f.x, f.y, 1.0h - abs(f.x) - abs(f.y));
 		half t = saturate(-n.z);
-		n.xy += n.xy >= 0.0h ? -t : t;
+		n.xy += GBUFFER_SELECT(n.xy >= 0.0h, -t, t);
 		return -normalize(n);
 	}
 

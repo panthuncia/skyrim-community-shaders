@@ -83,6 +83,11 @@ public:
 	void ModifyParticle();
 	/** @brief Switches refractive rain passes to alpha blending. */
 	void ParticleShaderHacks();
+	/**
+	 * @brief The blend state ParticleShaderHacks binds for the current pass: its alpha blending for a refractive rain pass, else null (the
+	 * engine's applies). Drawcall Limit Fix's precipitation family draws with it in the engine's place.
+	 */
+	ID3D11BlendState* RefractiveRainBlendState();
 
 private:
 	/** @brief Returns true when the current particle pass is rain and refractive rain is active this frame. */

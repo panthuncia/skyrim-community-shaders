@@ -1,0 +1,2 @@
+# native-vulkan, the TAA perf sample (perf-taa.toml).
+extends = ["native-vulkan", "perf-taa"]

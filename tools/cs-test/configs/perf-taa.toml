@@ -1,0 +1,42 @@
+# perf-quick with the TAA upscale method on every mode (no Streamline difference between them). A short frame-rate sample at the autoloaded save: god mode (a wolf attacks there), 600 frames to settle, then 900 frames
+# between the "start" and "end" marks. Compose it with a mode: guest+perf-quick, native-vulkan+perf-quick,
+# native-d3d12+perf-quick. Read the [Perf] lines between the marks.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 5
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "mark"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "mark"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+
+[game]
+uncapped = true   # no vsync and no frame-rate limiter from SSE Display Tweaks: frame rates are not held at the display's 144 Hz

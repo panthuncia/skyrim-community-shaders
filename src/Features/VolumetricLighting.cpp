@@ -179,6 +179,21 @@ void VolumetricLighting::SetupResources()
 	vlDataCB = new ConstantBuffer(ConstantBufferDesc<VLData>(), "VolumetricLighting::VLDataCB");
 }
 
+VolumetricLighting::TextureSize VolumetricLighting::VolumeSize(const bool a_interior) const
+{
+	// As SetupVL: the quality picks the engine's preset; Custom is set into the High preset's slot.
+	switch (static_cast<Quality>(a_interior ? settings.InteriorQuality : settings.ExteriorQuality)) {
+	case Quality::Low:
+		return *gVolumetricLightingSizeLow;
+	case Quality::Medium:
+		return *gVolumetricLightingSizeMedium;
+	case Quality::Custom:
+		return a_interior ? settings.InteriorCustomSize : settings.ExteriorCustomSize;
+	default:
+		return defaultSizeHigh;
+	}
+}
+
 void VolumetricLighting::EarlyPrepass()
 {
 	int32_t width = static_cast<int32_t>(globals::game::graphicsState->screenWidth);

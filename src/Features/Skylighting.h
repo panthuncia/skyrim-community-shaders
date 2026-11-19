@@ -84,6 +84,10 @@ public:
 	 */
 	SkylightingCB GetCommonBufferData(bool a_inWorld);
 
+	/** @brief The probe array (t50) and shadow visibility (t53) views D3D11 readers bind: the render graph's while its probe update runs. */
+	ID3D11ShaderResourceView* ProbeArraySRV() const;
+	ID3D11ShaderResourceView* ShadowVisibilitySRV() const;
+
 	winrt::com_ptr<ID3D11SamplerState> comparisonSampler = nullptr;
 
 	Texture2D* texOcclusion = nullptr;
@@ -121,17 +125,49 @@ public:
 	REX::W32::XMFLOAT4X4 ZenithTransform;
 	float3 zenithEyePos;
 	bool zenithValid = false;
+	// This frame's capture is the zenith one: due (zenithDue, BeginOcclusionFrame), and taken (RenderSkyOcclusionMap).
+	bool zenithDue = false;
 	bool zenithFrame = false;
 	// The capture is relative to the main camera, whose eye is only current in the next in-world buffer update.
 	bool zenithEyePending = false;
 
+	// The frame the occlusion maps' frame state was begun for (BeginOcclusionFrame: State::frameCount), and the sky direction it chose.
+	uint occlusionFrame = ~0u;
+	float3 occlusionDirection;
+
+	/**
+	 * @brief Once a frame, before the first map's camera is set up (at the shadow maps when Drawcall Limit Fix draws the maps there, else
+	 * at the engine's occlusion point): a queued reset (no grid bottom yet: no floor), the frame's quarter (frameCount, SetViewFrustum) and
+	 * the sky direction (r2 sequence over the zenith disc).
+	 */
+	void BeginOcclusionFrame();
+	/** @brief The sky occlusion map's render, into texOcclusion swapped in for the precipitation target (a_dclf: as the mask's). */
+	void RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf);
+
 	/** @brief Clears the accumulation frames array to force a full rebuild of skylighting probes. */
 	void ResetSkylighting();
-	void CaptureShadowCascadeSRV();
+	/** @brief Creates the D3D11 probe volumes (texProbeArray and the rest), unless they exist. */
+	void CreateProbeVolumes();
+	/** @brief Releases the D3D11 probe volumes, once the render graph's replace them. */
+	void ReleaseProbeVolumes();
+	/** @brief The probe update on the render graph (CS_ORG_SKYLIGHTING=1), its volumes then replacing the D3D11 ones; false: D3D11's dispatch. */
+	bool UpdateProbesOnGraph();
+	/** @brief Keeps a_shadowMap, the sun's shadow cascades (the shadow mask's t4). */
+	void CaptureShadowCascadeSRV(ID3D11ShaderResourceView* a_shadowMap);
 
 	std::chrono::time_point<std::chrono::system_clock> lastUpdateTimer = std::chrono::system_clock::now();
 
 	//////////////////////////////////////////////////////////////////////////////////
+
+	/**
+	 * @brief The Utility technique (without UtilityGeneralStart) the occlusion map draws a geometry with, or 0 when it
+	 * draws none: the rule GetPrecipitationOcclusionMapRenderPassesImpl applies. a_skylighting selects this feature's
+	 * own map (inOcclusion) rather than the precipitation mask. Reads only the property, the geometry and its fade
+	 * node's BSX flags, so Drawcall Limit Fix's native variant of the map classifies its objects with it too.
+	 */
+	// a_ignoreRadius: the technique as if the geometry passed the size test (worldBound.radius > 32); Drawcall Limit Fix applies
+	// that test on the GPU, against the object's bound when it draws.
+	static std::uint32_t OcclusionTechnique(const RE::BSLightingShaderProperty* a_property, RE::BSGeometry* a_geometry, bool a_skylighting, bool a_ignoreRadius = false);
 
 	// Hooks
 	struct BSLightingShaderProperty_GetPrecipitationOcclusionMapRenderPassesImpl
@@ -140,8 +176,20 @@ public:
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	/** @brief Renders the skylighting occlusion map using the precipitation rendering system. */
+	/**
+	 * @brief Renders the skylighting occlusion map (and the precipitation mask before it) using the precipitation rendering system, at
+	 * the engine's occlusion point (Main::Draw's Precipitation::RenderOcclusion call): every map Drawcall Limit Fix did not draw in the
+	 * frame's shadow epoch (RenderOcclusionAtShadowMaps), whole.
+	 */
 	void RenderOcclusion();
+	/**
+	 * @brief With Drawcall Limit Fix running, before the engine draws the shadow maps (Deferred's Main_RenderShadowMaps hook): the maps
+	 * it draws this frame (DrawcallLimitFix::OcclusionReady) set up and cleared here (their camera, DCLF's view, RenderMask), so its shadow
+	 * epoch at the shadow maps' end draws them, and RenderOcclusion leaves them alone. Nothing reads either map before the Prepass.
+	 */
+	void RenderOcclusionAtShadowMaps();
+	/** @brief The probe grid's bottom (probeGridBottomZ) for an eye at height a_eyeZ: the grid's snapped origin less half its height. */
+	float ProbeGridBottomZ(float a_eyeZ) const;
 
 	struct Main_Precipitation_RenderOcclusion
 	{

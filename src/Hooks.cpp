@@ -1,5 +1,22 @@
 #include "Hooks.h"
 
+#include "GpuEventTimers.h"
+#include "HangWatchdog.h"
+#include "Testing/Testing.h"
+#include "GpuIdleTrace.h"
+#include <intrin.h>
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Pipeline/EngineHooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameSequence.h"
+#include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "Utils/ExternalEmittance.h"
@@ -12,6 +29,7 @@
 #include "Feature.h"
 #include "Globals.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "TruePBR.h"
@@ -20,6 +38,8 @@
 #include "VanillaBinding.h"
 
 #include "CSEditor/SceneManager/WeatherTransition.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "Features/Effects11.h"
 #include "Features/GrassOptimizations.h"
 #include "Features/HDRDisplay.h"
@@ -29,7 +49,7 @@
 #include "Features/ProceduralAurora.h"
 #include "Features/RainRefraction.h"
 #include "Features/RemoteControl/FrameRecorder.h"
-#include "Features/RemoteControl/NvPerf.h"
+#include "Features/RemoteControl/GpuCounters.h"
 #include "Features/RenderDoc.h"
 #include "Features/ScreenshotFeature.h"
 #include "Features/Skin.h"
@@ -39,7 +59,21 @@
 #include "Features/Upscaling/DXVKInterop.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
+#include "RenderGraph/Engine/Buffers/EngineBuffers.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
+#include "RenderGraph/Engine/TonemapAnchor.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "Utils/ImportCallSites.h"
+#include "Vram/Debug.h"
+#include "Vram/VramLedger.h"
+#include "TextureStreaming/Census.h"
+#include "TextureStreaming/Streamer.h"
 
+#include <intrin.h>
 #include <xmmintrin.h>
 #include <unordered_map>
 
@@ -121,6 +155,25 @@ struct BSShader_LoadShaders
 
 		auto state = globals::state;
 		auto shaderCache = globals::shaderCache;
+		// The engine draw families' ORG stages for every descriptor the engine loaded, in CS's lookup form, whatever CS's own precompile
+		// below does (with background compilation it compiles nothing here): the sky, water, screen blood and shadow mask programs exist
+		// before their first draw (DrawcallLimitFix::PrecompileFamilyStages).
+		for (const auto& entry : shader->vertexShaders) {
+			auto vertexDescriptor = entry->id;
+			auto pixelDescriptor = entry->id;
+			NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
+			state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor);
+			DrawcallLimitFix::PrecompileFamilyStages(*shader, false, vertexDescriptor);
+		}
+		for (const auto& entry : shader->pixelShaders) {
+			for (const bool deferred : { false, true }) {
+				auto vertexDescriptor = entry->id;
+				auto pixelDescriptor = entry->id;
+				NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
+				state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor, deferred);
+				DrawcallLimitFix::PrecompileFamilyStages(*shader, true, pixelDescriptor);
+			}
+		}
 		if ((shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) || shaderCache->IsDump()) {
 			if (shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) {
 				Feature::ForEachLoadedFeature("GenerateShaderPermutations", [shader](Feature* feature) {
@@ -131,7 +184,7 @@ struct BSShader_LoadShaders
 
 			for (const auto& entry : shader->vertexShaders) {
 				if (entry->shader && shaderCache->IsDump()) {
-					if (const auto bytecode = GetShaderBytecode(entry->shader)) {
+					if (const auto bytecode = GetShaderBytecode(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<IUnknown*>(entry->shader)))) {
 						DumpShader(shader, entry, std::span(*bytecode));
 					} else {
 						logger::warn("No captured bytecode for vertex shader {} descriptor {:X}", shader->fxpFilename ? shader->fxpFilename : "Unknown", entry->id);
@@ -145,7 +198,7 @@ struct BSShader_LoadShaders
 			}
 			for (const auto& entry : shader->pixelShaders) {
 				if (entry->shader && shaderCache->IsDump()) {
-					if (const auto bytecode = GetShaderBytecode(entry->shader)) {
+					if (const auto bytecode = GetShaderBytecode(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<IUnknown*>(entry->shader)))) {
 						DumpShader(shader, entry, std::span(*bytecode));
 					} else {
 						logger::warn("No captured bytecode for pixel shader {} descriptor {:X}", shader->fxpFilename ? shader->fxpFilename : "Unknown", entry->id);
@@ -225,7 +278,8 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			shaderFound = false;
 		} else {
 			state->settingCustomShader = true;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+			// Through the flush latch, so a latched frame owes this shader rather than an older one.
+			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
 			state->customVertexShader = vertexShader;
 			*globals::game::currentVertexShader = vertexShader;
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -235,7 +289,7 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			*globals::game::currentPixelShader = pixelShader;
 			state->customPixelShader = pixelShader;
 			if (pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+				RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
 			state->settingCustomShader = false;
 			shaderFound = true;
 		}
@@ -255,6 +309,8 @@ namespace LightingExtensions
 		{
 			globals::state->UpdateLightingShaderPermutation(pass);
 			func(shader, pass, renderFlags);
+			if (globals::features::drawcallLimitFix.loaded)
+				globals::features::drawcallLimitFix.OnNativeLightingDraw(pass, renderFlags);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -349,8 +405,9 @@ namespace WaterBlendHistory
 			// Clear stale coverage left by discarded non-water pixels
 			const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
 			const auto target = renderTargets[1];
+			// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
 			globals::d3d::context->ClearRenderTargetView(
-				globals::game::renderer->GetRuntimeData().renderTargets[target].RTV,
+				RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[target].RTV),
 				clearColor);
 
 			func(imageSpaceShader, shape, param);
@@ -447,6 +504,9 @@ namespace PostProcessingExtensions
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
 
+			// The ORG FX runtime, Post Processing's graph chain and the Tonemap anchor's epoch.
+			RenderGraph::Engine::RunTonemapAnchor(a3, a4);
+
 			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped
 			// and HandlePostProcessing fixes up the render-target state the pass would have set.
 			if (state->HandlePostProcessing(input, output))
@@ -480,7 +540,36 @@ struct IDXGISwapChain_Present
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
 		// Nsight Perf passes span one frame's rendering: ended before the overlay and Present, begun after.
-		NvPerf::OnPresentBegin();
+		GpuCounters::OnPresentBegin();
+
+		ZoneScopedN("CS.Present");
+		{
+			// Instrumentation: the render thread's CPU time over the last Present-to-Present period (its thread cycles at the TSC's
+			// rate against the wall clock), plotted for Tracy. Less than the period means the thread slept or waited in it.
+			static ULONG64 lastCycles = 0;
+			static std::uint64_t lastTsc = 0;
+			static LARGE_INTEGER lastQpc{};
+			ULONG64 cycles = 0;
+			QueryThreadCycleTime(GetCurrentThread(), &cycles);
+			const std::uint64_t tsc = __rdtsc();
+			LARGE_INTEGER qpc, freq;
+			QueryPerformanceCounter(&qpc);
+			QueryPerformanceFrequency(&freq);
+			if (lastTsc && tsc > lastTsc) {
+				const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+				TracyPlot("CS.RenderThread.CpuMs", wallMs * static_cast<double>(cycles - lastCycles) / static_cast<double>(tsc - lastTsc));
+			}
+			lastCycles = cycles;
+			lastTsc = tsc;
+			lastQpc = qpc;
+		}
+		{
+			ZoneScopedN("CS.Present.Begin");
+			GpuTimingSource::OnPresent();
+			GpuIdleTrace::OnPresent();
+			HangWatchdog::OnPresent();
+			GpuEventTimers::OnPresent();
+		}
 
 		// DLSS-G on Vulkan requires SyncInterval 0.
 		{
@@ -504,28 +593,116 @@ struct IDXGISwapChain_Present
 		streamline->SetPCLMarker(Streamline::PclMarker::TriggerFlash);
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentStart);
 
-		HRESULT retval = globals::features::hdrDisplay.HandleSwapChainPresent(
+		// DXVK's moves of the pinless imports, once per Present on the thread that renders: the frames DCLF does not run (a loading
+		// screen, a menu) draw with imports too (docs/development/p5/loading-screen.md, "Scaleform on the loading thread: pinless imports").
+		if (FrameAnchors::IsRenderOwner())
+			DCLF::ImportRelocations::Poll();
+
+		FrameAnchors::Run(FrameAnchors::Anchor::Present);
+
+		// The frame's end in the stream, once a frame, after the UI stage's commit (in the present below; after the chain when it did not
+		// present): what DCLF puts in DXVK's stream for the frame (its CPU frame signal), before the present sends the stream on (its
+		// features' Reset, EndFrame, runs after the present); then the render thread's pacing point (RenderGraphRuntime::SignalFramePace),
+		// unless frame generation paces the present itself. After the commit, they follow the UI stage's block in stream order, and their
+		// D3D11 work (a flush, release queries) is outside the stage's window.
+		const bool pacedByCS = !globals::features::upscaling.IsFrameGenerationActive();
+		bool frameEndQueued = false;
+		const auto queueFrameEnd = [&] {
+			if (std::exchange(frameEndQueued, true))
+				return;
+			if (globals::features::drawcallLimitFix.loaded)
+				globals::features::drawcallLimitFix.BeforePresent();
+			RenderGraphRuntime::Get().SignalFramePace(pacedByCS);
+		};
+
+		HRESULT retval;
+		{
+		ZoneScopedN("CS.Present.Chain");
+		retval = globals::features::hdrDisplay.HandleSwapChainPresent(
 			This,
 			SyncInterval,
 			Flags,
 			[&](IDXGISwapChain* swapChain, UINT syncInterval, UINT presentFlags) {
 				return globals::features::upscaling.PresentWithFrameGeneration(
 					swapChain, syncInterval, presentFlags,
-					[&](IDXGISwapChain* sc, UINT si, UINT f) { return func(sc, si, f); });
+					[&](IDXGISwapChain* sc, UINT si, UINT f) {
+						ZoneScopedN("CS.Present.NativeWait");
+						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
+						// a screenshot is a pass of the stage (its Capture step, after the overlay).
+						if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
+							globals::features::screenshotFeature.ProcessCaptureRequest();
+						(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+						// The UI stage commits before the present (BeforeGpuWork).
+						FrameAnchors::BeforeGpuWork("the present");
+						queueFrameEnd();
+						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
+						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
+						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
+						// after the frame's epochs, so it does not drain (Native's QueuePresent).
+						const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
+						                          !globals::features::upscaling.IsFrameGenerationActive();
+						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && !globals::features::upscaling.IsFrameGenerationActive() &&
+						                           RenderGraphRuntime::Get().QueuesPresent();
+						if (!queuedPresent)
+							RenderGraphRuntime::Get().DrainSubmissions("the present", true);
+						RenderGraph::FrameSequence::NoteBoundary("the present");
+						GpuEventTimers::BeginEvent("mark before native present");
+						GpuEventTimers::EndEvent();
+						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
+						// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
+						// itself.
+						if (holdsPresent) {
+							globals::d3d::context->Flush();
+							// Native: the held frame is paced as a present would pace it.
+							if (RenderGraph::Engine::Native::Active())
+								RenderGraph::Engine::Native::PaceHeldPresent();
+							return S_OK;
+						}
+						const auto presented = func(sc, si, f);
+						GpuEventTimers::BeginEvent("mark after native present");
+						GpuEventTimers::EndEvent();
+						return presented;
+					});
 			});
+		}
 
+		// A chain that returned without presenting (occluded, a failed frame generation present).
+		queueFrameEnd();
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
 
 		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);
+		// A removed device (DXVK's or native D3D11's Present): the test run ends with device-lost.
+		if (retval == DXGI_ERROR_DEVICE_REMOVED || retval == DXGI_ERROR_DEVICE_RESET || retval == DXGI_ERROR_DEVICE_HUNG) {
+			const auto reason = globals::d3d::device ? static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason()) : 0u;
+			Testing::ReportDeviceLost(fmt::format("Present returned 0x{:08X}, removed reason 0x{:08X}", static_cast<std::uint32_t>(retval), reason), 0, {}, {});
+		}
+		{
+			ZoneScopedN("CS.Present.SurfaceState");
+			if (presentSucceeded)
+				dxvk->RefreshPresenterSurfaceState();
+			streamline->CaptureDLSSGPresentState();
+		}
+
+		// What the graph submitted before the present is on its way to the device: the points a mid-frame producer may wait for.
 		if (presentSucceeded)
-			dxvk->RefreshPresenterSurfaceState();
-		streamline->CaptureDLSSGPresentState();
+			RenderGraphRuntime::Get().SealPresented();
+		// CS_ORG_ENGINE_CONSTANTS=1: every anchor of the frame has run, so the frame's captured constants can retire.
+		RenderGraph::Engine::Constants::EndFrame();
+		// CS_ORG_ENGINE_BUFFERS=1: the dynamic ring's full chunks of the ended frame go back, outside every stage's window.
+		RenderGraph::Engine::Buffers::EndFrame();
+		{
+			ZoneScopedN("CS.Present.FramePace");
+			RenderGraphRuntime::Get().WaitFramePace();
+		}
 
 		// Collect the overlay's frame metrics here rather than from its draw path, so hiding the
 		// overlay does not stop measurement and then feed the whole hidden interval back as a
 		// single frame. Cheap, and self-limiting to once per game frame.
-		globals::features::performanceOverlay.UpdateMetrics();
+		{
+			ZoneScopedN("CS.Present.Metrics");
+			globals::features::performanceOverlay.UpdateMetrics();
+		}
 
 		// Ground-truth present rate. The overlay's numbers only exist while it is being drawn, so
 		// when the question is "why does the frame rate never exceed the refresh rate" there was
@@ -557,11 +734,17 @@ struct IDXGISwapChain_Present
 		}
 
 		// After Present (upstream #2354): frameCount and every feature's Reset (DCLF's EndFrame among them) belong to the frame just presented.
-		globals::state->Reset();
+		{
+			ZoneScopedN("CS.Present.Reset");
+			GpuEventTimers::PassSkipAfterPresent();
+			globals::state->Reset();
+		}
+		// The test runner: milestones, steps, the status file. Not a feature's: it runs with every feature off.
+		Testing::OnPresent();
 
 		FrameRecorder::OnPresentEnd();
 
-		NvPerf::OnPresentEnd();
+		GpuCounters::OnPresentEnd();
 
 		TracyD3D11Collect(globals::state->tracyCtx);
 
@@ -613,6 +796,10 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 
 		logger::info("[HDR] Upgraded swap chain: R10G10B10A2_UNORM + FLIP_DISCARD");
 	}
+
+	// CS_ORG_NATIVE=1: no D3D11 device. BasicRHI's device and ORG's swap chain, with tripwire handles for the engine.
+	if (RenderGraph::Engine::Native::Requested())
+		return RenderGraph::Engine::Native::CreateDeviceAndSwapChain(pAdapter, &modifiedDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
 
 	auto ret = ptrD3D11CreateDeviceAndSwapChain(pAdapter,
 		DriverType,
@@ -683,18 +870,6 @@ struct ID3D11Device_CreatePixelShader
 	static inline REL::Relocation<decltype(thunk)> func;
 };
 
-struct ID3D11Device_CreateSamplerState
-{
-	static HRESULT STDMETHODCALLTYPE thunk(ID3D11Device* This, D3D11_SAMPLER_DESC* pSamplerDesc, ID3D11SamplerState** ppSamplerState)
-	{
-		// Limit Anisotropy to 8x for performance
-		D3D11_SAMPLER_DESC descCopy = *pSamplerDesc;  // make a copy, pSamplerDesc is supposed to be immutable
-		descCopy.MaxAnisotropy = std::min(descCopy.MaxAnisotropy, 8u);
-		return func(This, &descCopy, ppSamplerState);
-	}
-	static inline REL::Relocation<decltype(thunk)> func;
-};
-
 /** @brief Nulls the output buffer on failure like the native runtime; RenderDoc leaves it untouched and the game uses it unchecked (e.g. zero-triangle skin partitions). */
 struct ID3D11Device_CreateBuffer
 {
@@ -721,11 +896,22 @@ struct BSShaderRenderTargets_Create
 
 	static void thunk()
 	{
+		static int calls = 0;
+		if (++calls > 1)
+			logger::warn("[Hooks] the engine is creating its render targets again (call {}); CS's resources are not made for that", calls);
 		Util::SetGameSettingValue<std::int32_t>("iNumFocusShadow:Display", iNumFocusShadow, 0);
 		if (globals::features::hdrDisplay.loaded)
 			globals::features::hdrDisplay.PreCreateRenderTargets();
-		func();
+		{
+			// Everything the game creates here is its render targets (VRAM attribution); each is then labeled by name.
+			Vram::OwnerScope vramScope("Game/RenderTarget");
+			// CS_ORG_ENGINE_TARGETS: ORG makes the set, and publishes it once it is complete.
+			RenderGraph::Engine::Targets::BeginSet();
+			func();
+			RenderGraph::Engine::Targets::EndSet();
+		}
 		globals::ReInit();
+		Vram::TagGameRenderTargets(true);
 		globals::state->Setup();
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
@@ -820,6 +1006,10 @@ namespace Hooks
 
 			func();
 
+			// Native mode: the engine's fields hold the native handles (a startup error names any that does not).
+			RenderGraph::Engine::Native::AfterInitD3D();
+			RenderGraph::Engine::Tripwire::InstallGuestDevice();
+
 			logger::info("Accessing render device information");
 			globals::ReInit();
 
@@ -847,14 +1037,36 @@ namespace Hooks
 				stl::detour_vfunc<15, ID3D11Device_CreatePixelShader>(globals::d3d::device);
 			}
 
-			stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(globals::d3d::device);
+			RenderGraph::Engine::Pipeline::InstallDeviceHooks(globals::d3d::device);
 
 			if (RenderDoc::IsLoaded())
 				stl::detour_vfunc<3, ID3D11Device_CreateBuffer>(globals::d3d::device);
+			RenderGraph::Engine::Buffers::InstallDeviceHooks(globals::d3d::device);
 
 			globals::InstallD3DHooks(globals::d3d::context);
 
+			Vram::OwnerScope vramScope("CS/Menu");
 			globals::menu->Init();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/**
+	 * @brief The last call of Renderer::Init (SE 75445+0x310, AE 77226+0x9C3): BSGraphics::State's setup, after the occlusion and
+	 * disjoint query pools. Installed only with CS_ORG_TRIPWIRE_GUEST=1.
+	 *
+	 * The engine's start, in order: the device, the render targets (BSShaderRenderTargets::Create, then State::Setup), the blend
+	 * table (the InitD3D hook above, which installs the guest device and context), the depth-stencil, rasterizer and sampler
+	 * tables, then the query pools here. This is the first point where the guest and every object the handles wrap exist, so the
+	 * state, query and startup target handles all go in here, once, before the first frame.
+	 */
+	struct BSGraphics_Renderer_Init_StateSetup
+	{
+		static void thunk(void* a_state)
+		{
+			func(a_state);
+			RenderGraph::Engine::Pipeline::InstallEngineHandlesOnce();
+			RenderGraph::Engine::Targets::InstallHandles();
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -864,6 +1076,36 @@ namespace Hooks
 		static LRESULT thunk(HWND a_hwnd, UINT a_msg, WPARAM a_wParam, LPARAM a_lParam)
 		{
 			auto menu = globals::menu;
+			// A monitor that turns off or is removed makes Windows shrink the window to what is left of the desktop, and the engine
+			// answers by creating its render targets again. CS's resources are not made for that: State::Setup runs a second time
+			// (about 1 GB more each time), and with Drawcall Limit Fix the game crashes recording its shadow views. Nothing the
+			// player asked for changed, so the window keeps its size. Moving and minimizing still work.
+			if (a_msg == WM_WINDOWPOSCHANGING && menu->initialized && !Upscaling::s_windowModifying.load(std::memory_order_relaxed) && !IsIconic(a_hwnd)) {
+				auto* position = reinterpret_cast<WINDOWPOS*>(a_lParam);
+				RECT rect{};
+				if (!(position->flags & SWP_NOSIZE) && position->x > -32000 && GetWindowRect(a_hwnd, &rect) &&
+					(position->cx != rect.right - rect.left || position->cy != rect.bottom - rect.top)) {
+					logger::info("[Hooks] window kept at {}x{}, not resized to {}x{}", rect.right - rect.left, rect.bottom - rect.top, position->cx, position->cy);
+					position->flags |= SWP_NOSIZE | SWP_NOMOVE;
+				}
+			}
+			// The display timeout does not count a controller as input: the screen stays on while the game has focus.
+			if (a_msg == WM_ACTIVATEAPP) {
+				(void)SetThreadExecutionState(a_wParam ? ES_CONTINUOUS | ES_DISPLAY_REQUIRED : ES_CONTINUOUS);
+				static const auto displayNotification = [&] {
+					static constexpr GUID kConsoleDisplayState{ 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+					return RegisterPowerSettingNotification(a_hwnd, &kConsoleDisplayState, DEVICE_NOTIFY_WINDOW_HANDLE);
+				}();
+				(void)displayNotification;
+			}
+			if (a_msg == WM_POWERBROADCAST && a_wParam == PBT_POWERSETTINGCHANGE) {
+				const auto* setting = reinterpret_cast<const POWERBROADCAST_SETTING*>(a_lParam);
+				// 0: off, 1: on, 2: dimmed.
+				if (setting->DataLength >= sizeof(DWORD))
+					Upscaling::NotifyDisplayState(*reinterpret_cast<const DWORD*>(setting->Data) != 0);
+			}
+			if (a_msg == WM_DISPLAYCHANGE)
+				Upscaling::NotifyDesktopChanged();
 			if ((a_msg == WM_KILLFOCUS || a_msg == WM_SETFOCUS) && menu->initialized) {
 				menu->focusChanged = true;
 			}
@@ -1016,6 +1258,18 @@ namespace Hooks
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	// kSHADOW_MASK: Community Shaders' render target modifications (ModifyRenderTarget: UAV bind).
+	struct CreateRenderTarget_ShadowMask
+	{
+		static void thunk(RE::BSGraphics::Renderer* This, RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
+		{
+			const auto saved = *a_properties;
+			globals::state->ModifyRenderTarget(a_target, *a_properties);
+			func(This, a_target, a_properties);
+			*a_properties = saved;
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
 	struct CreateRenderTarget_UnderwaterMask
 	{
 		static void thunk(RE::BSGraphics::Renderer* This, RE::RENDER_TARGETS::RENDER_TARGET a_target, RE::BSGraphics::RenderTargetProperties* a_properties)
@@ -1042,7 +1296,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
 						if (vertexShader) {
-							globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), NULL, NULL);
+							RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
 							state->customVertexShader = vertexShader;
 							*globals::game::currentVertexShader = a_vertexShader;
 							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -1056,7 +1310,8 @@ namespace Hooks
 
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
-			globals::d3d::context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader), NULL, NULL);
+			// An engine shader can be a tripwire handle (P4.6), which DXVK's own context cannot take.
+			RenderGraph::Engine::Flush::BindVertexShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader)), _ReturnAddress());
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1075,7 +1330,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
 						if (pixelShader) {
-							globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), NULL, NULL);
+							RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
 							state->customPixelShader = pixelShader;
 							*globals::game::currentPixelShader = a_pixelShader;
 							return;
@@ -1088,7 +1343,7 @@ namespace Hooks
 			state->customPixelShader = nullptr;
 
 			if (a_pixelShader)
-				globals::d3d::context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader), NULL, NULL);
+				RenderGraph::Engine::Flush::BindPixelShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader)), _ReturnAddress());
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1189,6 +1444,13 @@ namespace Hooks
 		{
 			static void thunk(RE::BSGraphics::Renderer* renderer, RE::BSGraphics::ComputeShader* shader, uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
 			{
+				// Volumetric Lighting on the render graph: the VL render's dispatches are the graph's, never D3D11's.
+				auto& orgVolumetricLighting = ORGVolumetricLighting::Get();
+				if (orgVolumetricLighting.TakeEngineDispatch(CurrentlyDispatchedComputeShader && CurrentlyDispatchedComputeShader->name ?
+																 std::string_view(CurrentlyDispatchedComputeShader->name) :
+																 std::string_view{}))
+					return;
+
 				auto state = globals::state;
 				auto shaderCache = globals::shaderCache;
 				auto& vl = globals::features::volumetricLighting;
@@ -1196,6 +1458,8 @@ namespace Hooks
 				if (shaderCache->IsEnabled() && state->ShaderEnabled(RE::BSShader::Type::ImageSpace)) {
 					RE::BSImagespaceShader* isShader = CurrentlyDispatchedShader;
 					uint32_t techniqueId = CurrentComputeShaderTechniqueId;
+					// The D3D11 path's VL shaders. On the ORG path the VL render's dispatches are taken above, and the VL blur's
+					// call is the graph's (ORGVolumetricLighting), so none of these reach here.
 					if (vl.loaded) {
 						if (CurrentlyDispatchedShader == nullptr) {
 							techniqueId = 0;
@@ -1313,8 +1577,18 @@ namespace Hooks
 			logger::info("BSBatchRenderer::RenderPassImmediately prefetch disabled via CS_NO_PASS_PREFETCH");
 		}
 
+		Vram::Debug::InstallGameHooks();
+		TextureStreaming::Census::InstallGameHooks();
+		TextureStreaming::InstallGameHooks();
+		// The engine-on-graph subsystems' game hooks (each behind its own switch).
+		RenderGraph::Engine::InstallGameHooks();
+
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
 		stl::write_thunk_call<BSGraphics_Renderer_Init_InitD3D>(REL::RelocationID(75595, 77226).address() + REL::Relocate(0x50, 0x2BC));
+		if (RenderGraph::Engine::Tripwire::GuestRequested()) {
+			logger::info("Hooking the end of BSGraphics::Renderer::Init (engine handles after the guest device)");
+			stl::write_thunk_call<BSGraphics_Renderer_Init_StateSetup>(REL::RelocationID(75445, 77226).address() + REL::Relocate(0x310, 0x9C3));
+		}
 
 		logger::info("Hooking WndProcHandler");
 		stl::write_thunk_call<RegisterClassA_Hook, 6>(REL::VariantID(75591, 77226, 0xDC4B90).address() + REL::VariantOffset(0x8E, 0x15C, 0x99).offset());
@@ -1331,6 +1605,16 @@ namespace Hooks
 		stl::write_thunk_call<CreateRenderTarget_MotionVectors>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x4F0, 0x4EF));
 
 		stl::write_thunk_call<CreateRenderTarget_RefractionNormals>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x503, 0x502));
+		{
+			// The call creating kSHADOW_MASK: `lea edx, [rdi + 0x12]`, `lea rcx, [the manager]`, then the call (verified on AE; SE's offset assumed one past, as the
+			// refraction normals' call is). Skipped, logged, when the bytes are not that.
+			const std::uintptr_t call = REL::RelocationID(100458, 107175).address() + REL::Relocate(0x555, 0x554);
+			const auto* bytes = reinterpret_cast<const std::uint8_t*>(call);
+			if (bytes[-10] == 0x8D && bytes[-9] == 0x57 && bytes[-8] == 0x12 && bytes[0] == 0xE8)
+				stl::write_thunk_call<CreateRenderTarget_ShadowMask>(call);
+			else
+				logger::warn("BSShaderRenderTargets::Create: the kSHADOW_MASK call is not where expected; the shadow mask stays without UAV access");
+		}
 		stl::write_thunk_call<CreateRenderTarget_UnderwaterMask>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0xB19, 0xB19));
 
 		stl::write_thunk_call<CreateDepthStencil_PrecipitationMask>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x1245, 0x123B));
@@ -1411,12 +1695,19 @@ namespace Hooks
 
 		// Load DXVK before the game creates its D3D11 device.
 		const bool nativeMode = DxvkLoader::NativeModeRequested();
+		// CS_ORG_NATIVE=1 loads no DXVK either; its checks fail the start on anything that still needs it.
+		const bool orgNative = RenderGraph::Engine::Native::Requested();
 		const bool dxvkLoaded = DxvkLoader::Load();
-		if (!nativeMode && !dxvkLoaded) {
+		if (orgNative)
+			RenderGraph::Engine::Native::CheckStartup();
+		if (!nativeMode && !orgNative && !dxvkLoaded) {
 			stl::report_and_fail(
 				"Community Shaders could not load its bundled DXVK renderer (dxvk_d3d11.dll / dxvk_dxgi.dll) "
 				"from Data/SKSE/Plugins/CommunityShaders/bin. Reinstall Community Shaders or verify the files exist."sv);
 		}
+		// AMD's counter library must exist before the device (D3D11) or its queues (Vulkan), and DXVK's device must enable its
+		// driver extensions: both happen here or not at all (only when a capture is asked for at startup).
+		GpuCounters::BeforeDeviceCreation();
 		if (nativeMode) {
 			globals::features::upscaling.loaded = false;
 			logger::info("[Native] CS_NATIVE_D3D11=1: DXVK + upscaling disabled, using system d3d11/dxgi");
@@ -1428,6 +1719,9 @@ namespace Hooks
 			*(uintptr_t*)&ptrD3D11CreateDeviceAndSwapChain = dxvkLoaded ?
 			                                                     reinterpret_cast<uintptr_t>(DxvkLoader::GetD3D11CreateDeviceAndSwapChain()) :
 			                                                     iatOriginal;
+			// The IAT patch alone does not survive RenderDoc; see RedirectImportCallSites.
+			Util::RedirectImportCallSites(::GetModuleHandleW(nullptr), "d3d11.dll", "D3D11CreateDeviceAndSwapChain",
+				reinterpret_cast<void*>(&hk_D3D11CreateDeviceAndSwapChain));
 		}
 
 		logger::info("Hooking CreateDXGIFactory");
@@ -1435,5 +1729,7 @@ namespace Hooks
 		*(uintptr_t*)&ptrCreateDXGIFactory = dxvkLoaded ?
 		                                         reinterpret_cast<uintptr_t>(DxvkLoader::GetCreateDXGIFactory()) :
 		                                         dxgiOriginal;
+		Util::RedirectImportCallSites(::GetModuleHandleW(nullptr), "dxgi.dll", "CreateDXGIFactory",
+			reinterpret_cast<void*>(&hk_CreateDXGIFactory));
 	}
 }

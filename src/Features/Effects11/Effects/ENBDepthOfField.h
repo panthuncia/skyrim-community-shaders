@@ -15,6 +15,12 @@ public:
 	/** @brief This frame's aperture texture for other effects, or null if DOF did not run this frame. */
 	ID3D11ShaderResourceView* GetApertureSRV() const;
 
+	/** @brief The chain Execute runs: the selected UIName technique, or the fallback when the effect has none. */
+	std::string GetChainTechnique() const;
+
+	/** @brief Marks the focus history as written, as Execute does, after a frame the ORG FX runtime rendered. */
+	void MarkHistoryValid() { historyValid = true; }
+
 protected:
 	void CreateEffectTextures() override;
 

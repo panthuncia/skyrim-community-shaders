@@ -21,11 +21,16 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/SharedData.hlsli"
 
-cbuffer SSGICB : register(b1)
+// SSGI's per-frame constants, read as SsgiFrame.<name> on both paths. D3D11: the cbuffer at b1.
+// ORG: the frame's latch region; each shader lists X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)
+// for its handle and offset. The matrix is the four rows C++ writes, so no load depends on matrix
+// packing: read it through SsgiPrevInvViewMat().
+struct SSGIConstants
 {
-	float4x4 PrevInvViewMat;
+	float4 PrevInvViewMat[4];  // the rows C++ writes, which the cbuffer reads as columns
 	float4 NDCToViewMul;
 	float4 NDCToViewAdd;
 
@@ -64,8 +69,16 @@ cbuffer SSGICB : register(b1)
 	float2 pad;
 };
 
-SamplerState samplerPointClamp : register(s0);
-SamplerState samplerLinearClamp : register(s1);
+ORG_RESOURCE(LATCH, SSGIConstants, SsgiFrame, 1)
+
+/** The previous frame's inverse view matrix. The rows C++ writes, read as columns as a float4x4 cbuffer member would be. */
+float4x4 SsgiPrevInvViewMat()
+{
+	return transpose(float4x4(SsgiFrame.PrevInvViewMat[0], SsgiFrame.PrevInvViewMat[1], SsgiFrame.PrevInvViewMat[2], SsgiFrame.PrevInvViewMat[3]));
+}
+
+ORG_RESOURCE(SAMPLER, SamplerState, samplerPointClamp, 0)
+ORG_RESOURCE(SAMPLER, SamplerState, samplerLinearClamp, 1)
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -94,22 +107,22 @@ float4 filterInf(float4 v) { return float4(filterInf(v.x), filterInf(v.y), filte
 #	define RES_MIP 1
 #	define READ_DEPTH(tex, px) tex.Load(int3(px, RES_MIP))
 #	define FULLRES_LOAD(tex, px, texCoord, samp) tex.SampleLevel(samp, texCoord, 0)
-#	define OUT_FRAME_DIM (FrameDim * 0.5)
-#	define RCP_OUT_FRAME_DIM (RcpFrameDim * 2)
+#	define OUT_FRAME_DIM (SsgiFrame.FrameDim * 0.5)
+#	define RCP_OUT_FRAME_DIM (SsgiFrame.RcpFrameDim * 2)
 #	define OUT_FRAME_SCALE (frameScale * 0.5)
 #elif defined(QUARTER_RES)
 #	define RES_MIP 2
 #	define READ_DEPTH(tex, px) tex.Load(int3(px, RES_MIP))
 #	define FULLRES_LOAD(tex, px, texCoord, samp) tex.SampleLevel(samp, texCoord, 0)
-#	define OUT_FRAME_DIM (FrameDim * 0.25)
-#	define RCP_OUT_FRAME_DIM (RcpFrameDim * 4)
+#	define OUT_FRAME_DIM (SsgiFrame.FrameDim * 0.25)
+#	define RCP_OUT_FRAME_DIM (SsgiFrame.RcpFrameDim * 4)
 #	define OUT_FRAME_SCALE (frameScale * 0.25)
 #else
 #	define RES_MIP 0
 #	define READ_DEPTH(tex, px) tex[px]
 #	define FULLRES_LOAD(tex, px, texCoord, samp) tex[px]
-#	define OUT_FRAME_DIM FrameDim
-#	define RCP_OUT_FRAME_DIM RcpFrameDim
+#	define OUT_FRAME_DIM SsgiFrame.FrameDim
+#	define RCP_OUT_FRAME_DIM SsgiFrame.RcpFrameDim
 #	define OUT_FRAME_SCALE frameScale
 #endif
 
@@ -119,7 +132,7 @@ float4 filterInf(float4 v) { return float4(filterInf(v.x), filterInf(v.y), filte
 float3 ScreenToViewPosition(const float2 screenPos, const float viewspaceDepth)
 {
 	float3 ret;
-	ret.xy = (NDCToViewMul.xy * screenPos.xy + NDCToViewAdd.xy) * viewspaceDepth;
+	ret.xy = (SsgiFrame.NDCToViewMul.xy * screenPos.xy + SsgiFrame.NDCToViewAdd.xy) * viewspaceDepth;
 	ret.z = viewspaceDepth;
 	return ret;
 }

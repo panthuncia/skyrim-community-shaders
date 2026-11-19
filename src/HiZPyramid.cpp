@@ -2,6 +2,7 @@
 
 #include "Features/TerrainBlending.h"
 #include "Profiler.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 
 void HiZPyramid::SetupResources()
@@ -32,12 +33,14 @@ bool HiZPyramid::IsValid() const
 ID3D11ShaderResourceView* HiZPyramid::GetSourceDepthSRV()
 {
 	// Bypass Terrain Blending's replacement SRV.
+	// The view is bound through DXVK's context. Engine depth fields can be tripwire handles, so this returns the wrapped view.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto& terrainBlending = globals::features::terrainBlending;
 	if (terrainBlending.loaded && terrainBlending.settings.Enabled && terrainBlending.prepassSRVBackup)
-		return terrainBlending.prepassSRVBackup;
+		return Unwrap(terrainBlending.prepassSRVBackup);
 
 	if (auto* renderer = globals::game::renderer)
-		return renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV;
+		return Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV);
 
 	return nullptr;
 }
@@ -45,15 +48,16 @@ ID3D11ShaderResourceView* HiZPyramid::GetSourceDepthSRV()
 ID3D11ShaderResourceView* HiZPyramid::GetLiveDepthSRV()
 {
 	// Terrain Blending retains the original kMAIN SRV.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto& terrainBlending = globals::features::terrainBlending;
 	if (terrainBlending.loaded && terrainBlending.depthSRVBackup)
-		return terrainBlending.depthSRVBackup;
+		return Unwrap(terrainBlending.depthSRVBackup);
 
 	auto* renderer = globals::game::renderer;
 	if (!renderer)
 		return nullptr;
 
-	return renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	return Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
 }
 
 bool HiZPyramid::CreateTexture(ID3D11Device* device, uint32_t dstW, uint32_t dstH, uint32_t outputMipCount)

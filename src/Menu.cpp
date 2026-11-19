@@ -13,7 +13,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
@@ -36,6 +35,7 @@
 #include "Menu/GoToPalette.h"
 #include "Menu/HomePageRenderer.h"
 #include "Menu/IconLoader.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Menu/MenuHeaderRenderer.h"
 #include "Menu/MenuShortcuts.h"
 #include "Menu/OverlayRenderer.h"
@@ -61,6 +61,10 @@
 #include "Features/PerformanceOverlay/ABTesting/ABTestAggregator.h"
 #include "Features/PerformanceOverlay/ABTesting/ABTesting.h"
 #include "Features/ScreenshotFeature.h"
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include "RenderGraph/MemoryWindow.h"
+#	include "RenderGraph/ScheduleWindow.h"
+#endif
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Menu::ThemeSettings::PaletteColors,
@@ -422,7 +426,7 @@ Menu::~Menu()
 	if (!initialized)
 		return;
 
-	ImGui_ImplDX11_Shutdown();
+	ImGuiRenderer::Shutdown();
 	ImGui_ImplWin32_Shutdown();
 	ImGui::DestroyContext();
 	dxgiAdapter3 = nullptr;
@@ -773,7 +777,7 @@ void Menu::Init()
 
 	// Setup Platform/Renderer backends
 	ImGui_ImplWin32_Init(desc.OutputWindow);
-	ImGui_ImplDX11_Init(globals::d3d::device, globals::d3d::context);
+	ImGuiRenderer::Init(globals::d3d::device, globals::d3d::context);
 
 	ThemeManager::ReloadFont(*this, MenuFonts::GetAtlasState().cachedFontSize);
 
@@ -912,6 +916,8 @@ void Menu::DrawSettings()
 		Util::DrawRestoreSavedSettingsConfirmation();
 	}
 	ImGui::End();
+
+	DrawRenderGraphWindows();
 
 	// After every watched feature has drawn; records the change an interaction that ended this frame made
 	undoHistory.EndFrame();
@@ -1545,4 +1551,17 @@ void Menu::DrawWeatherDetailsWindow()
 	if (!csEditor.WeatherDetailsWindow.Enabled || !csEditor.loaded)
 		return;
 	csEditor.RenderWeatherDetailsWindow(&csEditor.WeatherDetailsWindow.Enabled, !globals::features::performanceOverlay.settings.ShowWeatherPicker);
+}
+
+/**
+ * @brief Renders the render graph's schedule and memory windows while they are open
+ *
+ * Opened from Drawcall Limit Fix's settings; drawn with the menu. The schedule window owns its tracing switch (RenderGraph/ScheduleWindow.h).
+ */
+void Menu::DrawRenderGraphWindows()
+{
+#if defined(CS_HAS_RENDER_GRAPH)
+	RenderGraphSchedule::DrawWindow();
+	RenderGraphMemory::DrawWindow();
+#endif
 }

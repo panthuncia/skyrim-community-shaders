@@ -3,6 +3,7 @@
 #include "EngineFix.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <shared_mutex>
 #include <unordered_map>
@@ -99,7 +100,11 @@ struct LandscapeSeamsFix : EngineFix
 	void Reset();
 	/** @brief True when this land quad geometry has blend resources and should draw with the seams permutation. */
 	bool IsBlended(RE::BSGeometry* a_geometry);
-	/** @brief Binds the quad's weights, quad data and borrowed textures to t117-t124. Render thread only, before the draw. */
+	/** @brief Holds a quad's immutable seam resources for a batched renderer's frame capture. */
+	std::shared_ptr<const Resources> CaptureResources(RE::BSGeometry* a_geometry);
+	/** @brief Any thread: a count that changes after any quad's resources or loaded geometry change. Read it before CaptureResources. */
+	uint64_t ResourceChanges() const { return changes.load(std::memory_order_acquire); }
+	/** @brief Binds the quad's weights, quad data and borrowed textures to t104-t111. Render thread only, before the draw. */
 	void Bind(RE::BSGeometry* a_geometry);
 	/** @brief Reads a newly set up land record's quads and rebuilds them and their neighbours. */
 	void TESObjectLAND_SetupMaterial(RE::TESObjectLAND* a_land);
@@ -116,4 +121,5 @@ private:
 	std::unordered_map<RE::BSGeometry*, QuadKey> loadedQuads;
 	std::vector<RE::BSGeometry*> retiredGeometry;
 	uint32_t currentWorldSpace = 0;
+	std::atomic<uint64_t> changes{ 0 };  // bumped under the unique lock after each change
 };

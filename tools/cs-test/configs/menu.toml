@@ -1,0 +1,64 @@
+# The Community Shaders menu opened over the world as its hotkey opens it (the cs-menu step), a shot with it open, a font reload
+# (a fixed font size, then the saved one back), then closed and a shot after. Compose it: native-d3d12+menu, native-vulkan+menu,
+# guest+menu.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "menu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "font=20"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "menu-font"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "font=saved"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "closed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "menu", "menu-font", "closed"]

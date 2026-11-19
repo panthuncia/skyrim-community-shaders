@@ -1,0 +1,3 @@
+# native-d3d12-quick.env: native D3D12, the autoloaded save, one shot, exit. Read DCLF's "[DCLF] D3D12: on" line, the
+# "D3D12 InfoQueue" lines (with --set org.validation=true) and the start shot.
+extends = ["native-d3d12", "quick"]

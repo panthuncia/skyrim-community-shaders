@@ -1,8 +1,9 @@
-#include <dbghelp.h>
-
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/RenderDoc.h"
 #include "Features/Upscaling.h"
+#include "Features/RemoteControl/GpuCountersTrace.h"
 #include "FrameAnnotations.h"
 #include "Globals.h"
 #include "D3DX9MathUpgrade.h"
@@ -11,58 +12,22 @@
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
+#include "RenderGraph/Engine/D3D12SelfTest.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "ShaderCache.h"
 #include "State.h"
+#include "Utils/LogTee.h"
+#include "CrashDump.h"
+#include "HangWatchdog.h"
+#include "Testing/Testing.h"
 
 #define DLLEXPORT __declspec(dllexport)
 
 std::list<std::string> errors;
 
 bool Load();
-
-// Diagnostic crash capture. The frame-generation interop can take the process down during a
-// load with no Windows Error Reporting record and no .dmp, which leaves nothing to analyse.
-// A vectored handler runs before any SEH frame swallows the fault, so it sees the exception
-// even when something downstream would otherwise turn it into a silent exit.
-static LONG CALLBACK CommunityShadersCrashDump(EXCEPTION_POINTERS* a_exception)
-{
-	if (!a_exception || !a_exception->ExceptionRecord)
-		return EXCEPTION_CONTINUE_SEARCH;
-
-	const DWORD code = a_exception->ExceptionRecord->ExceptionCode;
-	// Ignore the benign ones the game raises constantly (C++ EH, debugger notifications).
-	if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
-		code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
-		code != 0xC0000409 /* fast-fail / stack cookie */)
-		return EXCEPTION_CONTINUE_SEARCH;
-
-	static std::atomic<bool> written{ false };
-	if (written.exchange(true))
-		return EXCEPTION_CONTINUE_SEARCH;
-
-	logger::critical("[CRASH] exception {:#x} at {} - writing CommunityShaders.dmp", code,
-		fmt::ptr(a_exception->ExceptionRecord->ExceptionAddress));
-	spdlog::default_logger()->flush();
-
-	wchar_t path[MAX_PATH]{};
-	GetModuleFileNameW(nullptr, path, MAX_PATH);
-	std::filesystem::path dump{ path };
-	dump = dump.parent_path() / L"CommunityShaders.dmp";
-
-	const HANDLE file = CreateFileW(dump.c_str(), GENERIC_WRITE, 0, nullptr,
-		CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (file != INVALID_HANDLE_VALUE) {
-		MINIDUMP_EXCEPTION_INFORMATION info{};
-		info.ThreadId = GetCurrentThreadId();
-		info.ExceptionPointers = a_exception;
-		info.ClientPointers = FALSE;
-		MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file,
-			static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
-			&info, nullptr, nullptr);
-		CloseHandle(file);
-	}
-	return EXCEPTION_CONTINUE_SEARCH;
-}
 
 void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::level::info)
 {
@@ -98,16 +63,30 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	while (!REX::W32::IsDebuggerPresent()) {};
 #endif
 	InitializeLog();
-	AddVectoredExceptionHandler(1, &CommunityShadersCrashDump);
-	logger::info("Loaded {} {}", Plugin::NAME, Plugin::VERSION.string());
+	// SKSE loads plugins on the game's main thread, the one that renders: the render graph's anchors run only there.
+	FrameAnchors::LatchMainThread();
+	CrashDump::Start();
+	logger::info("Loaded {} {} (build {})", Plugin::NAME, Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
+	// The test configuration (and the old CommunityShaders.env), before anything reads a switch.
+	Testing::LoadConfig();
+	// The graphics API (DXVK Vulkan, native Vulkan or native D3D12): sets CS_ORG_NATIVE and CS_ORG_NATIVE_BACKEND for it.
+	GraphicsAPI::ApplyAtBoot();
+	// The port switches native and guest mode turn on, before anything reads them.
+	RenderGraph::Engine::Native::ApplySwitches();
 	SKSE::Init(a_skse);
+	// SKSE::Init replaced the log with CommonLib's; its sinks go behind the fan-out sink, so a diagnostic capture can copy the lines
+	// it logs (Utils/LogTee.h).
+	Util::LogTee::Install();
+	Testing::InstallLogWatcher();
 	logger::info("Community Shaders {} | branch: {} | describe: {} | hash: {}{}",
 		Util::GetFormattedVersion(Plugin::VERSION),
 		Plugin::BUILD_BRANCH.empty() ? "(detached)" : Plugin::BUILD_BRANCH,
 		Plugin::BUILD_DESCRIBE,
 		Plugin::BUILD_HASH.empty() ? "unknown" : Plugin::BUILD_HASH,
 		Plugin::BUILD_DIRTY ? " (dirty)" : "");
-	SKSE::AllocTrampoline(1 << 10);
+	// Every write_call/write_branch stub (14 bytes) comes from this block; 1 KiB ran out at about 73 hooks. DCLF's
+	// switch events take about 400 bytes of it for their patched stores' stubs.
+	SKSE::AllocTrampoline(1 << 12);
 	return Load();
 }
 
@@ -130,6 +109,9 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, 
 
 void MessageHandler(SKSE::MessagingInterface::Message* message)
 {
+	// The test runner's milestones (kPostPostLoad's comes after the features').
+	if (message->type != SKSE::MessagingInterface::kPostPostLoad)
+		Testing::OnSkseMessage(message->type);
 	switch (message->type) {
 	case SKSE::MessagingInterface::kPreLoadGame:
 	case SKSE::MessagingInterface::kNewGame:
@@ -138,9 +120,20 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				Feature::ForEachLoadedFeature("GameReset", [](Feature* feature) { feature->GameReset(); });
 			break;
 		}
+	case SKSE::MessagingInterface::kPostLoad:
+		{
+			// Every plugin is loaded: SceneWriterFramework's copies elect the one that patches the engine's scene writers.
+			if (errors.empty() && globals::features::drawcallLimitFix.loaded)
+				globals::features::drawcallLimitFix.PostLoad();
+			break;
+		}
 	case SKSE::MessagingInterface::kPostPostLoad:
 		{
 			if (errors.empty()) {
+				// Tripwire handles: self-test and report only (CS_ORG_TRIPWIRE_SELFTEST, CS_ORG_TRIPWIRE_LOG); no engine hooks.
+				RenderGraph::Engine::Tripwire::Start();
+				// CS_ORG_D3D12_SELFTEST=1: the D3D12 backend on a device of its own, beside the game.
+				RenderGraph::Engine::D3D12SelfTest::Start();
 				Deferred::Hooks::Install();
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();
@@ -154,9 +147,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 
 				// Run feature PostPostLoad() first so features can disable themselves if needed
 				Feature::ForEachLoadedFeature("PostPostLoad", [](Feature* feature) { feature->PostPostLoad(); });
-
-				// Now validate disk cache after features have had a chance to modify their state
-				shaderCache->ValidateDiskCache();
+				// The test runner, once DCLF's switches and commands are registered.
+				Testing::OnSkseMessage(message->type);
 
 				if (shaderCache->UseFileWatcher())
 					shaderCache->StartFileWatcher();
@@ -175,6 +167,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				// Catch d3dx9 math importers that loaded after our plugin-load sweep.
 				D3DX9MathUpgrade::Sweep("data loaded");
 				globals::OnDataLoaded();
+				// The render thread's watchdog, from the first Present after the data loaded (HangWatchdog.h).
+				HangWatchdog::Start();
 				EngineFix::InstallOnDataLoadedFixes();
 				FrameAnnotations::OnDataLoaded();
 
@@ -190,10 +184,6 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 					break;
 				}
 
-				if (shaderCache->IsDiskCache()) {
-					shaderCache->WriteDiskCacheInfo();
-				}
-
 				Feature::ForEachLoadedFeature("DataLoaded", [](Feature* feature) { feature->DataLoaded(); });
 
 				NativeMenu::Register();
@@ -205,6 +195,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 		{
 			if (errors.empty())
 				Feature::ForEachLoadedFeature("GameLoaded", [](Feature* feature) { feature->GameLoaded(); });
+			GpuCounters::Trace::OnGameLoaded();
 			break;
 		}
 	}

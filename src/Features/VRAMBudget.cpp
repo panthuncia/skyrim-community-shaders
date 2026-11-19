@@ -1,0 +1,426 @@
+#include "VRAMBudget.h"
+
+#include "TextureStreaming/Streamer.h"
+#include "Vram/DxvkMemory.h"
+
+#include "Globals.h"
+#include "Menu.h"
+#include "RenderGraph/Engine/MainTick.h"
+#include "Utils/UI.h"
+
+#define I18N_KEY_PREFIX "feature.vram_budget."
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	VRAMBudget::Settings,
+	ThresholdPercent,
+	DeferTextureAllocation)
+
+namespace
+{
+	using namespace std::chrono_literals;
+
+	// Engine addresses, SE id first. Every one is described (with AE/SE addresses) in docs/development/skyrim-cell-buffer.md.
+
+	/** @brief `uInterior Cell Buffer:General` / `uExterior Cell Buffer:General`: the buffers' slot counts (read each time, as the engine does). */
+	std::uint32_t InteriorBufferSize()
+	{
+		static REL::Relocation<std::uint32_t*> value{ REL::RelocationID(500861, 358814) };
+		return *value;
+	}
+
+	std::uint32_t ExteriorBufferSize()
+	{
+		static REL::Relocation<std::uint32_t*> value{ REL::RelocationID(500863, 358817) };
+		return *value;
+	}
+
+	/** @brief The MemoryLevelManager `pcb` passes to the IO pause and the purge (a function-local static; the purge ignores it). */
+	void* MemoryLevelManager()
+	{
+		static REL::Relocation<void*> object{ REL::RelocationID(514175, 400323) };
+		return object.get();
+	}
+
+	/** @brief The active worldspace's `BGSTerrainManager*` (distant terrain, object and tree LOD); null without one. */
+	void* ActiveTerrainManager()
+	{
+		static REL::Relocation<void**> manager{ REL::RelocationID(516111, 402262) };
+		return *manager;
+	}
+
+	/** @brief `MemoryLevelManager::BeginMemoryFree(mlm, state, lockRenderer, pauseIO)`: pauses IO, waiting for the tasks in flight. */
+	void BeginMemoryFree(char a_state[2])
+	{
+		using func_t = void(void*, char*, bool, bool);
+		static REL::Relocation<func_t> func{ REL::RelocationID(35844, 36815) };
+		func(MemoryLevelManager(), a_state, false, true);
+	}
+
+	/** @brief `MemoryLevelManager::EndMemoryFree(mlm, state)`: resumes what BeginMemoryFree paused. */
+	void EndMemoryFree(char a_state[2])
+	{
+		using func_t = void(void*, char*);
+		static REL::Relocation<func_t> func{ REL::RelocationID(35845, 36816) };
+		func(MemoryLevelManager(), a_state);
+	}
+
+	/** @brief `pcb`'s full purge: garbage, deferred releases, then the model DB and the texture DB's whole release queues. */
+	void FreeAll()
+	{
+		using func_t = void(void*);
+		static REL::Relocation<func_t> func{ REL::RelocationID(35842, 36813) };
+		func(MemoryLevelManager());
+	}
+
+	/** @brief `TES::RemoveExteriorFromBuffer(tes, cell, unload)`: clears the cell from the grid, unloads it, compacts the buffer. */
+	void RemoveExteriorFromBuffer(RE::TES* a_tes, RE::TESObjectCELL* a_cell)
+	{
+		using func_t = void(RE::TES*, RE::TESObjectCELL*, bool);
+		static REL::Relocation<func_t> func{ REL::RelocationID(13219, 13369) };
+		func(a_tes, a_cell, true);
+	}
+
+	/** @brief `TES::RemoveInteriorFromBuffer(tes, cell)`: unloads the cell and compacts the buffer. Only for a cell in the buffer:
+	 * given one that is not, it clears the last slot without unloading it. */
+	void RemoveInteriorFromBuffer(RE::TES* a_tes, RE::TESObjectCELL* a_cell)
+	{
+		using func_t = void(RE::TES*, RE::TESObjectCELL*);
+		static REL::Relocation<func_t> func{ REL::RelocationID(13220, 13370) };
+		func(a_tes, a_cell);
+	}
+
+	/** @brief `BGSTerrainManager::UnloadAll(mgr, false, false)`, as `pcb` calls it while the player is in an interior. */
+	void UnloadDistantLand(void* a_manager)
+	{
+		using func_t = void(void*, bool, bool);
+		static REL::Relocation<func_t> func{ REL::RelocationID(31026, 31812) };
+		func(a_manager, false, false);
+	}
+
+	/** @brief The cells held by both buffers (the current interior included). */
+	std::uint32_t BufferedCells(const RE::TES* a_tes)
+	{
+		const auto count = [](RE::TESObjectCELL* const* a_buffer, std::uint32_t a_slots) {
+			return a_buffer ? static_cast<std::uint32_t>(std::count_if(a_buffer, a_buffer + a_slots, [](auto* a_cell) { return a_cell != nullptr; })) : 0u;
+		};
+		return count(a_tes->exteriorBuffer, ExteriorBufferSize()) + count(a_tes->interiorBuffer, InteriorBufferSize());
+	}
+
+	/** @brief The thread's name, for the log; empty without one. */
+	std::string ThreadName()
+	{
+		PWSTR name = nullptr;
+		std::string result;
+		if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &name)) && name) {
+			for (const wchar_t* c = name; *c; ++c)
+				result.push_back(*c < 0x80 ? static_cast<char>(*c) : '?');
+			LocalFree(name);
+		}
+		return result;
+	}
+
+	constexpr std::uint8_t kLoadedDetached = 4;      // TESObjectCELL::cellState of a buffered cell nobody is attaching
+	constexpr std::uint32_t kStillLoading = 1u << 21;  // TESForm::formFlags: an IO thread is still building the cell
+
+	// The controller (Tick): a proportional step, cells = gain * excess / (MiB a cell frees), where the MiB a cell frees is
+	// learnt from each step's measured response. It acts only once the last step's memory has come back (the plant's dead
+	// time: the render graph letting go of the engine's references, the engine's release rings, the GPU's frames in flight).
+	constexpr auto kTickInterval = 250ms;
+	constexpr auto kRelease = 500ms;  // after a step, until the purge that frees what the render graph let go of meanwhile
+	constexpr auto kSettle = 500ms;   // after that purge, until the response is measured
+	constexpr double kGain = 0.8;
+	constexpr double kMarginPercent = 2.0;  // a step aims this far under the threshold, so the next one is not one tick away
+	constexpr std::uint32_t kMaxCellsPerStep = 16;
+	constexpr double kMiB = 1024.0 * 1024.0;
+
+	/** @brief The cell's spin-lock count: non-zero while some code holds the cell (the engine's purges skip those). */
+	std::uint32_t LockCount(const RE::TESObjectCELL* a_cell)
+	{
+		return reinterpret_cast<const volatile std::uint32_t*>(&a_cell->GetRuntimeData().spinLock)[1];
+	}
+
+	std::int64_t Ticks(std::chrono::steady_clock::duration a_duration) { return a_duration.count(); }
+	std::int64_t Now() { return Ticks(std::chrono::steady_clock::now().time_since_epoch()); }
+
+	std::string Describe(const RE::TESObjectCELL* a_cell)
+	{
+		const char* editorID = a_cell->GetFormEditorID();
+		return editorID && *editorID ? std::format("{} ({:08X})", editorID, a_cell->GetFormID()) : std::format("{:08X}", a_cell->GetFormID());
+	}
+}
+
+void VRAMBudget::DrawSettings()
+{
+	ImGui::SliderFloat(T(TKEY("threshold"), "Threshold"), &settings.ThresholdPercent, 50.0f, 100.0f, "%.0f%%");
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("threshold_tooltip"),
+							  "Share of the GPU's VRAM budget above which the oldest cached cells are unloaded. "
+							  "100% leaves the game's own cell caching alone. "
+							  "Above it, DXVK also stops keeping free space in its memory blocks."));
+	}
+
+	ImGui::Checkbox(T(TKEY("defer_texture_allocation"), "Allocate Textures on First Use"), &settings.DeferTextureAllocation);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("defer_texture_allocation_tooltip"),
+							  "Render targets take no VRAM until something uses them, as with native D3D11. "
+							  "Takes effect after a restart."));
+	}
+
+	ImGui::Text(T(TKEY("usage"), "VRAM use: %.0f of %.0f MiB"), usage.load() / kMiB, budget.load() / kMiB);
+	ImGui::Text(T(TKEY("unloaded"), "Cells unloaded: %u in %u steps (last step %.1f ms, %.0f MiB a cell)"), cellsUnloaded.load(), steps.load(), lastStepMs.load(), mibPerCellShown.load());
+	if (exhausted)
+		ImGui::Text("%s", T(TKEY("exhausted"), "Over the threshold with no cached cells left to unload."));
+}
+
+void VRAMBudget::LoadSettings(json& o_json)
+{
+	settings = o_json;
+	settings.ThresholdPercent = std::clamp(settings.ThresholdPercent, 50.0f, 100.0f);
+	// Settings load before the device is made, which is when DXVK reads this. An environment value from a test stays.
+	if (!settings.DeferTextureAllocation)
+		SetEnvironmentVariableA("DXVK_DEFER_TEXTURE_ALLOCATION", "0");
+}
+
+void VRAMBudget::SaveSettings(json& o_json)
+{
+	o_json = settings;
+}
+
+void VRAMBudget::RestoreDefaultSettings()
+{
+	settings = {};
+}
+
+void VRAMBudget::EarlyPrepass()
+{
+	Vram::SetDxvkDefragPressure(settings.ThresholdPercent);
+}
+
+void VRAMBudget::PostPostLoad()
+{
+	// After Main::Update's frame-job wait: the frame's jobs are done, the AI job and its queued 3D attaches included, and the engine
+	// is back to one thread, so this is where the controller runs.
+	if (!RenderGraph::Engine::MainTick::Add("VRAM Budget", [] {
+			if (globals::features::vramBudget.loaded)
+				globals::features::vramBudget.OnFrameJobsDone();
+		}))
+		logger::error("[VRAM Budget] could not hook the frame-job wait; cells will not be unloaded");
+}
+
+void VRAMBudget::OnFrameJobsDone()
+{
+	const std::int64_t now = Now();
+	if (now < nextTick)
+		return;
+	nextTick = now + Ticks(kTickInterval);
+
+	if (!threadLogged) {
+		threadLogged = true;
+		const std::string name = ThreadName();
+		logger::info("[VRAM Budget] controller runs on thread {} ({}), after Main::Update's frame-job wait", GetCurrentThreadId(), name.empty() ? "unnamed" : name);
+	}
+	Tick();
+}
+
+bool VRAMBudget::Sample()
+{
+	const auto menu = Menu::GetSingleton();
+	const auto adapter = menu ? menu->GetDXGIAdapter3() : nullptr;
+	DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+	if (!adapter || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) || !info.Budget)
+		return false;
+	usage = info.CurrentUsage;
+	// A streaming budget above the driver's is room to use, not a reason to unload cells.
+	const std::uint64_t streaming = TextureStreaming::Active() ? std::uint64_t(TextureStreaming::GetSettings().budgetMB) << 20 : 0;
+	budget = std::max<std::uint64_t>(info.Budget, streaming);
+	return true;
+}
+
+void VRAMBudget::Purge()
+{
+	char state[2]{};
+	BeginMemoryFree(state);
+	FreeAll();
+	EndMemoryFree(state);
+}
+
+void VRAMBudget::Tick()
+{
+	if (!Sample())
+		return;
+	const std::int64_t now = Now();
+	const double usageMiB = usage.load() / kMiB;
+	const double budgetMiB = budget.load() / kMiB;
+
+	switch (phase) {
+	case Phase::kReleasing:
+		if (now < phaseEnd)
+			return;
+		Purge();
+		phase = Phase::kSettling;
+		phaseEnd = now + Ticks(kSettle);
+		return;
+	case Phase::kSettling:
+		{
+			if (now < phaseEnd)
+				return;
+			const double drop = stepUsageMiB - usageMiB;
+			// A pcb step frees a whole space at once (grid, distant land, other interiors): no per-cell figure to learn.
+			if (stepLearns && stepCells && drop > 0.0)
+				mibPerCell = std::clamp(0.5 * mibPerCell + 0.5 * drop / stepCells, 4.0, 1024.0);
+			mibPerCellShown = static_cast<float>(mibPerCell);
+			logger::info("[VRAM Budget] step response: {:.0f} -> {:.0f} MiB ({:+.0f}) after {} cells; {:.0f} MiB a cell", stepUsageMiB, usageMiB, -drop, stepCells, mibPerCell);
+			phase = Phase::kIdle;
+			break;
+		}
+	case Phase::kIdle:
+		break;
+	}
+
+	if (usageMiB * 100.0 <= budgetMiB * settings.ThresholdPercent) {
+		exhausted = false;
+		return;
+	}
+
+	const auto tes = RE::TES::GetSingleton();
+	const auto ui = RE::UI::GetSingleton();
+	const auto player = RE::PlayerCharacter::GetSingleton();
+	if (!tes || !tes->gridCells || !ui || ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) || !player || !player->GetParentCell())
+		return;
+
+	const double targetMiB = budgetMiB * (settings.ThresholdPercent - kMarginPercent) / 100.0;
+	const auto cells = static_cast<std::uint32_t>(std::clamp(std::ceil(kGain * (usageMiB - targetMiB) / mibPerCell), 1.0, static_cast<double>(kMaxCellsPerStep)));
+
+	const auto start = std::chrono::steady_clock::now();
+	std::string what;
+	const std::uint32_t unloaded = Unload(tes, cells, what);
+	if (what.empty()) {
+		if (!exhausted.exchange(true))
+			logger::info("[VRAM Budget] {:.0f} of {:.0f} MiB: over the threshold with no cached cells left to unload", usageMiB, budgetMiB);
+		return;
+	}
+	const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+	exhausted = false;
+	cellsUnloaded += unloaded;
+	++steps;
+	lastStepMs = ms;
+	stepUsageMiB = usageMiB;
+	stepCells = unloaded;
+	phase = Phase::kReleasing;
+	phaseEnd = Now() + Ticks(kRelease);
+	logger::info("[VRAM Budget] {:.0f} of {:.0f} MiB, target {:.0f}: asked for {} cells at {:.0f} MiB a cell; {} in {:.1f} ms", usageMiB, budgetMiB, targetMiB, cells, mibPerCell, what, ms);
+}
+
+std::vector<RE::TESObjectCELL*> VRAMBudget::PickVictims(RE::TES* a_tes, size_t a_max) const
+{
+	const auto player = RE::PlayerCharacter::GetSingleton();
+	const RE::TESObjectCELL* playerCell = player ? player->GetParentCell() : nullptr;
+	const auto grid = a_tes->gridCells;
+	const std::uint32_t gridSlots = grid && grid->cells ? grid->length * grid->length : 0;
+
+	const auto unloadable = [&](const RE::TESObjectCELL* a_cell) {
+		if (!a_cell || a_cell == a_tes->interiorCell || a_cell == playerCell)
+			return false;
+		if (a_cell->cellState.underlying() != kLoadedDetached || (a_cell->formFlags & kStillLoading) || LockCount(a_cell))
+			return false;
+		return std::find(grid->cells, grid->cells + gridSlots, a_cell) == grid->cells + gridSlots;
+	};
+
+	// Both buffers are most-recently-used lists by slot: the highest occupied slot is the oldest. The exterior buffer's
+	// first slots hold the attached grid, which the checks above skip; once the grid is detached they are unloadable too.
+	std::vector<RE::TESObjectCELL*> exteriors;
+	std::vector<RE::TESObjectCELL*> interiors;
+	if (a_tes->exteriorBuffer) {
+		const std::uint32_t slots = ExteriorBufferSize();
+		const auto occupied = static_cast<size_t>(std::count_if(a_tes->exteriorBuffer, a_tes->exteriorBuffer + slots, [](auto* a_cell) { return a_cell != nullptr; }));
+		// Never the last one: only the engine's own eviction releases the worldspace once the exterior buffer is empty.
+		for (std::uint32_t i = slots; i-- > 0 && exteriors.size() + 1 < occupied;)
+			if (unloadable(a_tes->exteriorBuffer[i]))
+				exteriors.push_back(a_tes->exteriorBuffer[i]);
+	}
+	if (a_tes->interiorBuffer) {
+		for (std::uint32_t i = InteriorBufferSize(); i-- > 0;)
+			if (unloadable(a_tes->interiorBuffer[i]))
+				interiors.push_back(a_tes->interiorBuffer[i]);
+	}
+
+	// The other space's cells first (exteriors while inside, interiors while outside), as the engine's own eviction does.
+	auto victims = a_tes->interiorCell ? std::move(exteriors) : std::move(interiors);
+	const auto& rest = a_tes->interiorCell ? interiors : exteriors;
+	victims.insert(victims.end(), rest.begin(), rest.end());
+	if (victims.size() > a_max)
+		victims.resize(a_max);
+	return victims;
+}
+
+std::uint32_t VRAMBudget::Unload(RE::TES* a_tes, std::uint32_t a_cells, std::string& o_what)
+{
+	if (a_tes->interiorCell != terrainUnloadedIn)
+		terrainUnloadedIn = nullptr;
+	stepLearns = true;
+	const auto grid = a_tes->gridCells;
+	const bool gridAttached = grid->cells && std::any_of(grid->cells, grid->cells + grid->length * grid->length, [](auto* a_cell) { return a_cell != nullptr; });
+	void* terrainManager = ActiveTerrainManager();
+
+	// Inside, in this order: the buffered exteriors; then pcb, which drops the exterior grid the engine keeps attached
+	// while the player is in an interior; then the invisible distant land; then the other interiors.
+	enum class Step
+	{
+		kCells,
+		kPurgeBuffers,
+		kDistantLand
+	};
+	const auto victims = PickVictims(a_tes, a_cells);
+	const bool exteriorsLeft = !victims.empty() && !victims.front()->IsInteriorCell();
+	Step step = Step::kCells;
+	if (a_tes->interiorCell && !exteriorsLeft) {
+		if (gridAttached)
+			step = Step::kPurgeBuffers;
+		else if (!terrainUnloadedIn && terrainManager)
+			step = Step::kDistantLand;
+	}
+	if (step == Step::kCells && victims.empty())
+		return 0;
+
+	if (step == Step::kPurgeBuffers) {
+		// The whole of pcb, never a part of it. Detaching the grid unloads the worldspace's portal graph, and an actor left
+		// in a detached exterior cell crashes the next time the engine attaches its 3D there (19165 reads the null graph).
+		// pcb unloads every detached exterior in the same call and releases the worldspace once none is left.
+		const std::uint32_t before = BufferedCells(a_tes);
+		a_tes->PurgeBufferedCells();
+		const std::uint32_t after = BufferedCells(a_tes);
+		const std::uint32_t count = before > after ? before - after : 0;
+		terrainUnloadedIn = a_tes->interiorCell;  // pcb unloads the distant land too while inside
+		stepLearns = false;
+		o_what = std::format("purged the cell buffers as pcb does: the exterior grid, the distant land and {} cells ({} left)", count, after);
+		return count;
+	}
+
+	char state[2]{};
+	BeginMemoryFree(state);
+
+	std::uint32_t count = 0;
+	if (step == Step::kDistantLand) {
+		UnloadDistantLand(terrainManager);
+		terrainUnloadedIn = a_tes->interiorCell;
+		stepLearns = false;
+		o_what = "unloaded the distant land";
+	} else {
+		// Picked again with IO paused: the cell loader tasks write the buffers from IO threads.
+		std::string names;
+		for (auto* cell : PickVictims(a_tes, a_cells)) {
+			names += (count++ ? ", " : "") + Describe(cell);
+			if (cell->IsInteriorCell())
+				RemoveInteriorFromBuffer(a_tes, cell);
+			else
+				RemoveExteriorFromBuffer(a_tes, cell);
+		}
+		o_what = std::format("unloaded {} cells: {}", count, names.empty() ? "none (taken meanwhile)" : names);
+	}
+	FreeAll();
+	EndMemoryFree(state);
+	return count;
+}
+
+#undef I18N_KEY_PREFIX

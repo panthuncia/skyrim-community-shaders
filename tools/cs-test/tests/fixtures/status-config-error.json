@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "run_id": "R1",
+  "pid": 12345,
+  "updated": "2026-11-12T15:18:01.000",
+  "phase": "boot",
+  "frame": 0,
+  "fps": 0,
+  "milestones": { "plugin": { "t": 0.0, "frame": 0 } },
+  "config": { "applied": 3, "features_off": [], "unknown": ["CS_DCLF_SHADOWZ"] },
+  "step": { "index": 0, "do": "", "state": "" },
+  "compile": { "done": 0, "total": 0 },
+  "holds": [],
+  "last_error": "[E] [TEST] unknown switch CS_DCLF_SHADOWZ",
+  "outcome": "config-error",
+  "reason": "unknown switch CS_DCLF_SHADOWZ",
+  "fault": { "address": "", "markers": "" },
+  "shots": []
+}
