@@ -64,6 +64,8 @@ namespace GraphResources
 		std::optional<std::uint64_t> aliasPool;
 		// Passes declare only the slot or published id, so a same-shape Resize is a new version, not a graph build. Not for transients.
 		bool versioned = false;
+		// A 2D texture that shaders read and write as an array, so it has array views even with one slice.
+		bool array = false;
 	};
 
 	/** @brief The one way to ask for a structural graph build after a resource identity change no version covers. Render thread.
@@ -96,6 +98,7 @@ namespace GraphResources
 		DXGI_FORMAT rtv = DXGI_FORMAT_UNKNOWN;
 		DXGI_FORMAT uav = DXGI_FORMAT_UNKNOWN;
 		DXGI_FORMAT dsv = DXGI_FORMAT_UNKNOWN;
+		bool array = false;  // array views even with one slice (Options::array)
 	};
 
 	/** @brief An exported image: the graph's texture and the D3D11 texture DXVK made of the same memory. Both null on failure. */

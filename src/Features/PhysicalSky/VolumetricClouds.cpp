@@ -874,14 +874,19 @@ void PhysicalSky::CompileVolumetricShaders()
 		ShaderInfo{ &csLightningCubeComposite, "Volumetrics.cs.hlsl", { { "CLOUD_VOXELS", "" } }, "compositeLightningCube" }
 	};
 
-	for (auto& info : shaderInfos)
-		shaders.Add(*info.csPtr, (std::filesystem::path(kShaderDir) / info.filename).wstring(), std::move(info.defines), std::move(info.entry));
+	// The graph modes render the clouds with the render graph's programs (ORGVolumetricClouds), so FXC builds none of these.
+	const bool graph = ORGVolumetricClouds::Requested();
+	if (!graph)
+		for (auto& info : shaderInfos)
+			shaders.Add(*info.csPtr, (std::filesystem::path(kShaderDir) / info.filename).wstring(), std::move(info.defines), std::move(info.entry));
 	ndfManager.CompileShaders(shaders);
 	localNdfManager.CompileShaders(shaders);
 	cirrusMapManager.CompileShaders(shaders);
 	midCloudMapManager.CompileShaders(shaders);
 	middleBoundsDirty = true;
 	cloudNoiseGenerator.CompileShaders(shaders);
+	if (graph)
+		return;
 	const auto boundaryPath = (std::filesystem::path(kShaderDir) / "CloudBoundary.hlsl").wstring();
 	shaders.Add(vsCloudBoundary, boundaryPath, {}, "vertexMain");
 	shaders.Add(psCloudBoundary, boundaryPath, {}, "pixelMain");

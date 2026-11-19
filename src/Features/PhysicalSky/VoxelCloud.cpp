@@ -338,7 +338,7 @@ void VoxelCloudManager::UpdateLighting(ID3D11ComputeShader* shader, float3 direc
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 		// A graph twin in the graph modes, which the cloud renderer writes there.
-		lighting = ORGCloudMaps::MakeTexture2D(desc, "PhysicalSky::VoxelCloudLighting");
+		lighting = ORGCloudMaps::MakeTexture2D(desc, "PhysicalSky::VoxelCloudLighting", true);
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 		srv.Format = desc.Format;
 		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;

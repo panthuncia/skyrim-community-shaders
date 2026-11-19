@@ -337,7 +337,8 @@ namespace
 			desc.MiscFlags = desc.CPUAccessFlags = 0;
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			entry->array = true;
-			auto twin = std::make_shared<GraphResources::Texture2D>(desc, name, GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
+			auto twin = std::make_shared<GraphResources::Texture2D>(desc, name,
+				GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV, .array = true });
 			if (*twin && twin->D3D11()) {
 				globals::d3d::context->CopyResource(twin->D3D11(), texture2D.get());
 				auto* d3d11 = twin->D3D11();
@@ -387,7 +388,7 @@ namespace
 	}
 }
 
-eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name)
+eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_array)
 {
 	if (!Requested() || !RenderGraphRuntime::Get().IsActive())
 		return eastl::make_unique<Texture2D>(a_desc, a_name);
@@ -399,7 +400,7 @@ eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_D
 		desc.MipLevels = FullChain(desc.Width, desc.Height);
 	const auto name = UniqueName(a_name);
 	auto twin = std::make_shared<GraphResources::Texture2D>(desc, name,
-		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV });
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV, .array = a_array });
 	if (!*twin || !twin->D3D11()) {
 		logger::error("[ORG] Physical Sky cloud maps: {} could not be made on the render graph; the clouds cannot render", name);
 		return eastl::make_unique<Texture2D>(a_desc, a_name);
@@ -783,7 +784,7 @@ bool ORGCloudInputs::Gather(const PhysicalSky& a_feature, Inputs& a_out)
 struct ORGCloudMaps::Impl
 {};
 
-eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name) { return eastl::make_unique<Texture2D>(a_desc, a_name); }
+eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool) { return eastl::make_unique<Texture2D>(a_desc, a_name); }
 eastl::unique_ptr<Texture3D> ORGCloudMaps::MakeTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name) { return eastl::make_unique<Texture3D>(a_desc, a_name); }
 bool ORGCloudMaps::Setup(const PhysicalSky&) { return false; }
 bool ORGCloudMaps::IsActive() const { return false; }

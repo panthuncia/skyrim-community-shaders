@@ -50,6 +50,7 @@ namespace GraphResources
 			UINT miscFlags;
 			D3D11_USAGE usage;
 			UINT cpuAccess;
+			bool array = false;  // array views even with one slice
 		};
 
 		struct Created
@@ -110,7 +111,7 @@ namespace GraphResources
 			desc.format = format;
 			desc.isCubemap = cube;
 			desc.arraySize = cube ? slices / 6 : slices;
-			desc.isArray = slices > (cube ? 6u : 1u);
+			desc.isArray = a_shape.array || slices > (cube ? 6u : 1u);
 			desc.depth = Is3D(a_shape) ? a_shape.depthOrArraySize : 1u;
 			desc.sampleCount = static_cast<std::uint8_t>((std::max)(a_shape.samples, 1u));
 			desc.hasSRV = true;
@@ -162,6 +163,7 @@ namespace GraphResources
 			desc.rtv = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.uav = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.dsv = formats.dsv;
+			desc.array = a_shape.array;
 			auto exported = ExportTexture(desc, a_name);
 			return { std::move(exported.graph), std::move(exported.d3d11) };
 		}
@@ -390,7 +392,7 @@ namespace GraphResources
 		const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
 		const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
 		const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
-			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0 };
+			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
 		const UINT mips = MipCount(shape);
 		// A typeless format names no image format, so a depth image uses its DSV's format.
 		const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
@@ -684,7 +686,7 @@ namespace GraphResources
 	void Texture2D::Create()
 	{
 		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format,
-			desc.SampleDesc.Count, desc.BindFlags, desc.MiscFlags, desc.Usage, desc.CPUAccessFlags };
+			desc.SampleDesc.Count, desc.BindFlags, desc.MiscFlags, desc.Usage, desc.CPUAccessFlags, options.array };
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);

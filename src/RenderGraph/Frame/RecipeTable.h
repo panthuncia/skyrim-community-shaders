@@ -369,14 +369,16 @@ namespace RenderGraph::Frame::Recipes::Table
 	* @brief Resources a stage reads before the stage that writes them, so it reads the previous frame's contents. Checked by hand.
 	* DCLF's stages are exempt, since their graphs declare the whole binding table their shaders may read.
 	*/
-	// Physical Sky's LUTs, AP shadow and sky tail: the sky's reflection faces draw in the start stage, before the pre-depth and pre-main stages
-	// make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their contents across
-	// frames (History/Persistent).
-	inline constexpr std::array<std::string_view, 17> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// Physical Sky's LUTs, AP shadow, sky tail and cloud outputs: the sky's reflection faces draw in the start stage, before the pre-depth
+	// and pre-main stages make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their
+	// contents across frames (History/Persistent).
+	inline constexpr std::array<std::string_view, 27> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
 		"Engine::kMAIN_COPY", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
 		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow",
-		"PhysicalSky::SkyTail" };
+		"PhysicalSky::SkyTail", "PhysicalSky::ShadowVolume", "PhysicalSky::CloudShadowMean", "PhysicalSky::VolTr", "PhysicalSky::VolLum",
+		"PhysicalSky::VolAux", "PhysicalSky::VolCubeTr", "PhysicalSky::VolCubeLum", "PhysicalSky::VolCubeDepth", "PhysicalSky::LightningChannels",
+		"PhysicalSky::LightningReflection" };
 
 	// What is derived from the table.
 

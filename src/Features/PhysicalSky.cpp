@@ -1144,7 +1144,8 @@ void PhysicalSky::SettingsWeatherEffects()
 		ImGui::ColorEdit3(T(TKEY("lightning_color"), "Lightning Color"), &settings.lightning.color.x, ImGuiColorEditFlags_Float);
 		settings.SanitizeLightning();
 		ImGui::Text(T(TKEY("lightning_duration"), "Discharge Duration: %.2f s"), ((settings.lightning.strokeCount - 1) * settings.lightning.strokeInterval + settings.lightning.strokeDuration) * 0.001f);
-		if (settings.enableVolumetricClouds && settings.lightningIntensity > 0.f && (!csLightningQuery || !csLightningComposite || !csLightningCubeComposite))
+		if (settings.enableVolumetricClouds && settings.lightningIntensity > 0.f && !ORGVolumetricClouds::Requested() &&
+			(!csLightningQuery || !csLightningComposite || !csLightningCubeComposite))
 			Util::Text::Error("%s", T(TKEY("lightning_unavailable"), "Lightning rendering is unavailable. Nonzero Lightning Intensity still suppresses vanilla flashes and thunder. See the log for details."));
 		if (ImGui::Button(T(TKEY("lightning_trigger"), "New Lightning")))
 			lightning.Trigger();
@@ -1854,23 +1855,30 @@ bool PhysicalSky::ShadersOK()
 	// The graph modes generate the maps on the render graph, without the D3D11 programs.
 	const bool ndfReady = ndfManager.texHeight && ndfManager.texModeling && ((ndfManager.generatorProgram && ndfManager.noiseProgram) || ORGCloudMaps::Requested());
 	const bool cirrusMapsReady = !settings.cloudLayer.cirrus.enabled || cirrusMapManager.ShadersReady(settings.cloudLayer.cirrus);
+	// The graph modes render the clouds with the render graph's programs (ORGVolumetricClouds), never the D3D11 ones.
+	const bool graphClouds = ORGVolumetricClouds::Requested();
+	const bool d3d11Programs = graphClouds ||
+	                           (vsCloudBoundary && psCloudBoundary && csCloudHeightBounds && csCloudHeightBoundsReduce && csCloudAmbientLighting && csCloudAmbientDensity &&
+								   csCloudAmbientBoundary && csCloudAmbientSweep && csCloudAmbientSweepFar && csCloudAmbientProject && csCloudAmbientLayout && csCloudAmbientView &&
+								   csVolMainView && csUpperView && csUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles && csVolFilter && csVolFilterWide &&
+								   csVolReproject && csVolCubeReproject && csVolShadowVolume && csVolShadowResample && csCloudShadowMean && csCloudShadowMeanVolcanic && csVolCubemap &&
+								   csVolAmbientSH && csCloudAmbientReduce);
 	bool volumetricShadersOk = !VolumetricCloudsEnabled() ||
-	                           (vsCloudBoundary && psCloudBoundary && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
-								   csCloudHeightBounds && csCloudHeightBoundsReduce && texCloudHeightBounds && texCloudHeightBoundsTiles && texCloudWeatherBounds &&
-								   csCloudAmbientLighting && texCloudAmbientLighting &&
-								   csCloudAmbientDensity && csCloudAmbientBoundary && csCloudAmbientSweep && csCloudAmbientSweepFar && csCloudAmbientProject && csCloudAmbientLayout && csCloudAmbientView && cloudAmbientVolumeCB &&
+	                           (d3d11Programs && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
+								   texCloudHeightBounds && texCloudHeightBoundsTiles && texCloudWeatherBounds && texCloudAmbientLighting && cloudAmbientVolumeCB &&
 								   texCloudAmbientView[0] && texCloudAmbientView[1] && texCloudAmbientView[2] && texCloudAmbientView[3] &&
 								   texCloudAmbientDensity && texCloudAmbientSweep && texCloudAmbientBoundary && texCloudAmbientLayout[0] && texCloudAmbientLayout[1] &&
 								   texCloudAmbientSource[0][0] && texCloudAmbientSource[0][1] && texCloudAmbientSource[1][0] && texCloudAmbientSource[1][1] &&
 								   texCloudAmbientSource[2][0] && texCloudAmbientSource[2][1] && texCloudAmbientSource[3][0] && texCloudAmbientSource[3][1] &&
-								   csVolMainView && csUpperView && csUpperSunDepth && texUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles && texStormTiles && csVolFilter && csVolFilterWide && csVolReproject && csVolCubeReproject && csVolShadowVolume && csVolShadowResample && texShadowVolumeRaw && csCloudShadowMean && csCloudShadowMeanVolcanic && texCloudShadowMean && csVolCubemap && csVolAmbientSH && csCloudAmbientReduce && texVolCloudAmbientSH && texCloudAmbientPartial &&
+								   texUpperSunDepth && texStormTiles && texShadowVolumeRaw && texCloudShadowMean && texVolCloudAmbientSH && texCloudAmbientPartial &&
 								   texVolTr && texVolLum && texVolAux && texVolLowTr && texVolLowLum && texVolLowAux &&
 								   texVolFilteredTr && texVolFilteredLum && texVolFilteredAux &&
 								   texVolHistoryTr && texVolHistoryLum && texVolHistoryAux && texVolCubeTr && texVolCubeLum &&
 								   texVolCubeAux && texVolCubeHistoryTr && texVolCubeHistoryLum && texVolCubeHistoryAux &&
 								   texVolCubeTraceTr && texVolCubeTraceLum && texVolCubeTraceAux &&
 								   texShadowVolume && baseShapeNoiseSrv && cloudProfileLutSrv && cloudAdjustmentLutSrv && ndfReady && cirrusMapsReady);
-	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudAmbientDensityVoxel && csCloudShadowMeanVoxel &&
+	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb &&
+																  (graphClouds || (csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudAmbientDensityVoxel && csCloudShadowMeanVoxel)) &&
 																  texVoxelTraceTr && texVoxelTraceLum && texVoxelTraceAux && texVoxelTraceMotion && texVoxelTraceLightning);
 	return baseShadersOk && volumetricShadersOk && voxelShadersOk;
 }
@@ -2041,7 +2049,8 @@ void PhysicalSky::Reset()
 		.lightSkyStatics = settings.lightSkyStatics ? 1u : 0u,
 		.skyStaticsBrightness = settings.skyStaticsBrightness,
 	};
-	lightning.Update(*this, worldspaceID, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() && csLightningQuery && csLightningComposite && csLightningCubeComposite);
+	lightning.Update(*this, worldspaceID, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() &&
+										 (ORGVolumetricClouds::Requested() || (csLightningQuery && csLightningComposite && csLightningCubeComposite)));
 	auto lightningColor = sRGBToWorkingGamut({ cbData.lightningColorIntensity.x, cbData.lightningColorIntensity.y, cbData.lightningColorIntensity.z });
 	// Same working-gamut Y and photometric scale as the solar illuminance control.
 	const float lightningY = wideGamut ? lightningColor.x * 0.2722287168f + lightningColor.y * 0.6740817658f + lightningColor.z * 0.0536895174f :
@@ -2290,6 +2299,9 @@ void PhysicalSky::Prepass()
 				ORGCloudMaps::Get().EndFrame();
 			}
 			RenderVolumetricClouds(VolumetricCloudPass::kShadowVolume);
+		} else if (ORGCloudMaps::Requested() && VolumetricCloudsEnabled()) {
+			// The cloud noise generates before the renderer is ready, and its work waits for the cloud maps client.
+			ORGCloudMaps::Get().EndFrame();
 		}
 
 		GenerateSkyTail();

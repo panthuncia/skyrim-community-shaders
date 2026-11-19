@@ -31,7 +31,7 @@ namespace
 		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 		// A graph twin in the graph modes, where the graph generates it.
-		auto texture = ORGCloudMaps::MakeTexture2D(desc, name);
+		auto texture = ORGCloudMaps::MakeTexture2D(desc, name, true);
 		texture->CreateSRV({ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY, .Texture2DArray = { .MipLevels = 1, .ArraySize = count } });
 		texture->CreateUAV({ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY, .Texture2DArray = { .ArraySize = count } });
 		return texture;

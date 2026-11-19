@@ -38,7 +38,7 @@ public:
 	* The twin is Persistent, exported (SRV and UAV) and cleared once before its first use. Bind flags become SRV and UAV,
 	* misc flags are dropped. Graph mode failures are fatal: logged, then the D3D11 texture is made so the game keeps running.
 	*/
-	static eastl::unique_ptr<Texture2D> MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name);
+	static eastl::unique_ptr<Texture2D> MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_array = false);
 	static eastl::unique_ptr<Texture3D> MakeTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name);
 
 	/** @brief At SetupResources, after the managers made their textures. Loads the programs. @return False, logged, on failure. */
