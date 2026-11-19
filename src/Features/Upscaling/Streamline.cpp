@@ -2044,6 +2044,8 @@ Streamline::EvaluationResult Streamline::EvaluateXeSS(ID3D11Resource* a_colorIn,
 	xessOpts.outputHeight = a_outputHeight;
 	xessOpts.sharpness = a_sharpness;
 	xessOpts.colorBuffersHDR = sl::Boolean::eTrue;
+	// The input color is pre-exposed. The plugin gives XeSS its inverse as the exposure multiplier, as Intel's guide asks.
+	xessOpts.preExposure = globals::state->preExposure;
 	const sl::Result optionsResult = g_sl.slXeSSSetOptions(g_sl.viewport, xessOpts);
 	if (optionsResult != sl::Result::eOk) {
 		logger::error("[Streamline] XeSS options failed (result {})", static_cast<int>(optionsResult));
