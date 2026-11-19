@@ -148,7 +148,8 @@ t125-t127 for the faces (with `flags.w = 1`). On the graph:
    own epochs, so a frame texture selects its view per epoch: no new registers, and one shader path for faces and main view.
 3. Sky (`Sky.hlsl`) and Water (`Water.hlsl`) DCLF families: whether their graph builds define `DCLF_BINDLESS` and bind frame
    textures. If not, they read t125-t127 unbound.
-4. `CompositeActive()` turns on when the registration exists. Until the stage's next build holds it, the hook's run is Idle and
-   that frame has no fog (logged once). A `declared` callback would let the schedule hold it from the first frame.
+4. **Decided (2026-11-19, Q12):** `CompositeActive()`, and so `PostWaterComposite`, is on only in frames whose schedule draws
+   the composite (`FrameAnchors::ScheduledThisFrame`, from the schedules taken at Renderer::Begin). A frame whose build lags
+   keeps the shaders' own fog instead of having none. Migration 6.21 deletes this.
 5. The D3D11 composite took PS t31 as bound by the engine at the hook. The graph reads Dynamic Cubemaps' `EnvTextureBC6H`, as the
    ORG SSAO composite does. Compare in an interior with `useDynamicCubemaps`.

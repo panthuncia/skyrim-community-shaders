@@ -464,7 +464,11 @@ void ORGViewAtmosphere::Prepass()
 
 bool ORGViewAtmosphere::CompositeActive() const
 {
-	return impl && impl->compositeWanted && impl->compositeInputs.has_value() && RenderGraphRuntime::Get().IsActive();
+	// On only in frames whose schedule draws the composite, so PostWaterComposite and the composite agree. The schedules are taken at
+	// Renderer::Begin, before anything reads the flag, and do not change during the frame. Before this, the flag followed the
+	// registration and frames whose build lagged had no fog at all. Migration 6.21 deletes this.
+	return impl && impl->compositeWanted && impl->compositeInputs.has_value() && RenderGraphRuntime::Get().IsActive() &&
+	       FrameAnchors::ScheduledThisFrame(kCompositeClientId, Anchor::EngineDraws);
 }
 
 void ORGViewAtmosphere::CompositeAfterWater()
@@ -477,9 +481,10 @@ void ORGViewAtmosphere::CompositeAfterWater()
 		impl->compositeFrame == frame)
 		return;
 	impl->compositeFrame = frame;
-	// A new registration lags until a build that holds it switches in at a frame boundary. Work the schedule has no place for stops the game.
+	// CompositeActive already asked ScheduledThisFrame, the answer PostWaterComposite took for this frame. The open stage must take
+	// the tap now, else the frame applies no fog: a disagreement, logged.
 	if (!FrameAnchors::Scheduled(kCompositeClientId, Anchor::EngineDraws)) {
-		static Util::ReasonLog s_lag("[ORG] Atmosphere and Fog: the post-water composite lags (the frame's schedule does not hold it yet)");
+		static Util::ReasonLog s_lag("[ORG] Atmosphere and Fog: the post-water composite's stage does not take its tap, though the frame's schedule holds it");
 		s_lag.Report("not scheduled");
 		return;
 	}
