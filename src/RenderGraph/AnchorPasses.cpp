@@ -371,9 +371,13 @@ namespace RenderGraph::AnchorPasses
 			static void Record(const CopyBindings& a_bindings, const SpecFrame<Copy>& a_frame, org::PassRecordContext& a_recording)
 			{
 				const auto& copy = a_frame.spec->step;
-				const rhi::TextureCopyRegion target{ .texture = a_recording.Resolve(a_bindings.target).GetHandle(), .width = copy.width, .height = copy.height };
-				const rhi::TextureCopyRegion source{ .texture = a_recording.Resolve(a_bindings.source).GetHandle(), .width = copy.width, .height = copy.height };
-				a_recording.Commands().CopyTextureRegion(target, source);
+				const auto targetHandle = a_recording.Resolve(a_bindings.target).GetHandle();
+				const auto sourceHandle = a_recording.Resolve(a_bindings.source).GetHandle();
+				for (std::uint32_t slice = 0; slice < copy.slices; ++slice) {
+					const rhi::TextureCopyRegion target{ .texture = targetHandle, .arraySlice = slice, .width = copy.width, .height = copy.height, .depth = copy.depth };
+					const rhi::TextureCopyRegion source{ .texture = sourceHandle, .arraySlice = slice, .width = copy.width, .height = copy.height, .depth = copy.depth };
+					a_recording.Commands().CopyTextureRegion(target, source);
+				}
 			}
 
 		private:
@@ -708,7 +712,7 @@ namespace RenderGraph::AnchorPasses
 
 	void Builder::Add(Copy a_copy)
 	{
-		if (!a_copy.source || !a_copy.target || !a_copy.width || !a_copy.height) {
+		if (!a_copy.source || !a_copy.target || !a_copy.width || !a_copy.height || !a_copy.depth || !a_copy.slices) {
 			Fail(std::format("{}: the copy's textures or size are missing", a_copy.name));
 			return;
 		}
@@ -720,7 +724,7 @@ namespace RenderGraph::AnchorPasses
 		// A gated copy is recorded at execution, since a copy cannot take its work from the gate.
 		const bool atExecution = a_copy.gate.has_value();
 		// Draw depth copies where the device can, so both textures stay in depth layouts.
-		const auto depthFormat = DepthCopyFormat(a_copy.target);
+		const auto depthFormat = a_copy.depth == 1 && a_copy.slices == 1 ? DepthCopyFormat(a_copy.target) : rhi::Format::Unknown;
 		auto program = depthFormat != rhi::Format::Unknown && DepthCopyFormat(a_copy.source) == depthFormat ? DepthCopyProgram(depthFormat) : nullptr;
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });
 		if (program) {
