@@ -299,6 +299,9 @@ test: an observer sees `Publish` and `Adopt`, not `PublishLate` (`ORG/tests/Pers
 
 **Size.** Small. One agent. Serial (first).
 
+**As built (2026-11-19, `org-native/rev-step1`).** `src/RenderGraph/Frame/BoundaryCheck.{h,cpp}`, ORG
+`VersionedResource::SetAdoptionObserver`. Where it differs from the scope above, see section 9, "Decided by the agent (step 1)".
+
 ---
 
 ### Step 2. Name texture versions (record against pending versions)
@@ -1073,6 +1076,35 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | A7 landed 2026-11-19 (`org-native/fg-a7`): the hudless copy, the clean scene copy and HDR output are UI steps, and no anchor runs an epoch of its own. 7b is left with `SwitchStaged` and FrameDriver's mid-frame build comment. |
 | Q11 | **Decided 2026-11-19: (b), replayable readbacks.** The post chain already uses this form in CS (`RunReadback` in `ORGPostProcessing.cpp`: a host buffer with a region per run lease, a stamp and the data copied by revisioned copy passes, read when the lease comes round). Readbacks against replayed recordings (R9). A revision records every member stage once per frame slot and replays it, and a readback capture is never replayable. Today the post stage holds the lens focus and adaptation readbacks, and the planned lightning ring would put one in the pre-main stage. The post stage already fails with the R9 error when the Post Processing chain runs on the graph (being fixed separately). | Options: (a) readbacks leave CS stages: each runs on a placed epoch or ticket of its own after the stage, reading the published texture; (b) ORG gets a replayable readback: the copy targets a ring entry picked by a run-latched index, and the CPU learns completion from the retirement clock instead of a lifecycle callback; (c) a stage that holds a readback is recorded every frame and never replayed, which makes it unable to be a revision member, so the readback would block any revision touching that stage. Recommended: (b), since it keeps one stage and no extra epochs, and Physical Sky's lightning ring is already designed that way (ring entry per frame in flight, non-blocking completion query). Whatever fixes the post stage now should be checked against this choice. |
 | Q12 | **Decided 2026-11-19: the recommendation.** Keep the gate until 6.21 and tie `PostWaterComposite` to `Scheduled`. Lagging registrations (`FrameAnchors::Scheduled`) as an interim. ViewAtmosphere's composite and the screenshot's clean scene skip frames until their build holds them. Before 6.21 and 6.23 land, keep the gate, or make the switch of `PostWaterComposite` wait for the same frame as the composite? | Recommended: keep the gate until 6.21, but tie `PostWaterComposite` to `Scheduled` (not to the registration) so the frames between have the shaders' own fog instead of none. That is a point fix, deleted by 6.21. |
+
+**Decided by the agent (step 1, 2026-11-19), to confirm:**
+- **Render thread.** The census counts the thread that last opened `Boundary::Scope` (the thread that runs `OnBegin`), not
+  `FrameAnchors::IsRenderOwner`. It keeps `BoundaryCheck` free of `FrameAnchors.h`. A loading screen's thread that begins frames
+  takes the count over while it does.
+- **Late changes cover every build request.** Besides `Register`/`Unregister`/`Refresh`/`Rearm` and `RequestStructuralRebuild`, every
+  `RenderGraph::Builds::Request/RequestAll/RequestFor/Change` call is counted. Many requests reach neither (an import added, engine
+  targets resized, DCLF's graph conditions, a published resource added, a stage key change). A `Boundary::Change` scope at the named
+  sites keeps their own requests from counting twice.
+- **Late attaches are counted at the attach.** In `BuildManager` (`Finish` for an attached build, `SwitchStaged`), keyed by epoch and
+  build point (the `Poll`/`BuildOwnerEpochsNow` caller). `Schedule`'s switches run inside `OnBegin`, so they never count. The
+  frame-end `Poll(Attach::All)` and guest's DCLF build point at `Main::Draw` count as late: both are section 8 scaffolding.
+- **More in the census line.** It also gives adoptions inside the scope ("at Begin"), the allowed `dclf` adoptions apart, the callers
+  of late versions, and session totals, so the last line of a run is its total.
+- **A new resource's first version is counted apart** ("new resources made late"). It replaces nothing a recording bound. In the first
+  runs nearly every late version was a first version (one per resource), which hid the replacements. Mid-frame imports still show
+  there, for step 9.
+- **The census also logs at a test run's exit** (`Testing::RegisterExitReport`). The `[ORG] declared frame:` window
+  (`Driver::LogStats`) never closes in a quick run unless `CS_ORG_EPOCH_STATS=1`, so without this a quick run printed no census.
+- **Caller tags.** `dclf` (allowed, `AdoptSnapshot`), `engine import` (`FrameAnchors.cpp:JoinSlot`), `twin`
+  (`GraphResources.cpp:Resource::JoinSlot`). Other sites are `untagged` and named by resource.
+- **ORG test in its own executable.** `tests/VersionedResourceTests.cpp` (`OpenRenderGraphVersionedResourceTests`, WARP), not a
+  scenario in `RebindingGpuTests.cpp`: `OpenRenderGraphExternalResourceTests` stops early on this base with an uncaught
+  `std::system_error` ("resource deadlock would occur"), also without this change, so a scenario there never runs. A standalone ORG
+  configure also needs `-DDirectX-Headers_DIR` (ORG's `vcpkg.json` lacks `directx-headers`, which BasicRHI requires).
+- **Since the plan was written.** A7 removed the own-epoch anchors, so guest's late attaches come from DCLF's build point and the frame
+  end only. Native swap chain replacement runs on the submission thread, so its adoptions are not counted. The back buffer's
+  per-present version (`NativeDevice.cpp:NextGraphVersion`) is on the render thread and counts. Physical Sky's handle tables and
+  `RunReadback` adopt no versions.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

@@ -117,12 +117,13 @@ namespace RenderGraph::Frame::Boundary
 			std::atomic<std::thread::id> renderThread{};
 			std::mutex mutex;
 			BoundaryCounts versions;  // by resource name
+			BoundaryCounts firstVersions;  // a new resource's first version, by name
 			BoundaryCounts versionCallers;
 			BoundaryCounts changes;
 			BoundaryCounts attaches;
 			std::uint64_t allowed = 0;
 			std::uint64_t atBegin = 0;
-			std::uint64_t sessionVersions = 0, sessionChanges = 0, sessionAttaches = 0, sessionAllowed = 0;
+			std::uint64_t sessionVersions = 0, sessionFirst = 0, sessionChanges = 0, sessionAttaches = 0, sessionAllowed = 0;
 		};
 
 		BoundaryState& GetBoundary()
@@ -159,7 +160,14 @@ namespace RenderGraph::Frame::Boundary
 					return;
 				}
 				const auto& name = a_version.resource ? a_version.resource->GetName() : std::string();
-				state.versions.Add(name.empty() ? std::string_view("(unnamed)") : std::string_view(name));
+				const auto key = name.empty() ? std::string_view("(unnamed)") : std::string_view(name);
+				// A new resource made inside the frame replaces nothing a recording bound, so it is counted apart.
+				if (a_version.number == 1) {
+					state.firstVersions.Add(key);
+					++state.sessionFirst;
+					return;
+				}
+				state.versions.Add(key);
 				state.versionCallers.Add(caller);
 				++state.sessionVersions;
 			} catch (...) {
@@ -203,11 +211,13 @@ namespace RenderGraph::Frame::Boundary
 		const auto part = [](const BoundaryCounts& a_counts) {
 			return a_counts.total ? fmt::format("{} (top: {})", a_counts.total, a_counts.Top()) : std::string("0");
 		};
-		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; allowed (dclf) adoptions {}, adoptions at Begin {}; "
-					 "session: late versions {}, late changes {}, late attaches {}, allowed adoptions {}",
+		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; new resources made late {}; allowed (dclf) adoptions {}, "
+					 "adoptions at Begin {}; session: late versions {}, late changes {}, late attaches {}, new resources made late {}, allowed adoptions {}",
 			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
-			part(state.attaches), state.allowed, state.atBegin, state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionAllowed);
+			part(state.attaches), part(state.firstVersions), state.allowed, state.atBegin, state.sessionVersions, state.sessionChanges, state.sessionAttaches,
+			state.sessionFirst, state.sessionAllowed);
 		state.versions = {};
+		state.firstVersions = {};
 		state.versionCallers = {};
 		state.changes = {};
 		state.attaches = {};
