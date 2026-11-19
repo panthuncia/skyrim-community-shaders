@@ -82,7 +82,8 @@ namespace DCLF::GrassInstances
 		float pbrParams4[4]{};                 // subsurface balance, front and back specular weights, back roughness scale
 		DescriptorIndex fuzzIndex, emissiveIndex;
 		float canopyHeight[kTiers]{ 1.0f, 1.0f, 1.0f };  // model-space height per tier
-		std::uint32_t pad2[3]{};
+		float occlusionRadius = 0.0f;                    // the canopy sphere's radius, the largest of the drawn tiers'
+		std::uint32_t pad2[2]{};
 	};
 	static_assert(sizeof(BucketRow) == 224);
 	static_assert(offsetof(BucketRow, flags) == 12 && offsetof(BucketRow, visibleBase) == 16 && offsetof(BucketRow, instanceCount) == 28 &&
@@ -92,7 +93,8 @@ namespace DCLF::GrassInstances
 				  offsetof(BucketRow, normalIndex) == 96 && offsetof(BucketRow, pbrSampler) == 108 && offsetof(BucketRow, pbrParams1) == 112 &&
 				  offsetof(BucketRow, pbrParams2) == 128 && offsetof(BucketRow, windDirection) == 144 &&
 				  offsetof(BucketRow, lodMeshCost) == 152 && offsetof(BucketRow, pbrParams3) == 160 && offsetof(BucketRow, pbrParams4) == 176 &&
-				  offsetof(BucketRow, fuzzIndex) == 192 && offsetof(BucketRow, emissiveIndex) == 196 && offsetof(BucketRow, canopyHeight) == 200);
+				  offsetof(BucketRow, fuzzIndex) == 192 && offsetof(BucketRow, emissiveIndex) == 196 && offsetof(BucketRow, canopyHeight) == 200 &&
+				  offsetof(BucketRow, occlusionRadius) == 212);
 
 	// InstanceFrame flags, stored in fadeFlags' high 16 bits.
 	inline constexpr std::uint32_t kFrameTierMask = 3u;
@@ -120,11 +122,12 @@ namespace DCLF::GrassInstances
 		float simpleShadingPx = 0.0f, collisionDistSq = 0.0f, midLodPx = 0.0f, farLodPx = 0.0f;
 		float lodBandPx = 0.0f;
 		std::uint32_t flags = 0;
-		float densityDistanceRcp = 0.0f;  // 1 / INI grass distance, over which thinning ramps in
-		std::uint32_t pad[13]{};
+		float occlusionDepthBias = 0.0f;  // separation behind an occluder, as a fraction of its view depth
+		float occlusionTightness = 1.0f;  // scales the occlusion sphere; below 1 culls more
+		std::uint32_t pad[12]{};
 	};
 	static_assert(sizeof(CullRow) == 128 && offsetof(CullRow, alphaParam1) == 36 && offsetof(CullRow, alphaParam2) == 40 && offsetof(CullRow, flags) == 68 &&
-				  offsetof(CullRow, densityDistanceRcp) == 72);
+				  offsetof(CullRow, occlusionDepthBias) == 72 && offsetof(CullRow, occlusionTightness) == 76);
 
 	/** @brief The single per-frame row, written by each depth commit. Holds the engine's grass constants from SetupGeometry's b2. */
 	struct DrawRow

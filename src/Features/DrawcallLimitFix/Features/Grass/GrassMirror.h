@@ -28,6 +28,7 @@ namespace DCLF::Features::Grass
 		std::uint64_t vertexDesc = 0;
 		std::uint32_t indexCount = 0;
 		float canopyHeight = 1.0f;
+		float occlusionRadius = 0.0f;
 	};
 
 	/** @brief Everything that must match for shapes to share one bucket. Wind direction matches Grass Optimizations' draw key. */
