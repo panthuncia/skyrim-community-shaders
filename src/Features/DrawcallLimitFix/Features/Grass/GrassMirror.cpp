@@ -50,6 +50,7 @@ namespace DCLF::Features::Grass
 			std::copy_n(a_source.pbrParams2, 4, a_row.pbrParams2);
 			std::copy_n(a_source.pbrParams3, 4, a_row.pbrParams3);
 			std::copy_n(a_source.pbrParams4, 4, a_row.pbrParams4);
+			a_row.fuzzRoughness = a_source.fuzzRoughness;
 			// Grass meshes are rooted at the model origin, so the bound's centre sits about halfway up.
 			const float canopy = a_source.boundCenter[2] > 1.0f ? 2.0f * a_source.boundCenter[2] : std::max(a_source.boundCenter[2] + a_source.modelRadius, 1.0f);
 			std::fill_n(a_row.canopyHeight, kTiers, canopy);
