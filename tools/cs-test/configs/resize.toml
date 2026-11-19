@@ -1,4 +1,4 @@
-# Size changes in the middle of a session: Exponential Height Fog's grid settings (its volumes' extents, as the menu's sliders
+# Size changes in the middle of a session: the fog volumes' grid settings (ViewAtmosphere's near and middle sizes, as the menu's sliders
 # write them) and upscale method switches to FSR and to TAA (a new render size when the
 # method changes). Each new size is a new version of a graph
 # texture, which may only switch in at a frame boundary. Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
@@ -32,25 +32,25 @@ arg = "fog"
 at = "previous"
 frames = 1
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridSizeZ=96"
+arg = "ViewAtmosphere.nearSlices=96"
 
 [[steps]]
 at = "previous"
 frames = 2
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridSizeZ=100"
+arg = "ViewAtmosphere.nearSlices=100"
 
 [[steps]]
 at = "previous"
 frames = 60
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridPixelSize=12"
+arg = "ViewAtmosphere.nearPixelSize=12"
 
 [[steps]]
 at = "previous"
 frames = 60
 do = "setting"
-arg = "ExponentialHeightFog.volumetricFarGridSizeZ=48"
+arg = "ViewAtmosphere.middleSlices=48"
 
 [[steps]]
 at = "previous"
