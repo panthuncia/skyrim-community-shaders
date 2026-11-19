@@ -379,275 +379,51 @@ namespace ORGPostChain
 
 	void CommitContext::Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const { gate.OpenDispatch(a_entry.index, a_x, a_y, a_z); }
 
-	namespace
-	{
-		// Enough lease indices for every run in flight. The occlusion query ring makes the same number at setup.
-		constexpr std::uint32_t kReadbackLeases = 256;
-		// A texture copy's offset must be 512-aligned on D3D12. Each part has its stamp, then its data, both at that alignment.
-		constexpr std::uint32_t kReadbackAlign = 512;
-
-		constexpr std::uint32_t AlignReadback(std::uint32_t a_bytes) { return (a_bytes + kReadbackAlign - 1) / kReadbackAlign * kReadbackAlign; }
-
-		/** @brief The latch word a committed run copies with its parts. 0 is never a stamp. */
-		struct ReadbackStamp
-		{
-			std::uint32_t value = 0;
-			std::uint32_t pad[3]{};
-		};
-	}
-
-	struct RunReadback::State final : RenderGraph::RunSlotsRegistry::Entry
-	{
-		struct Run
-		{
-			org::RunRef ref;
-			std::uint32_t stamp = 0;
-			bool committed = false, submitted = false;
-		};
-
-		std::string name;
-		std::shared_ptr<org::Buffer> buffer;
-		std::vector<std::uint32_t> sizes;  // by part
-		std::vector<std::uint32_t> bases;  // by part, the stamp's offset in a region. The data follows at kReadbackAlign.
-		std::uint32_t stride = 0;          // one lease's region
-
-		// The current build's stamp. Render thread.
-		std::shared_ptr<const org::LatchBlock> latch;
-		LatchRegion<ReadbackStamp> stamp;
-
-		// Render thread. MoveRun runs there too, inside a stage's submission.
-		mutable std::mutex mutex;
-		mutable std::vector<Run> runs;  // by lease index
-		mutable std::uint32_t lastCommitted = ~0u;
-		mutable std::vector<std::vector<std::byte>> latest;  // by part, not taken yet
-		mutable std::vector<std::uint32_t> latestStamps;      // by part
-		std::uint32_t sequence = 0;
-
-		State() { RenderGraph::RunSlotsRegistry::Add(this); }
-		~State() { RenderGraph::RunSlotsRegistry::Remove(this); }
-		State(const State&) = delete;
-		State& operator=(const State&) = delete;
-
-		/** @brief Fatal: a lease past the regions would copy outside the buffer. */
-		void CheckLease(std::uint32_t a_lease) const
-		{
-			if (a_lease >= kReadbackLeases)
-				stl::report_and_fail(std::format("Community Shaders: the Post Processing readback {} got run lease {}, past its {} regions.", name, a_lease,
-					kReadbackLeases));
-		}
-
-		/** @brief Under the mutex. The lease's last run is done, so its region holds what that run copied. */
-		void Harvest(std::uint32_t a_lease) const
-		{
-			if (a_lease >= runs.size())
-				return;
-			const auto run = std::exchange(runs[a_lease], Run{});
-			// A run that was committed but not submitted copied nothing of its own.
-			if (!run.committed || !run.submitted)
-				return;
-			void* mapped = nullptr;
-			buffer->GetAPIResource().Map(&mapped);
-			if (!mapped)
-				stl::report_and_fail(std::format("Community Shaders: the Post Processing readback {} could not be mapped.", name));
-			const auto* region = static_cast<const std::byte*>(mapped) + std::uint64_t(a_lease) * stride;
-			for (std::size_t part = 0; part < sizes.size(); ++part) {
-				std::uint32_t written = 0;
-				std::memcpy(&written, region + bases[part], sizeof(written));
-				// Another stamp means this part's pass was not in the run, or a later uncommitted run wrote over it.
-				if (written != run.stamp)
-					continue;
-				const auto* data = region + bases[part] + kReadbackAlign;
-				latest[part].assign(data, data + sizes[part]);
-				latestStamps[part] = run.stamp;
-			}
-			buffer->GetAPIResource().Unmap(0, 0);
-		}
-
-		/** @brief A stage's commit wrote its staging run. The stage now submits it as a_to, whose last run is done. */
-		void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const override
-		{
-			if (a_from.lease == a_to.lease)
-				return;
-			const std::scoped_lock lock(mutex);
-			if (a_from.lease >= runs.size() || !runs[a_from.lease].committed || !(runs[a_from.lease].ref == a_from))
-				return;
-			CheckLease(a_to.lease);
-			if (runs.size() <= a_to.lease)
-				runs.resize(static_cast<std::size_t>(a_to.lease) + 1);
-			Harvest(a_to.lease);
-			auto moved = std::exchange(runs[a_from.lease], Run{});
-			moved.ref = a_to;
-			runs[a_to.lease] = moved;
-			if (lastCommitted == a_from.lease)
-				lastCommitted = a_to.lease;
-		}
-	};
-
-	namespace
-	{
-		struct RunReadbackSpec
-		{
-			std::shared_ptr<const RunReadback::State> state;
-			std::shared_ptr<const org::LatchBlock> latch;
-			std::uint32_t stamp = 0;  // the stamp's offset in the latch
-			std::uint32_t part = 0;
-			std::shared_ptr<org::Resource> source;
-			bool texture = false;
-			std::uint32_t width = 0, height = 0;
-		};
-
-		struct RunReadbackBindings
-		{
-			org::ResourceBindingToken source;
-		};
-
-		struct RunReadbackFrame
-		{
-			std::shared_ptr<const RunReadbackSpec> spec;
-		};
-
-		/** @brief Copies the run's stamp and one part into the run's region. Its commands depend only on the run, so it is replayable. */
-		class RunReadbackPass final : public org::TypedRenderGraphPass<RunReadbackPass, RunReadbackFrame, RunReadbackBindings>
-		{
-		public:
-			explicit RunReadbackPass(std::shared_ptr<const RunReadbackSpec> a_spec) :
-				spec(std::move(a_spec)) {}
-
-			RunReadbackBindings Declare(org::PassBuilder& a_builder)
-			{
-				a_builder.PreferQueue(org::QueueKind::Graphics);
-				RunReadbackBindings bindings{};
-				bindings.source = a_builder.CopySource(spec->source);
-				a_builder.CopyDestination(std::static_pointer_cast<org::Resource>(spec->state->buffer));
-				return bindings;
-			}
-
-			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
-
-			RunReadbackFrame Prepare(const RunReadbackBindings&, const org::PassPrepareContext&) const { return { spec }; }
-
-			static void Record(const RunReadbackBindings& a_bindings, const RunReadbackFrame& a_frame, org::PassRecordContext& a_recording)
-			{
-				const auto& spec = *a_frame.spec;
-				const auto& state = *spec.state;
-				const auto& run = a_recording.Run();
-				if (run.lease >= kReadbackLeases)
-					throw std::runtime_error(std::format("the Post Processing readback {} got run lease {}, past its {} regions", state.name, run.lease,
-						kReadbackLeases));
-				auto& commands = a_recording.Commands();
-				const auto destination = state.buffer->GetAPIResource().GetHandle();
-				const std::uint64_t base = std::uint64_t(run.lease) * state.stride + state.bases[spec.part];
-				const auto latch = spec.latch->At(run);
-				commands.CopyBufferRegion(destination, base, latch.buffer->GetAPIResource().GetHandle(), latch.offset + spec.stamp, sizeof(std::uint32_t));
-				const auto source = a_recording.Resolve(a_bindings.source).GetHandle();
-				if (!spec.texture) {
-					commands.CopyBufferRegion(destination, base + kReadbackAlign, source, 0, state.sizes[spec.part]);
-					return;
-				}
-				rhi::BufferTextureCopyFootprint copy{};
-				copy.texture = source;
-				copy.buffer = destination;
-				copy.mip = 0;
-				copy.arraySlice = 0;
-				copy.footprint = { base + kReadbackAlign, 256, spec.width, spec.height, 1 };
-				commands.CopyTextureToBuffer(copy);
-			}
-
-		private:
-			std::shared_ptr<const RunReadbackSpec> spec;
-		};
-	}
-
 	std::shared_ptr<RunReadback> RunReadback::Create(std::string_view a_name, std::vector<std::uint32_t> a_parts)
 	{
-		auto state = std::make_shared<State>();
-		state->name = std::string(a_name);
-		for (const auto bytes : a_parts) {
-			state->bases.push_back(state->stride);
-			state->sizes.push_back(bytes);
-			state->stride += kReadbackAlign + AlignReadback(bytes);
-		}
-		state->latest.resize(a_parts.size());
-		state->latestStamps.resize(a_parts.size());
-		state->buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(state->stride) * kReadbackLeases);
-		if (!state->buffer) {
-			logger::error("[ORG] Post Processing: the readback buffer {} could not be made", state->name);
-			return nullptr;
-		}
-		state->buffer->SetName(state->name);
-		return std::make_shared<RunReadback>(std::move(state));
+		auto readback = RenderGraph::RunReadback::Create(a_name, std::move(a_parts));
+		return readback ? std::make_shared<RunReadback>(std::move(readback)) : nullptr;
 	}
 
 	void RunReadback::Build(Builder& a_builder)
 	{
-		state->latch = a_builder.LatchBlock();
-		state->stamp = a_builder.Latch<ReadbackStamp>();
+		stamp = a_builder.Latch<RenderGraph::RunReadback::Stamp>();
+		readback->Bind(a_builder.LatchBlock(), stamp.offset);
 	}
 
 	void RunReadback::AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source)
 	{
-		if (a_part >= state->sizes.size() || !a_source || !state->latch) {
-			a_builder.Fail(std::format("{}: the readback part, its source or its Build is missing", a_name));
+		std::string why;
+		auto make = readback->BufferPass(a_part, std::move(a_source), why);
+		if (!make) {
+			a_builder.Fail(std::format("{}: {}", a_name, why));
 			return;
 		}
-		auto spec = std::make_shared<const RunReadbackSpec>(RunReadbackSpec{ .state = state, .latch = state->latch, .stamp = state->stamp.offset, .part = a_part,
-			.source = std::move(a_source) });
-		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RunReadbackPass>(spec); });
+		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, std::move(make));
 	}
 
 	void RunReadback::AddTexture(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source,
 		std::uint32_t a_width, std::uint32_t a_height)
 	{
-		if (a_part >= state->sizes.size() || !a_source || !state->latch) {
-			a_builder.Fail(std::format("{}: the readback part, its source or its Build is missing", a_name));
+		std::string why;
+		auto make = readback->TexturePass(a_part, std::move(a_source), a_width, a_height, why);
+		if (!make) {
+			a_builder.Fail(std::format("{}: {}", a_name, why));
 			return;
 		}
-		if (!a_width || !a_height || a_width * 16 > 256 || std::uint64_t(a_height) * 256 > state->sizes[a_part]) {
-			a_builder.Fail(std::format("{}: a {}x{} texture does not fit its readback part", a_name, a_width, a_height));
-			return;
-		}
-		auto spec = std::make_shared<const RunReadbackSpec>(RunReadbackSpec{ .state = state, .latch = state->latch, .stamp = state->stamp.offset, .part = a_part,
-			.source = std::move(a_source), .texture = true, .width = a_width, .height = a_height });
-		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RunReadbackPass>(spec); });
+		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, std::move(make));
 	}
 
 	std::uint32_t RunReadback::Commit(const CommitContext& a_commit)
 	{
-		const auto& run = a_commit.Run();
-		std::uint32_t stamp = 0;
-		{
-			const std::scoped_lock lock(state->mutex);
-			state->CheckLease(run.lease);
-			if (state->runs.size() <= run.lease)
-				state->runs.resize(static_cast<std::size_t>(run.lease) + 1);
-			// A leased run's last run on this index retired before the lease reopened. A stage's staging run holds nothing.
-			state->Harvest(run.lease);
-			stamp = ++state->sequence;
-			if (stamp == 0)
-				stamp = ++state->sequence;
-			state->runs[run.lease] = { .ref = run, .stamp = stamp, .committed = true };
-			state->lastCommitted = run.lease;
-		}
-		a_commit.Write(state->stamp, ReadbackStamp{ .value = stamp });
-		return stamp;
+		const auto value = readback->Commit(a_commit.Run());
+		a_commit.Write(stamp, RenderGraph::RunReadback::Stamp{ .value = value });
+		return value;
 	}
 
-	void RunReadback::Executed()
-	{
-		const std::scoped_lock lock(state->mutex);
-		if (state->lastCommitted < state->runs.size())
-			state->runs[state->lastCommitted].submitted = true;
-	}
+	void RunReadback::Executed() { readback->Executed(); }
 
-	std::vector<std::byte> RunReadback::Take(std::uint32_t a_part, std::uint32_t* a_stamp)
-	{
-		const std::scoped_lock lock(state->mutex);
-		if (a_part >= state->latest.size())
-			return {};
-		if (a_stamp)
-			*a_stamp = state->latestStamps[a_part];
-		return std::exchange(state->latest[a_part], {});
-	}
+	std::vector<std::byte> RunReadback::Take(std::uint32_t a_part, std::uint32_t* a_stamp) { return readback->Take(a_part, a_stamp); }
 }
 
 namespace

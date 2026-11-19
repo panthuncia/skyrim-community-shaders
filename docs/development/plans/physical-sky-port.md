@@ -161,6 +161,24 @@ D3D11 maps a staging copy with `DO_NOT_WAIT` and retries on later frames. On the
   non-blocking query). Only then is the buffer read on the CPU. Nothing waits. A query that is not complete is read on a later
   frame, as `DO_NOT_WAIT` does today.
 
+**As decided in phase 5 (2026-11-19).** A recording must be replayable, since a revision-driven epoch submits it again. So the
+ring is `RenderGraph::RunReadback` (`src/RenderGraph/RunReadback.h`), shared with Post Processing's readbacks (commit
+`76e94d43e`'s pattern, moved out of `ORGPostProcessing.cpp`; `ORGPostChain::RunReadback` now wraps it). It keeps one host
+region per run lease. Each run copies a stamp from its latch and the candidates into its lease's region. The region is read
+when the lease's next run is committed, since that run is done by then. No completed-value query and no wait.
+
+The lightning query reads the cloud renderer's resources (`findLightningSource` in `Volumetrics.cs.hlsl`, the NDF maps, noise
+and storm data). It can be a graph pass only once those are graph resources, so it lands with phase 4. The steps then:
+
+1. ORGPhysicalSky makes `RunReadback::Create("PhysicalSky::LightningCandidates", { SkyLightning::kCandidates * 16 })` once,
+   and a graph buffer twin for `SkyLightning::candidates` (UAV u4, 32 float4).
+2. At each build of `cs.physical-sky`: `Bind(latch, stampOffset)` with 16 bytes of the client's latch, then the query as a
+   gated dispatch (1x1x1) after the cloud passes it reads, then `BufferPass(0, candidates)`.
+3. `SkyLightning::QuerySource` on the graph only asks for the query (pendingPhase becomes Readback). The client's commit opens
+   the query's gate entry, calls `Commit(run)` and writes the Stamp. The executed callback calls `Executed()`.
+4. `SkyLightning::ReadSource` on the graph calls `Take(0)`. Empty means not read yet (as `DXGI_ERROR_WAS_STILL_DRAWING`). The
+   first candidate with `w > 0` is the source, as on D3D11.
+
 ## 7. Order of work
 
 1. **LUTs** (this branch): disk phase, Tr, Ms, Sv, Ap on `cs.physical-sky.luts`; twins exported for D3D11 readers and
@@ -230,5 +248,9 @@ D3D11 maps a staging copy with `DO_NOT_WAIT` and retries on later frames. On the
   - `cs.physical-sky.composite` at DeferredComposite after `cs.deferred`: `PhysicalSky/ApplyAerialPerspectiveCS.hlsl`
     (section 5, open questions 9 and 10).
   - The fog's scattering: `PHYSICAL_SKY` with TexTrLut, the shadow volume and its mean (section 5). The push block is full.
+- Phase 5, as far as it goes without phase 4: the replayable readback is shared (`RenderGraph::RunReadback`), and the lightning
+  steps are written down (section 6). The query reads the clouds' resources, so the query pass and its readback land with
+  phase 4. Until then the lightning query stays on D3D11 (guest mode, with the clouds) and native mode has no lightning, since
+  `SkyLightning::Update` requires `VolumetricCloudsEnabled()`.
 - Native mode treats volumetric clouds as off (`PhysicalSky::VolumetricCloudsEnabled`) until phase 4.
-- Not started: clouds, lightning, sky tail and reflection bindings.
+- Not started: clouds, the lightning query pass, sky tail and reflection bindings.

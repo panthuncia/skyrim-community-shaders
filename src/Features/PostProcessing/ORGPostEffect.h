@@ -20,6 +20,7 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
+#	include "RenderGraph/RunReadback.h"
 
 #	include <Render/RunRef.h>
 
@@ -313,12 +314,8 @@ namespace ORGPostChain
 	};
 
 	/**
-	* @brief A small copy from the GPU to the CPU that a kept recording can replay.
-	* The post stage is recorded ahead and its recording is submitted again and again, so its passes may not use the readback
-	* service. Each run copies into its own region of a host buffer, picked by the run's lease index. A region is read when
-	* the lease's next run is committed, since the lease's last run is done by then. Nothing waits.
-	* Each copy also copies a stamp from the run's latch, so a run the chain did not commit is never read as one it did.
-	* Make one per effect and keep it across builds. Render thread, except the passes' recording.
+	* @brief A small copy from the GPU to the CPU that a kept recording can replay: RenderGraph::RunReadback (RunReadback.h) on the
+	* chain's latch. Make one per effect and keep it across builds. Render thread, except the passes' recording.
 	*/
 	class RunReadback
 	{
@@ -344,12 +341,12 @@ namespace ORGPostChain
 		/** @brief The newest copy of part a_part read since the last Take, and its run's stamp. Empty when none arrived. */
 		std::vector<std::byte> Take(std::uint32_t a_part, std::uint32_t* a_stamp = nullptr);
 
-		struct State;
-		explicit RunReadback(std::shared_ptr<State> a_state) :
-			state(std::move(a_state)) {}
+		explicit RunReadback(std::shared_ptr<RenderGraph::RunReadback> a_readback) :
+			readback(std::move(a_readback)) {}
 
 	private:
-		std::shared_ptr<State> state;
+		std::shared_ptr<RenderGraph::RunReadback> readback;
+		LatchRegion<RenderGraph::RunReadback::Stamp> stamp;  // the current build's
 	};
 
 	/** @brief One per pipeline slot for the session. Never keep the sub-feature, since SyncPipelineResources may replace it. */
