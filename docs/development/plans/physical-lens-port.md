@@ -1,7 +1,7 @@
 # Physical Lens on the ORG post chain
 
-Status, 2026-11-18: phase 1 (focus, image mapping, Composite inputs) implemented on `org-native/port-lens`. Phases 2 and 3
-(diffraction, ghosts) are designed here and not written. Until they are, the chain holds while Ghost Intensity is above zero
+Status, 2026-11-18: phase 1 (focus, image mapping, Composite inputs) implemented on `org-native/port-lens`, not built or run
+yet. Phases 2 and 3 (diffraction, ghosts) are designed here and not written. Until they are, the chain holds while Ghost Intensity is above zero
 or Diffraction Starburst is on, with the reason in the log.
 
 Upstream: #3171 (`00e99c218`), `src/Features/PostProcessing/PhysicalLens*.{h,cpp}`, shaders under
@@ -129,10 +129,13 @@ Each phase keeps the chain holding for what it has not ported, so no frame mixes
 ## 6. Open questions
 
 - **Push words.** `flare.cs.hlsl`, `planning.cs.hlsl` and `beam.trace.cs.hlsl` share one header that declares about 20
-  resources, several at the same register under different types (u1 is `Selected` and `OutRays`). One list per file
-  gives every entry point the same block; it fits in 32 words only if the aliases share one handle. Phase 2 must count
-  them, and may split the list per entry point with `#ifdef`s on the entry defines (`PHYSICAL_LENS_PLANNING`,
-  `PHYSICAL_LENS_AREA_LAYERS`).
+  resources, several at the same register under different types (u1 is `Selected` and `OutRays`). Counted: 15 views,
+  `LensParameters`, the exposure latch (2 words), and 5 more in `planning.cs` make 23 words, under the 32-word limit,
+  so one list per file works without splitting by entry point.
+- **CBUFFER entries with indexed arrays.** `Common/OrgResources.hlsli`'s `CBUFFER` kind declares
+  `static ConstantBuffer<T>`. DXC's SPIR-V rejects that once an array in `T` is indexed dynamically (`Surfaces[i]`),
+  and DXIL rejects the cast form. `trace.cs.hlsl` uses the cast on Vulkan and the static on D3D12. Fixing it in
+  `OrgResources.hlsli` would rebuild every Lighting variant, so it stays local until another shader needs it.
 - **The 16-bit index pull.** `BeamIndices` is 16-bit. The ORG VS reads it as `ByteAddressBuffer` halves or the effect
   uploads a 32-bit copy; the second is simpler and costs 2x a small buffer.
 - **The focus readback service.** Histogram Auto Exposure drops a readback when the service has no buffer. The lens
