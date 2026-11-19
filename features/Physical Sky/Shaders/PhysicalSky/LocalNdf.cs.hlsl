@@ -20,7 +20,8 @@
 	X(UAV, RWTexture2DArray<float4>, ModelingOutput, 1) \
 	X(UAV, RWTexture2DArray<float4>, MaximumOutput, 2)  \
 	X(SAMPLER, SamplerState, ClampSampler, 0)           \
-	X(LATCH, LocalNdfConstants, LocalNdfParameters, 1)
+	X(LATCH, LocalNdfConstants, LocalNdfParameters, 1)  \
+	X(EXTERN, uint, OutputSlice, 0)
 ORG_PUSH_BLOCK(LOCAL_NDF_RESOURCES(ORG_HANDLE))
 
 ORG_GLOBAL_LATCH_BEGIN(LocalNdfConstants, LocalNdfParameters, 1)
@@ -41,7 +42,12 @@ ORG_RESOURCE(UAV, RWTexture2DArray<float4>, MaximumOutput, 2)
 [numthreads(8, 8, 1)] void main(uint2 pixel : SV_DispatchThreadID) {
 	if (any(pixel >= dimension))
 		return;
+#if defined(CS_ORG_BINDLESS)
+	// The graph writes a whole-array view, so the push block names the layer's slice.
+	const uint3 target = uint3(pixel, OrgHandle_OutputSlice);
+#else
 	const uint3 target = uint3(pixel, 0);
+#endif
 	HeightOutput[target] = 0.0;
 	ModelingOutput[target] = 0.0;
 	MaximumOutput[target] = 0.0;
