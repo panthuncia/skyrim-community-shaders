@@ -603,6 +603,10 @@ refuses each, so they join instead of being registered by the engine every frame
     Since 2026-11-08 the runtime opts in to resting layouts and nothing is pinned, so this window may be gone; it has not been
     re-run under the validation layer. **Next:** check with `amdval.env`, and pin at first description only if it remains under
     `CS_ORG_RESTING_LAYOUTS=0`.
+-   **Physical Sky washes the scene out.** With Physical Sky on, a Whiterun exterior at noon is covered in a bright cream haze:
+    distant terrain nearly gone, a flat pale sky, glowing silhouette edges. It happens in plain D3D11 mode, in the graph modes,
+    and in upstream's own build (`a03587448`, 2.0.0-rc.1, checked by hand on 2026-11-19), so it is not from the sync or the ORG
+    ports. **Next:** find the source (defaults, units, exposure, a missing asset, or this modlist's weathers); being investigated.
 -   **BasicRHI's `frontCCW` under Vulkan.** `frontCCW` has D3D's meaning on both backends. SARP and BasicRenderer set it true for
     glTF content. Their D3D12 behaviour is unchanged, but they have not been run under Vulkan since the mapping changed.
 
