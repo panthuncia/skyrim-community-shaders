@@ -445,6 +445,8 @@ std::shared_ptr<PostProcessFeature> PostProcessing::MakePipelineFeature(FeatureP
 		return std::make_shared<CODBloom>();
 	case FeaturePipelineIndex::LensFlare:
 		return std::make_shared<LensFlare>();
+	case FeaturePipelineIndex::PhysicalLens:
+		return std::make_shared<PhysicalLens>();
 	case FeaturePipelineIndex::Composite:
 		return std::make_shared<Composite>();
 	case FeaturePipelineIndex::ColorGrading:
