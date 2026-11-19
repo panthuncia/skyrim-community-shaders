@@ -23,6 +23,7 @@
 #	include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
 #endif
 
+#include <charconv>
 #include <set>
 
 namespace Testing
@@ -384,9 +385,85 @@ namespace Testing
 			return true;
 		}
 
+		// A key segment names an object member, or with "[n]" an array element. A member name matches with its spaces
+		// dropped ("CODBloom" names "COD Bloom"). A segment absent from an object passes through the object's "settings"
+		// member, which is where PostProcessing keeps each sub-effect's settings.
+		json* FindSettingMember(json& a_object, std::string_view a_name, std::string& a_path)
+		{
+			if (!a_object.is_object())
+				return nullptr;
+			if (const auto exact = a_object.find(std::string(a_name)); exact != a_object.end()) {
+				a_path += a_name;
+				return &*exact;
+			}
+			const auto withoutSpaces = [](std::string_view a_text) {
+				std::string out;
+				std::ranges::copy_if(a_text, std::back_inserter(out), [](char a_char) { return a_char != ' '; });
+				return out;
+			};
+			json* match = nullptr;
+			for (auto& [key, member] : a_object.items()) {
+				if (withoutSpaces(key) != a_name)
+					continue;
+				if (match)
+					return nullptr;  // ambiguous
+				match = &member;
+				a_path += key;
+			}
+			if (match)
+				return match;
+			if (const auto nested = a_object.find("settings"); nested != a_object.end() && nested->is_object()) {
+				const auto size = a_path.size();
+				a_path += "settings.";
+				if (auto* found = FindSettingMember(*nested, a_name, a_path))
+					return found;
+				a_path.resize(size);
+			}
+			return nullptr;
+		}
+
+		/** @brief The value a_key ("a.b[3].c") names inside a_settings, or null. a_path gets the key with the names as stored. */
+		json* FindSettingByKey(json& a_settings, std::string_view a_key, std::string& a_path)
+		{
+			json* current = &a_settings;
+			std::size_t at = 0;
+			while (at <= a_key.size()) {
+				const auto end = std::min(a_key.find('.', at), a_key.size());
+				const auto segment = a_key.substr(at, end - at);
+				const auto bracket = segment.find('[');
+				const auto name = segment.substr(0, bracket);
+				if (name.empty())
+					return nullptr;
+				if (!a_path.empty())
+					a_path += '.';
+				current = FindSettingMember(*current, name, a_path);
+				if (!current)
+					return nullptr;
+				// Then each "[n]" in turn.
+				for (auto open = bracket; open != std::string_view::npos; open = segment.find('[', open)) {
+					const auto close = segment.find(']', open);
+					if (close == std::string_view::npos)
+						return nullptr;
+					std::size_t index = 0;
+					const auto digits = segment.substr(open + 1, close - open - 1);
+					const auto [last, error] = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+					if (digits.empty() || error != std::errc{} || last != digits.data() + digits.size() || !current->is_array() || index >= current->size())
+						return nullptr;
+					current = &(*current)[index];
+					a_path += fmt::format("[{}]", index);
+					open = close + 1;
+					if (open < segment.size() && segment[open] != '[')
+						return nullptr;
+				}
+				at = end + 1;
+			}
+			return current;
+		}
+
 		bool SetSetting(const std::string& a_arg, std::string& a_error)
 		{
 			// "<ShortName>.<key>=<JSON value>", one setting written as a menu widget writes it (through the feature's settings JSON).
+			// The key may be a path into nested objects and arrays, "PostProcessing.CODBloom.MipBlendFactor[3]=0.2".
 			const auto dot = a_arg.find('.');
 			const auto equals = a_arg.find('=');
 			if (dot == std::string::npos || equals == std::string::npos || equals < dot) {
@@ -403,7 +480,15 @@ namespace Testing
 			}
 			json settings;
 			(*found)->SaveSettings(settings);
-			if (!settings.is_object() || !settings.contains(key)) {
+			std::string path;
+			json* target = nullptr;
+			if (settings.is_object() && settings.contains(key)) {
+				target = &settings[key];  // the flat form, whatever the key holds
+				path = key;
+			} else {
+				target = FindSettingByKey(settings, key, path);
+			}
+			if (!target) {
 				a_error = fmt::format("{} has no setting '{}'", name, key);
 				return false;
 			}
@@ -412,9 +497,9 @@ namespace Testing
 				a_error = fmt::format("'{}' is not a JSON value", a_arg.substr(equals + 1));
 				return false;
 			}
-			settings[key] = value;
+			*target = value;
 			(*found)->LoadSettings(settings);
-			logger::info("[TEST] setting {}.{} = {}", name, key, value.dump());
+			logger::info("[TEST] setting {}.{} = {}", name, path, value.dump());
 			return true;
 		}
 
