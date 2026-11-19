@@ -8905,3 +8905,37 @@ from `integ/hard-ports` `2fcb06441`; OMS `rev-step2-named-versions` on `0185120`
 - Cold caches: `guest-quick` `a` and `native-d3d12-quick` `b` stopped while compiling shaders for the new stage (the D3D12 one in a
   DCLF portal program compile). Each passed after one warm run. Launches: 8.
 
+## Frame revisions, step 3 (2026-11-19)
+
+Step 3 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): atomic multi-epoch staged attach and the closure query. CS on
+`org-native/rev-step3` from `integ/hard-ports` `2fcb06441`; ORG `rev-step3-staged-attach` (`2ca5b4c`, `0f2efbf`) on `2b22711`.
+
+- **ORG.** `GraphHost::AttachStagedEpochGraphs(epochs)` checks every epoch, then swaps all staged graphs in while holding the host's
+  thread once. One failed check refuses the set and drops no staged graph. `GraphHost::EpochsDeclaring(slots)` (any thread) gives the
+  epochs whose attached or staged graph declares a versioned resource, from `RenderGraph::PersistentDeclaredVersions` (set at a
+  graph's first build, refreshed by its preparations). Refusals carry `AttachRefusal` and are counted over the host's life
+  (`AttachStatsTotal`). The single `AttachStagedEpochGraph` now names an epoch change as such, not as a host change.
+- **CS.** No caller of the new functions yet (step 4). `BuildManager` reports refusals at staging, attach and switch to the
+  boundary census: `build refusals N (top: site: reason x n)`.
+- **ORG tests.** New step 5 of `OpenRenderGraphPersistentVulkanHostTests built` (RX 6600): two staged epochs attach together; a set
+  with one epoch's extensions changed is refused naming epoch 1 and both stay staged; an empty set, a duplicated one and one with
+  nothing staged; `EpochsDeclaring` finds a versioned buffer only epoch 1's new pass declares, in its staged graph and then its
+  attached one, and in no other epoch. Every other mode of that executable passed, and `OpenRenderGraphPersistentTests` and
+  `OpenRenderGraphVersionedResourceTests` passed. Not from this change: `leases` fails with "Synchronous frame capacity exhausted" and
+  then hangs, on `2b22711` too; `OpenRenderGraphExternalResourceTests` exits early (127) as step 1 found.
+
+**Census** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv3`, label `b` after a warm-up `w`; session totals at exit):
+
+| Run | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin | Build refusals |
+|---|---|---|---|---|---|---|---|
+| `guest-quick` | 2 (`twin`) | 137 | 70 | 0 | 60 | 10 | 0 |
+| `native-quick` | 0 | 90 | 43 | 0 | 60 | 56 | 0 |
+| `native-d3d12-quick` | 0 | 90 | 43 | 0 | 57 | 56 | 0 |
+| `d3d11+quick` | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+Equal to step 1's numbers except DCLF's allowed adoptions (one to three more, which vary per run). No build was refused in these
+runs (plan Q9). Shots against step 1's runs (`rv1`): mean channel difference 1.40 (guest), 1.20 (native), 1.31 (native D3D12), 5.33
+(D3D11: the same frame, a little darker overall, eye adaptation). The first `a` runs failed on the new stage's cold shader cache
+(guest crashed while compiling, native timed out compiling, native D3D12 timed out loading); the warm-up passed all four.
+Launches: 12.
+

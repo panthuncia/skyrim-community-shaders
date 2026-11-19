@@ -389,6 +389,7 @@ namespace RenderGraph
 				}
 				if (!stagedResult.attached) {
 					++window.rejected;
+					RenderGraph::Frame::Boundary::NoteRefusal("staging", org::GraphHost::AttachRefusalName(stagedResult.refusal));
 					logger::info("[ORG] build manager: {}'s build rejected at its staging ({}); built again", Label(epoch), stagedResult.reason);
 					host.RequestRebuild(epoch, "its last build was rejected at its staging");
 					return false;
@@ -398,6 +399,7 @@ namespace RenderGraph
 			const double attachMs = MillisecondsSince(begin);
 			if (!result.attached) {
 				++window.rejected;
+				RenderGraph::Frame::Boundary::NoteRefusal("attach", org::GraphHost::AttachRefusalName(result.refusal));
 				// If no other build answered meanwhile, ask again so the next poll builds against the host as it is now.
 				const bool replaced = host.BuildGeneration(epoch) != a_done.job.generation;
 				logger::info("[ORG] build manager: {}'s build rejected at the attach ({}){}", Label(epoch), result.reason,
@@ -695,6 +697,7 @@ namespace RenderGraph
 		auto deferred = std::move(m.stagedAttach[a_epoch]);
 		m.stagedAttach.erase(a_epoch);
 		if (!result.attached) {
+			RenderGraph::Frame::Boundary::NoteRefusal("switch", org::GraphHost::AttachRefusalName(result.refusal));
 			logger::info("[ORG] build manager: {}'s staged graph was refused at its switch ({}); built again", m.Label(a_epoch), result.reason);
 			return false;
 		}

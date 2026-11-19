@@ -370,6 +370,10 @@ graph and not in an unrelated one. CS: bump ORG, standard set.
 
 **Size.** Medium. One agent. Parallel with step 2.
 
+**As built (2026-11-19, `org-native/rev-step3`).** ORG `rev-step3-staged-attach`: `GraphHost::AttachStagedEpochGraphs`,
+`EpochsDeclaring`, `AttachRefusal` with `AttachStatsTotal`, and `RenderGraph::PersistentDeclaredVersions`. CS counts refusals in the
+`[ORG] boundary:` census. Where it differs from the scope above, see section 9, "Decided by the agent (step 3)".
+
 ---
 
 ### Step 4. The prepared set, behind today's API
@@ -1134,6 +1138,36 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   `build/Dev-Fast/vcpkg_installed` (`x64-windows-static-md-release`). ORG needs Vulkan and D3D12 both on.
 - **Since the plan was written.** Frame generation (steps 1-8) and Physical Sky's port added no other segment host data. The only
   other host data naming versions is DCLF's `EpochRevisionData`, which keeps using its buffer `NamedVersions` directly.
+
+**Decided by the agent (step 3, 2026-11-19), to confirm:**
+- **Q1: build-time data, kept current.** Each graph keeps the set of versioned resources its passes declare
+  (`RenderGraph::PersistentDeclaredVersions`, keys of `PersistentInstanceState::entries` with a `versioned` slot). Its first build
+  sets it (`PrepareFirstPersistentBuild`, so a staged graph answers before it is ever prepared) and each preparation refreshes it,
+  only when a versioned slot was added or a slot retired. It is not the recordings' `versions` lists: a staged graph has none.
+  A graph built on the owner thread (`BuildIfRequested`) answers nothing until its first preparation; CS's staged builds all go
+  through `BuildEpochGraph`, so that never matters for a revision.
+- **`EpochsDeclaring` takes `IVersionedResource`**, not `VersionedResource`, and matches by `Key()`, so a clone matches its original.
+  The host keeps each instance's attached and staged sets under a mutex, published on the owner thread at install, staging and
+  retirement, so the query is safe on the revision lane.
+- **"Not being submitted" means:** no ticket of the epoch is held (`HoldEpochTicket`), and the call is not inside a submission on the
+  same thread (without a submission thread). The single form never checked either. CS holds no tickets today.
+- **"No newer build" means a newer build attached** (the single form's serial check). A build still running is not visible to the
+  host; superseding it is the revision lane's job (latest wins).
+- **Check order.** The set itself first (unknown epoch, an epoch named twice), then each epoch in the order given. The result names
+  the first refused epoch.
+- **Refusals counted twice over.** ORG counts every refusal of `AttachEpochGraph`, `StageEpochGraph` and both staged attaches by
+  reason (`AttachStatsTotal`, host lifetime). CS counts the ones `BuildManager` meets (staging, attach, switch) in the
+  `[ORG] boundary:` line as "build refusals", by site and reason, on any thread. That is Q9's counter.
+- **CS does not call the new functions yet.** Step 4 does. The plan's acceptance is "CS unchanged in behaviour".
+- **Since the plan was written.** Native frame generation (A7, swap chain replacement on the submission thread) and Physical Sky's
+  full port change nothing here: staged builds still switch per epoch through `FrameAnchors.cpp:Schedule` and
+  `BuildManager::SwitchStaged`, which step 4 replaces with one `AttachStagedEpochGraphs` per revision.
+- **`OpenRenderGraphExternalResourceTests`** still stops early (exit 127 on this base, after the device is made, before any scenario
+  line); not fixed here. The step 3 test is a scenario of `OpenRenderGraphPersistentVulkanHostTests built` instead, which runs on the
+  RX 6600.
+- **`PersistentVulkanHostTests leases`** fails with "Synchronous frame capacity exhausted" and then hangs, on ORG `2b22711` as well;
+  not fixed here.
+- **Q9 answered for the quick set:** 0 refusals in `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick`.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
