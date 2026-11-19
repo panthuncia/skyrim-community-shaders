@@ -1,8 +1,6 @@
 #pragma once
 
-// Grass's hook points: its sink's (any thread) and its mirror's (Mirror, render thread), for its parity's observers
-// (Diagnostics/GrassParity.cpp), and its depth commit's hole (the commit hook, render thread), for its log and report count
-// (Diagnostics/GrassReport.cpp).
+// Diagnostic events from the grass sink, mirror and depth commit, for the parity check and the report.
 
 #include <cstdint>
 
@@ -10,7 +8,7 @@ namespace DCLF::Features::Grass
 {
 	class Mirror;
 
-	/** @brief Any thread, the capture's sink: `shape`'s group's records (count of them), the group's removal or rejection, or the shape's removal, pushed with its seq. */
+	/** @brief Any thread, from the capture's sink. */
 	struct GrassCaptured
 	{
 		enum class Kind : std::uint8_t
@@ -27,23 +25,20 @@ namespace DCLF::Features::Grass
 		Kind kind;
 	};
 
-	/** @brief Render thread, Mirror::Drain: an event of `shape` applied (or dropped as stale). */
+	/** @brief Render thread. Sent for applied and stale events alike. */
 	struct GrassEventDrained
 	{
 		const void* shape;
 	};
 
-	/** @brief Render thread: the mirror's events drained on frame `frame`. */
+	/** @brief Render thread. */
 	struct GrassDrained
 	{
 		const Mirror& mirror;
 		std::uint32_t frame;
 	};
 
-	/**
-	 * @brief The depth commit could not draw grass on a frame that withheld the engine's passes (a hole): the mirror's slots and the
-	 * tables' (instances, buckets).
-	 */
+	/** @brief The depth commit could not draw grass on a frame that withheld the engine's passes, leaving a hole. */
 	struct GrassMissed
 	{
 		std::uint32_t frame;

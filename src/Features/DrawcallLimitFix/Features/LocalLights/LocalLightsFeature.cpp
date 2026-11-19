@@ -1,5 +1,4 @@
-// LocalLights: the light selection (installed from the Spot source's hooks), the light volumes' contribution (LocalShadowLights' sample)
-// and the selection's parity (Diagnostics/).
+// LocalLights feature registration: the light selection, the light volumes and the parity checks.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightContextResources.h"
@@ -18,26 +17,21 @@ namespace DCLF::Features::LocalLights
 {
 	namespace
 	{
-		/**
-		 * @brief The light selection, at the Spot source (by source: after the sun's accumulation and camera, before the point lights'
-		 * culls and the focus cameras, the install log's order).
-		 */
+		// Installed from the Spot source's hooks, to keep the install log in engine order.
 		void SourceHooks(Api::ShadowSourceHooks& a_hooks)
 		{
 			if (a_hooks.source == Api::ShadowSource::Spot)
 				LightSelection::Get().Install();
 		}
 
-		// "light limit fix" (Integrations/LightLimitFix's classify input): loaded, its clustered lights light the Lighting draws.
 		Api::ClassifyInputId lightLimitFix;
 
-		/** @brief Without Light Limit Fix the Lighting draws take their point lights from the frame's table (constant for the session). */
+		// Without Light Limit Fix the Lighting draws use the frame's point light table. This is fixed for the session.
 		bool PointLightsActive()
 		{
 			return !Extensions::ClassifyInputOn(lightLimitFix);
 		}
 
-		/** @brief Local shadow lights accumulated this frame, a volume per shadowmap descriptor, for Light Limit Fix's shadow mask. */
 		void Sample(Api::LightVolumeSink& a_sink)
 		{
 			const auto localShadows = LocalShadowLights::Sample();
@@ -62,16 +56,13 @@ namespace DCLF::Features::LocalLights
 		void Install(Api::InstallContext& a_context)
 		{
 			RegisterLightContexts(a_context);
-			// Each colour commit's volumes, from the selection's lights and the Lights board; the landscape properties take only the
-			// lights that affect land. Without Light Limit Fix, each commit's point light table too: the volumes' lights, then the
-			// scene's plain point lights (the Lighting draws' per-object lights).
+			// Landscape properties take only the lights that affect land.
 			lightLimitFix = a_context.NeedClassifyInput("light limit fix");
 			a_context.RegisterLightVolumes({ .name = "local shadow lights",
 				.landscapeFlags = kLandscapeFlags,
 				.sample = &Sample,
 				.pointLightsActive = &PointLightsActive,
 				.pointLights = &LocalShadowLights::SamplePointLights });
-			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the light selection and its rooms against the engine's.
 			if (Diagnostics::Observe().claimsOrScene)
 				Diagnostics::LightSelectionParity::Install();
 		}

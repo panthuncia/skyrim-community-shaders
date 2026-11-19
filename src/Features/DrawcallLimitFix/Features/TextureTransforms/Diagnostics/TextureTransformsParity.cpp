@@ -1,5 +1,4 @@
-// The texture transforms' frame-value pool's parity (CS_DCLF_PERSISTENT_PARITY, the moved-only parity's frames) and its stats line
-// (CS_DCLF_STATS), called by the frame's producer (TextureTransformsPool.cpp).
+// The texture transforms pool's parity (CS_DCLF_PERSISTENT_PARITY) and stats line (CS_DCLF_STATS), called by the frame's producer.
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransformsPool.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -12,8 +11,7 @@ namespace DCLF::Features::TextureTransforms
 {
 	namespace
 	{
-		// The producers', one at a time in frame order: the parity (Policy::SampleEveryMover's frames), and the line's counts, since its
-		// last line.
+		// The producers run one at a time in frame order.
 		struct Parity
 		{
 			std::uint64_t checks = 0, entries = 0, variables = 0, differ = 0;
@@ -22,9 +20,7 @@ namespace DCLF::Features::TextureTransforms
 		std::uint64_t lineFrames = 0, lineEntries = 0, lineChanged = 0, lineRefused = 0, lineVariables = 0, lineVariablesChanged = 0;
 	}
 
-	// Every entry read again at the producer's end against what it sends. The frame's buffer stands all frame (the controllers write the
-	// other), so a difference is a write to the buffer the frame's shaders read, a write to a declared frame variable inside the window, or
-	// a sampling defect.
+	// The frame's buffer stands all frame, so a difference is a write to it, a frame variable written inside the window, or a sampling defect.
 	void CheckPoolParity(const Api::FrameValuePoolProducer& a_producer, const TextureTransformList* a_list, std::size_t a_count, std::size_t a_buffer,
 		const std::vector<TextureTransformRow>& a_out, const std::vector<const RE::BSShaderMaterial*>& a_materials)
 	{
@@ -56,8 +52,7 @@ namespace DCLF::Features::TextureTransforms
 		}
 	}
 
-	// The builder's (one build at a time): a list made from its previous one and the moved slots against the list made whole. A difference is
-	// a move the builder was not told of (a row's state written unmarked, a material slot keyed or let go with no log entry).
+	// A difference is a move the builder was not told of.
 	void CheckListParity(const TextureTransformList& a_built, const TextureTransformList& a_whole)
 	{
 		static std::uint64_t checks = 0, differ = 0;

@@ -1,5 +1,5 @@
-// The water family's render graph side: a client per view at the EngineDraws anchor, made once, whose pass draws a batch's latched draws
-// in the engine's order with CS's Water.hlsl built for ORG, with the engine's stencil state and reference per draw.
+// The water family's render graph side. One client per view at the EngineDraws anchor, made once, draws a batch's latched draws in
+// engine order with the engine's stencil state and reference per draw.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -38,10 +38,8 @@ namespace DCLF::Features::Water::WaterDraws
 	namespace
 	{
 		constexpr const char* kShader = "Water.hlsl";
-		// The most draws a run latches (WaterCapture's kMaxLatched); a batch with more draws in several runs.
 		constexpr std::uint32_t kMaxDraws = 64;
-		// The most draws one execution holds: a declared segment commits all of a view's runs of a frame into
-		// its one run (ClientDesc::repeats), each after the earlier ones' entries.
+		// A declared segment commits all of a view's runs of a frame into one run, so one execution holds several runs' draws.
 		constexpr std::uint32_t kExecutionDraws = 4 * kMaxDraws;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
@@ -59,26 +57,22 @@ namespace DCLF::Features::Water::WaterDraws
 
 		const std::array<std::int32_t, 3>& TargetListOf(const Shape& a_shape) { return a_shape.view == View::Mask ? kMaskTargets : kSurfaceTargets; }
 
-		/** @brief A client's state, which its pass shares. */
 		struct Client
 		{
 			Shape shape;
 			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
-			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
-			// the anchor that another client keeps draws nothing of this client's older run.
+			// Only this client's commit opens the gate, so a run another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<FrameAnchors::Texture, 3> colours;
 			FrameAnchors::Texture depth;
-			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Render thread writes, the host's thread reads.
+			// Written by the render thread, read by the host's thread.
 			std::shared_ptr<const Run> run;
-			// The run each commit drew, by the epoch's run: what the pass recorded at execution reads. It may record on the submission
-			// thread after the render thread published the next run.
+			// The run each commit drew. The pass may record on the submission thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
-			// The draws committed into the declared segment's run this frame so far (a later run of the same frame follows them), and its frame.
+			// The draws committed into the declared segment's run so far this frame.
 			std::shared_ptr<const Run> committed;
 			std::uint64_t committedFrame = UINT64_MAX;
 			bool pending = false;
@@ -100,7 +94,7 @@ namespace DCLF::Features::Water::WaterDraws
 			std::shared_ptr<const Client> client;
 		};
 
-		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
+		/** @brief Records a run's draws in engine order. */
 		class WaterPass final : public org::TypedRenderGraphPass<WaterPass, Frame, Bindings>
 		{
 		public:
@@ -119,15 +113,12 @@ namespace DCLF::Features::Water::WaterDraws
 					bindings.hasColours[i] = true;
 				}
 				bindings.depth = a_builder.DepthReadWrite(c.depth).View();
-				// The published inputs, each with the view whose index the run's header indices and the draws' latches carry. Every
-				// registered one is declared, read this frame or not, so a new Publish needs no new client.
+				// Every registered input is declared, read this frame or not, so a new Publish needs no new client.
 				bindings.inputs = client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
-			// The run's draws (their programs, targets, stencil references, counts and viewports) and the headers' indices.
-			// Recorded at execution, the pass reads the run its commit published when it records: the run is not part of it, so a
-			// ticket prepared ahead stays current when the draws change.
+			// The pass reads the run at execution, so the run is not part of the revision and a prepared ticket stays current.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				if (atExecution)
@@ -142,7 +133,7 @@ namespace DCLF::Features::Water::WaterDraws
 				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
 			}
 
-			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.client)
@@ -201,7 +192,6 @@ namespace DCLF::Features::Water::WaterDraws
 												  .constants = ShaderBindings::Data(block),
 												  .debugName = run.view == View::Mask ? "WaterMask" : "Water",
 												  .stencilReference = draw.stencilRef,
-												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
 												  .indirect = &c.gate->Latch(),
 												  .indirectOffset = c.gate->Offset(i) });
 				}
@@ -212,17 +202,14 @@ namespace DCLF::Features::Water::WaterDraws
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
-		/**
-		 * @brief The programs a BSWaterShader vertex descriptor CS loads can be drawn with: the family keys its programs by the vertex
-		 * descriptor (both stages take its defines), so every one is a program's, for the mask (the Stencil technique) and the surface alike.
-		 */
+		/** @brief The programs a water vertex descriptor can be drawn with. Programs are keyed by the vertex descriptor. */
 		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
 			if (!a_pixel)
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
 		}
 
-		/** @brief Everything here: the render thread's. */
+		/** @brief Render-thread state. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
@@ -237,13 +224,8 @@ namespace DCLF::Features::Water::WaterDraws
 		};
 
 		/**
-		 * @brief Every published id a_view's draws can read, listed when its client is made at setup. That is what the ported features
-		 * publish at the headers' registers (DCLF's registry), the engine depths CS binds at a header (the scene depth at t17, Wetness
-		 * Effects' precipitation occlusion at t70), and the engine targets the surface's material slots hold (water.md, "The shader": the
-		 * refraction copy at t1, the displacement at t2, the reflection cubemap at t3, the depth copy at t7, the flow at t8, the SSR
-		 * targets at t10 and t11), imported now so the first build declares them, and the flow map at t8 (the ImageSpace port's
-		 * published import). The mask reads no header and no slot (HeadersRead,
-		 * SlotRead). An export of an id not listed here is an inherent refusal, logged once with the id: add the id here.
+		 * @brief Every published id a_view's draws can read, listed at setup. The mask reads none.
+		 * Exporting an id not listed here is refused and logged once. Add the id here.
 		 */
 		void ListInputs(View a_view, Family::PublishedInputs& a_inputs)
 		{
@@ -258,9 +240,9 @@ namespace DCLF::Features::Water::WaterDraws
 					 Colour::kWATER_FLOW, Colour::kSSR, Colour::kSSR_RAW, Colour::kSSR_BLURRED0 })
 				a_inputs.AddEngine(colour);
 			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
-			// The refraction at t1: kMAIN's copy texture, which the engine fills from kMAIN before the water draws.
+			// The refraction at t1, kMAIN's copy, which the engine fills before the water draws.
 			a_inputs.AddEngineCopy(Colour::kMAIN);
-			// The flow map at t8, which the ImageSpace port's flow copies write (published at its Setup; not without the port).
+			// The flow map at t8, written by the ImageSpace port's flow copies. Absent without the port.
 			a_inputs.Add(::RenderGraph::Engine::ImageSpace::kFlowMapId);
 		}
 
@@ -270,7 +252,7 @@ namespace DCLF::Features::Water::WaterDraws
 			return state;
 		}
 
-		/** @brief The client of a_shape's view, registered with the anchor for a_shape. Null, logged, when a target cannot be imported. */
+		/** @brief Makes the client for a_shape's view. Null, logged, when a target cannot be imported. */
 		std::shared_ptr<Client> MakeClient(const Shape& a_shape)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -313,7 +295,6 @@ namespace DCLF::Features::Water::WaterDraws
 				.make = [client]() -> std::shared_ptr<org::RenderPass> {
 					return std::make_shared<WaterPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
-				// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
 				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
@@ -321,8 +302,7 @@ namespace DCLF::Features::Water::WaterDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				// A later tap of a declared segment's run this frame (a batch of more than kMaxDraws draws is several runs): its draws follow
-				// the ones committed before, and the pass records them all.
+				// A batch longer than kMaxDraws is several runs in a frame. Later runs follow the draws committed before.
 				const auto frame = ::RenderGraph::Frame::Driver::Current().frame;
 				std::uint32_t first = 0;
 				if (run && FrameAnchors::TapInstance() > 0 && client->committedFrame == frame && client->committed) {
@@ -344,7 +324,6 @@ namespace DCLF::Features::Water::WaterDraws
 					client->committed = run;
 				}
 				client->committedFrame = frame;
-				// For the pass recorded at execution, by this run (null: nothing drawn).
 				client->runs.Store(latchRun, client->committed);
 				if (!run)
 					return;
@@ -355,14 +334,12 @@ namespace DCLF::Features::Water::WaterDraws
 						client->gate->OpenDraw(first + i, draw.indexCount, 1);
 				}
 			};
-			// In a declared segment both views may commit more than once into its run (above).
 			desc.repeats = true;
 			desc.executed = [client](const FrameAnchors::Point&) {
 				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 					logger::info("[DCLF] water: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			// Passes of the deferred+water stage, or of the sun stage under water, only.
 			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
@@ -374,7 +351,7 @@ namespace DCLF::Features::Water::WaterDraws
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: everything of its draws but the latched values and counts, and the headers' indices. */
+		/** @brief What a run's recording depends on: everything but the latched values and counts. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -425,7 +402,6 @@ namespace DCLF::Features::Water::WaterDraws
 			logger::warn("[DCLF] water: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the water stays the engine's");
 			return true;
 		}
-		// A client is made once for its view. Its targets and published inputs are fixed lists, so no later batch needs another.
 		for (const auto view : { View::Mask, View::Surface })
 			if (TakesView(view))
 				state.clients[static_cast<std::size_t>(view)] = MakeClient({ .view = view });
@@ -440,7 +416,7 @@ namespace DCLF::Features::Water::WaterDraws
 		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
 		if (!client)
 			return false;
-		// The water mask and above water the surface are the deferred+water stage's; under water the surface is the sun stage's.
+		// The mask and the above-water surface are the deferred+water stage's. Under water the surface is the sun stage's.
 		return Family::HeldForBatch("water", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Deferred));
 	}
 

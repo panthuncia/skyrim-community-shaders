@@ -1,8 +1,7 @@
 #pragma once
 
-// Fades' render side: its scene resources (FadeScene: FadeStateCS's buffers, the root programs, the write-back ring, held with the scene's
-// tables), the write-back's host side, and the parts RegisterRender registers (FadeRender.cpp), each in its own source. Included by the
-// feature's sources that use them.
+// Fades' render side. FadeScene holds the per-scene GPU resources for fade roots.
+// FadeWriteBack carries fade events read back from the GPU to the main thread, which writes them into engine nodes.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
@@ -35,13 +34,12 @@ namespace DCLF
 namespace DCLF::Features::Fades
 {
 	struct FadeWriteBack;
-	/** @brief Any thread: a write-back going away is no longer the census's (FadeWriteBack.cpp). */
+	/** @brief Drops a dying write-back from the census. Any thread. */
 	void ForgetWriteBackCensus(const FadeWriteBack* a_writeBack);
 
 	/**
-	 * @brief The fade write-back's host side (dclf-architecture.md, "The fade write-back"): its events handed to the write-back task
-	 * in batches through a lock-free stack. A frame whose epoch did not run is counted missed: FadeStateCS did not run either, so
-	 * nothing is lost.
+	 * @brief Host side of the fade write-back. Event batches reach the write-back task through a lock-free stack.
+	 * A frame whose epoch did not run loses nothing, because FadeStateCS did not run either.
 	 */
 	struct FadeWriteBack : Draws::HostEventRing
 	{
@@ -50,10 +48,10 @@ namespace DCLF::Features::Fades
 		struct Batch
 		{
 			std::vector<FadeEvent> events;
-			std::uint32_t frame = 0;  // the scene frame whose FadeStateCS appended them (the list's header)
+			std::uint32_t frame = 0;  // scene frame whose FadeStateCS appended these events
 			Batch* next = nullptr;
 		};
-		// Render thread: each readback range's last arm.
+		// Render thread only.
 		struct Armed
 		{
 			bool armed = false;
@@ -61,39 +59,34 @@ namespace DCLF::Features::Fades
 		};
 		std::vector<Armed> armed;
 		std::atomic<Batch*> batches{ nullptr };
-		// The write-back task's alone (one at a time, never joined): per root slot the scene frame of the event last taken, so an
-		// older one (a list read late) is not written over it.
+		// Owned by the write-back task. Per root slot, the scene frame of the last applied event, so a late older list cannot overwrite it.
 		std::vector<std::uint32_t> appliedFrame;
 		std::atomic<bool> running{ false };
 		/**
-		 * @brief What a task found to write: the stores in event order, and the tables they were judged against. Their nodes are the
-		 * installed publication's then, alive while the stores hold its retirement node (retirement), until the main thread makes them
-		 * (WriteFadeStores). The task touches no engine memory.
+		 * @brief Stores a task judged, in event order, for the main thread to write. The task touches no engine memory.
+		 * The retirement handle keeps the nodes alive until WriteFadeStores runs.
 		 */
 		struct Stores
 		{
 			struct Store
 			{
 				void* node = nullptr;
-				std::uint32_t flags = 0;  // the fade bits (kFadeFlagMask) only
+				std::uint32_t flags = 0;  // fade bits only (kFadeFlagMask)
 				float fade = 0.0f;
-				// A leaf or tree root's LOD state (+0x152, +0x153, +0x14C), written with the fade (lod false: a plain fade root's
-				// levels are the node's own, not written).
+				// LOD state of a leaf or tree root at +0x152, +0x153, +0x14C. Plain fade roots keep their own levels.
 				bool lod = false;
 				std::uint32_t levels = 0;
 				float blend = 0.0f;
 			};
-			std::uint64_t publication = 0;          // the oldest publication among the stores' tables
-			std::shared_ptr<const void> retirement;  // the oldest stores' publication's retirement node (it holds every newer one)
+			std::uint64_t publication = 0;          // oldest publication among the stores' tables
+			std::shared_ptr<const void> retirement;  // the oldest publication's retirement node, which also holds every newer one
 			std::shared_ptr<const SceneTables> tables;
 			std::vector<Store> stores;
 		};
 		std::atomic<Stores*> ready{ nullptr };
-		// Since the last report; notWritten: stores left because DCLF does not write the root (the engine's cull steps it: one writer).
+		// Counters since the last report. notWritten counts roots the engine's cull owns, so DCLF must not also write them.
 		std::atomic<std::uint64_t> applied{ 0 }, stale{ 0 }, busy{ 0 }, storeNs{ 0 }, notWritten{ 0 }, dropped{ 0 };
-		// Since the last report: frames harvested (and those with events), events.
 		std::atomic<std::uint64_t> harvested{ 0 }, harvestedWithEvents{ 0 }, events{ 0 };
-		// For the diagnostic capture: batches pushed and not yet taken by a task, and the stores waiting for Main::Update's entry.
 		std::atomic<std::uint64_t> pendingBatches{ 0 }, readyStores{ 0 };
 
 		void Push(Batch* a_batch)
@@ -115,43 +108,35 @@ namespace DCLF::Features::Fades
 		static std::uint64_t BytesFor(std::uint32_t a_events) { return (kFadeEventHeaderWords + std::uint64_t(a_events) * kFadeEventWords) * sizeof(std::uint32_t); }
 	};
 
-	/**
-	 * @brief Fades' scene resources (Api::SceneResources "fade roots"), made with the scene's tables when the fade state program loads:
-	 * FadeStateCS's buffers by root slot, its frame row and log, the root programs and animation stamps with their mirrors, the published
-	 * states, and the write-back ring. Core's cull reads them at its cull bindings (Api::CullBindingSlot's Root* slots), its draws at the
-	 * frame bindings t120/t119.
-	 */
+	/** @brief Fades' per-scene resources, made with the scene's tables when the fade state program loads. */
 	struct FadeScene
 	{
-		// Fade roots (FadeStateCS): static rows by root slot, GPU state rows, the frame's inputs, and CS_DCLF_FADE_PARITY's log.
 		Draws::Versioned fadeRoots, fadeStates;
 		std::shared_ptr<org::Buffer> fadeFrameBuffer, fadeLog;
-		Draws::Versioned fadeRootPrograms;  // per root slot: its program (Api::MainCullInputContribution::judge)
-		Draws::Versioned fadeAnimated;      // per root slot: the scene frame whose animation batch updated it
+		Draws::Versioned fadeRootPrograms;
+		Draws::Versioned fadeAnimated;  // per root slot, the scene frame whose animation batch last updated it
 		org::services::FilledVersion fadeAnimatedFilled;
-		// CPU mirrors: only differing runs go up.
+		// CPU mirrors. Only runs that differ are uploaded.
 		std::vector<std::uint32_t> fadeAnimatedMirror;
-		std::vector<std::uint32_t> fadeAnimatedCounts;  // per root slot: the batch's updates while it is counted, else 0
+		std::vector<std::uint32_t> fadeAnimatedCounts;
 		std::vector<std::uint32_t> fadeRootProgramsMirror;
-		org::services::FilledContents<> fadeRootProgramsFilled;  // the root and program versions it holds
-		// What the programs mirror was judged against: its key (as filled), the roots' content epoch and the input's programsVersion.
+		org::services::FilledContents<> fadeRootProgramsFilled;
+		// Inputs the programs mirror was last judged against.
 		struct ProgramsMirrorOf
 		{
 			std::uint64_t key = 0, rootsEpoch = 0, programs = 0;
 		} fadeRootProgramsMirrorOf;
-		// The judge's batch (Api::RootProgramsJudge), kept between commits: the roots judged, the questions (those with a node) and the
-		// answers.
+		// Kept between commits to reuse the allocations.
 		struct RootProgramsBatch
 		{
 			std::vector<std::uint32_t> roots, asked, programs;
 		} fadeRootProgramsBatch;
-		// FadeStateCS's published states per frame parity; builds read the previous frame's. Every version is zero-filled (builds
-		// then take the static row's state).
+		// Indexed by frame parity. Every version is zero-filled, so builds fall back to the static row's state.
 		std::array<Draws::Versioned, 2> fadeStatesOut;
-		/** @brief The published states a frame's builds read (the previous frame's). */
+		/** @brief The states a frame's builds read, which are the previous frame's. */
 		const Draws::Versioned& FadeStatesRead(std::uint32_t a_frame) const { return fadeStatesOut[(a_frame + 1) & 1]; }
-		org::services::FilledContents<> fadeRootsFilled;  // the root rows' content epoch (the root states' family's journal)
-		/** @brief The root rows' content epoch the fadeRoots version a_sealed names holds (~0: none). */
+		org::services::FilledContents<> fadeRootsFilled;
+		/** @brief Content epoch of the fadeRoots version named in a_sealed, or ~0 if none. */
 		std::uint64_t FadeRootsContentEpoch(const Draws::NamedVersions& a_sealed) const { return fadeRootsFilled.Since(a_sealed.Of(fadeRoots)).value_or(~0ull); }
 		std::uint32_t fadeRootCount = 0;
 		std::uint32_t fadeFrameNumber = 0;  // the scene frame of fadeFrame
@@ -160,91 +145,70 @@ namespace DCLF::Features::Fades
 		std::shared_ptr<const ComputeProgram> fadeState;
 		std::shared_ptr<const ComputeProgram> portalQueries;
 		std::shared_ptr<Portals::Batch> portalBatch;
-		// Fade write-back: event list (count zeroed by every depth commit), each root's last reported generation and milestone
-		// (every version zero-filled: no root reported yet, as a zero generation is never a listing's).
+		// Every depth commit zeroes the event count. fadeReported is zero-filled, and a zero generation never appears in a listing.
 		Draws::Versioned fadeEvents, fadeReported;
 		std::shared_ptr<FadeWriteBack> fadeWriteBack;
 	};
 
-	/** @brief The live write-back's state for the diagnostic capture. The counters are those since the last report; nothing is reset. */
+	/** @brief Write-back state for the diagnostic capture. Counters run since the last report. */
 	struct WriteBackCensus
 	{
-		bool present = false;  // false: no write-back was kicked yet, or its scene went away
+		bool present = false;  // false if no write-back was kicked yet or its scene went away
 		std::uint64_t applied = 0, stale = 0, busy = 0, notWritten = 0, dropped = 0, harvested = 0, harvestedWithEvents = 0, events = 0;
 		std::uint64_t overflowed = 0, missed = 0, setsAdded = 0;
 		std::uint64_t pendingBatches = 0, readyStores = 0;
 		std::size_t appliedFrameSize = 0;
-		// Per root slot: the scene frame of the last event the task judged into a store (0: none). Filled only when asked.
-		std::vector<std::uint32_t> appliedFrame;
+		std::vector<std::uint32_t> appliedFrame;  // filled only when asked
 	};
-	/**
-	 * @brief Any thread: the write-back the last kick ran, read under the census lock (the write-back task holds it while it judges, so
-	 * its per-root frames are copied whole). a_frames false skips the per-root copy. FadeWriteBack.cpp.
-	 */
+	/** @brief Reads the last kicked write-back under the census lock. Any thread. */
 	WriteBackCensus PeekWriteBackCensus(bool a_frames);
 
-	/** @brief The seed copies waiting for a kick (render thread's) and those a refused lease left (the producer's), as last stored. */
+	/** @brief Seed copies waiting for a kick, and those a refused lease left behind. */
 	struct SeedCounts
 	{
 		std::size_t unsent = 0, owed = 0;
 	};
-	/** @brief Any thread: SeedCounts. FadeSeeds.cpp. */
+	/** @brief Any thread. */
 	SeedCounts PeekSeedCounts();
 
-	/** @brief Fades' scene resources in a_scene (null: none made). FadeResources.cpp. */
+	/** @brief Fades' resources in a_scene, or null if none were made. */
 	FadeScene* SceneOf(const Draws::SceneBuffers& a_scene);
-	/** @brief SceneOf, sharing the state's ownership (a pass holds it). */
+	/** @brief Like SceneOf, but shares ownership so a pass can hold it. */
 	std::shared_ptr<FadeScene> SharedSceneOf(const Draws::SceneBuffers& a_scene);
 
 	/**
-	 * @brief Render thread: the descriptor of the fade seeds the current frame reads (StructuredBuffer<FadeRootStatic>, two rows a root
-	 * slot: FadeSeedRow; 0 before the first frame): the "fade-seeds" pool's backing (its readers take it as the cull binding RootSeeds).
-	 * A root's seed is its node as the frame's start had it (its bytes copied at Kick, StaticOf on the copy by the producer). FadeSeeds.cpp.
+	 * @brief Render thread. Descriptor of the fade seeds this frame reads, two rows per root slot, or 0 before the first frame.
+	 * A seed is the root's node as it was at the start of the frame.
 	 */
 	std::uint32_t SeedsIndex();
-	/**
-	 * @brief FrameValues' producer, a pool sampled after the seeds' (the CPU fade stage): the seed rows this producer just made. Producer
-	 * thread only. FadeSeeds.cpp.
-	 */
+	/** @brief The seed rows this producer just made. Producer thread only. */
 	const std::vector<FadeRootStatic>& ProducerSeeds();
-	/** @brief Render thread: the seed rows as the frame's producer left them, once it is done; a_wait (diagnostics frames): waits for it. */
+	/** @brief Render thread. The frame's seed rows once the producer is done. a_wait blocks until then. */
 	const std::vector<FadeRootStatic>* SeedsIfDone(bool a_wait = false);
 
 	/**
-	 * @brief Render thread, the frame's start (the root states' kick: Extensions::RootStatesKick): hands the fade events read back since the
-	 * last kick to a task on DCLF's executor that judges them into the stores WriteFadeStores makes (dclf-architecture.md, "The fade
-	 * write-back"). Without it a stood-in root's node stays as the engine last wrote it for its readers (tree LOD crossfade, occlusion
-	 * cull, animation gate). FadeWriteBack.cpp.
+	 * @brief Render thread, at the start of the frame. Hands fade events read back since the last kick to a task for WriteFadeStores.
+	 * Without it, engine readers such as tree LOD crossfade and the occlusion cull would see stale node fades.
 	 */
 	void KickFadeWriteBack();
-	/** @brief Render thread (DrainAsync's root states' wait; never per frame): waits for the fade write-back task, drops what it found. */
+	/** @brief Render thread, never per frame. Waits for the write-back task and drops what it found. */
 	void WaitFadeWriteBack();
 	/**
-	 * @brief Main thread at Main::Update's entry (no list cull, cell animation or animation job runs): makes the last task's stores on the
-	 * roots DCLF writes (a_written: FadeWrittenByDclf; other roots are left to the engine's cull). a_live false (DCLF does not run): dropped.
+	 * @brief Main thread, at Main::Update's entry while no cull or animation job runs. Writes the task's stores to roots DCLF owns.
+	 * Roots a_written rejects are left to the engine's cull.
 	 */
 	void WriteFadeStores(bool a_live, const std::function<bool(const void*)>& a_written);
 
-	// RegisterRender's parts (FadeRender.cpp, in its order), each in the source of its code:
-	/** @brief The seeds: the "fade-seeds" frame-value pool (the fade roots component's seeds). FadeSeeds.cpp. */
+	// RegisterRender's parts, in the order FadeRender.cpp calls them.
 	void RegisterSeeds(Api::InstallContext& a_context);
-	/** @brief The frame's object rows (FadePixelRows.cpp): their pool, their frame binding (t116) and their passes. */
 	void RegisterPixelRows(Api::InstallContext& a_context);
-	/** @brief The scene resources "fade roots" (setup, graph, requirements, fit, sealed). FadeResources.cpp. */
 	void RegisterResources(Api::InstallContext& a_context);
-	/** @brief The depth commit hook: the root rows and FadeStateCS's frame inputs, the write-back armed, the roots' programs. FadeCommit.cpp. */
 	void RegisterCommit(Api::InstallContext& a_context);
-	/** @brief The passes at the depth epoch's cull state: the fade state, then its events' copy to the host. FadeStage.cpp. */
 	void RegisterPasses(Api::InstallContext& a_context);
-	/**
-	 * @brief The CPU-driven pipeline's fade stage (dclf-architecture.md, "The CPU-driven pipeline"): the "fade-states-cpu" frame-value pool,
-	 * after the seeds'. On a frame Core's KickCpuFrameState armed, its producer steps every root on the CPU (FadeState's port, FadeStateCS's
-	 * order), sends the states into the pool's backing (the fade states the frame's draws and culls bind), pushes the milestones to the
-	 * write-back, and publishes the frame's Direct::CullFrame. FadeCpuStage.cpp.
-	 */
+	/** @brief The CPU pipeline's fade stage. It steps every root on the CPU in FadeStateCS's order. */
 	void RegisterCpuStage(Api::InstallContext& a_context);
-	/** @brief Render thread: the descriptor of the CPU stage's states the current frame reads (0: none this frame). FadeCpuStage.cpp. */
+	/** @brief Render thread. Descriptor of the CPU stage's states for this frame, or 0 if none. */
 	std::uint32_t CpuStatesIndex();
-	/** @brief Any thread: the write-back's batches made on the CPU (the CPU stage's events), as the harvest pushes the GPU's. FadeWriteBack.cpp. */
+	/** @brief Pushes CPU stage events to the write-back the same way the GPU harvest does. Any thread. */
 	void PostCpuFadeEvents(FadeWriteBack& a_writeBack, std::uint32_t a_frame, std::vector<FadeEvent> a_events);
 }

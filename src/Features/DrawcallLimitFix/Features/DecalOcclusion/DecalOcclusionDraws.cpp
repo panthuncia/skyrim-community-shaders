@@ -1,8 +1,7 @@
-// The decal occlusion family's render graph side: one client at the DecalQueries anchor, made once at setup, whose pass draws a test's
-// latched draws into kDECAL_OCCLUSION with RenderGraph/DecalOcclusion.hlsl, each counted by an ORG occlusion query of the run's range.
-// The engine ring slot the test began answers the sum (RenderGraph/Engine/Queries).
-// Native mode: the start stage holds the anchor wholly. The client has kInstances instances: the stage run's k-th test is instance k, with
-// its own gate entries, latch regions and part of the query range, recorded at execution from the run's slot.
+// The render graph side of decal occlusion: one client at the DecalQueries anchor draws each test's latched shapes
+// into kDECAL_OCCLUSION and counts them with occlusion queries.
+// In native mode the start stage runs several tests. The k-th test uses instance k, with its own gate entries,
+// latch region and share of the query range.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -47,27 +46,26 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		constexpr auto kAnchor = FrameAnchors::Anchor::DecalQueries;
 		constexpr auto kDepthTarget = RE::RENDER_TARGETS_DEPTHSTENCIL::kDECAL_OCCLUSION;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
-		// The tests one start stage run draws: the frame's decals waiting to be placed, a tap each. A test past them is a tap error.
+		// Tests per start stage run, one tap each.
 		constexpr std::uint32_t kInstances = 4;
 		static_assert(kInstances * kMaxDraws <= 32, "a run's begun queries are one bit each, and a query ring holds at most 32 a run");
 
-		/** @brief DecalOcclusion.hlsl's push block (DECAL_OCCLUSION_RESOURCES): the draw's latch. */
+		// DecalOcclusion.hlsl's push block (DECAL_OCCLUSION_RESOURCES).
 		struct DrawBlock
 		{
 			ShaderBindings::Latch draw;
 		};
 
-		/** @brief The client's state, which its pass shares. */
 		struct Client
 		{
 			std::shared_ptr<const RasterProgram> program;
 			std::shared_ptr<org::LatchBlock> latch;
-			// A draw's index count, opened by the commit for its run only.
+			// Opened by the commit for its own run only.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			FrameAnchors::Texture depth;  // kDECAL_OCCLUSION, imported at the registration
-			std::uint32_t width = 0, height = 0;                  // its size: a draw's render area is clamped to it
+			FrameAnchors::Texture depth;  // kDECAL_OCCLUSION
+			std::uint32_t width = 0, height = 0;                  // Render areas are clamped to this.
 			std::shared_ptr<Queries::QueryRing> queries;
-			// The test the next tap commits (render thread), and each instance's run by the run that records it.
+			// run is the test the next tap commits. Render thread.
 			std::shared_ptr<const Run> run;
 			std::array<::RenderGraph::RunSlots<Run>, kInstances> runs;
 			bool pending = false;
@@ -77,7 +75,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		struct Bindings
 		{
 			org::DeclaredViewToken depth{};
-			std::size_t readbacks = 0;  // the query ring's readbacks declared (QueryRing::Resolve)
+			std::size_t readbacks = 0;
 		};
 
 		struct Frame
@@ -86,11 +84,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			std::uint32_t instance = 0;
 		};
 
-		/**
-		 * @brief One instance's test: its draws, each in a render pass of its own on kDECAL_OCCLUSION (RasterProgram::Draw), counted by its
-		 * query of the instance's part of the run's range: that part reset first, resolved after (every query available). Recorded at
-		 * execution from the instance's run.
-		 */
+		// Each draw gets its own render pass and query. The instance's queries are reset first and resolved after.
 		class OcclusionPass final : public org::TypedRenderGraphPass<OcclusionPass, Frame, Bindings>
 		{
 		public:
@@ -101,7 +95,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			{
 				Bindings bindings{};
 				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
-				// The readbacks the queries resolve into: copy destinations, so the graph orders and tracks the resolve.
+				// Declared as copy destinations so the graph orders and tracks the resolve.
 				if (client->queries)
 					for (const auto& readback : client->queries->Readbacks()) {
 						a_builder.CopyDestination(readback);
@@ -110,12 +104,12 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 				return bindings;
 			}
 
-			// The run's draws are read when the pass records, at execution: only the instance is part of the recording.
+			// The draws are read at execution, so only the instance belongs in the revision.
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(instance); }
 
 			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { client, instance }; }
 
-			/** @brief A run that did not test with this instance records only the pass's barriers, and touches none of its queries. */
+			// An unused instance records only the barriers and touches none of its queries.
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
 				const auto run = a_frame.client ? a_frame.client->runs[a_frame.instance].Find(a_recording.Run()) : nullptr;
@@ -142,14 +136,12 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					const std::uint32_t entry = FrameAnchors::InstanceEntry(a_frame.instance, kMaxDraws, i);
 					DrawBlock block{};
 					block.draw = ShaderBindings::LatchOf(*c.latch, latchRun, entry * kDrawStride);
-					// The decal's clear, at the test's first draw, as the engine's target change asks for it.
 					RasterProgram::Depth depth{};
 					depth.view = &a_bindings.depth;
 					depth.readOnly = false;
 					depth.load = i == 0 && run.clear ? rhi::LoadOp::Clear : rhi::LoadOp::Load;
 					depth.clear = 1.0f;
-					// The shadow state's viewport, inside the target (a render area past it is invalid). An empty one draws nothing, and its
-					// query is begun and ended empty by Resolve.
+					// Clamp to the target, because a render area past it is invalid. An empty one draws nothing and Resolve still closes its query.
 					const auto x = (std::min)(latched.viewport.rect[0], c.width);
 					const auto y = (std::min)(latched.viewport.rect[1], c.height);
 					RasterProgram::DrawDesc draw{};
@@ -162,7 +154,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 						.maxDepth = latched.viewport.depthRange[1] };
 					draw.constants = ShaderBindings::Data(block);
 					draw.debugName = "DecalOcclusion";
-					// The count comes from the draw's gate entry, which the client's commit opens for this run only.
 					draw.indirect = &c.gate->Latch();
 					draw.indirectOffset = c.gate->Offset(entry);
 					draw.occlusionPool = queries.Pool(latchRun);
@@ -178,7 +169,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			std::uint32_t instance = 0;
 		};
 
-		/** @brief Everything here: the render thread's. */
+		// Render thread.
 		struct DrawsState
 		{
 			std::shared_ptr<Client> client;
@@ -194,7 +185,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			return state;
 		}
 
-		/** @brief kDECAL_OCCLUSION's depth format, from its first view, and its size (Unknown when it has no view). */
 		rhi::Format DepthTarget(std::uint32_t& a_width, std::uint32_t& a_height)
 		{
 			a_width = a_height = 0;
@@ -223,7 +213,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			return rhi::helpers::ToRHI(desc.Format);
 		}
 
-		/** @brief The client, registered with its anchor. Null, logged, when its program, target, gate or queries cannot be made. */
 		std::shared_ptr<Client> MakeClient()
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -238,8 +227,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			auto client = std::make_shared<Client>();
 			client->width = width;
 			client->height = height;
-			// Depth only: the position's depth, tested and written as the engine's silhouette pass does, both faces drawn (only the
-			// presence of samples matters to the engine's read).
+			// Depth only, both faces, like the engine's silhouette pass. Only whether samples pass matters.
 			RasterProgram::Desc desc{};
 			desc.pixelSource = kShader;
 			desc.pixelEntry = L"PSMain";
@@ -269,10 +257,10 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 				.order = 0,
 				.kind = FrameAnchors::PassKind::Render,
 				.makeInstance = [client](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionPass>(client, a_instance); },
-				// The test's draws are known after its commit: recorded then from the instance's run.
+				// The draws are only known after the commit.
 				.atExecution = true });
 			clientDesc.maxInstances = kInstances;
-			// Every instance is declared: how many decals the engine tests is its late decision, so the instances it does not test stay closed.
+			// Declare every instance, because the engine decides late how many decals it tests. Unused ones stay closed.
 			clientDesc.instances = [] { return kInstances; };
 			clientDesc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
@@ -280,7 +268,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				// The tap's instance: the k-th test of the start stage's run (0 on an anchor's own epoch).
+				// 0 on the anchor's own epoch.
 				const std::uint32_t instance = (std::min)(FrameAnchors::TapInstance(), kInstances - 1);
 				client->runs[instance].Store(latchRun, run);
 				if (!run)
@@ -293,7 +281,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					client->gate->OpenDraw(entry, draw.indexCount, 1);
 					slots.push_back(run->query);
 				}
-				// Every draw counts the test's ring slot, which answers their sum. A new readback is declared from the next build.
+				// Every draw counts into the test's ring slot, which answers the sum. A new readback applies from the next build.
 				if (client->queries->Commit(latchRun, slots, instance * kMaxDraws))
 					FrameAnchors::Refresh(kClientId);
 			};
@@ -311,7 +299,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: everything of its draws but the latched values. */
+		// Everything about the draws except the latched values.
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -370,7 +358,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		const auto& state = GetState();
 		if (!state.client)
 			return false;
-		// The decal tests are the start stage's first step.
 		return Family::HeldForBatch("decal occlusion", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Start), kAnchor);
 	}
 

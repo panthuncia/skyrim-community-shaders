@@ -9,70 +9,56 @@
 namespace DCLF
 {
 	/**
-	 * @brief The fade roots' OnVisible for the main camera, ported from the engine (AE 1.6.1170; skyrim-engine-notes.md,
-	 * "Fade state: inputs, outputs and their other readers"): BSFadeNode::OnVisible (0x141479f50), BSLeafAnimNode's
-	 * (0x14147c9c0), BSTreeNode's (0x14147d3c0) and what they call, the fade value (FUN_14147b110), the fade update
-	 * (FUN_14147a160) and the LOD step (FUN_14147a430). Instruction for instruction (the operations' order, MINSS / MAXSS
-	 * and the comparisons' unordered cases), so that the port, FadeStateCS.hlsl and the engine agree to the bit.
+	 * @brief A CPU port of the engine's fade OnVisible for BSFadeNode, BSLeafAnimNode and BSTreeNode (AE 1.6.1170).
+	 * It follows the engine instruction for instruction, including MINSS/MAXSS and unordered comparisons,
+	 * so the port, FadeStateCS.hlsl and the engine agree to the bit.
 	 *
-	 * The state is the node's fields (FadeNodeState); the inputs are the root's static row and the frame (FadeFrame). The
-	 * one value the port does not compute is the LOD step's distance scale (logf / powf of the bound radius), which the
-	 * static row carries from the CPU's CRT (FadeRootStatic::lodScale).
+	 * The one value not computed here is the LOD step's distance scale, which uses logf and powf.
+	 * The static row carries it from the CPU's CRT as FadeRootStatic::lodScale.
 	 */
 	namespace FadeState
 	{
-		/**
-		 * @brief The root's update for a frame its bound is in view (Process1's test passed): the tree height test, then the
-		 * OnVisible of its class. Returns the verdict bits (kFadeVerdict*), kFadeVerdictInView included.
-		 */
+		/** @brief Update for a frame where the root's bound is in view. Returns kFadeVerdict* bits. */
 		std::uint32_t OnVisible(FadeNodeState& a_state, const FadeRootStatic& a_root, const float a_centre[3], const FadeFrame& a_frame);
-		/** @brief The animation job's update (FUN_1402cff60's FUN_14147a160) with the frame's anim* inputs: FadeStateCS's AnimatedUpdate. */
+		/** @brief The animation job's fade update, repeated a_updates times. */
 		void AnimatedUpdate(FadeNodeState& a_state, const FadeRootStatic& a_root, const float a_centre[3], const FadeFrame& a_frame, std::uint32_t a_updates);
 
-		/** @brief Render thread: this frame's inputs, from the main camera (null: none this frame) and the engine's globals. */
+		/** @brief Render thread. a_camera may be null. */
 		FadeFrame SampleFrame(const RE::NiCamera* a_camera);
 
 		/**
-		 * @brief Render thread, the frame driver's frame start (Api::RootStatesContribution::frameStart: after Main::Draw's camera setup
-		 * and the camera cut, before the list build and culls, with the primary cull installed): FadeEye and TreeHeightTest from the main
-		 * camera, so neither depends on the engine's list processes running.
+		 * @brief Render thread, at frame start after the camera setup and before the culls.
+		 * Measures from the main camera so the results do not depend on the engine's list processes running.
 		 */
 		void BeginFrame();
-		/**
-		 * @brief The main camera as BSFadeNode::OnVisible measures from it: position and LOD factor (NiCamera +0x184), for
-		 * kObjectFadeTest. Zero when no camera was seen.
-		 */
+		/** @brief Main camera position and LOD factor (NiCamera +0x184). Zero when no camera was seen. */
 		std::array<float, 4> FadeEye();
-		/** @brief BSTreeNode::OnVisible's height test for kObjectHeightTest: base and limit (+infinity: off). */
+		/** @brief Tree height test base and limit. The limit is +infinity when off. */
 		std::array<float, 2> TreeHeightTest();
-		/** @brief Render thread, the depth commit (Api::RootStatesContribution::latchGlobals): FadeEye and TreeHeightTest into the latch's words. */
+		/** @brief Render thread, at the depth commit. */
 		void LatchGlobals(float (&a_eye)[4], float (&a_treeHeight)[2]);
-		/** @brief Render thread: the main camera BeginFrame measures from (the world scene graph's; null: none). The CPU fade stage's frustum. */
+		/** @brief Render thread. Null when there is none. */
 		const RE::NiCamera* MainCamera();
 
-		/** @brief The node's fade fields as it holds them. */
 		FadeNodeState ReadNode(const RE::NiAVObject& a_node);
 		/**
-		 * @brief The state onto the node (render thread, while nothing reads the fade nodes): the fade bit of the flags atomically
-		 * (other writers own the other bits), the rest plainly. Returns whether the fade or the LOD level changed, which the fade
-		 * watch is told of.
+		 * @brief Render thread, while nothing reads the fade nodes. The fade flag bit is set atomically because other writers own the other bits.
+		 * Returns whether the fade or the LOD level changed.
 		 */
 		bool WriteNode(RE::NiAVObject& a_node, const FadeNodeState& a_state);
-		/** @brief The bytes a node of the plan holds (BSFadeNode, BSLeafAnimNode, BSTreeNode), for a copy the engine's functions may run on. */
+		/** @brief Size of a node of this plan, for making a copy the engine's functions can run on. */
 		std::size_t NodeBytes(std::uint32_t a_plan);
 		inline constexpr std::size_t kMaxNodeBytes = 0x1C0;
-		/** @brief The plan (kFadeRoot*) by the node's OnVisible: BSFadeNode's, BSLeafAnimNode's, BSTreeNode's, or another. */
+		/** @brief The plan, chosen by which OnVisible the node's vtable points at. */
 		std::uint32_t PlanOf(const RE::NiAVObject& a_node);
-		/** @brief The node's static row (its inputs, and its state as `initial`), for listing it. Generation and object left 0. */
+		/** @brief Generation and object are left 0. */
 		FadeRootStatic StaticOf(const RE::NiAVObject& a_node);
-		/** @brief kFadeRootTreeLod: a tree whose LOD switch selects past child 0 (BSTreeNode::OnVisible's LOD fix-up). */
+		/** @brief Whether a tree's LOD switch selects past child 0. */
 		bool TreeLodSelected(const RE::NiAVObject& a_node);
-		// The tree's LOD switch itself is an engine read: Engine::TreeLodSwitch (Core/Engine/EngineAccess.h).
 
 		/**
-		 * @brief CS_DCLF_FADE_PARITY, render thread, before the list jobs: the port against the engine's own functions, run on
-		 * a copy of the node (they read and write only the node and the globals) with the fade watch muted. The node itself is
-		 * not touched. Counts into the report; a_first takes the first difference.
+		 * @brief CS_DCLF_FADE_PARITY. Runs the port and the engine's functions on a copy of the node and compares.
+		 * Render thread, before the list jobs. The real node is not touched.
 		 */
 		struct PortCheck
 		{
@@ -80,7 +66,7 @@ namespace DCLF
 			std::string first;
 		};
 		void CheckPort(const RE::NiAVObject& a_node, const RE::NiCamera& a_camera, PortCheck& a_check);
-		/** @brief The fields that differ between two states (empty when none). */
+		/** @brief Empty when the states match. */
 		std::string Differences(const FadeNodeState& a_expected, const FadeNodeState& a_actual);
 	}
 }

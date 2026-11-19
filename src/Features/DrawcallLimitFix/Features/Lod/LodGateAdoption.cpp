@@ -1,5 +1,4 @@
-// The LOD gates' publication and adoption: the flips' publication (scene lane) and their release by the frame installing them (render
-// thread).
+// Publishing flips on the scene lane, and releasing them on the render thread when a frame installs them.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
@@ -19,7 +18,7 @@ namespace DCLF::Features::Lod::Gates
 
 	void Published([[maybe_unused]] const Api::CoordinatorComponentContext& a_context)
 	{
-		// Before the deltas are taken: the observers read the flips pending (the component's deltas pending, Flips; none, nothing to check).
+		// Runs before the deltas are taken, so the observers can still read the pending flips.
 		Diagnostics::Notify(GateFlipsPublished{});
 	}
 
@@ -29,8 +28,7 @@ namespace DCLF::Features::Lod::Gates
 		if (a_context.deltas.empty())
 			return;
 		rs.any = true;
-		// The claims the frame installed (none before DCLF's first covered frame: the frame is the engine's, and every later publication
-		// is post-swap).
+		// Null before DCLF's first covered frame.
 		const void* claims = a_context.claims;
 		const std::uint64_t now = GateNowNs();
 		for (const auto& delta : a_context.deltas) {
@@ -48,7 +46,7 @@ namespace DCLF::Features::Lod::Gates
 			else
 				++rs.refused;
 		}
-		// The outcomes the flips posted, for the coordinator (folded into the frame start's wakes: ScenePassWakeBatch).
+		// The coordinator must pick up the outcomes the flips posted.
 		Extensions::WakeChannel(channel);
 	}
 }

@@ -1,5 +1,4 @@
-// MenuViews: the menu scene renders as DCLF views (CS_ORG_MENU3D=1, CS_ORG_MAP=1, default off). The feature installs the probe's hooks
-// and its report lines; the rest is MenuViewsProbe.cpp.
+// MenuViews: the menu scene renders as DCLF views (CS_ORG_MENU3D, CS_ORG_MAP, default off). The rest is MenuViewsProbe.cpp.
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -21,10 +20,7 @@ namespace DCLF::Features::MenuViews
 		}
 
 		/**
-		 * @brief UI3DSceneManager::Render (SE 51855, AE 52727): a menu's model (the inventory's, the loading screen's on its serving thread),
-		 * its depth, shadow maps, shadow masks and colour. Its registrations are no world view's, so a load's hold leaves them to the engine
-		 * (PassCapture::MenuSceneScope: the loading menu's model under the hold). Its depth and colour batches are the menu scenes family's
-		 * (MenuScenes.h, CS_ORG_MENU3D=1), its shadow masks the shadow mask family's, its TAA mask fill and HDR chain ImageSpace's.
+		 * @brief UI3DSceneManager::Render (SE 51855, AE 52727). Its registrations are no world view's, so a load's hold leaves them to the engine.
 		 */
 		struct Menu3DRender
 		{
@@ -36,11 +32,7 @@ namespace DCLF::Features::MenuViews
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land and objects and its fog of war. Its two batches are the
-		 * menu scenes family's (MenuScenes.h: drawn by the graph with CS_ORG_MAP=1, the engine's and vouched for by the family otherwise);
-		 * its ImageSpace effect (0x62, kLOCAL_MAP_SWAP into kLOCAL_MAP) is the ImageSpace port's.
-		 */
+		/** @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land, objects and fog of war. */
 		struct LocalMapRender
 		{
 			static void thunk(void* a_renderer)
@@ -66,7 +58,7 @@ namespace DCLF::Features::MenuViews
 		void Install(Api::InstallContext& a_context)
 		{
 			InstallSceneHooks();
-			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
+			// Before the render graph initializes, since the anchors' epochs are fixed then.
 			if (Scenes::AnyEnabled())
 				Scenes::SceneDraws::Reserve();
 			if (!Menu3DEnabled() && !MapEnabled()) {
@@ -74,7 +66,7 @@ namespace DCLF::Features::MenuViews
 				return;
 			}
 			InstallHooks();
-			// After the probe's: the family's thunks chain onto the probe's at the same calls.
+			// After the probe's, since the family's thunks chain onto the probe's at the same calls.
 			Scenes::InstallHooks();
 			a_context.RegisterReportLines({ .name = "menu views", .point = Api::ReportPoint::AsyncWork, .text = &Lines });
 			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the switched-on scenes' batches are the menu scenes family's", Menu3DEnabled() ? 1 : 0,

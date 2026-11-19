@@ -1,7 +1,7 @@
-// Tree wind's table family and coordinator component (scene lane): the tree slots listed for the residents that draw under a tree node,
-// with their owned engine nodes and seed requests, and the members TreeWindCS writes the wind of.
+// Tree wind's table family and coordinator component: tree slots for residents that draw under a tree node, with their owned nodes
+// and seed requests, and the members whose wind TreeWindCS writes.
 
-// TreeWindScene.h first: volk must precede every Vulkan header of the translation unit (the tables, the seeds' items).
+// TreeWindScene.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindTables.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
@@ -53,11 +53,10 @@ namespace DCLF::Features::TreeWind
 		struct TreeComponent
 		{
 			TreeMembers members;
-			// Owned while listed (a published version that names it keeps it, through the retirement chain).
+			// Owned while listed. A published version that names it keeps it through the retirement chain.
 			std::vector<RE::NiPointer<RE::NiAVObject>> owners;
 		};
 
-		// The family's callbacks (Api::TableFamily).
 		std::shared_ptr<void> MakeTrees() { return std::make_shared<TreeTables>(); }
 
 		void AssignTrees(void* a_to, const void* a_from)
@@ -65,7 +64,6 @@ namespace DCLF::Features::TreeWind
 			*static_cast<TreeTables*>(a_to) = *static_cast<const TreeTables*>(a_from);
 		}
 
-		// Vectors by their bytes, the index by its entries.
 		template <class T>
 		bool SameRows(const std::vector<T>& a_left, const std::vector<T>& a_right)
 		{
@@ -104,14 +102,12 @@ namespace DCLF::Features::TreeWind
 			static_cast<TreeTables*>(a_columns)->treeFree.push_back(a_row);
 		}
 
-		// The rows the scene resources' tree buffers hold (their requirement's: TreeWindScene.cpp), so a revision's reuse witnesses them
-		// rather than every write of the family (TableFamilies::RequirementsWitness).
+		// The rows the tree buffers hold, so a revision's reuse witnesses them rather than every write of the family.
 		std::uint32_t TreeRows(const void* a_columns)
 		{
 			return static_cast<std::uint32_t>(static_cast<const TreeTables*>(a_columns)->trees.size());
 		}
 
-		// The component's hooks (Api::CoordinatorComponent).
 		std::shared_ptr<void> MakeComponent() { return std::make_shared<TreeComponent>(); }
 
 		/** @brief A member's tree slot given back (the family's reference): its tree's last member retires the slot. */
@@ -140,7 +136,7 @@ namespace DCLF::Features::TreeWind
 		/** @brief A resident's tree slot: taken for a tree member, given back otherwise (as it leaves: UnlistTree). */
 		void ListTree(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
-			// The walk parity's dense walk restores the tables, not the owners kept beside them (as ListFadeRoot).
+			// The walk parity's dense walk restores the tables, not the owners kept beside them.
 			if (a_context.DenseWalk())
 				return;
 			auto& tables = a_context.tables;
@@ -149,8 +145,7 @@ namespace DCLF::Features::TreeWind
 			auto& owners = a_context.State<TreeComponent>().owners;
 			const bool tree = a_slot < tables.objects.size() && (tables.objects[a_slot].flags & kObjectTreeAnim);
 			const auto* geometry = a_slot < tables.objectGeometry.size() ? tables.objectGeometry[a_slot] : nullptr;
-			// The tree node from the mirror (its property's fade node, a BSTreeNode); its values are the seed's, which the render thread takes
-			// at the frame's start (the scene work reads no engine memory, and runs no engine code).
+			// The values come from the seed taken at frame start, since the scene work reads no engine memory and runs no engine code.
 			TreeStatic row;
 			const void* node = nullptr;
 			if (tree && geometry) {
@@ -158,7 +153,7 @@ namespace DCLF::Features::TreeWind
 				if (const void* fadeNode = a_context.MirroredFadeNode(a_slot, kind); fadeNode && (kind & Api::kMirroredKindTree))
 					node = fadeNode;
 			}
-			// A node not listed yet is owned from the entry's reference (pins), never from the key; without one, nodeless.
+			// A node not listed yet is owned from the entry's pins, never from the key. Without one it stays nodeless.
 			RE::NiPointer<RE::NiAVObject> owner;
 			if (node && !trees.treeIndex.contains(node) && !(owner = a_context.HoldFadeNode(a_slot, node)))
 				node = nullptr;
@@ -168,7 +163,6 @@ namespace DCLF::Features::TreeWind
 			}
 			auto& current = family.objectRow[a_slot];
 			const std::uint32_t wanted = !tree ? kNoTree : !node ? kNodelessTree : kNoTree;
-			// Already under this node (a patch that changed something else), or nodeless and staying so.
 			if (node && current < trees.treeNode.size() && trees.treeNode[current] == node)
 				return;
 			if (!node && current == wanted)
@@ -198,7 +192,7 @@ namespace DCLF::Features::TreeWind
 				trees.trees[t] = row;
 				family.rowTag[t] = row.generation;
 				trees.treeNode[t] = node;
-				// Owned while listed (a published version that names it keeps it, through the retirement chain).
+				// Owned while listed. A published version that names it keeps it through the retirement chain.
 				if (owners.size() <= t)
 					owners.resize(std::size_t(t) + 1);
 				owners[t] = std::move(owner);
@@ -217,7 +211,6 @@ namespace DCLF::Features::TreeWind
 			auto& tables = a_context.tables;
 			auto& members = a_context.State<TreeComponent>().members;
 			bool treesTouched = false;
-			// A counted slot is a resident within the objects (KeepResidentsAlive's keys).
 			const auto counted = [&](std::uint32_t a_slot) { return a_context.Counted(a_slot) && (tables.objects[a_slot].flags & kObjectTreeAnim); };
 			if (a_recount.rebuild) {
 				members.Clear();
@@ -226,7 +219,7 @@ namespace DCLF::Features::TreeWind
 						members.Add(slot);
 				treesTouched = true;
 			} else {
-				// Their old keys out (all of them first), then their keys now.
+				// Take all old keys out first, then add the keys now.
 				for (const std::uint32_t slot : a_recount.touched)
 					if (members.Has(slot)) {
 						members.Remove(slot);
@@ -238,7 +231,6 @@ namespace DCLF::Features::TreeWind
 						treesTouched = true;
 					}
 			}
-			// The members TreeWindCS writes the wind of, by their tree slots (in slot order).
 			if (!treesTouched)
 				return;
 			auto& family = tables.families.Mutable(treeFamily);
@@ -258,7 +250,6 @@ namespace DCLF::Features::TreeWind
 			}
 		}
 
-		// The listed nodes' references through the retirement chain with everything else the cleared tables named.
 		void Reset(const Api::CoordinatorComponentContext& a_context)
 		{
 			a_context.HandBack(a_context.State<TreeComponent>().owners);

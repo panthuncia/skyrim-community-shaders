@@ -1,7 +1,5 @@
-// The sky family's engine side: the sky batch's hook, which lets the engine's batch run with its draws latched; the cloud group's
-// hook, which latches the cloud layers drawn right after it and hands the draws to the anchor's pass; the sun's occlusion query draw's
-// hook, which brackets the engine's query and latches its draw (CS_ORG_OCCLUSION_QUERIES); the family's DrawTriShape taker, which
-// latches a sky draw in place of drawing it; and its BSSkyShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
+// Engine-side hooks for the sky family. They let the engine's sky batch, cloud layers and sun occlusion draw run
+// with their draws latched, so the graph can draw them in the engine's order. Render thread only.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -38,22 +36,20 @@ namespace DCLF::Features::Sky
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 
-		// The most draws one run latches (SkyDraws' latch has room for this many). A batch with more runs what it latched at that point
-		// and goes on in a new run (Continue).
+		// The most draws one run latches. A longer batch flushes what it has and continues in a new run.
 		constexpr std::size_t kMaxLatched = 128;
 
 		const char* NameOf(View a_view) { return a_view == View::Main ? "main" : a_view == View::Face ? "face" : "sun occlusion"; }
 
 		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
-		/** @brief Why a sun occlusion draw is skipped (its query answers its last count), each logged once. */
+		/** @brief Why a sun occlusion draw was skipped, each logged once. */
 		Util::ReasonLog& SunSkips()
 		{
 			static Util::ReasonLog log("[DCLF] sky: a sun occlusion draw is skipped, its query answers its last count", spdlog::level::warn);
 			return log;
 		}
 
-		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] sky: the engine draws", spdlog::level::warn);
@@ -61,8 +57,8 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief The batch being latched (render thread). Every draw is latched until one is refused: then the latched part runs at that
-		 * point (FlushLatched) and the rest of the batch reaches D3D11, where the flush latch skips it and the census counts it.
+		 * @brief The batch being latched, on the render thread.
+		 * After a refused draw the latched part runs, and the rest of the batch goes to D3D11 where the census counts it.
 		 */
 		struct Capture
 		{
@@ -76,10 +72,10 @@ namespace DCLF::Features::Sky
 			std::uint32_t lastTechnique = 0;   // the last pass's raw technique (State::currentPixelDescriptor & 0xFF)
 			std::int32_t lastCloudLayer = -1;  // the face's last cloud layer latched in this batch
 			Shape shape;                       // the batch's view and targets (CurrentShape)
-			// Geometry group 13 when the capture spans the cloud layers too: the batch's draws are handed over after it (CloudGroup).
+			// Geometry group 13 when the capture also spans the cloud layers.
 			const RE::BSBatchRenderer::GeometryGroup* cloudGroup = nullptr;
 			bool deferred = false;  // the sky batch ran; the capture is finished after the cloud group
-			// The cloud group's call did not follow a sky batch that spanned it (another hook at its site): never spanned again.
+			// Set when the cloud group's call did not follow a spanning sky batch, for example another hook at that site.
 			bool deferralBroken = false;
 		};
 
@@ -110,10 +106,7 @@ namespace DCLF::Features::Sky
 		bool IsTarget(std::int32_t a_target) { return a_target >= 0 && a_target < static_cast<std::int32_t>(RE::RENDER_TARGETS::kTOTAL); }
 		bool IsDepth(std::int32_t a_depth) { return a_depth >= 0 && a_depth < static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); }
 
-		/**
-		 * @brief The engine depth target whose depth SRV is a_view, or -1. The main pass's t17 is Util::GetCurrentSceneDepthSRV(true)
-		 * (VanillaBinding::BindSceneDepth), the Z-prepass copy unless Terrain Blending's blended depth replaces it.
-		 */
+		/** @brief The engine depth target whose depth SRV is a_view, or -1. */
 		std::int32_t DepthOfView(ID3D11ShaderResourceView* a_view)
 		{
 			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
@@ -123,7 +116,7 @@ namespace DCLF::Features::Sky
 			return -1;
 		}
 
-		/** @brief The published ids a batch's headers and t17 export (empty: none), read once its view's client is known to take it. */
+		/** @brief The published ids a batch's headers and t17 export. */
 		struct PublishedInputIds
 		{
 			std::array<std::string, kHeaderRegisters.size()> headers;
@@ -131,10 +124,8 @@ namespace DCLF::Features::Sky
 		};
 
 		/**
-		 * @brief The batch's view and targets from the shadow state, and its inputs from CS's bindings (what its draws would bind): a water
-		 * reflection face, or the main camera's GBuffer pass. The targets go into a_shape, the inputs' heap indices into a_run, and the ids
-		 * of the inputs that are published exports into a_published (ReadInputs). False for anything else (another accumulator, a cubemap
-		 * of another kind, the forward pass, an input that cannot be read), which stays the engine's.
+		 * @brief Reads the batch's view, targets and inputs, for a water reflection face or the main GBuffer pass.
+		 * Returns false for anything else, which stays the engine's.
 		 */
 		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, PublishedInputIds& a_published, Capture& a_capture)
 		{
@@ -148,9 +139,7 @@ namespace DCLF::Features::Sky
 				return false;
 			}
 			a_shape.cloudShadows = cloudShadows.loaded;
-			// The cloud layers are geometry group 13, which the capture spans only through the cloud group's hook.
 			a_shape.clouds = Address::kCloudGroup.Known();
-			// The headers' textures the sky's pixel stage may read, as CS binds them for the pass.
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				Family::Header header;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
@@ -180,7 +169,7 @@ namespace DCLF::Features::Sky
 			}
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return false;
-			// The main camera's accumulator, inside CS's deferred pass (its GBuffer bound: Deferred::StartDeferred).
+			// The main camera's accumulator, inside CS's deferred pass.
 			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 			if (a_accumulator != *mainAccumulator || !globals::deferred || !globals::deferred->deferredPass)
 				return false;
@@ -194,10 +183,7 @@ namespace DCLF::Features::Sky
 				if (!a_capture.colourFormats[i])
 					return false;
 			}
-			// t17: the scene depth CS binds. The Z-prepass copy is the client's own import (kSceneDepth); the depth target itself reads a
-			// null view (VanillaBinding::BindSkyResources' choice when they are one); Terrain Blending's blended depth is a published
-			// graph texture's export on its ORG path, read by its id, or its D3D11 view, read by heap index. Any other engine depth is
-			// refused.
+			// t17 is the scene depth CS binds. Any engine depth other than the prepass copy, the depth target or Terrain Blending's is refused.
 			auto* sceneDepth = Util::GetCurrentSceneDepthSRV(true);
 			const auto engineDepth = DepthOfView(sceneDepth);
 			if (engineDepth == static_cast<std::int32_t>(kSceneDepth))
@@ -215,8 +201,7 @@ namespace DCLF::Features::Sky
 				return a_capture.depthFormat != 0;
 			}
 			a_published.sceneDepth = PublishedResources::ExportedId(sceneDepth);
-			// Neither (Terrain Blending's D3D11 depth): the view itself, read by heap index. Without it the sun's depth test read zero and
-			// hid it.
+			// Terrain Blending's D3D11 depth is read by heap index. Without it the sun's depth test read zero and hid the sun.
 			if (a_published.sceneDepth.empty()) {
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				auto binding = GpuTextures::Get().ResolveBinding(sceneDepth, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 17), &failure);
@@ -230,10 +215,7 @@ namespace DCLF::Features::Sky
 			return a_capture.depthFormat != 0;
 		}
 
-		/**
-		 * @brief The published inputs of a batch its view's client takes: each read by its id's index (SkyDraws::ReadPublished). False,
-		 * logged once per id and reason, when the client cannot read one: the batch is the engine's.
-		 */
+		/** @brief Reads a batch's published inputs by id. False when the client cannot read one, and the batch stays the engine's. */
 		bool ReadInputs(View a_view, const PublishedInputIds& a_published, Run& a_run)
 		{
 			const auto read = [&](std::uint32_t a_register, const std::string& a_id, std::uint32_t& a_index) {
@@ -251,7 +233,7 @@ namespace DCLF::Features::Sky
 			return read(17, a_published.sceneDepth, a_run.sceneDepthIndex);
 		}
 
-		/** @brief Which of t0-t2 a technique (BSSkyShader's raw index, ShaderCache::SkyShaderTechniques) samples. */
+		/** @brief Which of t0-t2 a sky technique samples. */
 		std::array<bool, 3> TexturesOf(std::uint32_t a_technique)
 		{
 			switch (a_technique) {
@@ -272,7 +254,7 @@ namespace DCLF::Features::Sky
 			}
 		}
 
-		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		/** @brief Runs the latched part of the batch now, before anything the engine draws after it. */
 		void FlushLatched(Capture& a_capture)
 		{
 			auto run = std::move(a_capture.run);
@@ -286,9 +268,8 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief A full run: the latched part runs now, and the batch goes on in a new run with the same view, face and inputs (their
-		 * imports are kept with the run that submitted them, for longer than this frame). False when the run holds a face's cloud draws:
-		 * a later layer's copies draw every earlier layer of their run, so the rest of that batch stays one run and is refused.
+		 * @brief Runs the full run and continues the batch in a new one with the same view and inputs.
+		 * False for a face's cloud draws, since a later layer's copies draw every earlier layer of the same run.
 		 */
 		bool Continue(Capture& a_capture)
 		{
@@ -306,10 +287,7 @@ namespace DCLF::Features::Sky
 			return true;
 		}
 
-		/**
-		 * @brief A refusal: the latched part runs now, and the rest of the batch (the cloud group's included) is the engine's, vouched for
-		 * until Finish. Logged once per reason, technique and view.
-		 */
+		/** @brief Runs the latched part and leaves the rest of the batch to the engine. Logged once per reason, technique and view. */
 		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
 		{
 			a_capture.failed = true;
@@ -317,11 +295,7 @@ namespace DCLF::Features::Sky
 			FlushLatched(a_capture);
 		}
 
-		/**
-		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the shaders'
-		 * SetupGeometry wrote (the engine constants capture), the textures and samplers, the geometry. Null when latched; otherwise why
-		 * the graph cannot draw it, and the engine draws it.
-		 */
+		/** @brief Latches the draw the engine is about to make. Returns null when latched, else the reason it was refused. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			if (a_capture.run->draws.size() >= kMaxLatched && !Continue(a_capture))
@@ -334,8 +308,7 @@ namespace DCLF::Features::Sky
 			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Sky)
 				return "the bound shader is not BSSkyShader";
 
-			// Cloud Shadows' override (ModifySky, from SetupGeometry): on a face its layer, which this draw writes on the graph. Its flags
-			// are taken only once the draw is latched; a draw the engine makes keeps them for SkyShaderHacks.
+			// Cloud Shadows' flags are taken only once the draw is latched. A draw the engine makes keeps them for SkyShaderHacks.
 			auto& cloudShadows = globals::features::cloudShadows;
 			const bool occlusion = a_capture.view == View::Face && cloudShadows.loaded && cloudShadows.overrideSky && cloudShadows.cloudShadowBlendState;
 
@@ -344,9 +317,7 @@ namespace DCLF::Features::Sky
 			if (!depthStencil)
 				return "no depth-stencil state";
 
-			// The PerGeometry groups as SetupGeometry wrote them. A technique's group holds only the rows its vanilla shader declares
-			// (one may end before TexCoordOff, a pixel stage may have none): the rows past it are zero, which the technique's CS shader
-			// does not read either. The matrices and EyePosition/VParams (c0-c12) are every technique's.
+			// A technique's group holds only the rows its vanilla shader declares. The rest are zero, and its CS shader does not read them.
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
 				return "the engine constants capture is not active";
@@ -354,8 +325,7 @@ namespace DCLF::Features::Sky
 				return "its vertex PerGeometry is smaller than its matrices";
 
 			Draw draw{};
-			// The descriptors CS looks its shaders up by (State::ModifyShaderLookup): inside the deferred pass a sky pixel shader is
-			// the DEFERRED one (descriptor | 256), whose clouds write no Cloud Shadows target and reject nothing by the scene depth.
+			// Inside the deferred pass the sky pixel shader is the DEFERRED one (descriptor | 256), as State::ModifyShaderLookup picks it.
 			std::uint32_t vertexDescriptor = state->currentVertexDescriptor;
 			std::uint32_t pixelDescriptor = state->currentPixelDescriptor;
 			globals::state->ModifyShaderLookup(*state->currentShader, vertexDescriptor, pixelDescriptor);
@@ -363,7 +333,6 @@ namespace DCLF::Features::Sky
 			// A stencil test or write (a face's technique 8) uses the shadow state's reference, as the engine's draw would.
 			draw.stencilRef = engine.stencilRef;
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			// A face and the sun's occlusion draw bind one target (SKY_ORG_FACES).
 			draw.key.variant = a_capture.view != View::Main ? kVariantFaces : 0;
 			auto* blend = occlusion ? cloudShadows.cloudShadowBlendState :
 			                          Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra);
@@ -381,7 +350,7 @@ namespace DCLF::Features::Sky
 			if (!draw.program)
 				return "its ORG program cannot be built";
 			if (occlusion) {
-				// The face's layers in the engine's order, each once: a later layer then holds every earlier one's occlusion (FaceClouds).
+				// Each face layer once, in engine order, so a later layer holds every earlier layer's occlusion.
 				draw.occlusion = true;
 				draw.layer = cloudShadows.currentLayerForDraw;
 				if (draw.layer < 0 || draw.layer >= static_cast<std::int32_t>(kCloudLayers) || draw.layer <= a_capture.lastCloudLayer)
@@ -393,7 +362,7 @@ namespace DCLF::Features::Sky
 					return "its occlusion program cannot be built";
 			}
 
-			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
+			// The geometry is read by device address. The run holds its leases until the GPU is done.
 			Family::Owners owners;
 			Family::Geometry geometry;
 			std::string geometryDetail;
@@ -405,7 +374,6 @@ namespace DCLF::Features::Sky
 				return Family::ReasonOf(result);
 			}
 			auto& constants = draw.constants;
-			// PerGeometry as the vertex stage reads it (c0 to c16.xy) and the pixel stage's PParams; the rows after are set below.
 			Family::CopyConstants(use, Stage::Vertex, 2, { reinterpret_cast<std::byte*>(&constants), kVertexConstantBytes });
 			Family::CopyConstants(use, Stage::Pixel, 2, { reinterpret_cast<std::byte*>(constants.pParams), sizeof(constants.pParams) });
 			constants.vertexRef = geometry.vertexRef;
@@ -416,15 +384,13 @@ namespace DCLF::Features::Sky
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// The textures the technique samples, and every slot's sampler (an unused slot reads a null view and takes the first sampler:
-			// it is never sampled).
+			// An unused slot reads a null view with the first sampler. It is never sampled.
 			const auto used = TexturesOf(state->currentPixelDescriptor & 0xFF);
 			for (std::uint32_t t = 0; t < 3; ++t) {
 				auto* view = used[t] ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t),
 					constants.textures[t], owners, &failure);
-				// A published graph texture is read by its id, which the view's client declares (ListInputs), as the water does.
 				if (slot == Family::SlotResult::Published) {
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = SkyDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
@@ -442,16 +408,14 @@ namespace DCLF::Features::Sky
 				if (constants.samplers[t] == GpuTextures::kInvalid)
 					return "its sampler modes have no graph sampler";
 			}
-			// Cloud self shadowing (t26): a main pass cloud layer reads the occlusion of the layers up to its own (SkyShaderHacks binds that
-			// layer), anything else the occlusion cubemap.
+			// Cloud self shadowing (t26). A main pass cloud layer reads its own layers' occlusion, anything else the occlusion cubemap.
 			constants.textures[3] = kSelfShadowFromOcclusion;
 			if (a_capture.view == View::Main && cloudShadows.loaded && cloudShadows.bindLayerSelfShadow) {
 				const auto layer = cloudShadows.currentLayerForDraw;
 				auto* layerTexture = layer >= 0 && layer < CloudShadows::kMaxCloudLayers ? cloudShadows.texCloudShadowLayers[layer] : nullptr;
 				if (!layerTexture || !layerTexture->srv)
 					return "its cloud layer has no occlusion texture";
-				// A layer twin is read by its published id, which the main client declares (MakeClient): the graph orders the read after
-				// the layer's clears, copies and face draws. Only a D3D11 layer (no twin) is imported.
+				// A layer twin is read by published id, so the graph orders the read after the layer's writes. Only a D3D11 layer is imported.
 				if (const auto id = ORGCloudShadows::PublishedLayerId(layer); !id.empty()) {
 					const auto result = SkyDraws::ReadPublished(View::Main, id, constants.textures[3]);
 					if (result != Family::InputResult::Graph) {
@@ -464,41 +428,34 @@ namespace DCLF::Features::Sky
 				}
 			}
 
-			// The alpha test reference SetDirtyStates would write (PS b11: the reference while the test is on, else 0) and CS's extra
-			// descriptor for this draw (State::UpdateSkyShaderPermutation ran in SetupGeometry).
+			// The alpha test reference SetDirtyStates would write to PS b11.
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
-			// The camera's depth range as it is, with no depth bias offset (mode 0). The sky draws at the far plane: an offset taken off its
-			// maximum depth wrote the dome and the moon masks short of 1, so the deferred pass lit and fogged the sky as geometry (grey
-			// overcast, a darker exposure) and the clouds drew over the moons (sky-river-org1, 2026-11-11). The engine's sky leaves the
-			// range whole; the shadow state's bias mode is not the table's index for these draws.
+			// No depth bias offset. An offset left the sky short of depth 1, so the deferred pass lit and fogged it as geometry.
+			// The engine's sky also leaves the range whole.
 			draw.viewport = Family::LatchViewport(0);
 
 			for (auto& owner : owners)
 				if (owner)
 					run.owners.push_back(std::move(owner));
 			if (draw.occlusion) {
-				// Cloud Shadows' bookkeeping for the face and the layer's clear, on D3D11 before the anchor's run draws into it.
 				cloudShadows.NoteGraphCloudLayer(static_cast<int>(run.face), draw.layer);
 				a_capture.lastCloudLayer = draw.layer;
 			}
 			run.draws.push_back(std::move(draw));
-			// Its D3D11 overrides (SkyShaderHacks) run only at a draw's state flush, which a latched draw never reaches.
+			// SkyShaderHacks runs only at a draw's state flush, which a latched draw never reaches.
 			cloudShadows.overrideSky = false;
 			cloudShadows.bindLayerSelfShadow = false;
 			return nullptr;
 		}
 
 		/**
-		 * @brief The accumulator's geometry group 13 when the capture can span it: a pass list (FinishAccumulating draws it with
-		 * RenderPersistentPassList) of BSSkyShader TriShapes only, the cloud layers. Null otherwise, logged once per reason and view: an
-		 * empty group, or one with a sky-object effect (BSEffectShader, hint 0x12) or another geometry type, is drawn by the engine after
-		 * the anchor's run, in the engine's order. FinishAccumulating calls the group exactly when it is non-null with flag 1 set (SE
-		 * 99938 +0x260, AE 106583 +0x259), which a spanned group always is.
+		 * @brief Geometry group 13 when the capture can span it, which needs it to hold only BSSkyShader TriShapes.
+		 * FinishAccumulating calls the group exactly when it is non-null with flag 1 set (SE 99938 +0x260, AE 106583 +0x259).
 		 */
 		const RE::BSBatchRenderer::GeometryGroup* CloudGroupOf(void* a_accumulator, Capture& a_capture)
 		{
-			// BSShaderAccumulator::batchRenderer (+0x130 on SE and AE: RenderBatches reads it there, SE 0x1412cce40, AE 0x1414b4fe0).
+			// BSShaderAccumulator::batchRenderer is at +0x130 on SE and AE.
 			const auto* batch = static_cast<RE::BSShaderAccumulator*>(a_accumulator)->GetRuntimeData()->batchRenderer;
 			const auto* group = batch ? batch->geometryGroups[kCloudGeometryGroup] : nullptr;
 			if (!group || !group->passList.head)
@@ -521,7 +478,7 @@ namespace DCLF::Features::Sky
 			return nullptr;
 		}
 
-		/** @brief The end of a capture (after the sky batch, or after the cloud group when it spans it): the latched part runs. */
+		/** @brief Ends a capture and runs the latched part. */
 		void Finish(Capture& a_capture)
 		{
 			a_capture.active = false;
@@ -533,17 +490,15 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief FinishAccumulating's RenderBatches of the sky techniques (SE 99938 +0x247, AE 106583 +0x237): for the main camera's
-		 * GBuffer pass and a reflection face, the batch runs with its draws latched, then the anchor's pass draws them at this point, or
-		 * after the cloud group when the capture spans it (CloudGroup).
+		 * @brief Hook on FinishAccumulating's RenderBatches of the sky techniques (SE 99938 +0x247, AE 106583 +0x237).
+		 * The batch runs with its draws latched, for the main GBuffer pass and reflection faces.
 		 */
 		struct SkyBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
-				// The cloud group's call always follows a batch that spanned it (CloudGroupOf). If another hook at its site kept it from
-				// coming, the capture is finished now, late, and no batch spans the group again.
+				// If another hook kept the cloud group's call from coming, finish late and never span the group again.
 				if (capture.deferred) {
 					if (!std::exchange(capture.deferralBroken, true))
 						logger::error("[DCLF] sky: the cloud group was not drawn after a sky batch that spanned it (another hook at its call?); the engine draws the cloud layers from now on");
@@ -553,7 +508,6 @@ namespace DCLF::Features::Sky
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				// A batch the graph does not take reaches D3D11: the flush latch skips it and the census counts it.
 				const auto engineDraws = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
 				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
 					return engineDraws();
@@ -561,8 +515,6 @@ namespace DCLF::Features::Sky
 				Shape shape;
 				auto run = std::make_shared<Run>();
 				PublishedInputIds published;
-				// The batch's view and targets, its client taking that shape with an anchor that can run now, and its published inputs:
-				// otherwise the engine draws the batch (each logged once).
 				if (!CurrentShape(a_accumulator, shape, *run, published, capture) || !SkyDraws::CanTake(shape) || !ReadInputs(shape.view, published, *run)) {
 					SkyDraws::Keep(std::move(run->owners));
 					return engineDraws();
@@ -578,7 +530,6 @@ namespace DCLF::Features::Sky
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
-				// A batch refused partway leaves the cloud group to the engine as well: nothing to span.
 				if (capture.cloudGroup && !capture.failed) {
 					capture.deferred = true;
 					return;
@@ -589,10 +540,8 @@ namespace DCLF::Features::Sky
 		};
 
 		/**
-		 * @brief FinishAccumulating's RenderPersistentPassList of geometry group 13 (SE 99938 +0x284, AE 106583 +0x274), right after
-		 * the sky batch with write mode 11: when the sky batch's capture spans it, the cloud layers are latched as the batch's draws
-		 * were, and the capture is finished after them, so the anchor's pass draws the sky and its clouds in the engine's order. Any other
-		 * call reaches D3D11: the flush latch skips it and the census counts it.
+		 * @brief Hook on the RenderPersistentPassList of geometry group 13 (SE 99938 +0x284, AE 106583 +0x274).
+		 * Latches the cloud layers after a spanning sky batch, so sky and clouds draw in engine order.
 		 */
 		struct CloudGroup
 		{
@@ -610,11 +559,7 @@ namespace DCLF::Features::Sky
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief The sun occlusion draw's view from the shadow state: kMAIN with kMAIN's depth or the Z-prepass copy as the depth target
-		 * (Main::RenderWorld's call, and the later one in AE 107129). The formats go into a_capture, the depth target's choice into a_run.
-		 * Null when taken; otherwise why not.
-		 */
+		/** @brief The sun occlusion draw's view from the shadow state. Returns null when taken, else why not. */
 		const char* SunShape(Capture& a_capture, Run& a_run)
 		{
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -637,13 +582,8 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604), from Sun::SubmitOcclusionQuery: it acquires the
-		 * accumulator's query for the index (+0x70 + index * 0x18), BeginQuery, draws the sun's SunOcclude pass through
-		 * RenderPassImmediately, EndQuery. Installed only with CS_ORG_OCCLUSION_QUERIES=1: the engine's call then runs inside a query
-		 * bracket (its BeginQuery and EndQuery go nowhere) with its draw latched, and the EngineQueries anchor's pass draws it with the ORG
-		 * occlusion query that answers the engine's GetQueryData. A draw the graph cannot take is skipped, logged once per reason, and the
-		 * query answers its last count: nothing of it reaches D3D11. Without the sun's client (the family failed or was refused at setup)
-		 * the call is the engine's on D3D11, as with the switch off.
+		 * @brief Hook on BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604). Only with CS_ORG_OCCLUSION_QUERIES=1.
+		 * An ORG query answers the engine's GetQueryData. A draw the graph cannot take is skipped.
 		 */
 		struct SunOcclusionQuery
 		{
@@ -654,7 +594,6 @@ namespace DCLF::Features::Sky
 					return;
 				}
 				auto& capture = GetCapture();
-				// The sun's queries are submitted after the accumulator's batches, never inside a sky capture.
 				if (capture.active || capture.deferred) {
 					SunSkips().Report("a sun query inside a sky batch's capture: the engine's call is left out");
 					return;
@@ -670,7 +609,6 @@ namespace DCLF::Features::Sky
 					refusal = "its anchor cannot run now";
 				if (refusal)
 					SunSkips().Report(refusal);
-				// The capture takes every draw of the call, latched or skipped (TakeDraw).
 				capture.view = View::Sun;
 				capture.shape = {};
 				capture.shape.view = View::Sun;
@@ -687,7 +625,7 @@ namespace DCLF::Features::Sky
 					capture.failed = true;
 					SunSkips().Report(capture.passes.Describe("sun occlusion"));
 				}
-				// Nothing begun and nothing drawn: the accumulator had a result pending, or no query.
+				// Nothing begun and nothing drawn, because a result was pending or there was no query.
 				if (bracket.Slot() == Queries::kNoSlot && run->draws.empty() && !capture.failed) {
 					SkyDraws::Keep(std::move(run->owners));
 					return;
@@ -708,14 +646,13 @@ namespace DCLF::Features::Sky
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The family's DrawTriShape taker: during a latched sky batch, the draw is latched instead. */
+		/** @brief Latches a draw during a latched sky batch instead of drawing it. */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return false;
 			capture.passes.OnDraw();
-			// The sun's occlusion draw is never the engine's: one draw is latched, anything else is skipped (SunOcclusionQuery).
 			if (capture.view == View::Sun) {
 				if (capture.failed || !capture.run)
 					return true;
@@ -736,10 +673,7 @@ namespace DCLF::Features::Sky
 			return true;
 		}
 
-		/**
-		 * @brief After BSSkyShader::SetupGeometry (chained after Cloud Shadows' and the frame annotations'): counts the pass; one that will
-		 * not reach DrawTriShape ends the latched part before the engine draws it.
-		 */
+		/** @brief Counts the pass after BSSkyShader::SetupGeometry. A pass that will not reach DrawTriShape flushes first. */
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
@@ -778,17 +712,15 @@ namespace DCLF::Features::Sky
 			return;
 		}
 		stl::write_thunk_call<SkyBatch>(REL::Offset(Address::kSkyBatch).address());
-		// The cloud group's call is hooked whether the graph takes the clouds or not: the engine's clouds are vouched for there.
+		// Hooked even when the graph does not take the clouds, because the engine's clouds are vouched for there.
 		const bool clouds = Address::kCloudGroup.Known();
 		if (clouds)
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Sky>(RE::VTABLE_BSSkyShader[0], &OnSetupGeometry);
-		// The sun's occlusion query draw: the graph's with CS_ORG_OCCLUSION_QUERIES=1; otherwise not hooked (the engine's, on D3D11).
 		if (Queries::Requested() && Address::kSunOcclusionQuery.Known()) {
 			stl::detour_thunk<SunOcclusionQuery>(REL::Offset(Address::kSunOcclusionQuery).address());
 			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, on the graph)", SunOcclusionQuery::func.address());
 		}
-		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("sky", [] { return SkyDraws::Setup(); });
 		logger::info("[DCLF] sky: hooks installed (the sky batch{}, BSSkyShader::SetupGeometry)", clouds ? ", the cloud group" : "");
 	}

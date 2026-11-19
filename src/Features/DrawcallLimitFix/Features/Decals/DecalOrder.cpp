@@ -1,5 +1,5 @@
-// The kept decal order (OrderDecals, the feature's coordinator component) and its per-object ordinals, scene lane. Keys come from the
-// scene mirror's parent chains, so the order needs no frame lists.
+// Keeps decals in the engine's draw order and gives each one an ordinal. Scene lane.
+// Keys come from the scene mirror's parent chains, so no frame lists are needed.
 
 #include "Features/DrawcallLimitFix/Features/Decals/DecalOrder.h"
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
@@ -14,13 +14,13 @@ namespace DCLF::Features::Decals
 {
 	namespace
 	{
-		/** @brief A BGSDecalNode's record (its RTTI exactly: what its OnVisible is; its decals the record's captured list). */
+		// Exact RTTI match, because the decal node's OnVisible is what matters, not its base class.
 		bool IsDecalNode(const Api::MirroredNode& a_node)
 		{
 			return a_node.rtti == DecalNodeRtti();
 		}
 
-		/** @brief VisitIndex from the parent's record: a decal node's decals (its record's, in array order), else its children by slot. */
+		// A decal node visits its decals last to first. Other nodes visit children by slot.
 		std::uint32_t VisitIndex(const Api::MirroredNode& a_parent, const void* a_child)
 		{
 			if (IsDecalNode(a_parent)) {
@@ -36,11 +36,7 @@ namespace DCLF::Features::Decals
 			return ~0u;
 		}
 
-		/**
-		 * @brief The order the scene gives a_geometry, without the frame's lists: whether a BSOrderedNode groups it, and its
-		 * visit positions from the top of the scene graph down (NiNode slots do not move; a BGSDecalNode visits its decals
-		 * last to first). Within a reference this is the registration's order exactly.
-		 */
+		// The visit path from the scene root down. Within one reference this matches the engine's registration order exactly.
 		bool SceneKeyOf(const Api::CoordinatorComponentContext& a_context, const void* a_geometry, OrderKey& a_out)
 		{
 			static const REL::Relocation<const RE::NiRTTI*> orderedNode{ RE::BSOrderedNode::Ni_RTTI };
@@ -77,7 +73,6 @@ namespace DCLF::Features::Decals
 			return text;
 		}
 
-		/** @brief The BGSDecalNode above a_object (its record's kind: the RTTI exactly). */
 		const RE::NiAVObject* DecalNodeOf(const Api::CoordinatorComponentContext& a_context, const void* a_object)
 		{
 			const auto record = a_object ? a_context.MirroredNodeOf(a_object) : Api::MirroredNode{};
@@ -91,7 +86,7 @@ namespace DCLF::Features::Decals
 			}
 			return nullptr;
 		}
-		// Draw order within a chain: registered later is drawn earlier (RegisterPass prepends); the object last, for stability.
+		// Within a chain, a later registration draws earlier because RegisterPass prepends. The object id breaks ties.
 		bool DrawnBefore(const OrderedDecal& a_a, const OrderedDecal& a_b)
 		{
 			if (a_a.chain != a_b.chain)
@@ -103,7 +98,6 @@ namespace DCLF::Features::Decals
 			return a_a.object < a_b.object;
 		}
 
-		/** @brief A decal's place in the order: its chain and key (none for an object with no geometry). */
 		bool KeyedDecal(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_object, std::uint64_t a_chain, OrderedDecal& a_out)
 		{
 			const auto* geometry = a_context.ObjectGeometry(a_object);
@@ -114,7 +108,6 @@ namespace DCLF::Features::Decals
 			return true;
 		}
 
-		/** @brief The member decals' order made whole (every key taken now). */
 		std::vector<OrderedDecal> WholeDecalOrder(const Api::CoordinatorComponentContext& a_context,
 			const ankerl::unordered_dense::map<std::uint32_t, std::uint64_t>& a_members)
 		{
@@ -127,10 +120,7 @@ namespace DCLF::Features::Decals
 			return ordered;
 		}
 
-		/**
-		 * @brief The changed decals out of the kept order, and those still members in again with their keys taken now; with them every
-		 * kept decal under a decal node one of them is (or was) under, whose places the node's decal array gives now.
-		 */
+		// Re-keys the changed decals. Every kept decal under the same decal node is re-keyed too, since their array places shift together.
 		void RekeyChanged(DecalOrder& a_order, const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& kept = a_order.kept;
@@ -171,10 +161,6 @@ namespace DCLF::Features::Decals
 			std::inplace_merge(kept.begin(), kept.begin() + middle, kept.end(), DrawnBefore);
 		}
 
-		/**
-		 * @brief The ordinals, counted again in draw order: a decal whose ordinal moved is a change (its draw input's), and so is one no
-		 * longer ordered.
-		 */
 		void CountOrdinals(DecalOrder& a_order, const Api::CoordinatorComponentContext& a_context, std::span<std::uint32_t> a_ordinals)
 		{
 			auto& decalOrdered = a_order.decalOrdered;
@@ -191,7 +177,7 @@ namespace DCLF::Features::Decals
 			ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> previous(before.begin(), before.end());
 			for (const auto& entry : a_order.kept) {
 				const std::uint32_t group = static_cast<std::uint32_t>(entry.chain >> 60) - 1;
-				// A skinned decal of several partitions takes a slot per partition (RangeSpan).
+				// A skinned decal with several partitions takes one slot per partition.
 				const std::uint32_t ordinal = rangeCount[group];
 				rangeCount[group] += a_context.RangeSpan(entry.object);
 				a_ordinals[entry.object] = ordinal;
@@ -202,21 +188,17 @@ namespace DCLF::Features::Decals
 				if (it != previous.end())
 					previous.erase(it);
 			}
-			// Decals no longer ordered (left the members, or no longer decals).
 			for (const auto& [object, ordinal] : previous)
 				if (ordinal != ~0u && object < a_context.ObjectSlots())
 					a_context.NoteRangeOrdinalChanged(object);
 		}
 
-		/** @brief The slots' ordinals and counts in the decal groups' fixed ranges: the member decals, in the engine's draw order (joinsDone). */
 		void OrderDecals(const Api::CoordinatorComponentContext& a_context)
 		{
-			// The engine draws a decal chain (a group's technique bucket and sub-pass list) in reverse registration order, and
-			// registers in the order of its scene lists (the OrderKey, which the decal order parity checks). Stable: the
-			// scene's order, kept: a decal's key is taken when it joins (or is patched again), and a change re-keys only the
-			// decals it names; the ordinals are counted again in one pass.
+			// The engine draws a decal chain in reverse registration order. A decal's key is taken when it joins,
+			// and a change re-keys only the decals it names.
 			auto& order = a_context.State<DecalOrder>();
-			// The observers' check of this pass (the kept order against one made whole) runs the order's upkeep even with no change.
+			// When an observer checks this pass, the upkeep runs even with no change.
 			bool checked = false;
 			Diagnostics::Notify(OrderDue{ a_context.PassSerial(), checked });
 			if (!order.decalsRebuild && order.decalsChanged.empty() && !checked)
@@ -238,10 +220,8 @@ namespace DCLF::Features::Decals
 			CountOrdinals(order, a_context, ordinals);
 		}
 
-		// The component's hooks (Api::CoordinatorComponent).
 		std::shared_ptr<void> MakeOrder() { return std::make_shared<DecalOrder>(); }
 
-		// Every residency ended, or the slot tables reset: the members go whole, the order is rebuilt.
 		void ClearMembers(const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& order = a_context.State<DecalOrder>();
@@ -257,7 +237,6 @@ namespace DCLF::Features::Decals
 				order.decalsChanged.push_back(a_slot);
 		}
 
-		// A member decal's key from its patch (its chain), keyed again at the next order.
 		void JoinMember(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot, const Api::AccumulatedPatch& a_patch)
 		{
 			if (!a_patch.chain)
@@ -268,7 +247,6 @@ namespace DCLF::Features::Decals
 			order.decalsChanged.push_back(a_slot);
 		}
 
-		// The walk's candidates are counted again from its patches (the report's "the last pass").
 		void WalkBegun(const Api::CoordinatorComponentContext& a_context)
 		{
 			a_context.State<DecalOrder>().candidates = {};
@@ -277,10 +255,10 @@ namespace DCLF::Features::Decals
 		void Rewritten(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot, const Api::SlotRewrite& a_rewrite)
 		{
 			auto& order = a_context.State<DecalOrder>();
-			// A rewritten member decal may have moved in the scene graph: reorder it.
+			// A rewritten decal may have moved in the scene graph.
 			if (a_rewrite.written && order.memberDecals.contains(a_slot))
 				order.decalsChanged.push_back(a_slot);
-			// Blood decals: its slots follow its partitions (RangeSpanOf); reorder when the span moves.
+			// A blood decal's slot count follows its partitions.
 			using Context = Api::CoordinatorComponentContext;
 			if (Context::RangeSpanOf(a_rewrite.partitionsBefore) != Context::RangeSpanOf(a_rewrite.partitionsNow))
 				order.decalsChanged.push_back(a_slot);
@@ -297,7 +275,6 @@ namespace DCLF::Features::Decals
 
 	DecalOrderComparison CompareDecalOrder(const DecalOrder& a_order, const Api::CoordinatorComponentContext& a_context)
 	{
-		// The kept order against one made whole now (a key that went stale: a parent's children re-indexed under a kept decal).
 		DecalOrderComparison out;
 		const auto& kept = a_order.kept;
 		const auto reference = WholeDecalOrder(a_context, a_order.memberDecals);
@@ -305,8 +282,7 @@ namespace DCLF::Features::Decals
 		bool same = reference.size() == kept.size();
 		for (std::size_t i = 0; same && i < kept.size(); ++i)
 			same = reference[i].object == kept[i].object && reference[i].chain == kept[i].chain;
-		// Why: a kept key no longer the decal's now (a decal node's places shift together, which keeps their order: counted, not a
-		// difference), or an order the comparator does not hold (not a strict weak order).
+		// A stale key is counted but is not a difference, because a decal node's places shift together and keep their order.
 		for (const auto& entry : kept) {
 			OrderedDecal now;
 			if (KeyedDecal(a_context, entry.object, entry.chain, now) && (Before(now.key, entry.key) || Before(entry.key, now.key)) && out.staleKeys++ == 0) {
@@ -331,8 +307,6 @@ namespace DCLF::Features::Decals
 
 	Api::CoordinatorComponentId RegisterOrder(Api::InstallContext& a_context)
 	{
-		// The member decals follow the membership: joined by their patches' chains, left with their residency, re-keyed when the walk
-		// rewrites them, and ordered once the joins are done (the accumulate phase's statistics); their patches counted as the walk's candidates.
 		return a_context.RegisterCoordinatorComponent({ .name = "decal-order",
 			.make = &MakeOrder,
 			.residency = { .left = &LeaveMember, .allLeft = &ClearMembers },

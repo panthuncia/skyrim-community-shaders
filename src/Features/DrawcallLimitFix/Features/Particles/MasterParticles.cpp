@@ -1,5 +1,5 @@
-// The master particle systems (MasterParticles.h): the unheld roots contribution over the particle manager's child array, the removal
-// hook at the manager's update, the counters of the manager's child edits, and the observers' report lines.
+// Master particle systems: the unheld-roots contribution over the particle manager's children, the removal hook, child-edit
+// counters and the observers' report lines.
 
 #include "Features/DrawcallLimitFix/Features/Particles/MasterParticles.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
@@ -23,13 +23,8 @@ namespace DCLF::Features::Particles::MasterParticles
 {
 	namespace
 	{
-		// The particle manager's global (NiPointer<BSParticleSystemManager>, written by the world's setup FUN_140643060), its lock
-		// (BSReadWriteLock at the global + 8: the manager's AttachChild takes it for write, FUN_140e2ac70 for read), the removal call in
-		// the manager's per-master update FUN_140e2a520 (`if (master->+0x166 && refCount < 3 && !FUN_140e2b430(master))
-		// children.SetAt(index, null)`, then the master's UpdateDownwardPass otherwise; queued per slot by UpdateParticleSystemManagerJob),
-		// what it calls (NiTObjectArray<NiPointer<NiAVObject>>::SetAt), and the world reset's remove-all of the manager
-		// (SceneWriterFramework's detour covers it; read here to log that it is still that call).
-		// AE 1.6.1170 and SE 1.5.97 are the same code at the same offsets; AE 1.7.104 is checked by CallsTo before the hook goes in.
+		// The particle manager's global and its lock (BSReadWriteLock at the global + 8). FUN_140e2a520 clears an idle master's slot with
+		// SetAt when it has fewer than 3 references and no live particles. AE 1.6.1170 and SE 1.5.97 match; AE 1.7.104 is checked by CallsTo.
 		constexpr Engine::Offset kManager{ { 411270 }, { 524630 } };                     // 0x143284b88 / 0x143024208
 		constexpr Engine::Offset kRemovalCall{ { 76601, 0x69 }, { 74853, 0x69 } };       // 0x140e2a589 / 0x140d53029
 		constexpr Engine::Offset kArraySetAt{ { 70322 }, { 68970 } };                    // 0x140d1ee40 / 0x140c59560
@@ -38,9 +33,8 @@ namespace DCLF::Features::Particles::MasterParticles
 
 		constexpr std::size_t kChildrenArray = 0x110;    // NiNode::children (the NiTObjectArray SetAt is called on)
 		constexpr std::size_t kMasterRemovable = 0x166;  // byte: the master may be removed once idle
-		// std::uint32_t: the emitters feeding the master (its BSTArray of the source systems at +0x128, pruned by FUN_140e36630 in its
-		// update). With none, its particles die out and the removal's live count (FUN_140e2b430, AE ID 76620 / SE 74872) reaches 0. Read
-		// as a plain count: the live count walks arrays its update rebuilds on a job thread.
+		// The master's emitter count. With none, its particles die out. Read as a plain count, because the live count walks arrays that
+		// its update rebuilds on a job thread.
 		constexpr std::size_t kMasterEmitters = 0x138;
 		constexpr std::uint32_t kHeldFrames = 600;  // an idle master kept only by DCLF's pins this long is flagged (<- MASTER REFS)
 
@@ -59,29 +53,21 @@ namespace DCLF::Features::Particles::MasterParticles
 			return Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
 		}
 
-		// The gate between the category capture (shared: enter to leave, the render thread, only on a frame that gathers the masters) and
-		// the removal hook (exclusive): no removal is pushed between a master's listing and its capture's pushes.
-		//
-		// Lock order: gate, then the manager's lock. The render thread takes the gate (Enter), then the manager's lock for read inside it
-		// (Gather). The removal hook takes the gate alone: FUN_140e2a520 runs on a job thread with no lock held (AE: its one caller,
-		// UpdateParticleSystemManagerJob 0x1402c7470, queued once per array slot by FUN_1402c75c0 / FUN_1402c76c0, which take only the
-		// queue's spin lock DAT_1431374f8 while queueing; the job and FUN_140e2a520 take none, and SetAt FUN_140d1ee40 takes none). The
-		// manager's child-edit events (OnAttached, OnDetaching, SceneTracker's) never take the gate. So no thread holds the manager's lock
-		// while it waits for the gate.
+		// Shared by the render thread's category capture, exclusive for the removal hook, so no removal lands between a master's listing
+		// and its capture's pushes. Lock order is gate, then the manager's lock. The removal hook runs on a job thread holding no lock
+		// (UpdateParticleSystemManagerJob 0x1402c7470), so nothing holds the manager's lock while waiting for the gate.
 		std::shared_mutex gate;
 		bool installed = false;
 		Api::SwitchId masterSwitch;  // install
 		bool observing = false;      // install: CS_DCLF_STATS, the observers' report (Lines) is read
 
-		// The counters (any thread) and the masters' exits by event (keys, any thread; drained by the render thread's gathers).
 		struct Counts
 		{
 			std::atomic<std::uint64_t> attaches{ 0 }, detaches{ 0 }, removals{ 0 }, gathers{ 0 };
 		} counts;
 		EventQueue<const void*> exits;
 
-		// A master read at a gather: idle (removable, no emitter left) with more references than the slot's and the model entry's, and
-		// how many of those the category captures still held pin (FrameView::CapturePinsOf).
+		// A master read at a gather, and how many of its references are DCLF's capture pins.
 		struct MasterRead
 		{
 			RE::NiNode* master = nullptr;
@@ -89,8 +75,6 @@ namespace DCLF::Features::Particles::MasterParticles
 			std::uint32_t references = 0, pins = 0;
 		};
 
-		// The render thread's view at its last gather (inside enter): the masters listed, those that left with no event seen, and each
-		// idle master's first frame seen kept from removal by DCLF's pins.
 		struct Observed
 		{
 			std::vector<const void*> listed, gathered;
@@ -101,7 +85,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		} observed;
 		std::mutex observedLock;  // the render thread's gathers write, the report reads
 
-		/** @brief The observers (CS_DCLF_STATS alone): the masters that left with no event, the idle ones DCLF's pins keep. */
+		/** @brief Flags masters that left with no event, and idle ones held only by DCLF's pins. CS_DCLF_STATS only. */
 		void Observe(const std::vector<MasterRead>& a_masters)
 		{
 			const std::scoped_lock lock(observedLock);
@@ -120,10 +104,8 @@ namespace DCLF::Features::Particles::MasterParticles
 			std::swap(o.listed, o.gathered);
 			o.lastListed = static_cast<std::uint32_t>(o.listed.size());
 			o.maxListed = std::max(o.maxListed, o.lastListed);
-			// An idle master with a third reference is the engine's own state when an emitter's BSValueNode still names it (its
-			// associatedObject, +0x130, a NiPointer set by the manager's pending-master step FUN_140e2a6c0: TES's pooled impact clones keep
-			// theirs while detached). Only the references DCLF's capture pins add are DCLF's: an idle master that the engine would remove
-			// without them (references - pins < 3) for kHeldFrames between gathers is flagged (a pin never let go of).
+			// An idle master with a third reference is normal while an emitter's BSValueNode names it (+0x130), as with TES's pooled impact
+			// clones. Only DCLF's pins count against it: one held only by them for kHeldFrames is flagged as a leaked pin.
 			const std::uint32_t frame = FrameCounter();
 			std::vector<std::pair<const void*, std::uint32_t>> held;
 			o.idleEngine = o.idleDclf = 0;
@@ -167,12 +149,10 @@ namespace DCLF::Features::Particles::MasterParticles
 			if (!manager)
 				return;
 			counts.gathers.fetch_add(1, std::memory_order_relaxed);
-			// Render thread only (inside Enter): reused between gathers.
 			static std::vector<MasterRead> masters;
 			masters.clear();
-			// Under the manager's lock: its AttachChild grows the array under it. The removal hook waits for Leave, so no idle removal
-			// clears a slot read here before the sink pins its master (the manager's own DetachChild overrides do not wait: none is known
-			// to detach a master during play).
+			// The manager's AttachChild grows the array under this lock. The removal hook waits for Leave, so no slot read here is cleared
+			// before the sink pins its master.
 			auto& lock = ManagerLock();
 			lock.LockForRead();
 			for (const auto& child : Engine::Children(*manager)) {
@@ -181,7 +161,7 @@ namespace DCLF::Features::Particles::MasterParticles
 					continue;
 				MasterRead read{ .master = master };
 				if (observing) {
-					// Read before the sink pins it. Idle: removable, no emitter left; held: more references than the engine's removal allows.
+					// Read before the sink pins it.
 					read.references = master->GetRefCount();
 					read.idleHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && read.references > 2 &&
 					                std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
@@ -193,7 +173,6 @@ namespace DCLF::Features::Particles::MasterParticles
 				a_sink.Add(read.master);
 			if (!observing)
 				return;
-			// The pins the captures still held add to those idle masters' counts (render thread: the captures are FrameView's).
 			std::vector<const void*> keys;
 			for (const auto& read : masters)
 				if (read.idleHeld)
@@ -206,7 +185,7 @@ namespace DCLF::Features::Particles::MasterParticles
 			Observe(masters);
 		}
 
-		/** @brief The manager's update clearing an idle master's slot: its detach pushed first, as a child edit's would be. */
+		/** @brief The manager's update clearing an idle master's slot. Its detach is pushed first, as a child edit's would be. */
 		struct RemovalHook
 		{
 			static void thunk(void* a_array, std::uint32_t a_index, void* a_value)
@@ -226,8 +205,6 @@ namespace DCLF::Features::Particles::MasterParticles
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// The manager's child edits through SceneWriterFramework (its AttachChild override; its detaches and the world reset's
-		// remove-all): counted. SceneTracker pushes their events (naming the manager as the parent).
 		void OnAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
@@ -253,8 +230,7 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Preflight()
 	{
-		// Before the features' installs, so before the switch is registered: read from the same environment or switches file the
-		// registry reads it from at Install (masterSwitch).
+		// Runs before the switch is registered, so read it from the same source the registry uses.
 		if (Util::SwitchFile::Value("CS_DCLF_MASTER_PARTICLES") == "0")
 			return;
 		HookSites::RequireKnown("the particle manager's master removal", SitesKnown());
@@ -272,8 +248,8 @@ namespace DCLF::Features::Particles::MasterParticles
 			logger::warn("[DCLF] master particles: this runtime has no address for the particle manager's master removal; they stay the engine's");
 			return;
 		}
-		// Chained (Preflight required a CALL): another plugin's hook there is called through. A call to another of the game's functions is
-		// not the removal (a runtime whose code moved), and the masters stay the engine's.
+		// Chained, so another plugin's hook there is called through. A call to any other game function means the code moved, and the
+		// masters stay the engine's.
 		const auto removal = REL::Offset(kRemovalCall).address();
 		const auto setAt = REL::Offset(kArraySetAt).address();
 		if (!Engine::CallsTo(removal, setAt)) {

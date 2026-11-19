@@ -1,9 +1,7 @@
-// The shadow mask family's engine side: the two shadow mask calls' hooks (the world's and a menu scene's), which let the engine's
-// function run with its draws latched and hand them to the anchor's pass; the family's DrawTriShape taker, which latches a shadow mask
-// draw in place of drawing it; and its BSUtilityShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
-//
-// A call the family cannot take, or the rest of one after a refused draw, is drawn by the engine with nobody vouching for it: under the
-// flush latch it is skipped and the residue census counts it, since every such case is a defect of the family.
+// Engine-side hooks for the shadow mask family. The world's and menu scene's shadow mask calls run with their draws latched,
+// DrawTriShape latches each mask draw, and SetupGeometry counts the passes. Render thread.
+// A call the family cannot take reaches the engine with nobody vouching for it. Under the flush latch it is skipped and the
+// residue census counts it, because each such case is a family defect.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -36,8 +34,7 @@ namespace DCLF::Features::ShadowMask
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 
-		// The most draws one run latches (ShadowMaskDraws' latch has room for this many): one per shadow-casting light, which the
-		// engine caps far below this. A batch with more draws in several runs.
+		// One draw per shadow-casting light, which the engine caps far below this. A longer batch draws in several runs.
 		constexpr std::size_t kMaxLatched = 32;
 
 		/** @brief The inherent refusals, each logged once per reason. */
@@ -47,7 +44,7 @@ namespace DCLF::Features::ShadowMask
 			return log;
 		}
 
-		/** @brief The batch being latched (render thread). */
+		/** @brief The batch being latched, on the render thread. */
 		struct Capture
 		{
 			bool active = false;
@@ -72,7 +69,7 @@ namespace DCLF::Features::ShadowMask
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
-		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		/** @brief Runs the latched part of the batch now, before anything the engine draws after it. */
 		void FlushLatched(Capture& a_capture)
 		{
 			auto run = std::move(a_capture.run);
@@ -85,7 +82,7 @@ namespace DCLF::Features::ShadowMask
 			ShadowMaskDraws::Submit(std::move(run));
 		}
 
-		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason and view. */
+		/** @brief Runs the latched part and leaves the rest of the batch to the engine. Logged once per reason and view. */
 		void Refuse(Capture& a_capture, std::string_view a_reason, std::string_view a_detail = {})
 		{
 			a_capture.failed = true;
@@ -93,14 +90,9 @@ namespace DCLF::Features::ShadowMask
 			FlushLatched(a_capture);
 		}
 
-		/**
-		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the Utility
-		 * shader's Setup functions wrote (the engine constants capture), the slots' textures and samplers, the geometry (the screen quad).
-		 * Null when latched; otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
-		 */
+		/** @brief Latches the draw the engine is about to make. Returns null when latched, else why the engine must draw it. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
-			// A full run is drawn now and the batch goes on in a new one: no draw is refused for the count.
 			if (a_capture.run->draws.size() >= kMaxLatched) {
 				const auto view = a_capture.run->view;
 				FlushLatched(a_capture);
@@ -114,15 +106,13 @@ namespace DCLF::Features::ShadowMask
 			const auto* state = globals::state;
 			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Utility)
 				return "the bound shader is not BSUtilityShader";
-			// The function binds kSHADOW_MASK as RT0 and no depth (SetCurrentDepthStencilTarget(none)). A target the frame left bound at
-			// RT1 or later is not written: the pixel stage has one output.
+			// The function binds kSHADOW_MASK as RT0 and no depth. Anything bound at RT1 or later is not written, since the pixel stage has one output.
 			if (static_cast<std::uint32_t>(rss.renderTargets[0]) != kShadowMaskTarget || rss.depthStencil != static_cast<std::uint32_t>(-1) ||
 				rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return "its target is not kSHADOW_MASK, or a depth target is bound";
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
-			// The descriptor CS looks its shader up by (State::ModifyShaderLookup), which ShaderCompilationTask compiled the stages for.
 			draw.key.descriptor = state->modifiedPixelDescriptor;
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra), nullptr,
@@ -132,8 +122,6 @@ namespace DCLF::Features::ShadowMask
 			if (!draw.key.colourFormats[0])
 				return "no shadow mask target";
 
-			// PS b0 (SetupTechnique: VPOSOffset, the cascades' splits, the filter's parameters) and PS b2 (SetupGeometry: the light's
-			// projections), as the engine constants capture saw them, and the alpha test reference SetDirtyStates would write into b11.
 			auto& constants = draw.constants;
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
@@ -148,7 +136,7 @@ namespace DCLF::Features::ShadowMask
 			if (!draw.program)
 				return "its ORG program cannot be built";
 
-			// The screen quad, read by device address while its leases are held (the run keeps them until the GPU is done).
+			// The screen quad is read by device address. The run holds its leases until the GPU is done.
 			Family::Owners owners;
 			Family::Geometry geometry;
 			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
@@ -162,17 +150,14 @@ namespace DCLF::Features::ShadowMask
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// The slots the ORG build reads as the shadow state holds them (the scene depth, the light's shadow maps; an empty slot reads a
-			// null view of its declared kind) and their samplers. Every other slot reads a null view and the first sampler, whatever is
-			// bound there (SlotRead: the focus shadows' stencil at t5 among them, which the engine's draw reads as 0).
+			// Slots the ORG build does not read get a null view and the first sampler, whatever is bound there.
 			for (std::uint32_t t = 0; t < kSlots; ++t) {
 				const bool read = SlotRead(t);
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, SlotKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
-					// A depth or target a graph pass writes: read by its id, which the view's client declares, so the graph orders the write
-					// before the masks.
+					// A depth or target a graph pass writes is read by published id, so the graph orders the write before the masks.
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = ShadowMaskDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
 					if (result != Family::InputResult::Graph) {
@@ -189,7 +174,6 @@ namespace DCLF::Features::ShadowMask
 					return "its sampler modes have no graph sampler";
 			}
 
-			// The viewport SetDirtyStates would set.
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
 			for (auto& owner : owners)
@@ -199,10 +183,7 @@ namespace DCLF::Features::ShadowMask
 			return nullptr;
 		}
 
-		/**
-		 * @brief A shadow mask function's call: for a taken view, the function runs with its draws latched, then the anchor's pass draws
-		 * them at this point. The arguments are passed through as the engine passed them.
-		 */
+		/** @brief A shadow mask call hook. For a taken view, the draws are latched and the anchor's pass draws them here. */
 		template <View kView>
 		struct MaskBatch
 		{
@@ -228,16 +209,15 @@ namespace DCLF::Features::ShadowMask
 				capture.active = false;
 				if (!capture.passes.End())
 					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
-				// A batch whose draws all stayed the engine's (no light cast this frame) has nothing to run.
+				// No light cast this frame, so there is nothing to run.
 				FlushLatched(capture);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
 		/**
-		 * @brief The family's DrawTriShape taker: during a latched shadow mask batch, the draw is latched instead. A taken draw then applies
-		 * the engine's pending state as the draw function's own SetDirtyStates would: the kSHADOW_MASK clear the function asked for lands
-		 * before the anchor's run (on D3D11, or the engine skeleton's clear pass), and the dirty bits are consumed as before.
+		 * @brief Latches a draw during a latched batch. Applies the engine's pending state as SetDirtyStates would.
+		 * That way the kSHADOW_MASK clear lands before the anchor's run, and the dirty bits are consumed as before.
 		 */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -253,14 +233,14 @@ namespace DCLF::Features::ShadowMask
 				return false;
 			}
 			Engine::ApplyPendingState();
-			// The draw no longer reaches SetDirtyStates' hook (State::Draw), where Volumetric Shadows, Exponential Height Fog and
-			// Skylighting take the sun's shadow cascades from its t4: give them here.
+			// The draw no longer reaches SetDirtyStates' hook, where Volumetric Shadows, Exponential Height Fog and Skylighting take the sun's
+			// cascades from t4. Give them the cascades here.
 			if (globals::state->currentPixelDescriptor & static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask))
 				globals::state->OnShadowMaskDraw(Unwrap(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().PSTexture[4]));
 			return true;
 		}
 
-		/** @brief After BSUtilityShader::SetupGeometry: counts the pass; one that will not reach DrawTriShape ends the latched part. */
+		/** @brief Counts the pass after BSUtilityShader::SetupGeometry. A pass that will not reach DrawTriShape flushes first. */
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
@@ -292,7 +272,6 @@ namespace DCLF::Features::ShadowMask
 		stl::write_thunk_call<MaskBatch<View::World>>(REL::Offset(Address::kWorldMasks).address());
 		stl::write_thunk_call<MaskBatch<View::Menu>>(REL::Offset(Address::kMenuMasks).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Utility>(RE::VTABLE_BSUtilityShader[0], &OnSetupGeometry);
-		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("shadow mask", [] { return ShadowMaskDraws::Setup(); });
 		logger::info("[DCLF] shadow mask: hooks installed (the world's and the menu scenes' shadow masks, BSUtilityShader::SetupGeometry)");
 	}

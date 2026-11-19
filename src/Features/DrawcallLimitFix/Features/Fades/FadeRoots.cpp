@@ -1,6 +1,5 @@
-// The fade roots (scene lane): the fade-root family's columns and the coordinator component that lists the rows for the slots whose
-// records name a fade node, with their owned engine nodes and seed requests, and steps them on their input events (snaps, fade amounts,
-// tree LOD switches, the primary cull's admitted roots); their registration (RegisterScene).
+// Fade roots on the scene lane. A fade root is an engine fade node shared by one or more object slots.
+// The coordinator component lists one row per root, holds a reference to its node, and updates the row on engine events.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRoots.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
@@ -27,7 +26,7 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		/** @brief Slots by root, each in one list at a time: swap-removed, the first kept (a root's centre is its first member). */
+		/** @brief Member slots per root. Removal swaps with the last entry. */
 		struct RootMembers
 		{
 			std::vector<std::vector<std::uint32_t>> lists;
@@ -57,32 +56,28 @@ namespace DCLF::Scene
 				lists.clear();
 				position.clear();
 			}
-			/** @brief Whether a_slot is listed under a_key (Remove's precondition). */
+			/** @brief Remove's precondition. */
 			bool Has(std::uint32_t a_key, std::uint32_t a_slot) const
 			{
 				return a_key < lists.size() && a_slot < position.size() && position[a_slot] < lists[a_key].size() && lists[a_key][position[a_slot]] == a_slot;
 			}
 		};
 
-		/** @brief The component's state: the roots' members, which listed roots are stood in, and the listed nodes' references by root slot. */
 		struct FadeRootState
 		{
 			RootMembers members;
-			// The listed roots (kFadeRootOwned), by node: whether each is stood in (kFadeRootStoodIn).
+			// Admitted roots by node. The value says whether the root is stood in.
 			ankerl::unordered_dense::map<const void*, bool> owned;
-			// Owned while listed (a published version that names it keeps it, through the retirement chain).
+			// Node references by root slot. Retirement keeps them alive while a published version still names the root.
 			std::vector<RE::NiPointer<RE::NiAVObject>> owners;
-			// The diagnostic capture's: per root slot, which code last changed its row (FadeRootWriter) and the frame it did.
+			// For the diagnostic capture.
 			std::vector<std::uint8_t> lastWriter;
 			std::vector<std::uint32_t> lastWriteFrame;
-			// The fadeAmount events since the session started: all, those whose node is not a listed root, those the mirror had no
-			// record for (the row keeps its old value: a stuck partial fade's suspect), those that changed nothing or the row, and the
-			// seeds' rechecks among them (and those that changed the row: a listing taken mid-ramp).
+			// fadeAmount event counts for the session. amountNoMirror is a suspect for a stuck partial fade.
 			std::uint64_t amountEvents = 0, amountNotListed = 0, amountNoMirror = 0, amountUnchanged = 0, amountChanged = 0;
 			std::uint64_t rechecks = 0, recheckChanged = 0, reseeds = 0;
 		};
 
-		/** @brief Root a_root's row was changed by a_writer: the census's tag (one store, and a resize only when the table grew). */
 		void NoteRootWrite(FadeRootState& a_state, std::uint32_t a_root, FadeRootWriter a_writer)
 		{
 			if (a_state.lastWriter.size() <= a_root) {
@@ -93,10 +88,9 @@ namespace DCLF::Scene
 			a_state.lastWriteFrame[a_root] = Coordinator::Get().GetFrame();
 		}
 
-		// The coordinator's state, made once (MakeComponent) and held for the session: the report's stood-in count reads it.
+		// Made once and held for the session.
 		FadeRootState* liveState = nullptr;
 
-		// Vectors by their bytes, the maps by their entries.
 		template <class T>
 		bool SameRows(const std::vector<T>& a_left, const std::vector<T>& a_right)
 		{
@@ -114,7 +108,6 @@ namespace DCLF::Scene
 			return true;
 		}
 
-		/** @brief The live tables' family and its columns (the writer's: every family made first if none is). */
 		struct LiveRoots
 		{
 			Extensions::TableFamilyColumns& family;
@@ -135,15 +128,12 @@ namespace DCLF::Scene
 
 		FadeRootStatic FadeRootFromMirror(const Api::CoordinatorComponentContext& a_context, const void* a_node)
 		{
-			// What the coordinator's row holds of the node (CheckFadeInputs, the builds' state until the seed's): the fade's range, +0x109,
-			// the fadeAmount, the tree LOD switch's selection; and the state as far as the mirror holds it (the fade and the levels), the
-			// builds' until FadeStateCS's first update. The plan here is a guess (the seed's bits are the node's).
+			// Builds use these values until the seed arrives. The plan bits are a guess that the seed corrects.
 			FadeRootStatic row;
 			const auto& mirror = a_context.Mirror();
 			const auto* node = mirror.Node(a_node);
 			if (!node) {
-				// Its geometry tracked this frame by a walk the mirror's captures lag (CaptureMirrorRequests takes it next frame), or a
-				// property's fade node outside the world: the seed brings the node's values.
+				// The mirror lags by a frame, or the node is outside the world. The seed will bring the real values.
 				NoteFadeRootUnmirrored();
 				return row;
 			}
@@ -160,7 +150,7 @@ namespace DCLF::Scene
 			return row;
 		}
 
-		/** @brief A new generation for a root's row, its seed row toggled and requested. */
+		/** @brief Starts a new generation for the row and asks for a fresh seed into the other seed row. */
 		void RequestFadeSeed(const Api::CoordinatorComponentContext& a_context, FadeRootTables& a_roots, std::uint32_t a_root, FadeRootStatic& a_row)
 		{
 			const auto& owners = a_context.State<FadeRootState>().owners;
@@ -170,7 +160,7 @@ namespace DCLF::Scene
 				a_context.RequestSeed({ owners[a_root], a_root, a_row.generation, static_cast<std::uint32_t>(FadeSeedRow(a_root, a_row.bits)) });
 		}
 
-		/** @brief A member's root given back: its root's centre rechosen when it was the member, its last member retires the slot. */
+		/** @brief Removes a slot from its root. The last member leaving retires the root. */
 		void UnlistFadeRoot(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
 			if (a_context.DenseWalk())
@@ -184,7 +174,7 @@ namespace DCLF::Scene
 			auto& current = family.objectRow[a_slot];
 			if (members.Has(current, a_slot))
 				members.Remove(current, a_slot);
-			// The root's centre is a record that holds it (its fade node row): another one when this was it.
+			// The root's centre is one of its members, so pick another if this slot was it.
 			if (current < roots.fadeRoots.size() && roots.fadeRoots[current].object == a_slot && roots.fadeRootRefs[current] > 1) {
 				roots.fadeRoots[current].object = members.First(current);
 				family.Mark(current);
@@ -203,7 +193,6 @@ namespace DCLF::Scene
 			current = kNoFadeRoot;
 		}
 
-		/** @brief A new root's slot (a free one, else one more), its row from the mirror, owned and seeded. */
 		std::uint32_t ListNewRoot(const Api::CoordinatorComponentContext& a_context, const LiveRoots& a_live, const void* a_node, std::uint32_t a_slot,
 			RE::NiPointer<RE::NiAVObject>&& a_owner)
 		{
@@ -219,17 +208,15 @@ namespace DCLF::Scene
 				roots.fadeRootRefs.push_back(0);
 				roots.fadeRootNode.push_back(nullptr);
 			}
-			// The coordinator's half from the mirror; the node's state and values are the seed's, sampled by FrameValues in the frame
-			// that first draws the generation (the scene work reads no engine memory).
+			// Scene work reads no engine memory. The node's real values come from the seed in the frame that first draws this generation.
 			auto row = FadeRootFromMirror(a_context, a_node);
 			row.object = a_slot;
 			row.bits |= roots.fadeRoots[r].bits & kFadeRootSeedOdd;
 			if (const auto owned = state.owned.find(a_node); owned != state.owned.end())
 				row.bits |= kFadeRootOwned | (owned->second ? kFadeRootStoodIn | kFadeRootWritten : 0u);
-			// Every listed root is owned and DCLF's to write from its listing (the row's seed is the node as listed).
+			// DCLF owns and writes every listed root from the moment it is listed.
 			row.bits |= kFadeRootOwned | kFadeRootWritten;
 			roots.fadeRootNode[r] = a_node;
-			// Owned while listed (a published version that names it keeps it, through the retirement chain).
 			if (state.owners.size() <= r)
 				state.owners.resize(std::size_t(r) + 1);
 			state.owners[r] = std::move(a_owner);
@@ -242,25 +229,23 @@ namespace DCLF::Scene
 			return r;
 		}
 
-		/** @brief A written slot's root: the fade node its record names listed (taken by the slot), or none. */
+		/** @brief Lists the fade node a written slot names, or unlists the slot if it names none. */
 		void ListFadeRoot(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
-			// The walk parity's dense walk restores the tables, not the members kept beside them.
+			// The dense parity walk restores the tables but not the members kept beside them.
 			if (a_context.DenseWalk())
 				return;
 			const auto* geometry = a_context.ObjectGeometry(a_slot);
-			// Its property's fade node (the mirror's).
 			const auto* property = geometry ? a_context.Mirror().Leaf(geometry).property : nullptr;
 			const auto* node = property ? static_cast<const RE::NiAVObject*>(property->fadeNode) : nullptr;
-			// The engine's "no fade node" (Engine::EmptyFadeNode: terrain, object LOD, references whose root is no BSFadeNode) is no root: it
-			// is one node shared by thousands of geometries, outside the scene graph, so no chain reaches it and FadeStateCS and the write-back
-			// would write a static engine node. Such a geometry takes its entry's root as any plain one.
+			// The engine's shared empty fade node sits outside the scene graph and serves thousands of geometries.
+			// Treating it as a root would make FadeStateCS and the write-back write a static engine node.
 			static const bool emptyIsNone = Features::Fades::EmptyFadeNodeIsNone();
 			if (emptyIsNone && node == Engine::EmptyFadeNode())
 				node = nullptr;
 			const auto live = LiveRootsOf(a_context);
 			auto& [family, roots] = live;
-			// A root not listed yet is owned from the entry's reference (pins), never from the key; without one, not listed.
+			// A new root is held through the entry's pinned reference, never the raw key. No reference means no root.
 			RE::NiPointer<RE::NiAVObject> owner;
 			if (node && !roots.fadeRootIndex.contains(node) && !(owner = a_context.HoldFadeNode(a_slot, node)))
 				node = nullptr;
@@ -282,11 +267,10 @@ namespace DCLF::Scene
 			++roots.fadeRootRefs[it->second];
 			a_context.State<FadeRootState>().members.Add(it->second, a_slot);
 			family.objectRow[a_slot] = it->second;
-			// The shadow inputs name it (FadeRootOf).
+			// Shadow inputs read the slot's root.
 			a_context.tables.NoteChange(a_slot, kChangeBindings);
 		}
 
-		/** @brief Marks a root's row owned or not (its stood-in bit with it). */
 		void MarkFadeRootOwned(const LiveRoots& a_live, const void* a_node, bool a_owned, bool a_standIn)
 		{
 			auto& [family, roots] = a_live;
@@ -294,13 +278,12 @@ namespace DCLF::Scene
 			if (it == roots.fadeRootIndex.end())
 				return;
 			auto& row = roots.fadeRoots[it->second];
-			// Owned and written since its listing, its state the GPU's throughout (no engine step to seed again from):
-			// the cut's stand-in only moves kFadeRootStoodIn.
+			// The GPU has owned the state since listing, so only the stood-in bit changes here.
 			row.bits = (row.bits & ~kFadeRootStoodIn) | kFadeRootOwned | kFadeRootWritten | (a_owned && a_standIn ? kFadeRootStoodIn : 0u);
 			family.Mark(it->second);
 		}
 
-		/** @brief The primary cull's admitted roots, a whole set (MarkFadeRootOwned each that changed). */
+		/** @brief Takes the primary cull's full set of admitted roots and updates the rows that changed. */
 		void ApplyAdmitted(const Api::CoordinatorComponentContext& a_context, std::span<const Api::StandInRoot> a_roots)
 		{
 			const auto live = LiveRootsOf(a_context);
@@ -317,7 +300,7 @@ namespace DCLF::Scene
 			state.owned = std::move(owned);
 		}
 
-		/** @brief A placement snap: a listed root's row from its node again (a new generation: the GPU's state restarts from it), owned bits kept. */
+		/** @brief A placement snap. Rebuilds the row in a new generation, so the GPU state restarts from the node. */
 		void ReseedFadeRoot(const Api::CoordinatorComponentContext& a_context, const void* a_node)
 		{
 			auto [family, roots] = LiveRootsOf(a_context);
@@ -337,23 +320,22 @@ namespace DCLF::Scene
 			NoteRootWrite(state, it->second, FadeRootWriter::Reseed);
 		}
 
-		/** @brief A fadeAmount event (Actor::SetAlpha): a listed root's fadeAmount retaken from its node, its state row kept. */
+		/** @brief A fadeAmount event from Actor::SetAlpha. Updates the row's input and keeps the GPU state. */
 		void RefreshFadeAmount(const Api::CoordinatorComponentContext& a_context, const void* a_node)
 		{
 			auto [family, roots] = LiveRootsOf(a_context);
 			auto& state = a_context.State<FadeRootState>();
-			// Taken first, so a recheck whose node is not listed is not kept.
+			// Take the recheck first so one for an unlisted node does not linger.
 			const bool recheck = Features::Fades::TakeRecheck(a_node);
 			++state.amountEvents;
 			state.rechecks += recheck ? 1u : 0u;
-			// The key alone until it names a listed root, which the listing holds.
 			const auto it = roots.fadeRootIndex.find(a_node);
 			if (it == roots.fadeRootIndex.end()) {
 				++state.amountNotListed;
 				return;
 			}
 			auto& row = roots.fadeRoots[it->second];
-			// The mirror's (Actor::SetAlpha's update carries it, applied before this batch's structural events).
+			// The mirror already has the new value, applied before this batch's structural events.
 			const auto* record = a_context.Mirror().Node(a_node);
 			if (!record) {
 				++state.amountNoMirror;
@@ -364,7 +346,7 @@ namespace DCLF::Scene
 				++state.amountUnchanged;
 				return;
 			}
-			// An input, not state: the GPU's state row is kept, and FadeStateCS steps its amountFade toward it as the engine does.
+			// An input, not state. FadeStateCS steps amountFade toward it as the engine does.
 			row.fadeAmount = amount;
 			family.Mark(it->second);
 			++state.amountChanged;
@@ -372,20 +354,18 @@ namespace DCLF::Scene
 			NoteRootWrite(state, it->second, recheck ? FadeRootWriter::Recheck : FadeRootWriter::EngineEvent);
 		}
 
-		/** @brief The fade channels' keys (ApplyEvents' BeforeStructural channels, registered snaps first): snaps reseed, amounts refresh. */
 		void ApplyFadeKeys(const Api::CoordinatorComponentContext& a_context, Api::EngineChannelId a_channel, std::span<const void* const> a_keys)
 		{
 			if (a_channel == FadeSnapsChannelId()) {
 				for (const void* node : a_keys)
 					ReseedFadeRoot(a_context, node);
 			} else if (a_channel == FadeAmountsChannelId()) {
-				// Actors' fadeAmount: the rows' input (the GPU's fade state stands).
 				for (const void* node : a_keys)
 					RefreshFadeAmount(a_context, node);
 			}
 		}
 
-		/** @brief A switch event on a tree root's LOD switch: its kFadeRootTreeLod retaken. */
+		/** @brief A tree root's LOD switch changed. */
 		void RefreshFadeRootSwitch(const Api::CoordinatorComponentContext& a_context, const void* a_switch)
 		{
 			auto [family, roots] = LiveRootsOf(a_context);
@@ -393,18 +373,16 @@ namespace DCLF::Scene
 			if (it == roots.fadeRootSwitch.end() || it->second >= roots.fadeRoots.size() || !roots.fadeRootNode[it->second])
 				return;
 			auto& row = roots.fadeRoots[it->second];
-			// The mirror's (the switch's stores carry its index, applied before the switch events).
 			const auto* lodSwitch = a_context.Mirror().Node(a_switch);
 			const bool selected = lodSwitch && lodSwitch->switchIndex > 0;
 			if (selected == ((row.bits & kFadeRootTreeLod) != 0))
 				return;
-			// An input, not state: the row changes without a new generation, so the GPU's state row is kept.
+			// An input, not state. No new generation, so the GPU state row is kept.
 			row.bits = selected ? (row.bits | kFadeRootTreeLod) : (row.bits & ~kFadeRootTreeLod);
 			family.Mark(it->second);
 		}
 
-		// The listed nodes' references through the retirement chain with everything else the cleared tables named (after every other
-		// component's: Fades registers last).
+		// Node references go back through the retirement chain. Fades registers last so this runs after every other component's reset.
 		void Reset(const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& state = a_context.State<FadeRootState>();
@@ -419,8 +397,7 @@ namespace DCLF::Scene
 		Api::TableFamilyId fadeRootFamily;
 		Api::CoordinatorComponentId fadeRootComponent;
 
-		// The record word the root reference rides in: BindlessObject::recordFlags, bits 9-31 the root + 1 (RecordFlagsOf's Core bits stay
-		// below them).
+		// The root reference is stored as root + 1 in bits 9-31 of recordFlags. Core's bits stay below.
 		constexpr std::uint32_t kFadeRootRecordWord = static_cast<std::uint32_t>(offsetof(BindlessObject, recordFlags) / 4);
 		static_assert(kRecordFadeRootShift == 9, "the fade roots' record reference is bits 9-31 of recordFlags");
 	}
@@ -447,8 +424,7 @@ namespace DCLF::Scene
 
 	void AssignFadeRootRow(void* a_to, const void* a_from, std::uint32_t a_row)
 	{
-		// A marked row's own column (its listing, references and index are written under NoteWrite: the family is then copied whole), and
-		// the generations a reseed's mark counts on (RequestFadeSeed).
+		// Only the row column is copied per row. The other columns change under NoteWrite, which copies the whole family.
 		auto& to = *static_cast<FadeRootTables*>(a_to);
 		const auto& from = *static_cast<const FadeRootTables*>(a_from);
 		if (a_row < to.fadeRoots.size() && a_row < from.fadeRoots.size())
@@ -466,7 +442,7 @@ namespace DCLF::Scene
 
 	void ClearFadeRoots(void* a_columns)
 	{
-		// The generations count on (a row's seed is told from the one before it by its generation).
+		// Generations keep counting, because seeds are told apart by generation.
 		auto& roots = *static_cast<FadeRootTables*>(a_columns);
 		roots.fadeRoots.clear();
 		roots.fadeRootRefs.clear();
@@ -505,7 +481,7 @@ namespace DCLF::Scene
 
 	void OwnerLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text)
 	{
-		// What the owners alone keep alive (the coordinator's thread, which holds them), against the roots listed.
+		// Nodes that only these owners keep alive.
 		Diagnostics::SoleHolds owners;
 		for (const auto& owner : a_context.State<FadeRootState>().owners)
 			owners.Add(owner.get());
@@ -541,19 +517,19 @@ namespace DCLF::Scene
 
 	namespace
 	{
-		/** @brief What the census reads of a root's reference. Plain data, so the read can sit behind an SEH guard. */
+		/** @brief Plain data, so the read can sit behind an SEH guard. */
 		struct ReferenceIdentity
 		{
 			std::uint32_t formId = 0;
-			const char* name = nullptr;  // the base form's name (static form data)
+			const char* name = nullptr;  // static form data
 			bool actor = false;
 			bool has3D = false;  // the reference's 3D is this node
-			bool read = false;   // false: the node is detached (no reference read) or the read faulted
+			bool read = false;   // false if the node is detached or the read faulted
 		};
 
 		/**
-		 * @brief The node's reference (its user data), read only while the node is attached: a detached node may outlive its reference,
-		 * since the fade roots own their nodes. A fault is caught and leaves read false (diagnostics only; nothing is written).
+		 * @brief Reads the node's reference only while attached. A detached node can outlive its reference because fade roots own nodes.
+		 * Diagnostics only. A fault leaves read false.
 		 */
 		ReferenceIdentity ReadReferenceIdentity(const RE::NiAVObject* a_node)
 		{
@@ -620,7 +596,7 @@ namespace DCLF::Scene
 			player = character->GetPosition();
 			havePlayer = true;
 		}
-		// The roots that fade or whose copies disagree: actors first, then by distance.
+		// Roots that are fading or whose copies disagree. Actors first, then by distance.
 		struct Candidate
 		{
 			std::uint32_t root = 0;
@@ -635,7 +611,7 @@ namespace DCLF::Scene
 				continue;
 			++listed;
 			const auto& row = list.rows[r];
-			// The nodes are owned while listed (FadeRootState::owners), so reading them is safe; the values may be mid-write.
+			// Listed nodes are held, so the read is safe. The values may be mid-write.
 			const float nodeAmount = Engine::At<float>(node, 0x100);
 			const float current = Engine::At<float>(node, 0x130);
 			const auto* record = mirror.Node(node);
@@ -660,7 +636,6 @@ namespace DCLF::Scene
 			const auto sceneWriter = r < state.lastWriter.size() ? static_cast<FadeRootWriter>(state.lastWriter[r]) : FadeRootWriter::None;
 			const std::uint32_t sceneFrame = r < state.lastWriteFrame.size() ? state.lastWriteFrame[r] : 0u;
 			const std::uint32_t appliedFrame = r < writeBack.appliedFrame.size() ? writeBack.appliedFrame[r] : 0u;
-			// The write-back's judged store is the last writer when it is newer than the scene lane's row write.
 			const bool writeBackLast = appliedFrame && appliedFrame >= sceneFrame;
 			const auto& identity = candidate.identity;
 			json entry = json::object();
@@ -730,8 +705,7 @@ namespace DCLF::Features::Fades
 {
 	void RegisterScene(Api::InstallContext& a_context)
 	{
-		// The family: registered after TreeWind's trees, so the tables' report reads "trees kept a, fade roots kept b". The record's root
-		// reference is (root + 1) << 9 in recordFlags, none past 23 bits (RecordFlagsOf's cut-off); a row carries its generation, so no tag.
+		// The record reference has 23 bits. No tag is needed because each row carries its generation.
 		Scene::fadeRootFamily = a_context.RegisterTableFamily({ .name = "fade roots",
 			.make = &Scene::MakeFadeRoots,
 			.assign = &Scene::AssignFadeRoots,
@@ -745,11 +719,10 @@ namespace DCLF::Features::Fades
 			.recordTag = false,
 			.journaled = true,
 			.rows = &Scene::FadeRootRows });
-		// The component, last of the components: every shared point (ResetSlotTables' resets, then the owners' hand-back) keeps its order.
+		// Must be the last component, so its reset hands owners back after every other reset.
 		Scene::fadeRootComponent = a_context.RegisterCoordinatorComponent(Scene::FadeRootComponent());
 		a_context.RegisterReportLines({ .name = "fade root owners", .point = Api::ReportPoint::SceneCoordinatorLastPass, .component = Scene::fadeRootComponent,
 			.componentText = &Scene::OwnerLines });
-		// The diagnostic capture's census and growth lines (Coordinator::FadeCensus, Coordinator::SceneGrowthLines).
 		a_context.RegisterReportLines({ .name = "fade roots", .point = Api::ReportPoint::CaptureCensus, .component = Scene::fadeRootComponent,
 			.componentText = &Scene::FadeRootsCensus });
 		a_context.RegisterReportLines({ .name = "fade roots", .point = Api::ReportPoint::CaptureGrowth, .component = Scene::fadeRootComponent,

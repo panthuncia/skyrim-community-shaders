@@ -1,6 +1,5 @@
-// Faces' coordinator component (scene lane): the face shapes listed under their heads, the heads' publications taken as each walk begins
-// and applied as the delta walk schedules, each written shape's snapshot, region of the positions buffer and vertex stream row
-// (SceneTables::streamRows), and the regions freed as the walk ends.
+// The scene coordinator component for NPC faces. It tracks face shapes per head, gives each a region of the positions buffer,
+// and on each new head snapshot updates the shapes' vertex streams in place instead of rewriting them.
 
 #include "Features/DrawcallLimitFix/Features/Faces/Faces.h"
 #include "Features/DrawcallLimitFix/Features/Faces/FaceSnapshots.h"
@@ -21,16 +20,11 @@ namespace DCLF::Features::Faces
 {
 	namespace
 	{
-		// A face shape without a region of the positions buffer (its stream row's first vertex: none).
 		constexpr std::uint32_t kNoFaceRegion = Api::VertexStreamRow::kNoFirst;
 
-		/**
-		 * @brief The component's state: the face shapes' regions of the positions buffer, the tracked shapes by head and the heads'
-		 * publications this walk.
-		 */
 		struct FaceShapes
 		{
-			// Keys valid for this walk only; the captured recordId is durable.
+			// Keys are valid for this walk only. The captured recordId lasts.
 			ankerl::unordered_dense::map<const RE::BSFaceGenNiNode*, std::shared_ptr<const FaceSnapshots::HeadView>> capturedFaceHeads;
 			struct FaceRegion
 			{
@@ -41,17 +35,14 @@ namespace DCLF::Features::Faces
 			FaceRegions faceRegions;
 			FaceRegionFree faceRegionFree;  // (first, count), sorted, coalesced
 			std::uint32_t faceRegionTop = 0;
-			// Tracked face shapes by head, and the heads' publications this walk.
 			ankerl::unordered_dense::map<const RE::BSFaceGenNiNode*, std::vector<RE::BSGeometry*>> faceHeads;
 			std::vector<const RE::BSFaceGenNiNode*> facePublished, faceStale;
-			// Each listed shape's head (a key) while it is listed in faceHeads; its entry goes with the tracked entry.
 			ankerl::unordered_dense::map<const RE::BSGeometry*, const RE::BSFaceGenNiNode*> listedHeads;
-			// The delta walks since the last report and their publications (WalkScheduling's counts), for the scene delta line.
 			struct Counts
 			{
 				std::uint64_t walks = 0, published = 0, updated = 0, written = 0;
 			} counts;
-			// The regions as they were before the walk parity's dense walk, put back after it (the dense walk writes them).
+			// The parity's dense walk overwrites the regions, so they are saved before it and restored after.
 			struct Saved
 			{
 				FaceRegions faceRegions;
@@ -62,19 +53,15 @@ namespace DCLF::Features::Faces
 
 		std::shared_ptr<void> Make() { return std::make_shared<FaceShapes>(); }
 
-		/**
-		 * @brief A face shape's region of the positions buffer, held while a stream uses it; WalkEnded frees released streams' regions.
-		 * Walk thread only.
-		 */
+		// Walk thread only.
 		std::uint32_t FaceRegionOf(const Api::CoordinatorComponentContext& a_context, FaceShapes& a_state, const RE::BSGeometry* a_geometry, std::uint32_t a_vertexCount)
 		{
 			auto& region = a_state.faceRegions[a_geometry];
 			if (region.count != a_vertexCount) {
-				// Retired, not freed: an installed publication's streams may still name it.
+				// Retire rather than free, since an installed publication's streams may still name it.
 				if (region.count)
 					a_context.RetireRange(region.first, region.count);
 				region = {};
-				// First fit among the freed ranges, else the top of the buffer.
 				for (auto it = a_state.faceRegionFree.begin(); it != a_state.faceRegionFree.end(); ++it) {
 					if (it->second < a_vertexCount)
 						continue;
@@ -95,7 +82,6 @@ namespace DCLF::Features::Faces
 			return region.first;
 		}
 
-		/** @brief The shape leaves its head's list (it was erased); the head's last one releases its record. */
 		void UnlistFaceShape(FaceShapes& a_state, const RE::BSGeometry* a_geometry)
 		{
 			const auto listed = a_state.listedHeads.find(a_geometry);
@@ -110,7 +96,7 @@ namespace DCLF::Features::Faces
 				return;
 			std::erase(it->second, a_geometry);
 			if (!it->second.empty()) {
-				// Its siblings are written again, which rebuilds the head's record without it.
+				// Rewriting the siblings rebuilds the head's record without this shape.
 				a_state.faceStale.push_back(head);
 				return;
 			}
@@ -119,14 +105,10 @@ namespace DCLF::Features::Faces
 				FaceSnapshots::Get().Release(head);
 		}
 
-		/**
-		 * @brief The heads' publications: kept face streams (their stream rows) take the new snapshot in place; waiting, missing or
-		 * stale-head shapes are rewritten.
-		 */
+		// Existing streams take a new snapshot in place. Shapes that are waiting, mismatched or under a stale head are rewritten.
 		void ApplyFacePublications(const Api::CoordinatorComponentContext& a_context, FaceShapes& a_state, Api::WalkScheduling& a_scheduling)
 		{
 			auto& tables = a_context.tables;
-			// A head's record changed shape: every shape of it is written again, the first rebuilding the record.
 			for (const auto* head : a_state.faceStale) {
 				const auto it = a_state.faceHeads.find(head);
 				if (it == a_state.faceHeads.end())
@@ -136,7 +118,6 @@ namespace DCLF::Features::Faces
 						++a_scheduling.written;
 			}
 			a_state.faceStale.clear();
-			// A new snapshot of a head: its kept streams take it in place; a shape that waits for one is written.
 			auto& snapshots = FaceSnapshots::Get();
 			a_scheduling.events += a_state.facePublished.size();
 			for (const auto* head : a_state.facePublished) {
@@ -180,10 +161,7 @@ namespace DCLF::Features::Faces
 			a_state.facePublished.clear();
 		}
 
-		// The component's hooks (Api::CoordinatorComponent).
-
-		// The heads' publications since the last walk, and the freed records' references, released at Present through the retirement
-		// chain.
+		// Freed records' engine references go back through the retirement chain, to be released at Present.
 		void WalkBegun(const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& state = a_context.State<FaceShapes>();
@@ -194,13 +172,13 @@ namespace DCLF::Features::Faces
 				FaceSnapshots::Get().TakeReleased(released);
 				for (auto* object : released) {
 					RE::NiPointer<RE::NiRefObject> reference(object);
-					object->DecRefCount();  // the count TakeReleased handed over, now the reference's
+					object->DecRefCount();  // drop the count TakeReleased handed over, which the NiPointer now holds
 					a_context.HandBack(std::move(reference));
 				}
 			}
 		}
 
-		// After a reset, a load or a live toggle nothing kept can be trusted: the publications go. Otherwise they are applied.
+		// After a reset, a load or a live toggle, kept streams cannot be trusted, so the publications are dropped.
 		void Scheduling(const Api::CoordinatorComponentContext& a_context, Api::WalkScheduling& a_scheduling)
 		{
 			auto& state = a_context.State<FaceShapes>();
@@ -216,7 +194,6 @@ namespace DCLF::Features::Faces
 			state.counts.written += a_scheduling.written;
 		}
 
-		// Its fragment of the scene delta line (Api::ReportPoint::SceneCoordinatorDelta), a frame being a delta walk, as the line's.
 		void DeltaLine(const Api::CoordinatorComponentContext& a_context, std::string& a_text)
 		{
 			auto& c = a_context.State<FaceShapes>().counts;
@@ -230,9 +207,9 @@ namespace DCLF::Features::Faces
 		{
 			auto& state = a_context.State<FaceShapes>();
 			auto& tables = a_context.tables;
-			// Freed streams' regions retire once no stream of the shape holds them. The dense walk's tables are put back, so skip it.
+			// Skip the dense walk, whose tables are restored afterwards.
 			for (const auto& [source, first] : a_context.DenseWalk() ? decltype(tables.streamRowsReleased){} : tables.streamRowsReleased) {
-				const auto* geometry = static_cast<const RE::BSGeometry*>(source);  // the row's (Streamed)
+				const auto* geometry = static_cast<const RE::BSGeometry*>(source);
 				const auto it = state.faceRegions.find(geometry);
 				if (it == state.faceRegions.end() || it->second.first != first)
 					continue;
@@ -246,7 +223,6 @@ namespace DCLF::Features::Faces
 				state.faceRegions.erase(it);
 			}
 			tables.streamRowsReleased.clear();
-			// Coalesce the free ranges (Recycled returns them).
 			auto& faceRegionFree = state.faceRegionFree;
 			std::sort(faceRegionFree.begin(), faceRegionFree.end());
 			std::size_t out = 0;
@@ -280,7 +256,6 @@ namespace DCLF::Features::Faces
 			state.saved = {};
 		}
 
-		// The slot tables reset: the regions with the streams that held them.
 		void Reset(const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& state = a_context.State<FaceShapes>();
@@ -295,16 +270,14 @@ namespace DCLF::Features::Faces
 			UnlistFaceShape(a_context.State<FaceShapes>(), static_cast<const RE::BSGeometry*>(a_entry));
 		}
 
-		// A retired region no publication names any more.
 		void Recycled(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_first, std::uint32_t a_count)
 		{
 			a_context.State<FaceShapes>().faceRegionFree.push_back({ a_first, a_count });
 		}
 
-		// A tracked face shape joins its head's list (once: it stays listed until it is erased).
 		void Listed(const Api::CoordinatorComponentContext& a_context, const Api::EntryWrite& a_write)
 		{
-			const auto* head = static_cast<const RE::BSFaceGenNiNode*>(a_write.source);  // the entry's
+			const auto* head = static_cast<const RE::BSFaceGenNiNode*>(a_write.source);
 			if (!head)
 				return;
 			auto& state = a_context.State<FaceShapes>();
@@ -315,11 +288,9 @@ namespace DCLF::Features::Faces
 			listed = head;
 		}
 
-		// A face shape's snapshot and region this walk; false without one.
 		bool Resolve(const Api::CoordinatorComponentContext& a_context, Api::EntryWrite& a_write)
 		{
 			FaceSnapshots::ShapeView face{};
-			// The head's shapes: its dynamic-shape children in the mirror, each with its tracked entry's reference.
 			if (auto* head = static_cast<RE::BSFaceGenNiNode*>(a_write.source)) {
 				const auto& mirror = a_context.Mirror();
 				face = FaceSnapshots::Get().Shape(&a_write.geometry, head, [&](std::vector<FaceSnapshots::ShapeInput>& a_out) {
@@ -348,12 +319,11 @@ namespace DCLF::Features::Faces
 			return region != kNoFaceRegion;
 		}
 
-		// The shape's stream row at its slot (in place when it has one, else at a free index), with its head's complete capture.
 		void Streamed(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot, Api::EntryWrite& a_write)
 		{
 			auto& state = a_context.State<FaceShapes>();
 			std::shared_ptr<const FaceSnapshots::HeadView> headView;
-			const auto* head = static_cast<const RE::BSFaceGenNiNode*>(a_write.source);  // the entry's
+			const auto* head = static_cast<const RE::BSFaceGenNiNode*>(a_write.source);
 			if (head) {
 				auto [headEntry, inserted] = state.capturedFaceHeads.try_emplace(head);
 				if (inserted) {
@@ -384,7 +354,6 @@ namespace DCLF::Features::Faces
 			.dense = { .begun = &DenseBegun, .ended = &DenseEnded },
 			.retirement = { .reset = &Reset, .forgot = &Forgot, .recycled = &Recycled },
 			.entryClass = { .follows = Api::EntryClass::FaceShape, .takes = a_taken, .listed = &Listed, .resolve = &Resolve, .streamed = &Streamed } });
-		// The heads' publications, in the coordinator's scene delta line.
 		a_context.RegisterReportLines({ .name = "face publications", .point = Api::ReportPoint::SceneCoordinatorDelta, .component = component, .componentText = &DeltaLine });
 	}
 }

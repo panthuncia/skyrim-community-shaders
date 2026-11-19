@@ -1,7 +1,6 @@
 #pragma once
 
-// The LOD gates' hook points (Diagnostics/Hooks.h's mechanism), announced by the gates' publication and adoption (LodGateAdoption.cpp)
-// for their observers (LodGateObservers.cpp).
+// Diagnostic hook points for the LOD gates' observers.
 
 #include <cstdint>
 #include <span>
@@ -14,24 +13,18 @@ namespace RE
 
 namespace DCLF::Features::Lod
 {
-	/**
-	 * @brief The scene lane, taking a publication's deltas (the gates' published hook): the gates its commits flipped (the gates'
-	 * component's deltas pending: Gates::Flips), against its claims.
-	 */
+	/** @brief Scene lane, when a publication takes its deltas. */
 	struct GateFlipsPublished
 	{
 	};
 
-	/**
-	 * @brief Render thread, the frame's start (the gates' adoption, Gates::Adopt): a LOD gate flipped by an installed publication, about to
-	 * be released, and the claims the frame installed (opaque: read through Diagnostics::SceneView::ClaimedPhases).
-	 */
+	/** @brief Render thread, at the frame's start. claims is opaque, read it through Diagnostics::SceneView::ClaimedPhases. */
 	struct GateReleasing
 	{
 		const void* claims;
 		std::uint64_t token;
-		std::span<const std::pair<const RE::BSGeometry*, std::uint8_t>> incoming;  // the incoming base geometries claimed, with the flip's phases
-		std::span<const RE::BSGeometry* const> outgoing;                          // the outgoing base geometries dropped
-		bool released;                                                            // false: refused (forced or unknown by then; the engine moved on)
+		std::span<const std::pair<const RE::BSGeometry*, std::uint8_t>> incoming;  // with the flip's phases
+		std::span<const RE::BSGeometry* const> outgoing;
+		bool released;  // false when the gate was already forced or unknown
 	};
 }

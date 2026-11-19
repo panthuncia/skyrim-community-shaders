@@ -1,5 +1,4 @@
-// The LOD gates' report lines (registered by LodGateChannel.cpp): the component's line at the coordinator's report (the scene lane), and
-// the releases' and the engine side's at the frame's (the render thread).
+// The LOD gates' report lines. GateLines runs on the scene lane, ReleaseLines on the render thread.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 
@@ -18,7 +17,7 @@ namespace DCLF::Features::Lod::Gates
 	{
 		using Reports::Percentiles;
 
-		/** @brief The engine side's line over a_frames frames (LodGates::Take); empty while not installed. */
+		// Empty while not installed.
 		std::string EngineLine(std::uint32_t a_frames)
 		{
 			const auto t = LodGates::Take();
@@ -54,7 +53,7 @@ namespace DCLF::Features::Lod::Gates
 		const auto& parity = state.observed.parity;
 		if (!s.opened && !s.retiredFlipped && !s.retiredForced && lodGates.empty() && !gateHeldOutCount && !s.unknownOutcomes && !s.keptNotices && !parity.checks)
 			return;
-		// The open gates: their oldest request, and what their pending incoming geometries wait for (the blockers).
+		// Count what each open gate's pending geometries are waiting for.
 		const std::uint64_t now = GateNowNs();
 		std::uint64_t oldestNs = 0;
 		std::uint32_t open = 0, flipped = 0, unmirrored = 0, noIncoming = 0;
@@ -71,7 +70,6 @@ namespace DCLF::Features::Lod::Gates
 			unmirrored += gate.unmirrored;
 			noIncoming += gate.incoming.empty() ? 1u : 0u;
 			for (auto* geometry : gate.incomingGeometries) {
-				// Its tracked state (its slot's commit state: the base's, else the layer's).
 				const Api::TrackedState entry = a_context.TrackedStateOf(geometry);
 				if (!entry.tracked || GeometryReady(geometry, entry, [&](std::uint32_t a_slot) { return a_context.ObservedSlot(a_slot); }))
 					continue;
@@ -114,17 +112,14 @@ namespace DCLF::Features::Lod::Gates
 				p.sweeps, p.entries, p.unmarked, p.differ,
 				p.differ ? " <- GATE PARITY; first: " + p.first : std::string(" <- OK"));
 		s = {};
-		// The parity's flip and shown roots stay: they are the next commit's and sweep's.
+		// The parity's flip and shown roots carry over to the next commit and sweep.
 		observed = { .parity = { .pass = observed.parity.pass, .lastFlip = observed.parity.lastFlip, .shown = std::move(observed.parity.shown),
 			.unmarkedOutgoing = std::move(observed.parity.unmarkedOutgoing) } };
-		// One line, logged as it is (the coordinator's gates point logs a component's text whole).
 		a_text += text;
 	}
 
 	void ReleaseLines([[maybe_unused]] std::uint32_t a_frame)
 	{
-		// The releases' line (the render thread's: the flip to its release), then the engine side's, once a report window (the frame's
-		// report schedule: Reports::GateReleases).
 		auto& rs = Releases();
 		auto& observed = rs.observed;
 		if (rs.any)
@@ -138,7 +133,6 @@ namespace DCLF::Features::Lod::Gates
 		if (LodGates::Enabled())
 			if (const auto engine = EngineLine(Reports::Interval()); !engine.empty())
 				logger::info("{}", engine);
-		// The releases and their checks taken (the observers' with them).
 		rs = {};
 	}
 }

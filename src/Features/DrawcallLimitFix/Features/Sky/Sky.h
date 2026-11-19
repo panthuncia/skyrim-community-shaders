@@ -2,37 +2,15 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Sky (CS_ORG_SKY, docs/development/p5/sky.md): the engine's BSSkyShader draws (the sky dome, the stars and moon masks, the sun and
-// moons, the cloud layers) drawn by the render graph in the engine's place, in the main pass and in the water reflection's faces.
-//
-// The engine's CPU code runs unchanged. At the engine's sky batch (BSShaderAccumulator::FinishAccumulating's RenderBatches of the sky
-// techniques, SkyCapture.cpp) the family lets the batch run with its draw choke point latched: every sky pass goes through the
-// engine's own BeginPass, SetupTechnique, SetupGeometry and render state, and its DrawTriShape (the engine draw families' one detour,
-// Core/Engine/Family) records the draw instead of drawing it (the shadow state, the constants SetupGeometry wrote, read from the engine
-// constants capture, the textures, the geometry). The batch's draws are then drawn by an ORG pass at the Sky anchor (the main pass) or the
-// SkyReflections anchor (a reflection face), in the engine's order, with CS's Sky.hlsl built for ORG and the pipeline states the
-// engine's state objects describe (SkyDraws.cpp).
-//
-// The cloud layers are not in that batch: they are geometry group 13's pass list, which FinishAccumulating draws right after it. When
-// that list holds only sky TriShapes, the capture spans it too, and the anchor runs after
-// it (SkyCapture.cpp, CloudGroup).
-//
-// Cloud Shadows keeps its per-layer occlusion in its D3D11 layer cubemaps: layer L of a face holds the occlusion of the face's layers
-// up to L. The main pass's clouds read their own layer for their self shadowing, and its occlusion copy reads the last layer. A face
-// cloud draw on the graph writes its layer through an import of it, and draws its occlusion into the face's later layers too
-// (SkyDraws.cpp, FaceClouds), so both paths keep and read the same layers.
-//
-// The family is the primary path for the sky (docs/development/p5/primary-path.md): its stages compile when CS loads BSSkyShader's
-// pixel descriptors, its programs are prebuilt from the manifest, and both views' clients are made at setup for the targets the views
-// draw into (SkyDraws::Setup), with every published input declared. A draw it cannot take (its inherent refusals,
-// docs/development/p5/sky.md "What stays the engine's") ends the batch's latched part: the latched draws run at that point and the
-// engine draws the rest, the cloud group's included. A batch whose targets differ from its client's is the engine's.
-//
-// With CS_ORG_OCCLUSION_QUERIES=1 the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md): at
-// Sun::SubmitOcclusionQuery's draw (SkyCapture.cpp, SunOcclusionQuery) the engine's query is bracketed
-// (RenderGraph/Engine/Queries), its SunOcclude draw is latched as a batch's draws are, and the EngineQueries anchor's pass draws it
-// with an ORG occlusion query whose count answers the engine's GetQueryData. A draw it cannot take is skipped, never the engine's: the
-// query answers its last count.
+// Sky (CS_ORG_SKY): the render graph draws the engine's BSSkyShader passes in the main pass and the water reflection faces.
+// Details are in docs/development/p5/sky.md.
+// The engine's CPU code runs unchanged. The sky batch runs with DrawTriShape latched, so every pass still goes through the
+// engine's setup, and the draw is recorded instead of issued (SkyCapture.cpp). An ORG pass at the Sky or SkyReflections anchor
+// then draws the batch in engine order (SkyDraws.cpp). The cloud layers come right after in geometry group 13, and the capture
+// spans them when that group holds only sky shapes.
+// Cloud Shadows keeps per-layer occlusion in its D3D11 cubemaps, and layer L holds the occlusion of layers up to L. Graph cloud
+// draws write the same layers, so both paths stay in step.
+// With CS_ORG_OCCLUSION_QUERIES=1 the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md).
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -48,30 +26,26 @@
 
 namespace DCLF::Features::Sky
 {
-	// Engine::Offsets (Address Library ids) of the engine code the family hooks (docs/development/p5/sky.md, "RE").
 	namespace Address
 	{
-		// FinishAccumulating's RenderBatches(accumulator, 0x5C00005D, 0x5C000064, flags, -1): the sky techniques' batch (SE 99938, AE 106583).
+		// FinishAccumulating's RenderBatches of the sky techniques (SE 99938, AE 106583).
 		inline constexpr Engine::Offset kSkyBatch{ { 106583, 0x237 }, { 99938, 0x247 } };
-		// FinishAccumulating's RenderPersistentPassList(geometry group 13, flags), right after the sky batch: the cloud layers (BSSkyShader
-		// passes of accumulation hint 0x11) and the sky-object effects (hint 0x12). SE 0x1412caf54, AE 0x1414b3004.
+		// FinishAccumulating's RenderPersistentPassList of geometry group 13, right after the sky batch. SE 0x1412caf54, AE 0x1414b3004.
 		inline constexpr Engine::Offset kCloudGroup{ { 106583, 0x274 }, { 99938, 0x284 } };
-		// The accumulator's occlusion query draw (Sun::SubmitOcclusionQuery's, SE 25799 +0xAD, AE 26353 +0xAF): the sun's SunOcclude pass
-		// between BeginQuery and EndQuery, read back for the sun glare by Sun::UpdateOcclusionQueries (SE 99967, AE 106605). The graph's
-		// with CS_ORG_OCCLUSION_QUERIES=1 (docs/development/p5/occlusion-queries.md). SE 99958 at 0x1412ccad0, AE 106604 at 0x1414b4c00.
+		// Sun::SubmitOcclusionQuery's draw (SE 25799 +0xAD, AE 26353 +0xAF). Read back for the sun glare by Sun::UpdateOcclusionQueries.
+		// SE 99958 at 0x1412ccad0, AE 106604 at 0x1414b4c00.
 		inline constexpr Engine::Offset kSunOcclusionQuery{ { 106604 }, { 99958 } };
 	}
 
-	/** @brief The scene depth the main view's client imports for t17: the Z-prepass copy (Util::GetCurrentSceneDepthSRV's own). */
+	/** @brief The scene depth the main view imports for t17: the Z-prepass copy. */
 	inline constexpr auto kSceneDepth = RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY;
 
-	/** @brief The geometry group the cloud layers are registered into (accumulation hint 0x11; BSBatchRenderer::geometryGroups). */
+	/** @brief The geometry group the cloud layers are registered into (accumulation hint 0x11). */
 	inline constexpr std::uint32_t kCloudGeometryGroup = 13;
 
 	/** @brief Cloud Shadows' layer cubemaps (CloudShadows::kMaxCloudLayers). */
 	inline constexpr std::uint32_t kCloudLayers = 32;
 
-	/** @brief Where a batch draws. */
 	enum class View : std::uint8_t
 	{
 		Main,  // the main pass's GBuffer (the Sky anchor)
@@ -80,7 +54,7 @@ namespace DCLF::Features::Sky
 		Count
 	};
 
-	/** @brief SkyOrgDraw in Sky.hlsl: a draw's latched values, 352 bytes. */
+	/** @brief SkyOrgDraw in Sky.hlsl, 352 bytes. */
 	struct DrawConstants
 	{
 		float worldViewProj[16];
@@ -108,19 +82,17 @@ namespace DCLF::Features::Sky
 	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */
 	inline constexpr std::size_t kVertexConstantBytes = 264;
 
-	/** @brief DrawConstants::textures[3] for a draw whose self shadowing reads the occlusion cubemap (SKY_ORG_OCCLUSION). */
+	/** @brief DrawConstants::textures[3] when self shadowing reads the occlusion cubemap. */
 	inline constexpr std::uint32_t kSelfShadowFromOcclusion = ~0u;
 
 	/** @brief ProgramKey::variant: SKY_ORG_FACES, the face's target alone, then Cloud Shadows' layer for a cloud draw. */
 	inline constexpr std::uint32_t kVariantFaces = 1;
 
-	/** @brief One latched draw. */
 	struct Draw
 	{
 		Family::ProgramKey key;
 		std::shared_ptr<const void> program;  // the RasterProgram
-		// A face's cloud draw that writes Cloud Shadows' layer `layer` (no depth target, as Cloud Shadows binds it). Its occlusion is
-		// also drawn into the face's later layers with occlusionProgram (the same draw with the face's target write-masked).
+		// A face cloud draw writing Cloud Shadows' layer. Its occlusion is also drawn into the face's later layers with occlusionProgram.
 		bool occlusion = false;
 		std::int32_t layer = -1;
 		std::shared_ptr<const void> occlusionProgram;
@@ -131,19 +103,16 @@ namespace DCLF::Features::Sky
 	};
 
 	/**
-	 * @brief The headers' texture registers the sky's pixel stage may read, in Sky.hlsl's EXTERN order: IBL's t76 and t77 and Dynamic
-	 * Cubemaps' t30 and t31, which Exponential Height Fog's header includes (its reflection fog reads t31). Their declared kinds follow.
+	 * @brief The header texture registers the sky's pixel stage may read, in Sky.hlsl's EXTERN order.
+	 * Exponential Height Fog's header pulls in t30 and t31.
 	 */
 	inline constexpr std::array<std::uint32_t, 4> kHeaderRegisters{ 76, 77, 30, 31 };
 	inline constexpr std::array<GpuTextures::ViewKind, 4> kHeaderKinds{ GpuTextures::ViewKind::Texture2D, GpuTextures::ViewKind::Texture2D,
 		GpuTextures::ViewKind::Cube, GpuTextures::ViewKind::Cube };
 
 	/**
-	 * @brief What a view's client is made for: its targets, which it imports once at setup (SkyDraws::Setup predicts them: the deferred
-	 * pass's first three targets and kMAIN's depth, the reflection cubemap with its cube depth). The published inputs its passes declare
-	 * are fixed when the client is made (SkyDraws.cpp, ListInputs), so they are no part of it. The headers and a t17 other than the
-	 * Z-prepass copy are read by heap index, resolved per batch (Run): a D3D11 view's import, a null view, or a published input's
-	 * index (SkyDraws::ReadPublished).
+	 * @brief What a view's client is made for: the targets it imports once at setup.
+	 * Headers and any t17 other than the prepass copy are read by heap index, resolved per batch.
 	 */
 	struct Shape
 	{
@@ -166,55 +135,41 @@ namespace DCLF::Features::Sky
 		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
 		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
-		// View::Sun: the depth target is kPOST_ZPREPASS_COPY (else kMAIN's), and the engine ring slot its one draw counts.
+		// View::Sun only. Whether the depth target is kPOST_ZPREPASS_COPY rather than kMAIN's.
 		bool sunCopyDepth = false;
 		std::int32_t query = -1;
 	};
 
-	// SkyFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 
 	/** @brief Whether CS_ORG_SKY=1 turned the family on (read at install). */
 	bool Enabled();
 
-	// SkyCapture.cpp: the engine hooks, from the feature's install.
 	void InstallHooks();
 	void PreflightHooks();
 
-	// SkyDraws.cpp: the render graph's side (render thread).
 	namespace SkyDraws
 	{
-		/** @brief Whether the anchors exist and the runtime is up; false for good once a client failed. */
+		/** @brief Whether the anchors and runtime are up. False for good once a client failed. */
 		bool Available();
-		/** @brief Reserves both anchors (the feature's install, before the render graph initializes). */
+		/** @brief Reserves both anchors. Must run before the render graph initializes. */
 		void Reserve();
-		/**
-		 * @brief The family's setup (Family::AddSetup, main thread): the stage precompile started, the manifest's programs queued, both
-		 * views' clients made for their predicted shapes and their build asked for. True once done (or refused for good, logged); false
-		 * while the graph has no host.
-		 */
+		/** @brief Makes both views' clients for their predicted shapes and queues their programs. Main thread. */
 		bool Setup();
-		/**
-		 * @brief Whether a_shape's batch is taken: its view's client was made for a_shape's targets, and a run of its anchor now would
-		 * draw (Family::HeldForBatch). False is logged once per reason; the engine draws the batch. No client is made again during play.
-		 */
+		/** @brief Whether a_shape's batch is taken now. False is logged once per reason, and the engine draws the batch. */
 		bool CanTake(const Shape& a_shape);
-		/**
-		 * @brief How a_view's client reads a_id, the published id a bound header or t17 exports (Family::PublishedInputs::Resolve).
-		 * NotListed when the view has no client.
-		 */
+		/** @brief How a_view's client reads the published id a bound header or t17 exports. */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
-		/** @brief The program for a key (Family::EngineDrawPrograms::Get): null when it cannot be built. */
+		/** @brief The program for a key, or null when it cannot be built. */
 		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		/** @brief Keeps a batch's imports and leases as long as a run's when it ran nothing, so the next batches find them. */
+		/** @brief Keeps a batch's imports and leases alive when it ran nothing, so the next batches find them. */
 		void Keep(Family::Owners&& a_owners);
-		/** @brief Runs a_run's anchor with its draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
+		/** @brief Runs a_run's anchor. False means its draws were not drawn, and that is logged. */
 		bool Submit(std::shared_ptr<Run> a_run);
-		/** @brief Whether the sun's occlusion client was made at setup and the family has not failed: the graph answers its queries. */
+		/** @brief Whether the graph answers the sun's occlusion queries. */
 		bool HasSunClient();
-		/** @brief Whether a run of the sun's anchor now would draw (Family::HeldForBatch). False is logged once. */
+		/** @brief Whether a run of the sun's anchor now would draw. False is logged once. */
 		bool CanTakeSun();
-		/** @brief One status line. */
 		std::string Status();
 	}
 }

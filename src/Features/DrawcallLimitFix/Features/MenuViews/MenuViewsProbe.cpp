@@ -1,6 +1,5 @@
-// The menu views' probe: thunks on the menu scenes' SubmitAccumulator calls (UI3DSceneManager::Render's, LocalMapRenderer::Render's two)
-// that read what a DCLF view of the scene would need and log it once per change, then let the engine draw the scene. Main thread only:
-// the loading screen's model renders on the ServingThread (MistMenu, scheme kLoading), which stays the engine's (the p5-loading lane).
+// The menu views' probe: thunks on the menu scenes' SubmitAccumulator calls that log what a DCLF view would need, once per change,
+// then let the engine draw. Main thread only. The loading screen's model renders on the ServingThread and stays the engine's.
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 
@@ -42,8 +41,7 @@ namespace DCLF::Features::MenuViews
 
 		const char* SchemeName(std::uint32_t a_scheme)
 		{
-			// RE::INTERFACE_LIGHT_SCHEME, the index of UI3DSceneManager's menuObjects (+0x38) and currentlightScheme (+0x90): CommonLib's
-			// members, the same on SE and AE (UI3DSceneManager::Render reads both there, SE 0x1408d2390, AE 0x140972590).
+			// Indexed by RE::INTERFACE_LIGHT_SCHEME. menuObjects (+0x38) and currentlightScheme (+0x90) are at the same offsets on SE and AE.
 			constexpr std::array<const char*, 8> kNames{ "journal", "inventory", "magic", "book", "loading", "unk05", "stats", "lockpicking" };
 			return a_scheme < kNames.size() ? kNames[a_scheme] : "?";
 		}
@@ -72,11 +70,10 @@ namespace DCLF::Features::MenuViews
 			}
 		};
 
-		/** @brief The probe's state (main thread) and its report counters (taken by the report). */
+		/** @brief The probe's state, on the main thread, and its report counters. */
 		struct ProbeState
 		{
 			std::array<Probe, static_cast<std::size_t>(MenuScene::Count)> last{};
-			// The menu root's geometry last checked against DCLF's tables (ReadGeometry): its signature and the counts it gave.
 			std::uint64_t scannedSignature = 0;
 			std::uint32_t scannedTracked = 0, scannedClaimed = 0, rendersSinceScan = 0;
 			std::array<std::uint32_t, static_cast<std::size_t>(MenuScene::Count)> lastFrame{};
@@ -94,9 +91,8 @@ namespace DCLF::Features::MenuViews
 
 		bool FreezeFrameMenuOpen()
 		{
-			// MenuManager::sub (SE 0x140ebe220): Main's frame (SE 0x1405b1020) draws the world only when no open menu has
-			// kFreezeFrameBackground (IMenu flag 0x20); otherwise it renders it once (FUN_1405b1650, Main::Draw mode 0xE) and composites
-			// the frozen frame. The UI's lock is held: this runs inside UI::Render (UI__DrawInterface), which took it.
+			// Main's frame draws the world only when no open menu has kFreezeFrameBackground (IMenu flag 0x20). Otherwise it renders once
+			// and composites the frozen frame. The UI's lock is already held inside UI::Render.
 			auto* ui = RE::UI::GetSingleton();
 			if (!ui)
 				return false;
@@ -106,13 +102,12 @@ namespace DCLF::Features::MenuViews
 			return false;
 		}
 
-		// Menu renders between two scans of DCLF's tables while the root's geometry stays the same (a few seconds at the menu's rate).
+		// Rescan DCLF's tables this often while the root's geometry stays the same, a few seconds at the menu's rate.
 		constexpr std::uint32_t kRescanRenders = 300;
 
 		/**
-		 * @brief The root's geometry, against the installed tables: tracked by DCLF's scene, and claimed by a set phase. The tables are
-		 * scanned again only when the root's geometry changed, or every kRescanRenders renders: a menu renders every frame, and a scan
-		 * walks every table.
+		 * @brief Checks the root's geometry against the installed tables.
+		 * Rescanned only on change or every kRescanRenders renders, because a menu renders every frame and a scan walks every table.
 		 */
 		void ReadGeometry(RE::NiAVObject* a_root, Probe& a_probe)
 		{
@@ -159,10 +154,7 @@ namespace DCLF::Features::MenuViews
 			state.scannedClaimed = a_probe.claimed;
 		}
 
-		/**
-		 * @brief The verdict for a menu scene's view: what stops DCLF from drawing it (the first missing input), or that every input a view
-		 * needs is there. The view is not built in this stage, so the engine draws the scene either way.
-		 */
+		/** @brief The first missing input that stops DCLF from drawing a menu scene. The engine draws the scene either way. */
 		const char* Verdict(const Probe& a_probe)
 		{
 			if (!a_probe.installed)
@@ -192,10 +184,7 @@ namespace DCLF::Features::MenuViews
 				a_probe.freezeFrame ? " (freeze-frame menu open)" : "", Verdict(a_probe));
 		}
 
-		/**
-		 * @brief One render of a menu scene: its probe read from the shadow state as SubmitAccumulator will bind it (the engine set the
-		 * targets and the stencil mode just before the call) and from DCLF's scene, logged when anything changed since the scene's last.
-		 */
+		/** @brief Probes one render of a menu scene and logs it when anything changed. */
 		void ProbeRender(MenuScene a_scene, std::uint32_t a_scheme, RE::NiAVObject* a_root, const RE::NiCamera* a_camera)
 		{
 			auto& state = GetState();
@@ -210,8 +199,7 @@ namespace DCLF::Features::MenuViews
 			probe.stencilMode = rss.depthStencilStencilMode;
 			probe.stencilRef = rss.stencilRef;
 			probe.ortho = a_camera && a_camera->GetRuntimeData2().viewFrustum.bOrtho;
-			// DCLF's frame number moves at its frame start (Main::Draw): the same number at two renders of the scene means no world frame
-			// ran between them. The first render has nothing to compare with and counts as one without.
+			// DCLF's frame number moves at Main::Draw, so the same number at two renders means no world frame ran between them.
 			const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 			probe.worldFrame = state.seen[index] && frame != state.lastFrame[index];
 			state.lastFrame[index] = frame;

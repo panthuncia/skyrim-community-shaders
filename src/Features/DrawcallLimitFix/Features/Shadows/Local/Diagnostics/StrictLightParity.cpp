@@ -1,5 +1,4 @@
-// A portal-strict point light's native cull against DCLF's model of it (StrictLightParity.h): the AppendNonAccum trace, the
-// model's walk, the comparison and its lines (render thread).
+// Compares a portal-strict point light's native cull with DCLF's model of it (StrictLightParity.h). Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Diagnostics/StrictLightParity.h"
 
@@ -37,8 +36,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 		constexpr DCLF::Engine::Offset kProcess{ { 414845 }, { 527898 } };
 		constexpr DCLF::Engine::Offset kAppendNonAccum{ { 108604 }, { 101601 } };  // vtable slot 0x19
 		constexpr DCLF::Engine::Offset kRoomFrustum{ { 76123 }, { 74399 } };       // FUN_140e14460(entry, room): the entry's visibility map's frustum
-		// OnVisible implementations (NiAVObject vtable slot 0x34), as kinds: a kind is the AE function's offset (the switches' labels),
-		// and kOnVisibleOffsets gives each kind's function on the running runtime.
+		// OnVisible kinds are the AE function offsets. kOnVisibleOffsets maps each kind to the running runtime's function.
 		constexpr std::uintptr_t kNodeOnVisible = 0xd1e2c0, kFadeOnVisible = 0x1479f50, kLeafOnVisible = 0x147c9c0, kTreeOnVisible = 0x147d3c0;
 		constexpr std::uintptr_t kMultiBoundOnVisible = 0xe2d710, kRoomOnVisible = 0xe089f0, kSwitchOnVisible = 0xd29700;
 		constexpr std::uintptr_t kSharedOnVisible = 0xe24740, kGeometryOnVisible = 0xd37f30, kSubIndexOnVisible = 0xe312c0;
@@ -59,39 +57,35 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			{ kSwitchOnVisible, { { 70590 }, { 69227 } } },
 			{ kSharedOnVisible, { { 76448 }, { 74713 } } },
 			{ kGeometryOnVisible, { { 70926 }, { 69542 } } },
-			// Address Library's 1.7.104 database gives AE's sub-index id (76792) to the segmented shape's OnVisible (the vtables' slot
-			// 0x34: BSSegmentedTriShape's tests +0x144, BSSubIndexTriShape's +0x16c), and the sub-index one a new id.
+			// Address Library 1.7.104 gives AE's sub-index id (76792) to the segmented shape's OnVisible, and the sub-index one a new id.
 			{ kSubIndexOnVisible, { { 76792 }, { 75030 }, { 524249 } } },
 			{ kSegmentedOnVisible, { { 71790 }, { 70303 }, { 76792 } } },
 			{ kNoOnVisible, { { 70268 }, { 68917 } } },
 			{ kBillboardOnVisible, { { 71063 }, { 69683 } } },
 		} };
-		// A function no kind names: its own offset, marked so that it never equals a kind (an SE function may sit at an AE kind's offset).
+		// Marked so it never equals a kind, since an SE function may sit at an AE kind's offset.
 		constexpr std::uintptr_t kUnnamedOnVisible = std::uintptr_t(1) << 63;
-		// Globals the node types read.
 		constexpr DCLF::Engine::Offset kFadeGate{ { 390866 }, { 513142 } };   // byte: BSFadeNode::OnVisible's fades on
 		constexpr DCLF::Engine::Offset kTreeGate{ { 390930 }, { 513192 } };   // byte: BSTreeNode::OnVisible's height test on
 		constexpr DCLF::Engine::Offset kTreeBase{ { 414568 }, { 527639 } };   // float: the height test's base
 		constexpr DCLF::Engine::Offset kTreeLimit{ { 390927 }, { 513190 } };  // float: and its limit
-		// The process's fields (BSCullingProcess / BSParabolicCullingProcess).
 		constexpr std::size_t kIgnorePreprocess = 0x11e, kTreeTest = 0x121;
 		constexpr std::size_t kGraphEntry = 0x30190, kCullMode = 0x30198, kCompound = 0x301a0;
 		constexpr std::size_t kBackAccumulator = 0x30200, kPlane = 0x30208, kCentre = 0x30218, kRadius = 0x30224;
-		// Node fields.
 		constexpr std::size_t kFadeAmount = 0x100, kCurrentFade = 0x130, kSubIndexSegments = 0x16c;
 		constexpr std::size_t kSwitchIndex = 0x12c;  // NiSwitchNode::OnVisible reads the active child here (CommonLib's member does not land on it)
 		constexpr std::uint32_t kAlwaysDraw = 1u << 11, kPreprocessed = 1u << 12, kSettled = 1u << 15, kPreprocessHidden = 1u << 20;
 
 		std::uintptr_t Base() { return REL::Module::get().base(); }
 		using DCLF::Engine::Global;  // the module globals (an Engine::Offset argument finds it by ADL too)
-		// CommonLib's casts are not const; the model reads only.
+		// CommonLib's casts are not const. The model only reads.
 		const RE::NiNode* NodeOf(const RE::NiAVObject* a_object) { return const_cast<RE::NiAVObject*>(a_object)->AsNode(); }
 		const RE::BSGeometry* GeometryOf(const RE::NiAVObject* a_object) { return const_cast<RE::NiAVObject*>(a_object)->AsGeometry(); }
 		std::uintptr_t OnVisibleOf(const RE::NiAVObject* a_object) { return (*reinterpret_cast<const std::uintptr_t* const*>(a_object))[0x34] - Base(); }
 
 		/**
-		 * @brief The OnVisible a node runs, by its class's vtable: DCLF's own detours take some classes' slot (NiNode's category filter),
-		 * and they forward to the engine's on the frames this parity runs. A class not listed is matched by its slot's engine function.
+		 * @brief The OnVisible a node runs, by its class's vtable. DCLF's detours forward to the engine's on parity frames.
+		 * A class not listed is matched by its slot's engine function.
 		 */
 		std::uintptr_t OnVisibleKind(const RE::NiAVObject* a_object)
 		{
@@ -126,7 +120,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			return function | kUnnamedOnVisible;
 		}
 
-		/** @brief A kind's function, as an address in the image's own numbering (0x140000000 based), for the logs. */
+		/** @brief A kind's function as a 0x140000000-based address, for the logs. */
 		std::uintptr_t KindAddress(std::uintptr_t a_kind)
 		{
 			if (a_kind & kUnnamedOnVisible)
@@ -173,7 +167,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The light's context: its rooms' compact programs (PortalPrograms.h's encoding, PortalViews::WalkLight's snapshot). */
+		/** @brief The light's context: its rooms' compact programs. */
 		struct Programs : Portals::ProgramWords
 		{
 			using ProgramWords::ProgramWords;
@@ -211,7 +205,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 		};
 		constexpr std::array<const char*, kUnmodelledKinds> kUnmodelledNames{ "shared portal nodes", "other OnVisible", "multibound outside modes 1/3/4" };
 
-		/** @brief The point process's walk from Process2's root (Process1, NiAVObject::Cull, the node types' OnVisible). */
+		/** @brief The point process's walk from Process2's root. */
 		struct Model
 		{
 			const Programs& programs;
@@ -423,7 +417,6 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			{
 				const auto room = PortalViews::Get().ProgramOfRoom(a_object);
 				const bool reached = room != kPortalNoProgram && programs.Reached(room);
-				// The engine's own map: the context must agree on which rooms the walk reached.
 				if (graphEntry) {
 					using Lookup = const void* (*)(const void*, const void*, std::uint64_t, std::uint64_t);
 					const bool native = reinterpret_cast<Lookup>(Base() + kRoomFrustum)(graphEntry, a_object, 0, 0) != nullptr;
@@ -497,10 +490,8 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 		};
 
 		/**
-		 * @brief The per-object predicate a GPU stage could evaluate from persistent ancestry: each geometry's structural gates (hidden,
-		 * zero-radius nodes, inactive switch children, unsettled fades, the tree height test, unreached rooms, kAllPass below its room)
-		 * and its own bound's test in its room's frustum, but no ancestor's bound test and no inherited state: an untested geometry
-		 * takes its own sphere code. Measures how far that is from the engine's appends.
+		 * @brief A per-object predicate a GPU stage could evaluate: structural gates plus the geometry's own bound in its room's frustum.
+		 * It skips ancestor bound tests and inherited state, and measures how far that is from the engine's appends.
 		 */
 		struct Leaf
 		{
@@ -589,7 +580,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			}
 		};
 
-		/** @brief Why the model did not append a geometry: the first node on its parent chain it rejected, or where its walk never went. */
+		/** @brief Why the model did not append a geometry: the first rejecting node on its parent chain. */
 		std::string Explain(const Model& a_model, const RE::NiAVObject* a_geometry)
 		{
 			std::uint32_t depth = 0;
@@ -625,11 +616,8 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 		}
 
 		/**
-		 * @brief DCLF's strict gates (Portals/StrictGates.h) as its consumers apply them, against the engine's appends: every geometry the
-		 * structural gates (hidden, zero radius, switches, fades, the tree test) let through whose bound is in the light's sphere, rooms and
-		 * shared nodes descended whatever their verdict (the gates' to decide). By geometry (the receivers' bits: its own chain) and by fade
-		 * root (the GPU's casters and receivers: the root's chain, gate 0 without a listed root), each against whether the engine appended
-		 * it with a hemisphere code.
+		 * @brief DCLF's strict gates as its consumers apply them, compared with the engine's appends.
+		 * Checked by geometry, for the receivers' bits, and by fade root, for the GPU's casters and receivers.
 		 */
 		struct Coverage
 		{
@@ -671,8 +659,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				const float centre[3]{ bound.center.x, bound.center.y, bound.center.z };
 				Portals::ChainOf(a_object, chain);
 				Count(geometry, Portals::Admit(context, chain, centre, bound.radius), engine, a_object, "geometry");
-				// The GPU's column: the object's fade root's chain, its own chain without a root. A geometry DCLF has no object for is drawn by
-				// the engine (the receivers' bits alone).
+				// The GPU uses the fade root's chain. A geometry DCLF has no object for is drawn by the engine.
 				const auto object = objects.find(a_object);
 				if (object == objects.end())
 					return void(++notObjects);
@@ -739,7 +726,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			}
 		};
 
-		/** @brief The report window's counts (render thread). */
+		/** @brief The report window's counts. Render thread. */
 		struct Window
 		{
 			std::uint64_t lights = 0, noContext = 0, noSelection = 0, notSelected = 0, unwalked = 0, noGraph = 0, arrays = 0, explicitRoots = 0, engine = 0, agree = 0, differ = 0, engineOnly = 0, modelOnly = 0, excluded = 0, uncertain = 0;
@@ -774,7 +761,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				logger::info("[DCLF] strict light parity: first unmodelled subtree {}", w.firstUnmodelled);
 			logger::info("[DCLF] strict light parity: per-object predicate (own bound, structural gates) against the engine: {} agree, {} codes differ, {} engine only, {} predicate only{}",
 				w.leafAgree, w.leafDiffer, w.leafEngineOnly, w.leafOnly, w.firstLeafDiffer.empty() ? "" : "; first " + w.firstLeafDiffer);
-			// The coverage of DCLF's consumers: an engine-only geometry is a caster or receiver DCLF drops; a gates-only one, one DCLF adds.
+			// An engine-only geometry is one DCLF drops. A gates-only one is one DCLF adds.
 			const bool gatesDiffer = w.geometryEngineOnly || w.geometryGatesOnly || w.rootEngineOnly || w.rootGatesOnly;
 			logger::info("[DCLF] strict light parity: DCLF's strict gates against the engine in {} lights (geometries in the sphere under the structural gates): by geometry (receivers' "
 						 "bits) {} agree, {} engine only, {} gates only; by object column (GPU casters and receivers) {} agree, {} engine only, {} gates only ({} without a root, by their own chain), {} not DCLF objects{}",
@@ -796,8 +783,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 		struct Pending
 		{
 			const RE::BSShadowLight* light = nullptr;
-			// Accumulate's roots: an explicit one, the light's sceneAccumArray (FUN_140e28f70: the first through Process2, the rest
-			// straight to Process1, the process's state carried between them), or the scene graph's object root.
+			// Accumulate's roots: an explicit one, the light's sceneAccumArray (FUN_140e28f70), or the scene graph's object root.
 			std::vector<const RE::NiAVObject*> roots;
 			bool array = false;
 			std::uint32_t frame = 0, mode = 4;
@@ -852,9 +838,8 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 	void End(const RE::BSShadowLight& a_light, const RE::NiAVObject* a_root, std::uint32_t a_frame)
 	{
 		tracing = nullptr;
-		// The process as the cull left it: its sphere and plane, back accumulator and request flags (the mode and frustum restored). The
-		// light's context is the selection's, made after the engine's function returns: the comparison waits for LightSelectionMade
-		// (the scene graph does not change in between; the next light's cull overwrites the process).
+		// The light's context is made after the engine's function returns, so the comparison waits for LightSelectionMade.
+		// The scene graph does not change in between, but the next light's cull overwrites the process.
 		auto& pending = pendings.emplace_back();
 		pending.light = &a_light;
 		pending.frame = a_frame;
@@ -901,8 +886,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				traced.firstRepeatCodes[0], traced.firstRepeatCodes[1], covering, a_pending.roots.size());
 		}
 		const auto* selection = LightSelection::Get().Current(a_pending.frame);
-		// The frame's lights (Frame::FrameLight): every selection of the scene frame's. A light the walk did not walk (no rooms, hidden, on an
-		// object node) has no context: no room is reached, and the engine's own visibility map checks that at every room the model meets.
+		// A light the walk skipped has no context, so no room is reached. The engine's own visibility map checks that at every room.
 		const auto* entry = selection ? selection->LightOf(a_pending.light) : nullptr;
 		const bool selected = entry != nullptr;
 		const Portals::ContextHold context = entry ? entry->portalContext : nullptr;
@@ -949,7 +933,6 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			else
 				model.Process1(root);
 		}
-		// The comparison, both ways, the unmodelled subtrees' geometries left out.
 		const auto note = [&](const void* a_geometry, std::string_view a_what) {
 			if (w.firstDiffer.empty())
 				w.firstDiffer = fmt::format("{}: {}", PathOf(static_cast<const RE::NiAVObject*>(a_geometry)), a_what);
@@ -977,7 +960,6 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				note(geometry, fmt::format("model appended code {}{}, the engine did not", append.code, append.untested ? " untested" : ""));
 			} else
 				w.uncertain += append.uncertain;
-		// The per-object predicate against the engine, on the same geometries.
 		Leaf leaf{ model };
 		if (!a_pending.compound)
 			for (const auto* root : a_pending.roots)
@@ -1008,7 +990,6 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				++w.leafOnly;
 				noteLeaf(geometry, fmt::format("predicate code {}, the engine did not reach it", code));
 			}
-		// DCLF's strict gates, as its consumers apply them, on the same cull.
 		if (context && !a_pending.compound) {
 			const auto& tables = Scene::FrameView::Get().GetTables();
 			ankerl::unordered_dense::map<const void*, std::uint32_t> objects;

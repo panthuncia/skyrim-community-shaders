@@ -1,7 +1,5 @@
-// Fades: the fade roots' OnVisible state, the one producer of root states. Its switches, the fade roots' table family and coordinator
-// component, the fade snaps and fade amounts channels, the render side (the seeds pool, the scene resources with their depth commit hook,
-// the passes, the frame and cull bindings), the root states (the family's view, the root test, the write-back's kick and wait, the fade
-// test's frame start and latch words), the diagnostics, the fade writers (the stand-in observer and engine hooks, last) and the early hook (FadeSnap).
+// The Fades feature's install. Fades steps the fade roots' OnVisible state and is the only producer of root states.
+// The install order below matters because several pieces must register after other features' equivalents.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Fades/Fades.h"
@@ -21,7 +19,7 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		Api::EngineChannelId fadeSnaps, fadeAmounts;  // install; read-only after
+		Api::EngineChannelId fadeSnaps, fadeAmounts;  // set at install, read-only after
 	}
 
 	Api::EngineChannelId FadeSnapsChannelId()
@@ -39,10 +37,8 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		Api::SwitchId emptyFadeNodeSwitch, fadeParitySwitch;  // install
+		Api::SwitchId emptyFadeNodeSwitch, fadeParitySwitch;
 
-		// The switches, where Core's were listed: the empty fade node's right before the first parity row (after the shadows' and the
-		// switches anchored after it), the parity's after the resident parity's.
 		void RegisterSettings(Api::InstallContext& a_context)
 		{
 			emptyFadeNodeSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_EMPTY_FADE_NODE", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero,
@@ -52,15 +48,14 @@ namespace DCLF::Features::Fades
 				.description = "1: the fade port against the engine's functions, and FadeStateCS against the port", .after = "CS_DCLF_RESIDENT_PARITY" });
 		}
 
-		// The root test (per join): a fade node's fade-out distance for BuildDraws' fade test (measured from the node's centre); trees add
-		// the height test.
+		// The fade-out distance is measured from the node's centre. Trees also get the height test.
 		void RootTest(const Api::RootTestInput& a_input, Api::RootTestOutput& a_out)
 		{
 			a_out.distance = FadeDistanceOf(*a_input.node);
 			a_out.objectFlags = (a_input.node->kind & SceneCapture::kKindTree) ? kObjectHeightTest : 0u;
 		}
 
-		// The fade distances' globals (FadeDistanceOf) into the membership witness, in the order MembershipWitness mixed them.
+		// Mixes the globals FadeDistanceOf reads. Keep the order MembershipWitness used, or the witness changes.
 		void RootGlobalsKey(const Api::RootTestInput& a_input, std::uint32_t& a_witness)
 		{
 			const auto& g = a_input.globals;
@@ -73,9 +68,7 @@ namespace DCLF::Features::Fades
 				mix(std::bit_cast<std::uint32_t>(g.fadeTypeDivisors[type]));
 		}
 
-		// The root states: the family's rows, the root test per join and its globals in the membership witness, the write-back task
-		// (kicked at the frame's start, joined when DCLF's async work drains), and the fade test's frame inputs (the eye and the tree
-		// height test: captured at the frame start, written into the depth commit's latch).
+		// The write-back task is kicked at the frame start and joined when DCLF's async work drains.
 		void RegisterRootStates(Api::InstallContext& a_context)
 		{
 			a_context.RegisterRootStates({ .name = "fade roots",
@@ -93,15 +86,13 @@ namespace DCLF::Features::Fades
 		void Install(Api::InstallContext& a_context)
 		{
 			RegisterSettings(a_context);
-			// The family (after TreeWind's trees) and the component, last of the components.
+			// The family must come after TreeWind's trees, and the component last of all components.
 			RegisterScene(a_context);
-			// The channels: "fade snaps" then "fade amounts", drained and applied where Core's queues were (BeforeStructural).
 			RegisterEngine(a_context, Scene::fadeSnaps, Scene::fadeAmounts);
-			// The render side: the seeds pool, the scene resources, the depth commit hook, the passes, the frame and cull bindings.
 			RegisterRender(a_context);
 			RegisterRootStates(a_context);
 			RegisterDiagnostics(a_context);
-			// The fade writers, last (Main::Update's entry keeps its order: the writer tables and stores after the other observers').
+			// Last, so the writer stores run after the other observers at Main::Update's entry.
 			RegisterWriters(a_context);
 		}
 	}

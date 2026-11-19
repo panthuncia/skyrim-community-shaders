@@ -1,8 +1,7 @@
-// Grass's draw family (Api::DrawFamily::Grass, dclf-architecture.md, "Grass: the draws"): the mirror's drain, the frame's decision (with
-// GrassShared's stand-down of the features inside the engine's grass passes) and its program source, and its draws in the main passes
-// (the depth segment's two phases and the colour segment): arrays of instanced draws with a GPU count, one per bucket and LOD tier.
+// The grass draw family (dclf-architecture.md, "Grass: the draws"). Decides each frame whether DCLF draws grass, and records the
+// indirect draws, one per bucket and LOD tier, in the two depth phases and the colour pass.
 
-// volk must precede every Vulkan header of the translation unit (DrawPipelinesRhi.h's FamilyPipelines).
+// volk must precede every Vulkan header in the translation unit.
 #include <rhi_interop_vulkan.h>
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
@@ -29,21 +28,17 @@ namespace DCLF::Features::Grass
 {
 	namespace
 	{
-		// stage 0: the engine's grass colour passes blend as the main pass's opaque write mode (alphaBlendWriteMode 1).
+		// The engine's grass colour passes use the opaque write mode.
 		constexpr std::uint8_t kWriteMode = 1;
 
-		// The frame: the mirror is the render thread's (the decision reads it at the frame's start), drained running or not. GrassShared
-		// hears the grass is not DCLF's until the decision says otherwise.
+		// Drained every frame, even when DCLF does not own grass.
 		void Serve(const Api::DrawFamilyFrame& a_frame)
 		{
 			GrassShared::SetDclfOwned(false);
 			RenderMirror().Drain(a_frame.frame);
 		}
 
-		/**
-		 * @brief stage 0: whether the engine shows grass (ToggleGrass, tg): BGSGrassManager's grass node is not hidden (+0xF4 bit 0). False
-		 * without the manager or its node.
-		 */
+		// The tg console command hides BGSGrassManager's grass node (+0xF4 bit 0).
 		bool EngineGrassShown()
 		{
 			const auto* manager = Engine::Global<const std::byte*>(Address::kGrassManager);
@@ -51,12 +46,7 @@ namespace DCLF::Features::Grass
 			return node && (*reinterpret_cast<const std::uint32_t*>(node + 0xF4) & 1u) == 0;
 		}
 
-		/**
-		 * @brief DCLF's while there is something to draw that it draws whole: tables, the mirror's buckets within the draws buffer's slots,
-		 * no live group the capture could not read (the engine draws it: withholding grass by its property would hide it), and the engine
-		 * showing grass; then once the pipeline lane has built its pipelines (the grass shader as input; until the frame's catalog has
-		 * them the engine draws grass).
-		 */
+		// DCLF takes grass only when it can draw all of it. A rejected group is still engine-drawn, and withholding grass would hide it.
 		bool Decide(const Api::DrawFamilyFrame& a_frame)
 		{
 			const auto& mirror = RenderMirror();
@@ -65,21 +55,16 @@ namespace DCLF::Features::Grass
 			return a_frame.Pipelines(mirror.BucketSlots() <= GrassInstances::kMaxBuckets && !mirror.RejectedLive() && EngineGrassShown());
 		}
 
-		/**
-		 * @brief The frame's published ownership (every frame, as PassCapture withholds by it): GrassShared hears it, so Grass
-		 * Optimizations and Grass Collision stand down exactly on the frames whose grass passes are withheld; on those the features
-		 * inside the engine's grass passes do their frame's work from here (Grass Collision's update and publish), before the depth
-		 * commit reads what they publish.
-		 */
+		// Grass Optimizations and Grass Collision must stand down on exactly the frames whose grass passes are withheld.
+		// On those frames Grass Collision's update runs from here instead, before the depth commit reads it.
 		void Owned(bool a_owned)
 		{
-			// During a load's hold every grass pass is withheld (PassCapture::HeldByLoad) whether or not DCLF owns the family yet: the
-			// features inside the engine's grass passes stand down then too, and do their frame's work from here.
+			// A load hold withholds every grass pass, even before DCLF owns the family.
 			const bool standDown = a_owned || LoadHold::Active();
 			GrassShared::SetDclfOwned(standDown);
 			if (!standDown)
 				return;
-			// The main view's eye, as the draw row's (SampleCull): the renderer's posAdjust is the last pass's here, not the main view's.
+			// Not the renderer's posAdjust, which belongs to the last pass here rather than the main view.
 			auto* camera = RE::Main::WorldRootCamera();
 			if (!camera)
 				return;
@@ -87,7 +72,7 @@ namespace DCLF::Features::Grass
 			GrassShared::RunStoodDownFrame({ .eye = { eye.x, eye.y, eye.z } });
 		}
 
-		// stage 0: the BSGrassShader singleton; before it is known, the first grass pass's shader GrassShared saw.
+		// Falls back to the shader GrassShared saw until the BSGrassShader singleton is known.
 		const void* ProgramSource()
 		{
 			if (auto* shader = Engine::Global<RE::BSShader*>(Address::kGrassShader))
@@ -95,15 +80,12 @@ namespace DCLF::Features::Grass
 			return GrassShared::GrassShader();
 		}
 
-		// The engine's grass shapes: their shader property is a BSGrassShaderProperty.
 		const void* EngineShapeVtable()
 		{
 			return reinterpret_cast<const void*>(RE::VTABLE_BSGrassShaderProperty[0].address());
 		}
 
-		// RunGrass's descriptors (ShaderCache.h, GrassShaderTechniques and GrassShaderFlags), as the engine's main view draws grass: colour
-		// the lit technique without AlphaTest (EQUAL against the depth decides), depth RenderDepth, PBR grass's colour TruePbr (TruePBR's
-		// kMenuScreen grass); no faces, so no forward program.
+		// Colour has no AlphaTest because the EQUAL depth test already decides coverage. Grass has no forward program.
 		using GrassTechnique = SIE::ShaderCache::GrassShaderTechniques;
 		constexpr std::uint32_t kGrassColour = 0x3;
 		constexpr Api::DrawFamilyProgram kProgram{ .shaderType = static_cast<std::uint8_t>(RE::BSShader::Type::Grass),
@@ -124,16 +106,13 @@ namespace DCLF::Features::Grass
 						  (kProgram.descriptors.colour & static_cast<std::uint32_t>(SIE::ShaderCache::GrassShaderFlags::AlphaTest)) == 0,
 			"grass's descriptors are not the engine's (RenderDepth, TruePbr; the colour program without AlphaTest)");
 
-		// The draws' push data (RunGrass.hlsl's DCLFGrassPush, b190): the draw row's buffer view ref, the pass's phase and colour program.
+		// Matches DCLFGrassPush in RunGrass.hlsl (b190).
 		void Push(rhi::CommandList& a_commands, RenderGraph::BufferRef a_draw, std::uint32_t a_phase, std::uint32_t a_program)
 		{
 			std::uint32_t words[kDrawPushWords]{ a_draw.viewSlot, a_draw.byteOffset, a_phase, a_program };
 			a_commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
 		}
 
-		// The main passes: the draws buffer (its arrays and their counts), the draw row's ref (in its push data), the tables its
-		// vertex and pixel stages read by address, and Grass Collision's texture once it was ever published (its ORG path: the vertex
-		// stages read it by the graph's descriptor, ordered after the update at the EarlyPrepass anchor).
 		void MainDeclare(Api::DrawFamilyDeclare& a_declare)
 		{
 			auto* tables = TablesOf(a_declare.scene);
@@ -148,12 +127,9 @@ namespace DCLF::Features::Grass
 			builder.ShaderResource(tables->draw, noViews);
 			static constexpr std::string_view kCollisionIds[] = { GrassShared::kCollisionGraphId };
 			Extensions::DeclareGraphTextures(builder, kCollisionIds);
-			// The engine's shadow mask, which the draw row names by its published texture's descriptor (BindFrameTextures).
 			Extensions::DeclareGraphTextures(builder, Extensions::ShadowMaskGraphTextureIds());
 		}
 
-		// The CPU pipeline's main draw (main.direct): MainDeclare's draws buffer (a plain buffer, fixed with the tables) and
-		// draw row's ref.
 		bool MainDirect(Api::DrawFamilyDirect& a_draw)
 		{
 			const auto* tables = TablesOf(a_draw.scene);
@@ -164,17 +140,12 @@ namespace DCLF::Features::Grass
 			return true;
 		}
 
-		// Its pipelines (built late, rebuilt on a target change).
 		void MainRevision(const Api::DrawFamilyRevision& a_revision, std::vector<std::uint64_t>& a_out)
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(a_revision.pipelines.get()));
 		}
 
-		/**
-		 * @brief The depth passes: each phase's array of depth draws (a bucket tier's culled instances each); the colour pass: each colour
-		 * program's array, EQUAL against the depth draws. Each ExecuteIndirect reads its draw count from the draws buffer's header, and starts
-		 * where the family's signature reads a draw (DrawArgs: its first instance word on D3D12, its arguments on Vulkan).
-		 */
+		// argumentsOffset skips the instance word on Vulkan, which has no push-constant argument in its signature.
 		void MainRecord(const Api::DrawFamilyRecord& a_record)
 		{
 			using namespace GrassInstances;

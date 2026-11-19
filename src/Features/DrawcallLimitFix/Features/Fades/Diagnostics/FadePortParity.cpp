@@ -1,6 +1,5 @@
-// CS_DCLF_FADE_PARITY, the port's side (the primary cull's hook points; Diagnostics/Engine/Events.h):
-// - <- FADE PORT: every 30th frame, up to 64 fade roots, the port against the engine's functions on node copies;
-// - the fade roots' nodes at the list jobs' end every 30th frame, for the fade state's comparison (NodeSnapshot: the fade log's).
+// CS_DCLF_FADE_PARITY, C++ side. Every 30th frame it runs the port on copies of up to 64 fade roots and compares with the engine.
+// It also snapshots the fade roots' nodes at the end of the list jobs, for the fade log to compare against.
 
 #include "Features/DrawcallLimitFix/Features/Fades/Diagnostics/FadeDiagnostics.h"
 
@@ -19,9 +18,9 @@ namespace DCLF::Features::Fades
 	{
 		using Diagnostics::PrimaryCullView;
 
-		std::uint64_t frames = 0;   // PrepareFrame's frames (the fade port's every 30th)
+		std::uint64_t frames = 0;
 		std::uint32_t fadePortCursor = 0;
-		FadeState::PortCheck fadePort;  // render thread, since the last report (TakePortCheck)
+		FadeState::PortCheck fadePort;  // render thread only
 		std::vector<FadeNodeState> nodeSnapshot;
 		std::uint32_t nodeSnapshotFrame = ~0u;
 
@@ -30,7 +29,7 @@ namespace DCLF::Features::Fades
 			++frames;
 		}
 
-		/** @brief The port against the engine's functions on copies of the snapshot's fade roots (nothing writes them until the list jobs). */
+		/** @brief Nothing writes the fade roots between here and the list jobs, so copies taken now are stable. */
 		void CheckFadePort(const Diagnostics::On<Diagnostics::EnginePoint::FullFrustumDone>&)
 		{
 			if (!PrimaryCullView::StandInLive() || (frames % 30) != 0)
@@ -52,7 +51,7 @@ namespace DCLF::Features::Fades
 			fadePortCursor = entries ? (fadePortCursor + 64) % entries : 0;
 		}
 
-		/** @brief The fade roots' nodes now, after this cull's OnVisible and before the next animation job's updates. */
+		/** @brief Taken after this cull's OnVisible and before the next animation job's updates. */
 		void SnapshotNodes(const Diagnostics::On<Diagnostics::EnginePoint::ListJobsDone>&)
 		{
 			const std::uint32_t frame = Scene::FrameView::Get().GetFrame();

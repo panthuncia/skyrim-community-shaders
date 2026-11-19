@@ -1,6 +1,5 @@
-// The particle systems' palette rows class (Api::PaletteRowsContribution, FrameValueItemClass::ParticleSystem): their blocks in
-// FrameValues' palette part, five rows a particle of their capacity bucket, expanded from the snapshots each frame, and their placement
-// rows the snapshots' world and bound; the quads' geometry slot; the frame's cameras.
+// The particle systems' palette rows class: five rows per particle of the capacity bucket, expanded from the snapshots each frame,
+// plus placement rows, the quads' geometry slot and the frame's cameras.
 
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -13,15 +12,13 @@ namespace DCLF::Features::Particles
 {
 	namespace
 	{
-		// The frame's input (FrameValues' job, from the kick): the main camera the quads face, and the camera first-person quads face: the
-		// main camera's rotation (the first-person camera's, FUN_1414cb020) at the first-person eye (DrawWorld +0x00).
+		// The main camera, and the first-person camera: the main camera's rotation at the first-person eye (DrawWorld +0x00, FUN_1414cb020).
 		struct FrameCameras
 		{
 			ParticleSnapshots::Camera main, firstPerson;
 		};
 
-		// A particle system draws the renderer's own quads (FUN_1414f2ad0 type 1: FUN_140e4d280's quad index list and texcoord stream, one
-		// quad a particle), vertices pulled from its palette block: one slot per capacity bucket, keyed by a DCLF address.
+		// A particle system draws the renderer's own quads (FUN_1414f2ad0 type 1), vertices pulled from its palette block. One slot per capacity bucket.
 		bool GeometrySource(Api::PaletteGeometrySource& a_source)
 		{
 			const auto quads = a_source.units;
@@ -37,7 +34,6 @@ namespace DCLF::Features::Particles
 			return true;
 		}
 
-		// The main camera the frame's particle quads face, and the renderer's quads once.
 		void FrameStart()
 		{
 			ParticleSnapshots::Get().BeginFrame();
@@ -47,14 +43,13 @@ namespace DCLF::Features::Particles
 		{
 			auto& cameras = a_kick.input.As<FrameCameras>();
 			cameras.main = ParticleSnapshots::Get().FrameCamera();
-			// The first-person eye (DrawWorld +0x00, filled by FUN_1406452c0 before FrameDriver::BeginFrame): where FUN_1414cb020 places
-			// the first-person camera, with the world camera's rotation.
+			// The first-person eye, filled by FUN_1406452c0 before FrameDriver::BeginFrame.
 			cameras.firstPerson = cameras.main;
 			if (const auto* eye = REL::Relocation<const float*>{ REL::Offset(Engine::Address::kDrawWorldEye) }.get(); eye && cameras.main.valid)
 				std::memcpy(cameras.firstPerson.eye, eye, sizeof(cameras.firstPerson.eye));
 		}
 
-		// The members' records, followed from now on (ParticleSnapshots::Follow is the producer's alone).
+		// Follow is the producer's alone.
 		void BeginRun(const Api::PaletteRowsRun& a_run)
 		{
 			auto& snapshots = ParticleSnapshots::Get();
@@ -62,7 +57,7 @@ namespace DCLF::Features::Particles
 				item.state = snapshots.Follow(item.geometry);
 		}
 
-		// Particle quads, transforms and bound from the newest snapshot (particle data is never read here).
+		// Particle data is never read here.
 		void SampleChunk(const Api::PaletteRowsChunk& a_chunk)
 		{
 			const auto& cameras = a_chunk.input.As<FrameCameras>();

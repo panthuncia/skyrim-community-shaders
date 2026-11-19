@@ -1,5 +1,5 @@
-// CS_DCLF_TREE_LOD_AUDIT: the open defect's probe (dclf-open-defects.md, "Tree LOD instances the engine leaves hidden after allVisible"),
-// main thread at the scene frame's start, with or without DCLF: the attached tree LOD blocks' instances against their references (TreeLodMirror.h).
+// CS_DCLF_TREE_LOD_AUDIT probes the open defect in dclf-open-defects.md, "Tree LOD instances the engine leaves hidden after allVisible".
+// Main thread at the scene frame's start, with or without DCLF.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
@@ -91,8 +91,7 @@ namespace DCLF::Features::TreeLod
 			const auto* fadeNode = full->AsFadeNode();
 			const float fullFade = fadeNode ? *reinterpret_cast<const float*>(reinterpret_cast<const std::byte*>(fadeNode) + 0x130) : 1.0f;
 			if (!(fullFade > 0.0f) || fullFade < 0.05f) {
-				// The full tree is faded out (or stuck at a first step) on its node: the LOD stands in for it, unless DCLF draws the tree from
-				// its own fade state. Only one in view can show both; how long it has been so.
+				// The full tree is faded out on its node, so the LOD stands in unless DCLF draws the tree from its own fade state.
 				++a_audit.fadedOut;
 				if (!InView(*full))
 					return;

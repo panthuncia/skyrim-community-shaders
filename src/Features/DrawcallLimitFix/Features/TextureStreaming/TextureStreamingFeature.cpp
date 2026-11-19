@@ -57,8 +57,8 @@ namespace DCLF::Features::Streaming
 		constexpr std::uint8_t kFeedbackTicks = 32;
 		std::vector<float> feedbackFootprint;
 		std::vector<std::uint8_t> feedbackAge;
-		// Which material each slot last reported for (raw, only compared). One that never has may be one whose shaders cannot: alpha-tested
-		// Lighting, grass, Effect. Those have only distance to go by, so while they are in view, that counts as on screen.
+		// A slot that never reported may belong to a shader that cannot, such as alpha-tested Lighting, grass or Effect.
+		// Those have only distance, so while in view they count as on screen.
 		std::vector<const RE::BSShaderMaterial*> reporter;
 
 		template <class Views>
@@ -162,10 +162,7 @@ namespace DCLF::Features::Streaming
 			}
 		}
 
-		/**
-		 * @brief A window build's readiness for the state graph: null when the window is in place (a D3D11 window), else done once the render
-		 * thread installed it, which wakes the graph (TextureStreaming::PendingWindow).
-		 */
+		/** @brief A window build's readiness: null for a D3D11 window, else done once the render thread installed it. */
 		std::shared_ptr<const org::async::GpuSubmissionSet> Readiness(std::shared_ptr<TextureStreaming::PendingWindow> a_pending)
 		{
 			if (!a_pending)

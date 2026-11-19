@@ -1,6 +1,5 @@
-// The decal occlusion family's engine side: the test's detour, which brackets the engine's query and latches the test's draws; the
-// family's DrawTriShape taker, which latches a draw in place of drawing it; and its BSUtilityShader::SetupGeometry watcher, which keeps
-// the pass being drawn and counts the test's passes. Render thread.
+// The engine side of decal occlusion: the test's detour, the DrawTriShape taker that latches draws instead of
+// drawing them, and a SetupGeometry watcher that tracks the current pass. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -27,21 +26,19 @@ namespace DCLF::Features::DecalOcclusion
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
-		/** @brief Why a test is skipped (its query answers kSkipAnswer), each logged once. */
 		Util::ReasonLog& Skips()
 		{
 			static Util::ReasonLog log("[DCLF] decal occlusion: a decal test is skipped, its query answers visible", spdlog::level::warn);
 			return log;
 		}
 
-		/** @brief The test being latched (render thread). */
 		struct Capture
 		{
 			bool active = false;
-			bool failed = false;  // a draw was refused: every draw of the test is dropped, and the query answers kSkipAnswer
-			RE::NiCamera* camera = nullptr;           // the decal camera, which the test places before it draws
-			const RE::BSRenderPass* pass = nullptr;   // the pass SetupGeometry set up last: its draw comes next
-			bool haveMatrices = false;                // matrices are the camera's (made at the first draw, once the camera is placed)
+			bool failed = false;  // One refused draw drops the whole test.
+			RE::NiCamera* camera = nullptr;
+			const RE::BSRenderPass* pass = nullptr;   // Set by SetupGeometry. Its draw comes next.
+			bool haveMatrices = false;                // Built at the first draw, once the test has placed the camera.
 			ShadowCameras::Camera matrices;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
@@ -53,11 +50,7 @@ namespace DCLF::Features::DecalOcclusion
 			return capture;
 		}
 
-		/**
-		 * @brief The draw's values: the geometry (leased), and the decal camera's view-projection times the shape's world, both relative to
-		 * the camera, as BSUtilityShader's vertex stage takes them (FrameBuffer's CameraViewProj times PerGeometry's World). Null when
-		 * latched; otherwise why the graph cannot draw it.
-		 */
+		// Returns null when latched, otherwise the reason the graph cannot draw it. Matrices are camera-relative, as BSUtilityShader expects.
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& run = *a_capture.run;
@@ -92,14 +85,13 @@ namespace DCLF::Features::DecalOcclusion
 				return Family::ReasonOf(result);
 			}
 
-			// The camera as the test placed it (SetCameraData's matrices: ShadowCameras' port of it), once per test.
 			if (!a_capture.haveMatrices) {
 				ShadowCameras::CameraMatrices(*a_capture.camera, a_capture.matrices);
 				a_capture.haveMatrices = true;
 			}
-			const auto& viewProj = a_capture.matrices.viewProj;  // row-major, a row vector times it
+			const auto& viewProj = a_capture.matrices.viewProj;  // Row-major, multiplied by a row vector.
 			const auto& eye = a_capture.matrices.eye;
-			// The shape's world as rows (a column vector times it), its translation relative to the camera.
+			// Multiplied by a column vector. The translation is relative to the camera.
 			const auto& world = geometry->world;
 			const auto& r = world.rotate.entry;
 			const float s = world.scale;
@@ -115,7 +107,7 @@ namespace DCLF::Features::DecalOcclusion
 
 			Draw draw{};
 			auto& constants = draw.constants;
-			// clip[i] = sum over k of viewProj[k][i] * (world * position)[k]: the transposed view-projection times the world.
+			// clip[i] = sum over k of viewProj[k][i] * (world * position)[k]
 			for (std::uint32_t i = 0; i < 4; ++i)
 				for (std::uint32_t j = 0; j < 4; ++j) {
 					float sum = 0.0f;
@@ -130,7 +122,6 @@ namespace DCLF::Features::DecalOcclusion
 			constants.vertexStride = latched.stride;
 			constants.firstIndex = latched.firstIndex;
 			draw.indexCount = latched.indexCount;
-			// The viewport the test's target change set (kDECAL_OCCLUSION's), with the camera's depth range.
 			draw.viewport = Family::LatchViewport(0);
 			if (!draw.viewport.rect[2] || !draw.viewport.rect[3])
 				return "an empty viewport";
@@ -141,7 +132,7 @@ namespace DCLF::Features::DecalOcclusion
 			return nullptr;
 		}
 
-		/** @brief The family's DrawTriShape taker: during a test, every draw is latched or dropped, never the engine's. */
+		// During a test, every draw is latched or dropped. None reaches the engine.
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
@@ -157,10 +148,7 @@ namespace DCLF::Features::DecalOcclusion
 			return true;
 		}
 
-		/**
-		 * @brief After BSUtilityShader::SetupGeometry (chained after the shadow masks' watcher): keeps the pass for its draw, and counts it. A
-		 * pass that will not reach DrawTriShape fails the test; that draw still reaches D3D11.
-		 */
+		// A pass that will not reach DrawTriShape fails the test, and its draw still reaches D3D11.
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
@@ -173,13 +161,7 @@ namespace DCLF::Features::DecalOcclusion
 			Skips().Report("a pass the dispatcher draws through another function than DrawTriShape", "that draw reaches D3D11");
 		}
 
-		/**
-		 * @brief The engine's decal occlusion test (SE 35563, AE 36562; Ghidra 2026-11-12), called by Main's frame (SE 35556) for each decal
-		 * of BGSDecalManager in state 3: it places the decal camera (a_camera) along the decal, sets no colour target and kDECAL_OCCLUSION
-		 * as the depth target (cleared when the decal's +0x31 is set), acquires a query from the ring into the decal's +0x38, begins it,
-		 * culls the decal's target (+0x178) into the decal manager's accumulator with render mode 0x1B, draws it (SubmitAccumulator) and
-		 * ends the query. The same layout on SE and AE.
-		 */
+		// SE 35563, AE 36562, same layout on both. The query slot lands in the decal's +0x38 and its target is at +0x178.
 		struct DecalTest
 		{
 			static void thunk(void* a_main, std::byte* a_decal, RE::NiPointer<RE::NiCamera>* a_camera, void* a_accumulator)
@@ -205,7 +187,6 @@ namespace DCLF::Features::DecalOcclusion
 					refusal = "its anchor cannot run now";
 				if (refusal)
 					Skips().Report(refusal);
-				// The capture takes every DrawTriShape of the call, latched or dropped (TakeDraw).
 				capture.failed = refusal != nullptr;
 				capture.camera = a_camera ? a_camera->get() : nullptr;
 				capture.pass = nullptr;
@@ -223,7 +204,7 @@ namespace DCLF::Features::DecalOcclusion
 					Skips().Report(capture.passes.Describe("decal occlusion"));
 				}
 				if (bracket.Slot() == Queries::kNoSlot) {
-					// The test always begins its query; another plugin's hook in between could change that.
+					// The engine always begins a query, but another plugin's hook could prevent it.
 					if (!run->draws.empty())
 						Skips().Report("draws with no query begun");
 					DecalDraws::Keep(std::move(run->owners));
@@ -234,7 +215,7 @@ namespace DCLF::Features::DecalOcclusion
 					bracket.Skip("its draws were refused");
 					return;
 				}
-				// Nothing of the target was drawn (culled away, or no shape): no sample passed, as on D3D11.
+				// Nothing drawn means no sample passed, as on D3D11.
 				if (run->draws.empty()) {
 					DecalDraws::Keep(std::move(run->owners));
 					bracket.Answer(0);
@@ -260,7 +241,7 @@ namespace DCLF::Features::DecalOcclusion
 		}
 		stl::detour_thunk<DecalTest>(REL::RelocationID(35563, 36562));
 		HookSites::NoteDetour("the decal occlusion test (on the graph)", DecalTest::func.address());
-		// The client is made on the main thread once the graph runs (the main menu), before any world frame.
+		// Runs on the main thread once the graph is up, before any world frame.
 		Family::AddSetup("decal occlusion", [] { return DecalDraws::Setup(); });
 		logger::info("[DCLF] decal occlusion: hooks installed (the decal occlusion test, BSUtilityShader::SetupGeometry)");
 	}

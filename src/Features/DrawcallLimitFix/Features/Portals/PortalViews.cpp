@@ -1,6 +1,6 @@
-// PortalViews: the main camera's and the shadow lights' portal and occluder programs, built on the render thread. Each function names
-// the engine function it ports (AE 1.6.1170); the arithmetic keeps the engine's grouping where it decides a comparison
-// (skyrim-engine-notes.md, "Portals, rooms and occluders").
+// Portal and occluder programs for the main camera and the shadow lights, built on the render thread.
+// Each function names the engine function it ports (AE 1.6.1170). The arithmetic keeps the engine's grouping wherever it decides
+// a comparison, so results match bit for bit.
 
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -143,7 +143,7 @@ namespace DCLF
 		constexpr std::array<std::array<std::uint32_t, 6>, 6> kBoxFaces{ { { 0, 1, 2, 0, 2, 3 }, { 5, 1, 0, 5, 0, 4 }, { 3, 2, 6, 3, 6, 7 }, { 6, 5, 4, 4, 6, 7 },
 			{ 0, 3, 7, 0, 7, 4 }, { 2, 1, 5, 2, 5, 6 } } };
 
-		/** @brief Calls a virtual of the engine's: slot a_slot of a_object's vtable, with a pointer argument. */
+		/** @brief Calls slot a_slot of a_object's engine vtable with a pointer argument. */
 		template <class R, class A>
 		R CallVirtual(const void* a_object, std::size_t a_slot, const A* a_argument)
 		{
@@ -166,7 +166,7 @@ namespace DCLF
 
 	std::int32_t PortalViews::FindRoom(const void* a_room) const
 	{
-		// The visibility map's lookup: the first inserted under the key.
+		// Match the visibility map, which returns the first entry inserted under a key.
 		for (std::size_t i = 0; i < frame.roomKeys.size(); ++i)
 			if (frame.roomKeys[i] == a_room)
 				return static_cast<std::int32_t>(i);
@@ -180,7 +180,6 @@ namespace DCLF
 		return static_cast<std::uint32_t>(frame.rooms.size() - 1);
 	}
 
-	// ---- BSCompoundFrustum's builders ----
 
 	void PortalViews::Reset(Program& a_program) const
 	{
@@ -211,8 +210,7 @@ namespace DCLF
 
 	PortalViews::PlaneSet PortalViews::PortalPlanes(const void* a_quad, const Vec3& a_eye)
 	{
-		// FUN_140e233b0: the quad's plane (the camera on its non-positive side), its four edges through the camera; slot 1 the zero
-		// plane, off; a clipped edge's plane off.
+		// FUN_140e233b0: the quad's plane, then its four edges through the camera. Slot 1 is the zero plane, off, and clipped edges are off.
 		const auto c = Corners(a_quad);
 		PlaneSet out;
 		out.mask = 0x3F;
@@ -359,8 +357,8 @@ namespace DCLF
 		}
 		if (state == 2)
 			return;
-		// A graph plane is judged at Build (PlaneJudged); an untested one here is the start room's, judged the same way rather than by
-		// the walk's WithinFrustumDistFirst, whose rectangle bug takes planes wholly outside the view (skyrim-engine-notes.md).
+		// An untested start-room plane is judged as Build judges graph planes, not by WithinFrustumDistFirst. That function has a rectangle
+		// bug that accepts planes wholly outside the view (skyrim-engine-notes.md).
 		if (state == 0 && !(engineWalkTest ? WithinFrustumDistFirst(a_occluder, camera.view, camera.eye) : PlaneJudged(a_occluder)))
 			return;
 		if (a_needOpen) {
@@ -380,7 +378,7 @@ namespace DCLF
 			if (!a_occluder)
 				return;
 			states[a_occluder] = At<std::uint32_t>(a_occluder, 0x40);
-			// A plane the engine's other tests judged keeps the edge flags their test wrote (+0xF0): the walk takes it untested.
+			// A plane the engine's other tests judged keeps the edge flags they wrote (+0xF0). The walk takes it untested.
 			if (IsPlane(a_occluder) && states[a_occluder] != 0)
 				std::memcpy(edgeFlags[a_occluder].data(), reinterpret_cast<const std::byte*>(a_occluder) + 0xF0, 4);
 		});
@@ -405,9 +403,8 @@ namespace DCLF
 
 	void PortalViews::AddOccluderRoom(Program& a_program, const void* a_occluder, const Program* a_parent)
 	{
-		// FUN_140e32860: an occluder of a room reached through a portal. A plane only once accepted this frame: the engine resets
-		// every state before its walk and nothing in the walk accepts a plane, so a room's own planes take no part; the graph's take
-		// part where Build's judgment (the actor culler's) accepted them, for unbound space reached through a portal.
+		// FUN_140e32860: an occluder of a room reached through a portal. A plane counts only once accepted this frame, and nothing in
+		// the walk accepts one, so only graph planes accepted at Build take part.
 		if (!IsPlane(a_occluder)) {
 			bool ok = false;
 			if (!a_parent || TestShapeProgram(*a_parent, a_occluder))
@@ -422,7 +419,6 @@ namespace DCLF
 		AddPlane(a_program, a_occluder);
 	}
 
-	// ---- The shapes' tests ----
 
 	bool PortalViews::QuadVsSet(const PlaneSet& a_set, const Quad& a_quad, Flags& a_flags)
 	{
@@ -561,8 +557,7 @@ namespace DCLF
 
 	bool PortalViews::WithinFrustumDistFirst(const void* a_quad, const PlaneSet& a_planes, const Vec3& a_eye)
 	{
-		// BSOcclusionPlane::WithinFrustumDistFirst (0x140e23e10): a camera within 5 units of the quad's plane and over it sees a
-		// portal (not an occlusion plane); else the quad against the frustum, or the camera looking straight at it.
+		// BSOcclusionPlane::WithinFrustumDistFirst (0x140e23e10). A camera within 5 units of a portal's plane and over it sees the portal.
 		const auto c = Corners(a_quad);
 		const auto p = PlaneFromPoints(c[0].x, c[0].y, c[0].z, c[1].x, c[1].y, c[1].z, c[2].x, c[2].y, c[2].z);
 		const float dP = ((a_eye.x * p[0] + a_eye.y * p[1]) + a_eye.z * p[2]) - p[3];
@@ -586,9 +581,8 @@ namespace DCLF
 
 	bool PortalViews::PlaneJudged(const void* a_plane)
 	{
-		// FUN_1414a8ba0 (HighActorCuller::Operate's occluder test, which judges every untested graph occluder before Main::Update's walk
-		// takes them): FUN_140e23920, the corners relative to the eye against the camera-relative frustum (its edge flags written), and
-		// FUN_140e242d0, a one-sided plane only with the eye on its negative side.
+		// FUN_1414a8ba0, HighActorCuller::Operate's occluder test, which judges every untested graph occluder before Main::Update's walk.
+		// It tests the eye-relative corners (FUN_140e23920) and takes a one-sided plane only with the eye behind it (FUN_140e242d0).
 		const auto c = Corners(a_plane);
 		const auto& e = camera.eye;
 		Quad relative;
@@ -647,8 +641,7 @@ namespace DCLF
 
 	bool PortalViews::BoxInView(const void* a_box) const
 	{
-		// FUN_140e21750: not with the camera inside it (its shape's GetWithinPoint, vfunc 0x2C), not wholly outside a view plane, and
-		// its extents overlapping the view frustum's eight corners projected on its axes.
+		// FUN_140e21750: false with the camera inside, wholly outside a view plane, or with no overlap on the box's axes.
 		const void* shape = At<const void*>(a_box, kBoxBound);
 		const RE::NiPoint3 eye{ camera.eye.x, camera.eye.y, camera.eye.z };
 		if (shape && CallVirtual<bool>(shape, 0x2C, &eye))
@@ -691,8 +684,7 @@ namespace DCLF
 
 	bool PortalViews::BoxSilhouette(const void* a_box, BoxScratch& a_scratch)
 	{
-		// FUN_140e21090: cached while the box's state is set this frame; else the silhouette's edge planes from the projected corners'
-		// hull, then the faces turned away from the camera, refined against the camera-relative frustum.
+		// FUN_140e21090: cached while the box's state is set this frame. Else the silhouette planes from the projected corners' hull.
 		if (const auto it = states.find(a_box); it != states.end() && it->second != 0)
 			return it->second == 1;
 		const auto k = BoxCorners(a_box);
@@ -833,7 +825,6 @@ namespace DCLF
 		return valid;
 	}
 
-	// ---- The walk ----
 
 	void PortalViews::Walk(const void* a_graph, const void* a_startRoom, bool a_isFirst)
 	{
@@ -1021,7 +1012,7 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.PortalViews");
 		frame.valid = false;
 		frame.sceneFrame = Scene::FrameView::Get().GetFrame();
-		// Whatever this frame builds (nothing: no programs), the words FadeStateCS, BuildDraws and the checks read, and the VisibleSet.
+		// Always encode on exit, even with no programs, so FadeStateCS, BuildDraws and the checks read this frame's words.
 		struct EncodeOnExit
 		{
 			PortalViews& self;
@@ -1074,8 +1065,7 @@ namespace DCLF
 			}
 		for (std::uint32_t p = 2; p < 6; ++p)
 			camera.relative.plane[p][3] = 0.0f;
-		// The graph's planes judged before the walk, as the frame's actor culler judges them (FUN_1414a8ba0, PlaneJudged): the walk takes
-		// an accepted one untested and skips a rejected one, and a linked pair needs its neighbour accepted.
+		// Judge the graph's planes before the walk, as the actor culler does (FUN_1414a8ba0). A linked pair needs its neighbour accepted.
 		if (graph)
 			ForList(graph, kGraphOccluders, [&](const void* a_occluder) {
 				if (a_occluder && IsPlane(a_occluder))
@@ -1109,13 +1099,11 @@ namespace DCLF
 		Diagnostics::Notify<Diagnostics::EnginePoint::PortalWalkBuilt>();
 	}
 
-	// ---- A shadow light's rooms ----
 
 	bool PortalViews::ParabolicVisible(const Parabolic& a_parabolic, const void* a_portal)
 	{
-		// TestBaseVisibility2 (0x14151a120): the portal's sphere {centre, the larger half extent}; TestBaseVisibility3: outside
-		// the light's sphere culls, else a sphere reaching behind the plane or in front of it is seen; with +0x30200 set (a
-		// shadow light's second hemisphere) every sphere inside.
+		// TestBaseVisibility2 (0x14151a120) uses the portal's sphere. Outside the light's sphere culls. With +0x30200 set, the light's
+		// second hemisphere, every sphere inside is seen.
 		const float cx = At<float>(a_portal, kShapeCentre), cy = At<float>(a_portal, kShapeCentre + 4), cz = At<float>(a_portal, kShapeCentre + 8);
 		const float hx = At<float>(a_portal, kShapeHalfX), hy = At<float>(a_portal, kShapeHalfY);
 		const float r = hx > hy ? hx : hy;
@@ -1165,10 +1153,8 @@ namespace DCLF
 			a_rooms.walk = kLightBounds;
 			return;
 		}
-		// The light's room process camera (+0x128 -> +0x18): a shadow light's own, set up with the light (an orthographic frustum,
-		// near 0.1; its world-to-camera matrix and viewport as set up), read as a camera, as the shadow sources read theirs. Before the
-		// engine has made one, the one FUN_1414a6400 would: the NiCamera constructor's (FUN_140d2afa0, then FUN_140d2c910 at the
-		// identity). The walk puts the light's rotation and position on it.
+		// The light's room process camera (+0x128 -> +0x18). Before the engine has made one, use what FUN_1414a6400 would, the NiCamera
+		// constructor's (FUN_140d2afa0, then FUN_140d2c910 at identity).
 		{
 			auto* bytes = lightCamera.data();
 			const auto* roomProcess = At<const std::byte*>(a_light, 0x128);
@@ -1191,10 +1177,8 @@ namespace DCLF
 		const auto* lightProcess = At<const std::byte*>(a_light, 0x128);
 		const Parabolic sphere{ position, radius, { r[0][0], r[1][0], r[2][0], (position.y * r[1][0] + r[0][0] * position.x) + position.z * r[2][0] },
 			lightProcess && At<std::uint64_t>(lightProcess, 0x30200) != 0 };
-		// The walk's state swapped in: the light's own frame, camera and crossed portals, and a copy of the edge flags (the engine's
-		// are on the shapes, shared: CommitLightWalk keeps the copy when the light is kept, as only a kept light's walk runs). The
-		// camera-relative frustum the boxes refine against stays the main camera's (only FUN_1401a43c0 sets it); the occluder
-		// states are shared.
+		// Swap in the light's frame, camera, crossed portals and a copy of the edge flags. The engine's flags live on shared shapes, so
+		// CommitLightWalk keeps the copy only for a kept light. The box frustum and occluder states stay the main camera's.
 		Camera light = camera;
 		light.camera = lightCamera.data();
 		light.eye = position;
@@ -1215,7 +1199,6 @@ namespace DCLF
 		frame.accumulated.clear();
 		frame.visibleUnbound = false;
 		crossed.clear();
-		// The camera's near point (its near along the forward) in each room: each walked as a first walk; none, unbound space.
 		const float nearDistance = At<float>(lightCamera.data(), kCameraFrustum + 0x10);
 		const RE::NiPoint3 nearPoint{ nearDistance * r[0][0] + position.x, nearDistance * r[1][0] + position.y, nearDistance * r[2][0] + position.z };
 		bool any = false;
@@ -1229,7 +1212,7 @@ namespace DCLF
 		a_rooms.visibleUnbound = frame.visibleUnbound;
 		a_rooms.rooms = frame.accumulated;
 		a_rooms.walk = kLightWalked;
-		// Snapshot while the light's scratch and camera are active. Never expose lightFrame's reused vectors to a consumer.
+		// Snapshot while the light's scratch is active. lightFrame's vectors are reused and must never reach a consumer.
 		auto context = std::make_shared<Portals::Context>();
 		context->kind = Portals::Context::Kind::PointLight;
 		context->frame = frame.sceneFrame;
@@ -1263,7 +1246,7 @@ namespace DCLF
 			return a_why = fmt::format("view mask {:#x}, plane 0 {} {} {} {}", At<std::uint32_t>(a_roomProcess, 0x9C), At<float>(a_roomProcess, 0x3C),
 					   At<float>(a_roomProcess, 0x40), At<float>(a_roomProcess, 0x44), At<float>(a_roomProcess, 0x48)),
 			       false;
-		// Its portal test (vfunc 0xD8) BSParabolicCullingProcess's TestBaseVisibility2 (the process has no RTTI name to read).
+		// The process has no RTTI name, so check its vfunc 0xD8 against TestBaseVisibility2.
 		if (const std::uintptr_t test = (*reinterpret_cast<const std::uintptr_t* const*>(a_roomProcess))[0xD8 / 8]; test != REL::Offset(kParabolicPortalTest).address())
 			return a_why = fmt::format("its vfunc 0xD8 at {:#x}", test - REL::Module::get().base() + 0x140000000), false;
 		return true;
@@ -1277,7 +1260,6 @@ namespace DCLF
 
 	bool PortalViews::SharesRoom(const LightRooms& a_light) const
 	{
-		// The world camera's entry is this frame's walk's (a frame with no graph keeps the last walk's, as the engine's does).
 		if (a_light.visibleUnbound && frame.visibleUnbound)
 			return true;
 		for (const void* room : a_light.rooms)
@@ -1292,8 +1274,7 @@ namespace DCLF
 		const auto* graphRooms = graph ? At<const void* const*>(graph, kGraphRooms) : nullptr;
 		const std::uint32_t roomCount = graphRooms ? At<std::uint32_t>(graph, kGraphRoomCount) : 0;
 		const std::uint32_t count = graph ? 1 + roomCount : 0;
-		// Unbound space, then each room of the graph with its own cull mode (BSMultiBoundRoom::OnVisible gives it to the process for its
-		// children; unbound space the lists').
+		// Unbound space, then each room with its own cull mode, which BSMultiBoundRoom::OnVisible gives its children's process.
 		std::vector<PortalModel::EncodeEntry> entries(count);
 		for (std::uint32_t p = 0; p < count; ++p) {
 			const void* room = p ? graphRooms[p - 1] : nullptr;
@@ -1301,7 +1282,7 @@ namespace DCLF
 			entries[p].cullMode = room ? static_cast<std::uint32_t>(static_cast<const RE::BSMultiBoundNode*>(room)->GetRuntimeData().cullingMode) : 0u;
 			entries[p].room = p != 0;
 		}
-		// Encode runs from Build's exit guard and inside the light walk's swapped state: a stream the lowering rejects does not throw.
+		// Encode runs from Build's exit guard and inside the light walk's swapped state, so it must not throw.
 		PortalModel::Encode(camera.view, entries, a_words, [](const PortalModel::EncodeError& a_error) {
 			static std::uint64_t rejected = 0;  // render thread
 			if (std::has_single_bit(++rejected))
@@ -1367,7 +1348,6 @@ namespace DCLF
 
 	void PortalViews::NoteStructure(const RE::NiNode* a_parent)
 	{
-		// The rooms (ProgramOf), and the portals' shared nodes and multibound nodes a strict light's gates pass through (StrictGates.h).
 		static const std::uintptr_t roomVtable = RE::VTABLE_BSMultiBoundRoom[0].address();
 		static const std::uintptr_t sharedVtable = RE::VTABLE_BSPortalSharedNode[0].address();
 		static const std::uintptr_t multiBoundVtable = RE::VTABLE_BSMultiBoundNode[0].address();
@@ -1375,12 +1355,11 @@ namespace DCLF
 			structure.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	// ---- The VisibleSet ----
 
 	PortalViews::VisibleSet::Answer PortalViews::VisibleSet::Visible(const void* a_key, bool a_previous) const
 	{
-		// Main::IsRoomVisible (0x140649f20): true for no node, for a node that is neither a room nor a shared node, and with no
-		// entry; else the entry's map holds it, or (a shared node) its portal's entrance or exit room (+0x140 -> +0x118, +0x120).
+		// Main::IsRoomVisible (0x140649f20). True for no node, a non-room key or no entry. A shared node is held if its portal's
+		// entrance or exit room is (+0x140 -> +0x118, +0x120).
 		if (!a_key)
 			return { true, kNoKey };
 		if (!graph)
@@ -1397,7 +1376,7 @@ namespace DCLF
 
 	PortalViews::VisibleSetHold::VisibleSetHold()
 	{
-		// Counted before the load (both sequentially consistent): a publish that replaces this set then sees the count.
+		// Count before the load, both seq_cst, so a publish that replaces this set sees the count.
 		auto& self = PortalViews::Get();
 		self.visibleReaders.fetch_add(1, std::memory_order_seq_cst);
 		set = self.visibleSet.load(std::memory_order_seq_cst);
@@ -1427,10 +1406,10 @@ namespace DCLF
 	void PortalViews::PublishVisible()
 	{
 		DCLF_ZONE("CS.DCLF.PortalViews.VisibleSet");
-		// No walk this frame (no graph or camera): no graph, so every key answers true.
+		// No walk this frame means no graph, so every key answers true.
 		const void* graph = frame.valid ? frame.graph : nullptr;
 		if (graph) {
-			// The graph's rooms and portals by count: a cell's attach or detach changes them without a new graph.
+			// A cell attach or detach changes the rooms and portals without a new graph.
 			const auto* rooms = At<const void* const*>(graph, kGraphRooms);
 			const std::uint32_t roomCount = rooms ? At<std::uint32_t>(graph, kGraphRoomCount) : 0;
 			std::uint64_t signature = (static_cast<std::uint64_t>(roomCount) << 32) ^ ListCount(graph, kGraphPortals);
@@ -1457,7 +1436,7 @@ namespace DCLF
 		auto set = std::make_shared<VisibleSet>();
 		set->generation = visibleGeneration.load(std::memory_order_relaxed) + 1;
 		set->sceneFrame = frame.sceneFrame;
-		// A cell change (another graph, or none): the engine's map may still hold the last graph's keys for a frame (the observers' aside).
+		// After a cell change the engine's map may still hold the last graph's keys for one frame.
 		const void* graphNow = graph ? graphKeys->graph : nullptr;
 		const void* graphBefore = visibleOwned && visibleOwned->graph ? visibleOwned->graph->graph : nullptr;
 		set->graphAge = visibleOwned && graphNow == graphBefore ? std::min(visibleOwned->graphAge + 1, 1000u) : 0u;
@@ -1465,8 +1444,7 @@ namespace DCLF
 			set->previous = visibleOwned->current;
 		if (graph) {
 			set->graph = graphKeys;
-			// The map after the frame's lists: the walk's rooms and crossed portals' shared nodes (Traverse adds both), then every
-			// portal of each room it popped (DrawWorld_BuildSceneLists over multiBoundRoomAccumList: BuildSharedCompoundFrustum).
+			// The walk's rooms and crossed portals' shared nodes, then every portal of each popped room, as DrawWorld_BuildSceneLists adds them.
 			set->current.rooms.insert(frame.roomKeys.begin(), frame.roomKeys.end());
 			set->current.shared.insert(crossed.begin(), crossed.end());
 			for (const void* room : frame.accumulated)
@@ -1481,7 +1459,7 @@ namespace DCLF
 		visibleOwned = std::move(set);
 		visibleSet.store(visibleOwned.get(), std::memory_order_seq_cst);
 		visibleGeneration.store(generation, std::memory_order_release);
-		// A reader counted at this point may hold any retired set; with none, nothing can.
+		// A reader counted here may hold any retired set. With none, nothing can.
 		if (visibleReaders.load(std::memory_order_seq_cst) == 0)
 			visibleRetired.clear();
 	}

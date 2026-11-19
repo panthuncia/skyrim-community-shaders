@@ -1,5 +1,4 @@
-// CS_DCLF_SET_PARITY: the particle members' withheld passes (Particles.h, SubscribePasses): counted on the registering threads, taken on
-// the render thread.
+// CS_DCLF_SET_PARITY: the particle members' withheld passes, counted on the registering threads and taken on the render thread.
 
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"

@@ -1,5 +1,4 @@
-// LocalShadowLights' render-thread sample from DCLF's light selection and light views (the Spot and Point sources' cameras), and the
-// per-object mask test.
+// Samples the local shadow lights from DCLF's selection and light views. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalShadowLights.h"
 
@@ -18,9 +17,7 @@ namespace DCLF
 	LocalShadowLights LocalShadowLights::Sample()
 	{
 		LocalShadowLights out;
-		// DCLF's selection: the lights CalculateActiveShadowCasterLights keeps, a light once (the sun's slots are the sun's),
-		// their mask indices, and per shadowmap descriptor what its cull tests (its source's camera, Shadows/Local's Lights board:
-		// Process2's planes).
+		// Each light appears once. Its volumes are the planes each descriptor's cull tests (Process2).
 		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
 		const auto* selection = LightSelection::Get().Current(sceneFrame);
 		if (!selection)
@@ -33,7 +30,7 @@ namespace DCLF
 			Light sampled;
 			sampled.maskBit = 1u << (selected.maskIndex & 31);
 			sampled.affectsLand = Engine::At<std::uint8_t>(shadowLight, 0x61) != 0;
-			// Gated only while the atlas holding its context was encoded (the commits publish that atlas).
+			// Gated only when the atlas holding its context was encoded.
 			if (selected.portalContext && selected.portalContextIndex != ~0u && !selection->portalContexts.empty())
 				sampled.portalContext = selected.portalContextIndex + 1;
 			if (const auto* niLight = shadowLight->light.get()) {
@@ -77,7 +74,7 @@ namespace DCLF
 			out.position[1] = niLight->world.translate.y;
 			out.position[2] = niLight->world.translate.z;
 			out.radius = data.radius.x;
-			// PointLightColor: the diffuse times the NiLight's fade and the BSLight's lodDimmer (+0x14), one product a channel.
+			// Diffuse times the NiLight's fade times the BSLight's lodDimmer (+0x14).
 			const float scale = data.fade * a_light->lodDimmer;
 			out.color[0] = scale * data.diffuse.red;
 			out.color[1] = scale * data.diffuse.green;
@@ -85,12 +82,11 @@ namespace DCLF
 			out.shadowMaskIndex = a_maskIndex;
 			out.affectsLand = a_light->affectLand;
 		};
-		// The shadow lights a pass takes by its object's mask bits (the selection's kept lights after the sun, as Sample's volumes).
 		if (const auto* selection = LightSelection::Get().Current(Scene::FrameView::Get().GetFrame()))
 			for (const auto& selected : selection->locals)
 				if (selected.light != selection->sun)
 					put(selected.light, selected.maskIndex);
-		// The plain lights a pass takes by its light data: ShadowSceneNode's active lights (+0x130).
+		// ShadowSceneNode's active lights (+0x130).
 		auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
 		if (sceneNode)
 			for (const auto& entry : sceneNode->GetRuntimeData().activeLights)

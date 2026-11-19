@@ -13,10 +13,7 @@ namespace DCLF::Features::Shadows::Local
 {
 	struct SunExclusion;
 
-	/**
-	 * @brief The point light culls' observer's (LightCulls) read-only view of LocalLightCull's file-local state (defined beside it, in
-	 * LocalLightCull.cpp). Any thread the hooks run on; the frame's state is published before the culls.
-	 */
+	/** @brief Read-only view of LocalLightCull.cpp's file-local state for the LightCulls observer. The frame's state is published before the culls. */
 	struct LocalLightCullView
 	{
 		static bool Installed();
@@ -26,7 +23,7 @@ namespace DCLF::Features::Shadows::Local
 		static const SunExclusion* FrameExclusion();
 		/** @brief Whether a_object is an entry a_exclusion excludes. */
 		static bool Excluded(const SunExclusion& a_exclusion, const void* a_object);
-		/** @brief A category filter is built (and installed). */
+		/** @brief Whether a category filter is built and installed. */
 		static bool FilterLive();
 		/** @brief Whether a_object hangs from a filtered category node's kept child, when its chain passes through one (a_through). */
 		static bool UnderKeptChild(const RE::NiAVObject* a_object, bool& a_through);

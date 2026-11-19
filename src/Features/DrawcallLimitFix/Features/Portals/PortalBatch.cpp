@@ -46,8 +46,8 @@ namespace DCLF::Features::Portals
 		auto batch = std::make_shared<Batch>();
 		batch->name = std::move(a_name);
 		const wchar_t* entries[]{ L"Clear", L"Count", L"TaskCounts", L"Scan", L"AddOffsets", L"Scatter", L"MakeTasks", L"Evaluate", L"Inline" };
-		// Inline by default: the portal bench (tests/DclfPortalBench) measured the batch's count/scan/scatter dispatches at ~25 us a batch
-		// over the evaluation itself, on every captured and synthetic corpus (dclf-portal-query-batches.md, "Portal culling bench").
+		// Inline by default. The portal bench measured count, scan and scatter at about 25 us a batch over the evaluation itself
+		// (dclf-portal-query-batches.md, "Portal culling bench").
 		const auto& evaluator = RegisteredSwitchValue("CS_DCLF_PORTAL_EVALUATOR");
 		batch->inlineEvaluation = evaluator != "batched";
 		batch->trace = RegisteredSwitchValue("CS_DCLF_PORTAL_TRACE") == "1";

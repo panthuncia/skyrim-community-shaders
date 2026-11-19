@@ -1,6 +1,5 @@
-// The sky family's render graph side: a client per view at the Sky and SkyReflections anchors, made once at setup, whose passes draw a
-// batch's latched draws in the engine's order with CS's Sky.hlsl built for ORG, and the faces' cloud draws into Cloud Shadows' layers.
-// With CS_ORG_OCCLUSION_QUERIES=1 a third client at the EngineQueries anchor draws the sun's occlusion draw with an ORG occlusion query.
+// The sky family's render graph side. One client per view, made once at setup, draws a batch's latched draws in engine order.
+// With CS_ORG_OCCLUSION_QUERIES=1 a third client draws the sun's occlusion draw with an ORG query.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -42,18 +41,17 @@ namespace DCLF::Features::Sky::SkyDraws
 	namespace
 	{
 		constexpr const char* kShader = "Sky.hlsl";
-		// The most draws a run latches; a batch with more draws in several runs (SkyCapture's Continue). A cloudy weather draws about 40.
+		// The most draws in one run. Cloudy weather draws about 40.
 		constexpr std::uint32_t kMaxDraws = 128;
 		constexpr std::uint32_t kFaces = 6;
-		// The faces' client in the start stage: one instance per face the engine may draw in a frame, each with its own gate entries,
-		// latch regions and run. An anchor's own epoch uses instance 0 alone.
+		// One face instance per face the engine may draw in a frame. An anchor's own epoch uses instance 0 alone.
 		constexpr std::uint32_t kFaceInstances = kFaces;
-		// The sun's client in CS stages: two queries a frame at most (the world's and first person's), each a tap of a stage run.
+		// Two sun queries a frame at most, the world's and first person's.
 		constexpr std::uint32_t kSunInstances = 2;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
-		/** @brief Sky.hlsl's push block (SKY_ORG_RESOURCES), in list order. Everything per draw is in the latch (DrawConstants). */
+		/** @brief Sky.hlsl's push block (SKY_ORG_RESOURCES), in list order. */
 		struct SkyBlock
 		{
 			SharedConstants::Handles shared;
@@ -63,7 +61,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		};
 		static_assert(sizeof(SkyBlock) == 52, "Sky.hlsl's push block is 52 bytes");
 
-		/** @brief Which of a run's draws a pass records. */
 		enum class Part : std::uint8_t
 		{
 			Main,        // every draw, on the GBuffer targets with the depth target
@@ -82,7 +79,6 @@ namespace DCLF::Features::Sky::SkyDraws
 
 		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
-		/** @brief A client's state, which its passes share. */
 		struct Client
 		{
 			View view = View::Main;
@@ -90,29 +86,24 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::string id;
 			FrameAnchors::Anchor anchor = FrameAnchors::Anchor::Sky;
 			std::shared_ptr<org::LatchBlock> latch;
-			// A draw's index count, opened by the commit for its run only: a recording replayed for a run that did not commit draws nothing.
+			// Opened by the commit for its run only, so a recording replayed for another run draws nothing.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
 			std::array<FrameAnchors::Texture, 3> colours;
 			FrameAnchors::Texture cubemap, depth, sceneDepth;
-			// View::Sun: kPOST_ZPREPASS_COPY as a depth target (the import sceneDepth holds), and the ORG queries of its runs.
 			FrameAnchors::Texture copyDepth;
 			std::shared_ptr<Queries::QueryRing> queries;
-			// Cloud Shadows' layers, which the faces' cloud draws write (ORGCloudShadows::ImportLayer).
 			std::array<FrameAnchors::Texture, kCloudLayers> layers;
-			// Null views of the dimensions the push block's handles declare, for an input the batch does not have.
+			// Null views for inputs the batch does not have.
 			std::uint32_t null2D = GpuTextures::kInvalid, nullCube = GpuTextures::kInvalid;
 			Family::Owners nullOwners;
-			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Render thread writes, the host's thread reads.
+			// Written by the render thread, read by the host's thread.
 			std::shared_ptr<const Run> run;
-			// The run each commit drew, by the epoch's run and the tap's instance: what the passes recorded at execution read. They may
-			// record on the submission thread after the render thread published the next run.
+			// The run each commit drew. Passes may record on the submission thread after the render thread published the next run.
 			std::array<::RenderGraph::RunSlots<Run>, kFaceInstances> runs;
 			std::uint32_t instances = 1;  // kFaceInstances for the faces' client, else 1
-			// The faces' client in a CS stage: each instance's first face draw clears the face and its depth (load operations), and the
-			// engine's clears of them are dropped (the engine skeleton). Fixed at setup.
+			// In a CS stage the first face draw clears the face and its depth, and the engine's clears are dropped.
 			bool clearsFace = false;
 			bool pending = false;
 			bool shapeLogged = false;
@@ -138,7 +129,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::uint32_t instance = 0;
 		};
 
-		/** @brief A run's draws of one part, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
+		/** @brief Records one part of a run's draws in engine order. */
 		class SkyPass final : public org::TypedRenderGraphPass<SkyPass, Frame, Bindings>
 		{
 		public:
@@ -151,7 +142,6 @@ namespace DCLF::Features::Sky::SkyDraws
 				bindings.shared = SharedConstants::Declare(a_builder);
 				const auto& c = *client;
 				if (IsSun(part)) {
-					// kMAIN alone (SunOcclude writes no colour), the depth target of the part, t17 for the main depth's part.
 					bindings.colours[0] = a_builder.RenderTarget(c.colours[0]).View();
 					bindings.depth = a_builder.DepthReadWrite(part == Part::SunCopy ? c.copyDepth : c.depth).View();
 					bindings.hasDepth = true;
@@ -159,7 +149,6 @@ namespace DCLF::Features::Sky::SkyDraws
 						bindings.sceneDepth = a_builder.ShaderResource(c.sceneDepth).View();
 						bindings.hasSceneDepth = true;
 					}
-					// The readbacks the sun's queries resolve into: copy destinations, so the graph orders and tracks the resolve.
 					if (c.queries)
 						for (const auto& readback : c.queries->Readbacks()) {
 							a_builder.CopyDestination(readback);
@@ -179,7 +168,7 @@ namespace DCLF::Features::Sky::SkyDraws
 						for (std::uint32_t f = 0; f < kFaces; ++f)
 							bindings.layers[l][f] = a_builder.RenderTarget(c.layers[l], org::RtvView{ UINT32_MAX, 0, f }).View();
 					bindings.hasLayers = true;
-					// The face's depth is read (t17) instead of tested, as Cloud Shadows binds it for these draws.
+					// The face's depth is read, not tested, as Cloud Shadows binds it.
 					bindings.sceneDepth = a_builder.ShaderResource(c.depth).View();
 					bindings.hasSceneDepth = true;
 				} else {
@@ -190,8 +179,7 @@ namespace DCLF::Features::Sky::SkyDraws
 						bindings.hasSceneDepth = true;
 					}
 				}
-				// The published inputs, declared for their order only: the run carries their indices. Every registered one is declared,
-				// read this frame or not, so a new Publish needs no new client.
+				// Every registered input is declared, read this frame or not, so a new Publish needs no new client.
 				client->inputs.Declare(a_builder);
 				if (c.shape.cloudShadows) {
 					bindings.cloudShadows = a_builder.ShaderResource(org::ResourceIdentifier(std::string(ORGCloudShadows::kOcclusionId))).View();
@@ -200,10 +188,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				return bindings;
 			}
 
-			// The run's draws (their programs, counts, layers and viewports), its face and its unpublished inputs, as the render thread
-			// published it before the run. The latched values (constants, geometry, textures) are not in it.
-			// Recorded at execution, the pass reads the run its commit published when it records, so the run is not part of it: the
-			// reflection faces and the sun's queries change every run, and a ticket prepared ahead would be prepared again each time.
+			// The latched values are not part of the revision. Recorded at execution, the pass reads the run itself, so the run is left out too.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				a_out.push_back(static_cast<std::uint64_t>(part));
@@ -219,10 +204,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				return { atExecution ? nullptr : std::atomic_load(&client->run), client, part, instance };
 			}
 
-			/**
-			 * @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers (the
-			 * sun's parts then touch none of the run's queries).
-			 */
+			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.client)
@@ -246,13 +228,11 @@ namespace DCLF::Features::Sky::SkyDraws
 				const auto& run = *runRef;
 				const auto& c = *a_frame.client;
 				const Part part = a_frame.part;
-				// The sun's parts: only the one of the run's depth target records, and it alone touches the run's queries.
+				// Only the sun part matching the run's depth target records, and only it touches the run's queries.
 				if (IsSun(part) && (part == Part::SunCopy) != run.sunCopyDepth)
 					return;
 				SkyBlock block{};
 				block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-				// t17: the face's depth for its cloud draws; the main pass's own index (a D3D11 view, a published input), a null view, or the
-				// client's Z-prepass copy.
 				block.depth = part == Part::FaceClouds && a_bindings.hasSceneDepth ? a_recording.Index(a_bindings.sceneDepth) :
 				              run.sceneDepthNull                                   ? c.null2D :
 				              run.sceneDepthIndex != GpuTextures::kInvalid         ? run.sceneDepthIndex :
@@ -264,8 +244,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
 				const org::RunRef latchRun = a_recording.Run();
 
-				// The faces' client in a CS stage: the instance's first face draw clears the face and its depth (depth 1, stencil 0, as the
-				// engine clears them; the face's colour to zero: the sky draws its background).
+				// Clear as the engine does, depth 1 and stencil 0. The face colour clears to zero because the sky draws its background.
 				bool clearFirst = part == Part::FaceSky && c.clearsFace;
 				const auto draw = [&](const RasterProgram& a_program, std::uint32_t a_index, std::span<const RasterProgram::Colour> a_colours,
 									  rhi::QueryPoolHandle a_queries = {}, std::uint32_t a_query = 0) {
@@ -286,7 +265,6 @@ namespace DCLF::Features::Sky::SkyDraws
 													.constants = ShaderBindings::Data(block),
 													.debugName = "Sky",
 													.stencilReference = latched.stencilRef,
-													// The count comes from the draw's gate entry, which the client's commit opens for this run only.
 													.indirect = &c.gate->Latch(),
 													.indirectOffset = c.gate->Offset(entry),
 													.occlusionPool = a_queries,
@@ -294,13 +272,11 @@ namespace DCLF::Features::Sky::SkyDraws
 				};
 
 				if (IsSun(part)) {
-					// Its inputs: t17 as the part declares it, null views for the headers and Cloud Shadows (SunOcclude samples none).
+					// SunOcclude samples nothing, so headers and Cloud Shadows get null views.
 					block.depth = a_bindings.hasSceneDepth ? a_recording.Index(a_bindings.sceneDepth) : c.null2D;
 					block.sharedDepth = block.depth;
 					block.cloudShadows = c.nullCube;
 					block.headers = { c.null2D, c.null2D, c.nullCube, c.nullCube };
-					// Each draw counted by its own query of the instance's part of the run's range: reset first, resolved after (every query
-					// available).
 					const auto& queries = *c.queries;
 					auto& commands = a_recording.Commands();
 					const std::uint32_t perInstance = (std::max)(queries.PerRun() / c.instances, 1u);
@@ -336,9 +312,8 @@ namespace DCLF::Features::Sky::SkyDraws
 						draw(program, i, { colours.data(), count });
 						continue;
 					}
-					// A cloud draw writes its own layer, then its occlusion into each later layer the face draws (their order is the engine's,
-					// strictly rising: SkyCapture), with the face's target masked: a layer then holds the occlusion of every layer up to it,
-					// as Cloud Shadows' copy from the layer below makes it on D3D11. The layers start cleared (CloudShadows::NoteGraphCloudLayer).
+					// Draw the occlusion into each later layer too, with the face target masked. That matches Cloud Shadows' D3D11 copy from the layer
+					// below, so a layer holds the occlusion of every layer up to it.
 					colours[count++] = { .view = &a_bindings.layers[latched.layer][face] };
 					draw(program, i, { colours.data(), count });
 					if (!latched.occlusionProgram)
@@ -361,10 +336,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::uint32_t instance = 0;
 		};
 
-		/**
-		 * @brief Whether a view's passes record after their run's commit, reading the run's draws then: on an anchor's own epoch as it
-		 * records them (FrameAnchors::RecordsAtExecution), and in a CS stage, whose late batch records them at each submission.
-		 */
+		/** @brief Whether a view's passes record after their run's commit, reading the run's draws then. */
 		bool RecordsLate(FrameAnchors::Anchor a_anchor)
 		{
 			return FrameAnchors::RecordsAtExecution(a_anchor) || FrameAnchors::HeldByStage(a_anchor);
@@ -379,21 +351,19 @@ namespace DCLF::Features::Sky::SkyDraws
 		}
 
 		/**
-		 * @brief The programs a BSSkyShader pixel descriptor CS loads can be drawn with. CS loads each descriptor plain and with DEFERRED
-		 * (| 256, State::ModifyShaderLookup's main pass form): the main view draws with the deferred ones, the reflection faces with the
-		 * plain ones (variant SKY_ORG_FACES).
+		 * @brief The programs a sky pixel descriptor can be drawn with.
+		 * The main view uses the DEFERRED form (| 256), the reflection faces the plain one.
 		 */
 		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
-			// The sun glare (raw technique 1, pass 0x5C006072) is outside the sky batch's techniques (0x5C00005D-0x5C000064): the family
-			// never draws it. Its ORG vertex stage would not build either: its GetSunGlareVisibility reads SharedData in the vertex stage,
-			// which with the vertex pull makes DXC 1.9 emit invalid SPIR-V (a ConstantBuffer<T> in Function storage, VUID-10684).
+			// The sun glare is outside the sky batch and never drawn here. Its vertex stage reads SharedData, and with the vertex pull
+			// DXC 1.9 emits invalid SPIR-V for it (VUID-10684).
 			if (!a_pixel || (a_descriptor & 0xFF) == 1)
 				return;
 			a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel, .variant = (a_descriptor & 256) ? 0u : kVariantFaces });
 		}
 
-		/** @brief Everything here: the render thread's. */
+		/** @brief Render-thread state. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
@@ -410,10 +380,8 @@ namespace DCLF::Features::Sky::SkyDraws
 		};
 
 		/**
-		 * @brief Every published id a view's draws can read, listed when its client is made at setup: what the ported features publish at
-		 * the headers' registers and at t17 (DCLF's registry: IBL's, Dynamic Cubemaps' and Terrain Blending's ids). Cloud Shadows'
-		 * occlusion is declared on its own (Shape::cloudShadows), and the Z-prepass copy at t17 is imported as a target. An export of an
-		 * id not listed here is an inherent refusal, logged once with the id: add the id here.
+		 * @brief Every published id a view's draws can read, listed at setup.
+		 * Exporting an id not listed here is refused and logged once. Add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
@@ -428,7 +396,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			return state;
 		}
 
-		/** @brief The client of a_shape's view, registered with the anchors for a_shape. Null, logged, when a target cannot be imported. */
+		/** @brief Makes the client for a_shape's view. Null, logged, when a target cannot be imported. */
 		std::shared_ptr<Client> MakeClient(const Shape& a_shape)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -441,14 +409,11 @@ namespace DCLF::Features::Sky::SkyDraws
 			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky :
 			                 a_shape.view == View::Face ? FrameAnchors::Anchor::SkyReflections :
 			                                              FrameAnchors::Anchor::EngineQueries;
-			// The faces' client takes one instance per face a frame may draw when a CS stage holds its anchor (the start stage).
 			if (a_shape.view == View::Face && FrameAnchors::HeldByStage(client->anchor)) {
 				client->instances = kFaceInstances;
 				client->clearsFace = true;
 			}
-			// The sun's client in CS stages (the sun stage after DCLF's forward epoch, the post stage after the first-person one): an
-			// instance per query a stage run may take (Main::RenderWorld's and Main::RenderFirstPersonView's), each with its own query of
-			// the run's range. Its first tap in a stage run is instance 0.
+			// The sun client in CS stages takes one instance per query a stage run may take. Its first tap in a run is instance 0.
 			if (a_shape.view == View::Sun && FrameAnchors::NamedByStage(client->id))
 				client->instances = kSunInstances;
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", client->instances * kMaxDraws * kDrawStride);
@@ -468,7 +433,6 @@ namespace DCLF::Features::Sky::SkyDraws
 				client->nullOwners.push_back(std::move(binding.owner));
 			}
 			if (a_shape.view == View::Sun) {
-				// kMAIN, with kMAIN's depth or the Z-prepass copy as the depth target, and that copy at t17 with kMAIN's.
 				client->colours[0] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
 				client->copyDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(kSceneDepth));
 				client->sceneDepth = client->copyDepth;
@@ -499,7 +463,6 @@ namespace DCLF::Features::Sky::SkyDraws
 			}
 			if (a_shape.view != View::Sun)
 				ListInputs(client->inputs);
-			// The main view's cloud self shadowing (t26) reads the layer its draw names: each layer twin, by its published id.
 			if (a_shape.view == View::Main && a_shape.cloudShadows)
 				for (std::uint32_t l = 0; l < kCloudLayers; ++l)
 					client->inputs.Add(ORGCloudShadows::PublishedLayerId(static_cast<int>(l)));
@@ -508,7 +471,6 @@ namespace DCLF::Features::Sky::SkyDraws
 				logger::warn("[DCLF] sky: the depth target {} cannot be imported; the sky stays the engine's", a_shape.depth);
 				return nullptr;
 			}
-			// The faces' cloud draws write Cloud Shadows' layers.
 			const bool faceClouds = a_shape.view == View::Face && a_shape.cloudShadows && a_shape.clouds;
 			if (faceClouds) {
 				for (std::uint32_t l = 0; l < kCloudLayers; ++l) {
@@ -532,11 +494,9 @@ namespace DCLF::Features::Sky::SkyDraws
 					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor));
 					},
-					// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again. A face
-					// pass's clears are load operations of its first draw, which its gate entry holds back too.
+					// Recorded after the commit, when the draws are known. A face pass's clears are its first draw's load ops, held back by the gate.
 					.atExecution = true };
 				if (client->instances > 1) {
-					// One pass per instance (the k-th face the frame draws), made in place of make.
 					pass.make = nullptr;
 					pass.makeInstance = [client, a_part](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor), a_instance);
@@ -560,9 +520,8 @@ namespace DCLF::Features::Sky::SkyDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				// The tap's instance: the k-th face the start stage's run draws this frame (0 on an anchor's own epoch).
+				// The k-th face the start stage's run draws this frame, 0 on an anchor's own epoch.
 				const std::uint32_t instance = (std::min)(FrameAnchors::TapInstance(), client->instances - 1);
-				// For the passes recorded at execution, by this run (null: nothing drawn).
 				client->runs[instance].Store(latchRun, run);
 				if (!run)
 					return;
@@ -573,7 +532,6 @@ namespace DCLF::Features::Sky::SkyDraws
 					if (draw.program)
 						client->gate->OpenDraw(entry, draw.indexCount, 1);
 				}
-				// The engine ring slot the run's draw counts. A new readback is declared from the next build.
 				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1), instance))
 					FrameAnchors::Refresh(client->id);
 			};
@@ -586,8 +544,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			desc.active = [client] { return client->pending; };
 			if (client->instances > 1) {
 				desc.maxInstances = client->instances;
-				// Every face instance is declared: how many faces the engine draws is its late decision, so the instances it does not
-				// draw stay closed (their gate entries and runs are not written).
+				// Every face instance is declared because the engine decides late how many faces it draws. Unused instances stay closed.
 				desc.instances = [n = client->instances] { return n; };
 			}
 			if (!FrameAnchors::Register(std::move(desc))) {
@@ -601,7 +558,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: everything of its draws but the latched values. */
+		/** @brief What a run's recording depends on: everything but the latched values. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -641,7 +598,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		state.reserved = FrameAnchors::Reserve(FrameAnchors::Anchor::Sky) && FrameAnchors::Reserve(FrameAnchors::Anchor::SkyReflections);
 		if (!state.reserved)
 			logger::warn("[DCLF] sky: the Sky anchors could not be reserved; the sky stays the engine's");
-		// The sun's occlusion queries (CS_ORG_OCCLUSION_QUERIES): their anchor, or the engine keeps them.
 		if (state.reserved && ::RenderGraph::Engine::OcclusionQueries::Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EngineQueries))
 			logger::warn("[DCLF] sky: the EngineQueries anchor could not be reserved; the sun's occlusion queries stay the engine's");
 	}
@@ -665,9 +621,8 @@ namespace DCLF::Features::Sky::SkyDraws
 			logger::warn("[DCLF] sky: Cloud Shadows runs on D3D11 (its occlusion, t25, is not on the graph: CS_ORG_CLOUD_SHADOWS=1); the sky stays the engine's");
 			return true;
 		}
-		// The shapes the views draw with (CurrentShape reads them per batch, and a batch of another shape is the engine's): the main
-		// pass inside CS's deferred pass writes its first three targets (Deferred::StartDeferred: kMAIN, kMOTION_VECTOR,
-		// NORMALROUGHNESS) with kMAIN's depth; a reflection face writes the reflection cubemap with its cube depth.
+		// The shapes the views draw with. The main pass writes the deferred pass's first three targets with kMAIN's depth. A face writes
+		// the reflection cubemap with its cube depth.
 		Shape main;
 		main.view = View::Main;
 		main.colours = { static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR),
@@ -682,7 +637,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		face.clouds = Address::kCloudGroup.Known();
 		for (const auto& shape : { main, face })
 			state.clients[static_cast<std::size_t>(shape.view)] = MakeClient(shape);
-		// The sun's occlusion draw (CS_ORG_OCCLUSION_QUERIES with its detours in): kMAIN and the depth targets it draws with.
 		if (::RenderGraph::Engine::OcclusionQueries::Active() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineQueries)) {
 			Shape sun;
 			sun.view = View::Sun;
@@ -701,14 +655,13 @@ namespace DCLF::Features::Sky::SkyDraws
 		const auto& client = state.clients[static_cast<std::size_t>(a_shape.view)];
 		if (!client)
 			return false;
-		// No client is registered again during play (a graph rebuild on the frame's path): a batch of other targets is the engine's.
+		// No client is registered again during play, so a batch with other targets stays the engine's.
 		if (client->shape != a_shape) {
 			if (!std::exchange(client->shapeLogged, true))
 				logger::warn("[DCLF] sky: a {} batch draws into targets {} {} {} with depth {} (cloud shadows {}, cloud layers {}), not its client's; those batches stay the engine's",
 					client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows, a_shape.clouds);
 			return false;
 		}
-		// The faces' sky is the start stage's, the main pass's sky the pre-main stage's.
 		return Family::HeldForBatch("sky", client->id,
 			static_cast<std::uint32_t>(a_shape.view == View::Face ? ::RenderGraph::Frame::SegmentId::Start : ::RenderGraph::Frame::SegmentId::PreMain), client->anchor);
 	}
@@ -725,7 +678,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		const auto& client = state.clients[static_cast<std::size_t>(View::Sun)];
 		if (!client)
 			return false;
-		// The world's query is the sun stage's, the first person's the post stage's (or the sun stage's in a frame without the first-person epoch).
 		return Family::HeldForBatch("sun", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun), client->anchor);
 	}
 

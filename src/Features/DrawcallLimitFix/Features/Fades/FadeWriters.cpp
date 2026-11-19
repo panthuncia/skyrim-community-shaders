@@ -1,8 +1,7 @@
-// Fades' writer hooks: the writer tables and fade stores at Main::Update's entry, the animation job's fade updates (job threads) and
-// their batch at the list jobs' end (render thread), the fade OnVisibles without their stores (cull threads), their stand-in observer
-// and installs; and the root test's fade-out distance.
+// Fade writer hooks. Threads involved: the main thread at Main::Update's entry, animation job threads,
+// cull threads in the OnVisible detours, and the render thread when the list jobs end.
 
-#include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"  // the write-back's WriteFadeStores
+#include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"  // WriteFadeStores
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeWriters.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -30,29 +29,23 @@ namespace DCLF::Features::Fades
 	{
 		using namespace Engine;
 
-		// Engine::Offsets (Address Library ids); field offsets the same on both.
-		// NiAVObject / BSFadeNode fields BSFadeNode::OnVisible (AE 0x141479f50) reads before its fade update.
+		// Field offsets are the same on SE and AE. These are fields BSFadeNode::OnVisible (AE 0x141479f50) reads.
 		constexpr std::uint32_t kFlagFadeSettled = 1u << 15;
 		constexpr std::size_t kFadeAmount = 0x100;
 		constexpr std::size_t kCurrentFade = 0x130;
 		constexpr std::size_t kLastVisibleFrame = 0x13C;
 		constexpr std::uint32_t kFlagFadeTargetReached = 1u << 14;
 		constexpr DCLF::Engine::Offset kAnimatedFadeCallSite{ { 19384, 0xe4 }, { 18972, 0xe4 } };  // FUN_1402cff60 (UpdateAnimationJob) -> FUN_14147a160
-		// The NiNode OnVisible BSFadeNode's ends in (its children's cull), and fields the fade OnVisible detours read.
 		constexpr DCLF::Engine::Offset kNodeOnVisible{ { 70307 }, { 68956 } };  // NiNode::OnVisible
 		constexpr std::size_t kNodeWorldZ = 0xEC;                 // NiAVObject::world.translate.z
 		constexpr std::size_t kProcessCameraUpdates = 0x11C;      // byte: NiCullingProcess::cameraRelatedUpdates
-		constexpr std::size_t kFadeLodType = 0x153;               // byte: the LOD type in its low nibble
-		// FUN_14147b110 (the fade value) and FUN_14147a160 (the fade update): what the fade-out distance is made of.
+		constexpr std::size_t kFadeLodType = 0x153;               // byte, LOD type in the low nibble
 		constexpr std::size_t kFadeNear = 0x128;                  // float, on the fade node
 		constexpr std::size_t kFadeFar = 0x12C;                   // float
-		constexpr std::size_t kFadeAlwaysOut = 0x109;             // byte: bit 0 fades the node out whatever its distance
+		constexpr std::size_t kFadeAlwaysOut = 0x109;             // byte, bit 0 fades the node out at any distance
 
-		// The animation job's fade updates (FUN_1402cff60's call of FUN_14147a160, AnimatedFade) since the last list jobs, with their
-		// inputs; at the list jobs' end (DrainAnimatedFades, render thread) they become the batch FadeStateCS applies before its cull
-		// test. Lock-free: the nodes are queued; the inputs, the same for every call of one animation update, are a single-writer
-		// record (the first caller claims it, writes it, then publishes it), later callers compare against it and set animatedVaried.
-		// A caller that finds the record claimed but not yet published queues its inputs for DrainAnimatedFades to compare.
+		// Lock-free queue of the animation job's fade updates. The inputs are the same for every call in one animation update.
+		// The first caller claims and publishes them. Later callers compare and set animatedVaried if they differ.
 		EventQueue<AnimatedFadeRoot> animatedNodes;
 		std::vector<AnimatedFadeRoot> animatedBatch;  // render thread
 		enum : std::uint32_t
@@ -62,34 +55,31 @@ namespace DCLF::Features::Fades
 			kAnimatedPublished
 		};
 		std::atomic<std::uint32_t> animatedState{ kAnimatedEmpty };
-		AnimatedFadeInputs animatedInputs{};  // written by the claimer only, read once published (and by DrainAnimatedFades)
+		AnimatedFadeInputs animatedInputs{};  // written by the claimer only, read once published
 		std::atomic<std::uint32_t> animatedVaried{ 0 };
-		EventQueue<AnimatedFadeInputs, 64> animatedUnpublished;  // compared by DrainAnimatedFades
-		AnimatedFadeInputs batchInputs{};  // render thread, or the CPU fade stage's producer while a drain is handed off
-		// A drain handed to the CPU fade stage's producer and not yet done (HandAnimatedDrainToWorker).
+		EventQueue<AnimatedFadeInputs, 64> animatedUnpublished;  // inputs seen before the claimer published, compared at drain
+		AnimatedFadeInputs batchInputs{};  // render thread, or the CPU stage's producer while a drain is handed off
 		std::atomic<bool> animatedDrainHanded{ false };
 		void EndAnimatedDrain()
 		{
 			animatedDrainHanded.store(false, std::memory_order_release);
 			animatedDrainHanded.notify_all();
 		}
-		// FadeWrittenByDclf's set: immutable SceneTables from Main::Update's entry, held by the main thread until the next entry
-		// (no OnVisible or gate runs then). Lock-free.
+		// Immutable tables published at Main::Update's entry and held until the next entry, when no OnVisible or gate runs.
 		std::atomic<const void*> fadeWriterTables{ nullptr };
 		std::shared_ptr<const void> fadeWriterTablesHeld;
 		std::atomic<std::uint64_t> onVisibleFadeSkipped{ 0 };
 		std::atomic<std::uint64_t> gateFadeSkipped{ 0 };
 
-		/** @brief The fade roots a_tables (SceneTables) lists: the family's columns, read in place (null before its first write). */
+		/** @brief Null before the family's first write. */
 		const Scene::FadeRootTables* RootsOf(const void* a_tables)
 		{
 			return static_cast<const SceneTables*>(a_tables)->families.Columns<Scene::FadeRootTables>(Scene::FadeRootFamilyId());
 		}
 
-		/** @brief Main::Update's entry: publishes the accepted tables as the writer set (a_running false: none). */
 		void PublishWriterTables(bool a_running)
 		{
-			// The replaced tables are released after publication: the last cycle was waited for, so no OnVisible or gate reads them.
+			// Safe to release the old tables here because the last job cycle has finished, so nothing still reads them.
 			std::shared_ptr<const void> tables;
 			if (a_running)
 				tables = Scene::FrameView::Get().AcceptedTables();
@@ -97,11 +87,10 @@ namespace DCLF::Features::Fades
 			fadeWriterTablesHeld = std::move(tables);
 		}
 
-		/** @brief The animation job's hook: the update noted (a_node's root in the writer tables); returns whether DCLF writes the root. */
+		/** @brief Queues the update and returns whether DCLF writes the root. */
 		bool NoteAnimatedFade(const void* a_node, const float* a_camera)
 		{
-			// One lookup in the writer tables (FadeWrittenByDclf's): the root's slot for the batch, and whether DCLF writes it. A node they
-			// do not list is no root of DCLF's this update (one listed later is seeded from the node, this update included).
+			// An unlisted node is left to the engine. If it is listed later, its seed already includes this update.
 			bool written = false;
 			if (const auto* tables = fadeWriterTables.load(std::memory_order_acquire)) {
 				if (const auto* roots = RootsOf(tables)) {
@@ -112,8 +101,7 @@ namespace DCLF::Features::Fades
 					}
 				}
 			}
-			// FUN_14147a160's inputs: the camera FUN_1402cff60 passes (world root camera's position, lodAdjust) and the fade globals;
-			// the same for every call of one animation update.
+			// a_camera is the world root camera's position and lodAdjust.
 			if (!a_camera)
 				return written;
 			const AnimatedFadeInputs inputs{ { a_camera[0], a_camera[1], a_camera[2] }, a_camera[3], Global<std::int32_t>(Address::kFadeFrameCounter), Global<float>(Address::kFadeStepTime), 1u };
@@ -128,21 +116,19 @@ namespace DCLF::Features::Fades
 					animatedVaried.store(1, std::memory_order_relaxed);
 				return written;
 			}
-			// Claimed, not yet published: compared once the jobs are done.
+			// Claimed but not yet published. Compare at drain time.
 			animatedUnpublished.Push(inputs);
 			return written;
 		}
 
 		/**
-		 * @brief FUN_1402cff60's call of FUN_14147a160: the animation job updates an animated reference's fade node the cull did not
-		 * reach (kAccumulated clear), from the main camera.
+		 * @brief FUN_1402cff60's call of FUN_14147a160. The animation job updates the fade of animated nodes the cull did not reach.
+		 * FadeStateCS repeats it on the GPU, so the engine's store is skipped on DCLF-written roots.
 		 */
 		struct AnimatedFade
 		{
 			static void thunk(void* a_node, float a_amount, const float* a_camera)
 			{
-				// FadeStateCS makes the same update on the GPU (the animated batch), for every root.
-				// One writer: the root keeps the write-back's state; the gate reads its currentFade.
 				if (NoteAnimatedFade(a_node, a_camera)) {
 					gateFadeSkipped.fetch_add(1, std::memory_order_relaxed);
 					return;
@@ -153,9 +139,8 @@ namespace DCLF::Features::Fades
 		};
 
 		/**
-		 * @brief BSFadeNode::OnVisible (AE 0x141479f50) without its stores, for a root DCLF writes. Control flow kept (fades off, or
-		 * settled with kIgnoreFade at fade and amount 1: children; camera updates with a LOD-type-6 node in its special state:
-		 * children; faded out or zero amount: none), but the fade update (FUN_14147a160 or the type-6 step) and +0x13C are skipped.
+		 * @brief BSFadeNode::OnVisible (AE 0x141479f50) with the same control flow but none of its stores.
+		 * The fade update, the type-6 step and the +0x13C store are skipped.
 		 */
 		void WrittenFadeOnVisible(void* a_node, RE::NiCullingProcess* a_process, std::int32_t a_arg)
 		{
@@ -192,7 +177,7 @@ namespace DCLF::Features::Fades
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief BSLeafAnimNode::OnVisible (AE 0x14147c9c0): for a root DCLF writes, its leaf LOD step and +0x13C store skipped. */
+		/** @brief BSLeafAnimNode::OnVisible (AE 0x14147c9c0). Skips the leaf LOD step and the +0x13C store. */
 		struct LeafOnVisible
 		{
 			static void thunk(void* a_node, RE::NiCullingProcess* a_process, std::int32_t a_arg)
@@ -207,10 +192,7 @@ namespace DCLF::Features::Fades
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief BSTreeNode::OnVisible (AE 0x14147d3c0): for a root DCLF writes, the engine's height test kept (a tree above the limit is
-		 * not visited), BSLeafAnimNode's without its stores, and the LOD fix-up's stores (+0x153, +0x14C) skipped.
-		 */
+		/** @brief BSTreeNode::OnVisible (AE 0x14147d3c0). Keeps the height test and skips the LOD stores at +0x153 and +0x14C. */
 		struct TreeOnVisible
 		{
 			static void thunk(void* a_node, RE::NiCullingProcess* a_process, std::int32_t a_arg)
@@ -228,16 +210,12 @@ namespace DCLF::Features::Fades
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief The animation job's fade update and the fade OnVisibles, with the primary cull's stand-in (its install answered). All or
-		 * none (PreflightWriters checked their sites): a root DCLF writes whose engine writer still ran would have two writers.
-		 */
+		/** @brief All or none. A root whose engine writer still ran would have two writers. */
 		void InstallWriterHooks()
 		{
 			const auto base = REL::Module::get().base();
 			stl::write_thunk_call<AnimatedFade>(base + kAnimatedFadeCallSite);
-			// Fade OnVisibles leave DCLF-written roots alone (detours, not vtable slots, so subclass tables and FadeState::PlanOf keep
-			// the engine's addresses).
+			// Detours rather than vtable patches, so subclass vtables and FadeState::PlanOf still see the engine's addresses.
 			stl::detour_thunk<FadeOnVisible>(base + Address::kFadeOnVisible);
 			stl::detour_thunk<LeafOnVisible>(base + Address::kLeafOnVisible);
 			stl::detour_thunk<TreeOnVisible>(base + Engine::Address::kTreeOnVisible);
@@ -261,11 +239,9 @@ namespace DCLF::Features::Fades
 
 	void WriteFadeWriters(bool a_running)
 	{
-		// Main::Update's jobs push again once its job cycle starts: a drain handed off last frame ends first (in practice long done:
-		// the cell animations job, inside the last Main::Draw, already waited for the sampling that holds it).
+		// Main::Update's jobs start pushing again soon, so a drain handed off last frame must end first. It is normally long done.
 		WaitAnimatedDrain();
-		// The fade write-back on every root the accepted tables list with kFadeRootWritten, published first as the set the gate
-		// and fade OnVisibles skip.
+		// Publish the writer set before writing, so the engine writers skip the same roots the write-back covers.
 		PublishWriterTables(a_running);
 		WriteFadeStores(a_running, [](const void* a_root) { return FadeWrittenByDclf(a_root); });
 	}
@@ -307,7 +283,7 @@ namespace DCLF::Features::Fades
 		return c;
 	}
 
-	// DrainAnimatedFades without the wait: the producer's, which holds the hand-off.
+	// No hand-off check. Used by the producer, which holds the hand-off.
 	std::size_t DrainAnimatedFadesNow();
 
 	void WaitAnimatedDrain()
@@ -345,7 +321,7 @@ namespace DCLF::Features::Fades
 	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
 	{
 		WaitAnimatedDrain();
-		// Render thread, as DrainAnimatedFades, which made the batch. Copied, so the batch keeps its storage for the next drain.
+		// Copied so the batch keeps its storage for the next drain.
 		a_roots.assign(animatedBatch.begin(), animatedBatch.end());
 		animatedBatch.clear();
 		a_inputs = std::exchange(batchInputs, {});
@@ -372,9 +348,7 @@ namespace DCLF::Features::Fades
 
 	void DrainAnimatedFades()
 	{
-		// The render thread's (listJobsDone). A CPU frame handed its drain to the fade stage's producer, which owns the queue until it
-		// ends the hand-off. Nothing is pushed between the frame's start and the list jobs' end (measured: 0 in every frame; the cell
-		// animations job runs after the shadow cull), so this drain would find nothing: skipped rather than waited for.
+		// The producer owns the queue during a hand-off. Nothing is pushed before the list jobs end, so skipping loses nothing.
 		if (animatedDrainHanded.load(std::memory_order_acquire))
 			return;
 		DrainAnimatedFadesNow();
@@ -382,8 +356,7 @@ namespace DCLF::Features::Fades
 
 	std::size_t DrainAnimatedFadesNow()
 	{
-		// The animation job runs between two culls, so its updates are complete now: its queued nodes and published inputs become
-		// the batch, and the record is free for the next update.
+		// The animation job runs between two culls, so its updates are complete by now.
 		animatedBatch.clear();
 		const std::size_t drained = animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { animatedBatch.push_back(a_root); });
 		batchInputs = {};
@@ -402,14 +375,13 @@ namespace DCLF::Features::Fades
 
 	float FadeDistanceOf(const SceneCapture::NodeRecord& a_root)
 	{
-		// From the fade node's record and the frame's captured globals, never the engine's.
+		// Reads captured globals, never live engine memory.
 		const auto& g = FrameGlobals::Current();
-		// No fade update at all, or no distance term in the fade value (FUN_14147b110 returns 1).
+		// The fade value has no distance term here (FUN_14147b110 returns 1).
 		if (!g.fadesOn || !g.fadeLodUpdates)
 			return 0.0f;
 		const std::uint32_t type = a_root.fadeType;
-		// Type 8 fades gradually even out of view (FUN_14147a160) and OnVisible's type-6 branch never fades out (ServiceFade): the
-		// engine draws either the frame it comes into view.
+		// Type 8 fades even out of view, and the type-6 branch never fades out. The engine draws both as soon as they come into view.
 		if (type == 8 || (type == 6 && g.fadeSpecialA == g.fadeSpecialB))
 			return 0.0f;
 		const float mult = g.fadeDistanceMult;
@@ -427,9 +399,8 @@ namespace DCLF::Features::Fades
 
 	void RegisterWriters(Api::InstallContext& a_context)
 	{
-		// Last of the observers, so Main::Update's entry keeps its order: kAccumulated, the other observers' updateEntry (Portals' live
-		// flag), the writer tables and stores, then the UpdateEntry event and afterWrites. Without the primary cull neither point runs,
-		// and none of the writer hooks goes in (as when its install wrote them).
+		// Must be the last observer, so the writer tables publish after the other observers' updateEntry.
+		// Without the primary cull no hooks go in.
 		if (!a_context.RegisterStandInObserver({ .updateEntry = &WriteFadeWriters, .listJobsDone = &DrainAnimatedFades }))
 			return;
 		InstallWriterHooks();

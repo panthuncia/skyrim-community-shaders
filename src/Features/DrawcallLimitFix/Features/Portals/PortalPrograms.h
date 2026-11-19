@@ -1,22 +1,15 @@
 #pragma once
 
-// The portal programs' encoding (PortalViews::Encode, PortalViews::Visible), which PortalPrograms.hlsli's PortalTest reads: the feature's
-// buffer sends the words (PortalPrograms.cpp), which Core binds by its cull binding (Api/CullInputs.h) and never reads.
+// The portal programs' encoding, which PortalPrograms.hlsli's PortalTest reads. Core binds the buffer and never reads it.
 
 #include <cstdint>
 
 namespace DCLF
 {
 	/**
-	 * @brief The main camera's portal and occluder programs (Features/Portals/PortalViews), for FadeStateCS's and BuildDrawsCS's main
-	 * view tests: a ByteAddressBuffer uploaded with the depth commit (PortalPrograms.cpp).
-	 *
-	 * Layout (bytes): the camera's view planes (NiFrustumPlanes: six {n, d}, the active mask at +96; kPortalSetBytes), then a header
-	 * {program count, 0, 0, 0}, then a directory entry per program (kPortalDirectoryBytes: flags, operator count, set count, first
-	 * operator, first operator record, first set, cull mode, maximum executable path length), then compact 16-byte operator records
-	 * {type, plane set index, next if true, next if false}. Only reachable tests and terminals are emitted, in forward topological order, and the
-	 * plane sets. Program 0 is unbound space; program 1 + i the portal graph's room i (graph +0x40). A root's program is
-	 * kPortalNoProgram when there is no walk this frame (the frustum alone).
+	 * @brief The main camera's portal programs for FadeStateCS's and BuildDrawsCS's view tests, uploaded with the depth commit.
+	 * Layout: view planes (kPortalSetBytes), a header, one directory entry per program, 16-byte operator records in forward
+	 * topological order, then the plane sets. Program 0 is unbound space, program 1 + i is room i.
 	 */
 	inline constexpr std::uint32_t kPortalSetBytes = 112;
 	inline constexpr std::uint32_t kPortalHeaderBytes = kPortalSetBytes + 16;

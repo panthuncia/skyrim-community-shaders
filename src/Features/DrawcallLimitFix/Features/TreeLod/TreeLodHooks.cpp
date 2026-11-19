@@ -1,6 +1,4 @@
-// Tree LOD's engine side: the refill, AddGroup and RemoveGroup (SceneWriterFramework's tree LOD calls) and the block update's call (any
-// thread), the source of the feature's tree LOD channel (events onto events through Push, which the render thread's mirror drains:
-// TreeLodMirror.h).
+// Tree LOD's engine side: the refill, AddGroup, RemoveGroup and block update hooks, on any thread, push events for the mirror.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -20,12 +18,10 @@ namespace DCLF::Features::TreeLod
 		// The family's records (its layout: TreeInstancesLayout.h) and engine shapes.
 		namespace Layout = ::DCLF::TreeInstances;
 
-		// The refill (FUN_140504a40(block, group), at the block's attach and its visibility update) and the instance shape's AddGroup and
-		// RemoveGroup (vfuncs 0x1E0, 0x1E8) are SceneWriterFramework's tree LOD calls.
+		// The refill FUN_140504a40 and the shape's AddGroup and RemoveGroup (vfuncs 0x1E0, 0x1E8) are SceneWriterFramework's tree LOD calls.
 		constexpr Engine::Offset kBlockUpdate{ { 31659 }, { 30838 } };      // FUN_140503f70(block): refills the groups not up to date
 		constexpr Engine::Offset kBlockUpdateSite{ { 31838, 0x1cf }, { 31051, 0x1df } };  // its one call, in the node update (FUN_140510730)
-		// The tree types (the attach's and the refill's): an array of 0x28-byte entries (width +4, height +8, base shape +0x20)
-		// and their count; a group's type past the count takes the first entry.
+		// The tree types: 0x28-byte entries (width +4, height +8, base shape +0x20) and their count. A type past the count takes the first entry.
 		constexpr Engine::Offset kTreeTypes{ { 402201 }, { 516088 } }, kTreeTypeCount{ { 402203 }, { 516090 } };
 		constexpr std::size_t kTreeTypeBytes = 0x28;
 
@@ -37,7 +33,7 @@ namespace DCLF::Features::TreeLod
 		};
 		thread_local Refilling refilling;
 
-		// The refill: PRE saves the outer refill's block and group (scratch[0], [1]) and sets this one's; POST restores them.
+		// Refills nest, so PRE saves the outer refill's block and group in scratch and POST restores them.
 		void OnRefill(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			if (SceneWriter::IsPre(a_event)) {
@@ -49,7 +45,7 @@ namespace DCLF::Features::TreeLod
 			refilling = { reinterpret_cast<const void*>(a_scratch[0]), reinterpret_cast<const void*>(a_scratch[1]) };
 		}
 
-		// AddGroup, after the call (its data is the caller's, alive until it returns).
+		// After the call, while its data is the caller's and still alive.
 		void OnAddGroup(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			auto* shape = SceneWriter::Arg<RE::BSMultiStreamInstanceTriShape*>(a_event, 0);
@@ -60,8 +56,7 @@ namespace DCLF::Features::TreeLod
 				Event event{ shape, refilling.block, refilling.group, std::vector<Layout::Instance>(count), Event::Kind::Add };
 				if (count)
 					std::memcpy(event.instances.data(), data, count * sizeof(Layout::Instance));
-				// The shape's placement (AddGroup's bound uses its local translation), its type's extent, and its mesh, whose
-				// buffers are held until the render thread leases them.
+				// The mesh's buffers are held until the render thread leases them.
 				const auto& translate = shape->local.translate;
 				event.translate = { translate.x, translate.y, translate.z };
 				const auto* types = Engine::Global<const std::byte*>(kTreeTypes);
@@ -89,19 +84,16 @@ namespace DCLF::Features::TreeLod
 		}
 
 		/*
-		 * The block's update, at its one call (dclf-open-defects.md, "Tree LOD instances the engine leaves hidden after
-		 * allVisible"). The node update sets allVisible, or has the block's visibility updated, then calls it; it refills only
-		 * the groups whose shaderPropertyUpToDate is clear, so a group whose instances were hidden keeps them at scale 0 after
-		 * allVisible is set. DCLF draws by the rule instead: every group of the block packed again with the block's allVisible,
-		 * on this thread (the one that writes the groups), as events the drain applies where they change the records.
+		 * The block update's one call (dclf-open-defects.md, "Tree LOD instances the engine leaves hidden after allVisible").
+		 * The engine refills only groups whose shaderPropertyUpToDate is clear, so hidden instances stay at scale 0 after allVisible.
+		 * DCLF repacks every group with the block's allVisible on this thread, and the drain applies only what differs.
 		 */
 		struct BlockUpdate
 		{
 			static void thunk(RE::BGSDistantTreeBlock* a_block)
 			{
 				func(a_block);
-				// Only a group with a hidden instance packs differently with allVisible set and clear: the engine's records can be either
-				// (it refills only groups whose instances changed), and the drain applies the rule's where they differ.
+				// Only a group with a hidden instance packs differently with allVisible set and clear.
 				for (auto* group : a_block->treeGroups) {
 					if (!group || !group->geometry)
 						continue;
@@ -127,7 +119,7 @@ namespace DCLF::Features::TreeLod
 			logger::warn("[DCLF] tree LOD: the scene writer framework has no tree LOD calls; tree LOD is not mirrored");
 			return;
 		}
-		// Chained onto whatever the call holds (PreflightHooks required a CALL).
+		// Chained onto whatever the call holds. PreflightHooks required a CALL.
 		if (!Engine::CallsTo(at(kBlockUpdateSite), at(kBlockUpdate)))
 			logger::info("[DCLF] tree LOD: the block update's call is hooked by {}; DCLF's thunk chains onto it", HookSites::BranchTargetModule(at(kBlockUpdateSite)));
 		const bool subscribed = SceneWriter::SubscribeCall(SWF_HOOK_TREE_LOD_REFILL, &OnRefill) &&

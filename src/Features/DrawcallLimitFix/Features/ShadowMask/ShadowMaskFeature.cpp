@@ -1,6 +1,5 @@
-// Shadow mask: the engine's shadow mask passes drawn by the render graph (CS_ORG_SHADOW_MASK=1, default off). The feature reserves the
-// EngineDraws anchor and installs the engine hooks; the rest is ShadowMaskCapture.cpp (the engine side) and ShadowMaskDraws.cpp (the
-// graph side).
+// Shadow mask: the engine's shadow mask passes drawn by the render graph (CS_ORG_SHADOW_MASK=1, default off).
+// The engine side is ShadowMaskCapture.cpp and the graph side ShadowMaskDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "RenderGraph/Engine/Native/Native.h"

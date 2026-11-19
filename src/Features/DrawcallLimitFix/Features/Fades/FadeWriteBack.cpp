@@ -1,6 +1,5 @@
-// Fades' write-back (dclf-architecture.md, "The fade write-back"): the events the depth commit harvests (FadeCommit.cpp) judged on DCLF's
-// executor by the root states' kick (KickFadeWriteBack), joined by its wait, and the stores made on the main thread at Main::Update's
-// entry (WriteFadeStores).
+// The fade write-back. A task on DCLF's executor turns harvested fade events into stores.
+// The main thread writes those stores to the engine nodes at Main::Update's entry.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -24,8 +23,7 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		// Each lost store or event named (the first 200): the GPU counts a milestone reported once it is in the list, so a lost one is never
-		// sent again and its node keeps the fade it had (a stuck partial fade until the root is listed again).
+		// The GPU never resends a milestone once listed. A lost store leaves the node stuck mid-fade until the root is listed again.
 		std::atomic<int> lostLines{ 0 };
 		template <class... A>
 		void LogLost(std::format_string<A...> a_format, A&&... a_args)
@@ -33,12 +31,10 @@ namespace DCLF::Features::Fades
 			if (lostLines.fetch_add(1, std::memory_order_relaxed) < 200)
 				logger::info("{}", std::format(a_format, std::forward<A>(a_args)...));
 		}
-		// The diagnostic capture's view of the write-back the last kick ran. The kick sets it, the write-back's destructor clears it, and
-		// the task holds the lock while it judges, so a census reads the per-root frames whole and never a write-back being destroyed.
+		// The task holds this lock while it judges, so a census never sees a half-grown appliedFrame or a write-back being destroyed.
 		std::mutex censusMutex;
 		std::atomic<FadeWriteBack*> censusWriteBack{ nullptr };
 
-		/** @brief Fades' scene resources in the scene's tables IndirectDraws keeps (null: none made yet, or no fade program). */
 		FadeScene* CurrentScene()
 		{
 			const auto* scene = IndirectDraws::Get().Scene();
@@ -52,15 +48,12 @@ namespace DCLF::Features::Fades
 		if (!fades || !fades->fadeWriteBack)
 			return;
 		auto& writeBack = *fades->fadeWriteBack;
-		// The last task's stores, made on the main thread at Main::Update's entry (no list cull, cell or job animation runs; every
-		// reader of the node sees them this frame), only on roots DCLF still writes (a_written; the engine steps the rest: one
-		// writer). Their snapshot is released here.
+		// No cull or animation runs now, so every reader of the node sees these stores this frame.
 		std::unique_ptr<FadeWriteBack::Stores> stores{ writeBack.ready.exchange(nullptr, std::memory_order_acq_rel) };
 		if (!stores)
 			return;
 		writeBack.readyStores.store(0, std::memory_order_relaxed);
-		// DCLF is not running (the engine culls every root this frame), or their publication was released all the same (stores made
-		// without its node: a defect; the next stores come from the installed one).
+		// A released publication means the nodes may be gone. That would be a defect, so the stores are dropped and logged.
 		if (!a_live || !EngineReleases::Alive(stores->publication)) {
 			for (const auto& store : stores->stores)
 				LogLost("[DCLF] fade write-back: store dropped ({}): node {} fade {:.3f}", a_live ? "publication released" : "not live", store.node, store.fade);
@@ -76,15 +69,13 @@ namespace DCLF::Features::Fades
 				++notWritten;
 				continue;
 			}
-			// The fade and the flags' fade bits (atomically: the engine owns the others). Stood-in roots' dependents read the fade
-			// from FadeStateCS's state, so the fade watch is not told.
+			// The flag bits are changed atomically because the engine owns the other bits.
 			auto* node = static_cast<std::byte*>(store.node);
 			std::atomic_ref<std::uint32_t> flags(*reinterpret_cast<std::uint32_t*>(node + 0xF4));
 			flags.fetch_and(~kFadeFlagMask, std::memory_order_relaxed);
 			flags.fetch_or(store.flags, std::memory_order_relaxed);
 			*reinterpret_cast<float*>(node + 0x130) = store.fade;
-			// A leaf or tree root's LOD level, transition and blend (written otherwise only by FUN_14147a430 and OnVisible, neither
-			// running now).
+			// Only the LOD step and OnVisible otherwise write these, and neither runs now.
 			std::uint32_t fields = SceneCapture::NodeRecord::kFadeCurrent;
 			if (store.lod) {
 				*reinterpret_cast<float*>(node + 0x14C) = store.blend;
@@ -92,7 +83,7 @@ namespace DCLF::Features::Fades
 				*reinterpret_cast<std::uint8_t*>(node + 0x153) = static_cast<std::uint8_t>(store.levels >> 8);
 				fields |= SceneCapture::NodeRecord::kFadeLevel;
 			}
-			// The mirror's value: an update, not a fade event.
+			// Keeps the mirror current. This is a plain update, not a fade event.
 			SceneTracker::Get().PushUpdate(SceneCapture::Update{ fields, SceneCapture::CaptureNodeFields(*static_cast<const RE::NiAVObject*>(store.node), fields) });
 			++applied;
 		}
@@ -104,8 +95,6 @@ namespace DCLF::Features::Fades
 
 	void PostCpuFadeEvents(FadeWriteBack& a_writeBack, std::uint32_t a_frame, std::vector<FadeEvent> a_events)
 	{
-		// The CPU stage's events take the harvest's way in (FadeCommit.cpp's ArmFadeReadback): a batch per frame with any, judged by the
-		// next task as the GPU's are.
 		a_writeBack.harvested.fetch_add(1, std::memory_order_relaxed);
 		if (a_events.empty())
 			return;
@@ -124,26 +113,23 @@ namespace DCLF::Features::Fades
 		if (!fades || !fades->fadeWriteBack)
 			return;
 		auto& writeBack = *fades->fadeWriteBack;
-		// The census reads this write-back from now on (a lock only when the scene's write-back changed).
 		if (censusWriteBack.load(std::memory_order_relaxed) != &writeBack) {
 			std::lock_guard lock(censusMutex);
 			censusWriteBack.store(&writeBack, std::memory_order_relaxed);
 		}
-		// One task at a time; a running one (or the next) takes the new batches.
+		// One task at a time. A running task or the next one picks up the new batches.
 		if (bool idle = false; !writeBack.running.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) {
 			writeBack.busy.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		// The task judges events against the frame's immutable tables; their nodes are the installed publication's.
 		std::shared_ptr<const SceneTables> tables = Scene::FrameView::Get().AcceptedTables();
 		const std::uint64_t publication = Scene::FrameView::Get().InstalledSequence();
 		auto retirement = Scene::FrameView::Get().InstalledRetirement();
 		auto find = [fades = std::move(fades), tables, publication, retirement = std::move(retirement)] {
 			DCLF_ZONE("CS.DCLF.FadeWriteBack");
 			auto& state = *fades->fadeWriteBack;
-			// The roots as those tables list them (the root states' view).
 			const auto list = tables ? Extensions::RootListOf(*tables) : Api::RootListView{};
-			// The batches in frame order (the stack is newest first, and recordings may finish out of order).
+			// Sort by frame. The stack is newest first, and recordings may finish out of order.
 			std::vector<FadeWriteBack::Batch*> batches;
 			for (auto* batch = state.batches.exchange(nullptr, std::memory_order_acquire); batch; batch = batch->next)
 				batches.push_back(batch);
@@ -154,7 +140,7 @@ namespace DCLF::Features::Fades
 			stores->tables = tables;
 			stores->publication = publication;
 			stores->retirement = retirement;
-			// Held while appliedFrame is read and grown: the census copies it whole (uncontended outside a capture).
+			// Uncontended outside a diagnostic capture.
 			std::unique_lock censusLock(censusMutex);
 			for (auto* batch : batches) {
 				for (const auto& event : batch->events) {
@@ -162,7 +148,7 @@ namespace DCLF::Features::Fades
 						break;
 					if (event.root >= state.appliedFrame.size())
 						state.appliedFrame.resize(std::size_t(event.root) + 1, 0u);
-					// Only a root still DCLF's to write (same generation, kFadeRootWritten), and never an event older than the last taken.
+					// Skip roots DCLF no longer writes, and events older than the last one applied.
 					if (event.root >= list.rows.size() || list.rows[event.root].generation != event.generation ||
 						!(list.rows[event.root].bits & kFadeRootWritten) || !list.nodes[event.root] || batch->frame < state.appliedFrame[event.root]) {
 						LogLost("[DCLF] fade write-back: event stale: root {} gen {} (list {} rows, row gen {}, written {}, node {}), frame {} applied {}, fade {:.3f}", event.root,
@@ -180,11 +166,11 @@ namespace DCLF::Features::Fades
 				delete batch;
 			}
 			censusLock.unlock();
-			// Stores an earlier task found that no Main::Update entry has made yet go first.
+			// Stores from an earlier task that were not written yet go first.
 			if (std::unique_ptr<FadeWriteBack::Stores> earlier{ state.ready.exchange(nullptr, std::memory_order_acq_rel) }) {
 				earlier->stores.insert(earlier->stores.end(), stores->stores.begin(), stores->stores.end());
 				earlier->tables = std::move(stores->tables);
-				// The earlier stores' node is kept: an older node holds every newer one.
+				// Keep the earlier retirement node, because an older node holds every newer one.
 				earlier->publication = std::min(earlier->publication, stores->publication);
 				stores = std::move(earlier);
 			}
@@ -208,7 +194,7 @@ namespace DCLF::Features::Fades
 		auto& running = fades->fadeWriteBack->running;
 		while (running.load(std::memory_order_acquire))
 			running.wait(true, std::memory_order_acquire);
-		// Teardown, toggle or load: what it found is dropped (the roots may no longer stand in).
+		// Called on teardown, toggle or load, when the roots may no longer stand in, so the stores are dropped.
 		std::unique_ptr<FadeWriteBack::Stores> dropped{ fades->fadeWriteBack->ready.exchange(nullptr, std::memory_order_acq_rel) };
 		fades->fadeWriteBack->readyStores.store(0, std::memory_order_relaxed);
 		if (dropped)

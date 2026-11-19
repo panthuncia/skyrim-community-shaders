@@ -1,6 +1,4 @@
-// Tree wind: the trees DCLF owns animated on the GPU. Its switches and the trees toggle, technique 12's contributions, the trees' table
-// family and coordinator component, the seeds (a frame-value pool), the scene resources with their commit hook and frame binding (t124),
-// the pass in the depth epoch's next-frame state, the tree manager's engine side, the report line and the parity.
+// Tree wind: the trees DCLF owns, animated on the GPU.
 
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeList.h"
@@ -14,8 +12,7 @@ namespace DCLF::Features::TreeWind
 	{
 		Api::SwitchId listAllSwitch;  // install
 
-		// The trees' switches and live toggle, where Core's were listed (after the skin partitions' behind Features/Actors', which registers
-		// before this feature, and the primary exclusion's): the toggle.
+		// Registered where Core's switches and toggle were, to keep the order.
 		Api::ToggleId RegisterSettings(Api::InstallContext& a_context)
 		{
 			const auto trees = a_context.RegisterSwitch({ .name = "CS_DCLF_TREES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::UnlessOne,
@@ -23,8 +20,6 @@ namespace DCLF::Features::TreeWind
 			listAllSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_TREE_LIST_ALL", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
 				.description = "1 (T7f; off by default): the tree manager's list loop given DCLF's verdict for every BSTreeNode DCLF lists; off: the stood-in trees alone (T7b5's fix)",
 				.after = "CS_DCLF_SHADOWS" });
-			// The TreeAnim technique, whose vertex animation reads TreeParams and WindTimers per object (extras rows): an object class
-			// (its technique contribution's toggle: RegisterObjects).
 			return a_context.RegisterToggle({ .name = "trees", .label = "Trees", .seed = trees, .entersClassification = true, .after = "skinned" });
 		}
 
@@ -43,7 +38,6 @@ namespace DCLF::Features::TreeWind
 				SubscribeParity();
 		}
 
-		// The tree manager's list loop and walk (RegisterAnimation installs both, whatever the toggle).
 		void Preflight()
 		{
 			TreeList::Preflight();

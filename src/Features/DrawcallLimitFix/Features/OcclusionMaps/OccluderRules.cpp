@@ -1,5 +1,4 @@
-// The maps' occluder rules (their contributions' technique): Skylighting::OcclusionTechnique's and the precipitation mask's, from the
-// walked object's records (Api::OccluderLeaf); and the maps' camera and accumulator, the precipitation accumulator's.
+// The maps' occluder rules, Skylighting's and the precipitation mask's, from the walked object's records, and the maps' camera.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
@@ -78,9 +77,8 @@ namespace DCLF::Features::OcclusionMaps
 
 	std::uint32_t EnginePrecipitationTechnique(const Api::OccluderLeaf& a_leaf)
 	{
-		// BSShaderProperty's GetPrecipitationOcclusionMapRenderPasses (vfunc 0x2D, AE 0x1414afd50), BSLightingShaderProperty's without
-		// Skylighting: no size test, and tree animation and anisotropic lighting occlude nothing. Its technique (RenderDepth with the
-		// vertex inputs' bits) writes the same depth as DepthTechnique's.
+		// The engine's GetPrecipitationOcclusionMapRenderPasses (vfunc 0x2D, AE 0x1414afd50): no size test, and tree animation and
+		// anisotropic lighting occlude nothing. It writes the same depth as DepthTechnique.
 		if (!Any(a_leaf, kZBufferWrite) || Any(a_leaf, kSkinned, kRefraction, kTempRefraction, kMultiTextureLandscape, kNoLODLandBlend, kLODLandscape,
 												 kEyeReflect, kTreeAnim, kDecal, kDynamicDecal, kAnisotropicLighting))
 			return 0;

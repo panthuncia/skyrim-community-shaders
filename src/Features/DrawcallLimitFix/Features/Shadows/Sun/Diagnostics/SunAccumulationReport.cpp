@@ -1,5 +1,4 @@
-// The sun accumulation's report lines (Api::ReportPoint::RenderThread: Reports::RenderThread, at Present, before the primary cull's):
-// the accumulation's and the sun entry exclusion's, with the exclusion watch's verdict (SunCasters).
+// The sun accumulation's and entry exclusion's report lines, with the exclusion watch's verdict. At Present.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunAccumulation.h"

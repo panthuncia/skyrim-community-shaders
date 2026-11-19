@@ -1,7 +1,6 @@
-// Tree wind's pass: the next frame's wind (TreeWindCS), on the compute queue in the depth epoch beside its raster work, from the
-// scene resources' rows and the depth commit's frame row.
+// Tree wind's pass: next frame's wind (TreeWindCS) on the compute queue in the depth epoch, beside its raster work.
 
-// Shapes.h first: volk must precede every Vulkan header of the translation unit.
+// Shapes.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -34,9 +33,8 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Tree wind (TreeWindCS.hlsl) on the compute queue in the Z-prepass epoch: advances each tree's clock and writes its
-	 * TreeParams and WindTimers into this frame's wind buffer (by parity), which next frame's draws read. Nothing this frame
-	 * reads it, so it overlaps the raster work; the host orders it against adjacent frames, and readers need not declare it.
+	 * @brief Advances each tree's clock and writes its wind into this frame's buffer, which next frame's draws read.
+	 * Nothing this frame reads it, so it overlaps the raster work and readers need not declare it.
 	 */
 	class TreeWindPass final : public org::TypedRenderGraphPass<TreeWindPass, TreeWindFramePrepared, TreeWindBindings>
 	{
@@ -53,13 +51,10 @@ namespace DCLF::Draws
 			bindings.clocks = a_builder.UnorderedAccess(*scene->treeClocks).View();
 			for (std::uint32_t h = 0; h < 2; ++h)
 				bindings.wind[h] = a_builder.UnorderedAccess(*scene->treeWindRows[h]).View();
-			// The pools: the tree seeds (the frame row's treeSeedsIndex).
 			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPools);
 			return bindings;
 		}
 
-		// The recording depends on the buffers' versions (the revision's: the ticket's host data); count and frame inputs are in the
-		// uploaded frame row.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		TreeWindFramePrepared Prepare(const TreeWindBindings&, const org::PassPrepareContext& a_preparation) const
@@ -68,7 +63,7 @@ namespace DCLF::Draws
 			if (!scene->treeWind || !scene->treeFrameBuffer)
 				return prepared;
 			prepared.program = scene->treeWind;
-			// Full capacity (the nodeless entry, then the tree slots); the shader stops at the count.
+			// Full capacity. The shader stops at the count.
 			const std::uint64_t trees = std::min({ NamedUnitsOf(a_preparation, scene->trees), NamedUnitsOf(a_preparation, scene->treeClocks),
 				NamedUnitsOf(a_preparation, scene->treeWindRows[0]), NamedUnitsOf(a_preparation, scene->treeWindRows[1]) });
 			constexpr std::uint32_t group = Features::TreeWind::kTreeWindGroup;
@@ -76,7 +71,6 @@ namespace DCLF::Draws
 			return prepared;
 		}
 
-		// The dispatch.
 		static void Record(const TreeWindBindings& a_bindings, const TreeWindFramePrepared& a_frame, org::PassRecordContext& a_recording)
 		{
 			if (!a_frame.program || !a_frame.groups)
@@ -103,7 +97,6 @@ namespace DCLF::Features::TreeWind
 {
 	namespace
 	{
-		// The scene's GPU setup, after the scene resources: their state when they made the program (else out of the graph).
 		std::shared_ptr<const void> Setup(const Api::PassSetup& a_setup)
 		{
 			auto scene = SharedSceneOf(a_setup.scene);
@@ -120,7 +113,6 @@ namespace DCLF::Features::TreeWind
 
 	void RegisterPass(Api::InstallContext& a_context)
 	{
-		// Tree wind for the next frame, beside the depth epoch's raster work.
 		a_context.RegisterPass({ .key = "tree-wind.next-frame", .passName = "cs.dclf.z.tree-wind", .queue = Api::PassQueue::Compute, .make = &MakePass,
 			.setup = &Setup, .cpuPipeline = true });
 	}

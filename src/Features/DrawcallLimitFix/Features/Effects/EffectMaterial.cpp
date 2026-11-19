@@ -1,6 +1,5 @@
-// The Effect port's material part: BSEffectShader::SetupMaterial (the non-membrane half) on a snapshot, pure, in the port's space
-// (EffectVSLayout, EffectPSLayout). And the port's registration (Api::MaterialPortContribution): the property's capture and shading
-// (EffectProperty.cpp), its descriptors and variants (EffectDescriptors.cpp) and this evaluation.
+// The Effect port's material evaluation, a pure copy of BSEffectShader::SetupMaterial without the membrane half.
+// Also registers the Effect material port.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
@@ -14,10 +13,9 @@ namespace DCLF::Features::Effects
 {
 	namespace
 	{
-		// BSEffectShaderMaterial's size (its Create's allocation, CommonLib's sizeof).
 		constexpr std::uint32_t kEffectMaterialBytes = 0x88;
-		// BSEffectShaderMaterial (0x88 bytes, its Create 0x1414e9c80): the fields SetupMaterial (0x1414ea6c0) reads.
-		constexpr std::uint16_t kFalloff = 0x38;  // falloffStartAngle, falloffStopAngle, falloffStartOpacity, falloffStopOpacity
+		// BSEffectShaderMaterial fields that SetupMaterial (0x1414ea6c0) reads.
+		constexpr std::uint16_t kFalloff = 0x38;  // start angle, stop angle, start opacity, stop opacity
 		constexpr std::uint16_t kBaseColor = 0x48;
 		constexpr std::uint16_t kSourceTexture = 0x58;
 		constexpr std::uint16_t kGreyscaleTexture = 0x60;
@@ -25,23 +23,17 @@ namespace DCLF::Features::Effects
 		constexpr std::uint16_t kBaseColorScale = 0x6c;
 		constexpr std::uint16_t kClampMode = 0x80;
 		constexpr std::uint16_t kLightingInfluence = 0x81;
-		// The texture-transform buffers' first offset and scale (BSShaderMaterial +0x0c/+0x10, +0x1c/+0x20; 8 bytes a buffer), as Lighting's.
+		// Texture transforms are double-buffered, 8 bytes apart, as in Lighting.
 		constexpr std::uint16_t kTexcoordOffset = 0x0c;
 		constexpr std::uint16_t kTexcoordScale = 0x1c;
-		// 1/255 as the engine holds it (0x141ad2810).
+		// 1/255 with the engine's exact bits (0x141ad2810).
 		constexpr std::uint32_t kInverse255Bits = 0x3b808081u;
-		// BSGraphics::TextureFilterMode: SetupTechnique gives t0 anisotropic filtering with Texture, SetupMaterial t4 bilinear.
 		constexpr std::uint32_t kFilterBilinear = 1;
 		constexpr std::uint32_t kFilterAnisotropic = 3;
-		// The texture fields a snapshot resolves: the source and the greyscale palette.
 		constexpr std::uint16_t kEffectTextureFields[] = { kSourceTexture, kGreyscaleTexture };
 
-		/**
-		 * @brief The variables the frame owns (Api::MaterialFrameVariable), which the effect controllers move every frame (EffectWrites.cpp):
-		 * FalloffData, the four falloff floats (+0x38..+0x48) as EvaluateEffect copies them (its rows place it only under Falloff, where the
-		 * record writes it), and BaseColor (+0x48..+0x58): the colour times baseColorScale and the raw alpha, or under GrayscaleToColor the
-		 * raw colour (the scale is BaseColorScale's, the record's: a write of it is captured). No other record value reads those bytes.
-		 */
+		// Effect controllers change falloff and base colour every frame, so the frame owns these variables rather than the record.
+		// No other record value reads those bytes.
 		constexpr std::uint16_t kNoScale = Api::MaterialFrameComponent::kNoScale;
 		constexpr Api::MaterialFrameVariable kEffectFrameVariables[] = {
 			{ .pixel = false, .variable = kEffectVSFalloffData, .first = kFalloff, .end = kFalloff + 16,
@@ -52,7 +44,6 @@ namespace DCLF::Features::Effects
 				.alternate = { { { kBaseColor, kNoScale }, { kBaseColor + 4, kNoScale }, { kBaseColor + 8, kNoScale }, { kBaseColor + 12, kNoScale } } } },
 		};
 
-		/** @brief Where each Effect variable lives in an effect MaterialRecord's blocks (the port's space: MakeStageLayout of its rows). */
 		const StageLayout& EffectVSLayout()
 		{
 			static const StageLayout layout = MakeStageLayout(kEffectVSVariables, kEffectVSSized, kEffectVSScratch);
@@ -65,19 +56,12 @@ namespace DCLF::Features::Effects
 			return layout;
 		}
 
-		/**
-		 * @brief BSEffectShader::SetupMaterial (0x1414ea6c0, the non-membrane half) and SetupTechnique's filter modes for an effect material's
-		 * snapshot, into a record of kind kMaterialKindEffect (EffectVSLayout / EffectPSLayout order). LightingInfluence.y holds
-		 * softFalloffDepth itself (the pixel stage divides the frame's near * far by it). False: a membrane pass, a greyscale pass without
-		 * its palette, or a snapshot that is not an effect material's. The vanilla frame's sources alone (the snapshot's and the record's
-		 * through the evaluation's calls: Core/Extensions/MaterialPorts.h).
-		 */
+		// Returns false for membrane passes and for greyscale passes without a palette.
 		bool EvaluateEffect(Api::MaterialPortEvaluation& a_port)
 		{
 			const std::uint32_t pass = a_port.passDescriptor;
 			if (a_port.Port() != kMaterialKindEffect || a_port.Size() < kEffectMaterialBytes || !a_port.FrameSampled())
 				return false;
-			// The membrane half (the TESEffectShader membranes: normal and noise textures, no constants) is not ported.
 			if (pass & EffectFlag::Membrane)
 				return false;
 			a_port.ResetRecord(kMaterialKindEffect);
@@ -100,8 +84,6 @@ namespace DCLF::Features::Effects
 			};
 
 			if (pass & EffectFlag::Texture) {
-				// SetupTechnique: t0 anisotropic. SetupMaterial: the source texture with the material's clamp mode, when there is one (the
-				// engine binds its renderer texture's view, null without one), and TexcoordOffset from the buffer the frame reads.
 				a_port.SetFilterMode(0, kFilterAnisotropic);
 				if (a_port.HasTexture(kSourceTexture))
 					a_port.BindTexture(0, a_port.View(kSourceTexture), a_port.At<std::uint8_t>(kClampMode));
@@ -112,15 +94,14 @@ namespace DCLF::Features::Effects
 				copyVS(kEffectVSTexcoordOffset, 3, kTexcoordScale + 4 + buffer);
 			}
 			if (pass & (EffectFlag::GrayscaleToColor | EffectFlag::GrayscaleToAlpha)) {
-				// The greyscale palette: dereferenced without a test by the engine (a null one would crash its draw), so not one DCLF draws.
+				// The engine dereferences the palette without a null check, so DCLF never draws a pass without one.
 				if (!a_port.HasTexture(kGreyscaleTexture))
 					return false;
 				a_port.BindTexture(4, a_port.View(kGreyscaleTexture), 0);
 				a_port.SetFilterMode(4, kFilterBilinear);
 			}
 
-			// BaseColor: the base colour times its scale, or with GrayscaleToColor the raw colour and the scale apart (the palette's).
-			// A frame variable, as FalloffData is (kEffectFrameVariables): the frame values read the same values from the live material for its rows.
+			// With GrayscaleToColor the scale stays separate because the palette needs it.
 			const float scale = a_port.At<float>(kBaseColorScale);
 			if (!(pass & EffectFlag::GrayscaleToColor)) {
 				setPS(kEffectPSBaseColor, 0, scale * a_port.At<float>(kBaseColor));
@@ -134,9 +115,8 @@ namespace DCLF::Features::Effects
 			}
 			setPS(kEffectPSLightingInfluence, 0, static_cast<float>(a_port.At<std::uint8_t>(kLightingInfluence)) * std::bit_cast<float>(kInverse255Bits));
 			if (pass & EffectFlag::Soft) {
-				// The engine writes near * far / softFalloffDepth, the camera's planes as SetupTechnique left them. DCLF keeps the depth itself
-				// here and the pixel stage divides the frame's product by it (Effect.hlsl, DCLF_BINDLESS: the same product and quotient), so
-				// the record does not change with the camera.
+				// The engine writes near * far / softFalloffDepth. DCLF stores the depth and the shader divides, so the record
+				// does not change with the camera.
 				copyPS(kEffectPSLightingInfluence, 1, kSoftFalloffDepth);
 				copyVS(kEffectVSSoftMaterialParams, 0, kSoftFalloffDepth);
 			}
@@ -146,7 +126,6 @@ namespace DCLF::Features::Effects
 			return true;
 		}
 
-		// The port's callbacks (Api::MaterialPortContribution).
 		void DeriveEffect(Api::MaterialPortDerivation& a_derivation)
 		{
 			a_derivation.reason = DeriveEffectDescriptors(a_derivation.property, a_derivation.leaf, *a_derivation.out);
@@ -159,14 +138,14 @@ namespace DCLF::Features::Effects
 
 		bool EvaluateEffectPort(Api::MaterialPortEvaluation& a_evaluation)
 		{
-			// No Community Shaders hook on BSEffectShader's SetupMaterial: the vanilla frame's sources alone.
+			// Community Shaders does not hook BSEffectShader's SetupMaterial, so vanilla values are enough.
 			return EvaluateEffect(a_evaluation);
 		}
 	}
 
 	void RegisterPort(Api::InstallContext& a_context)
 	{
-		// The first port registered (no feature before this one registers one), so kind 1: the kind its records carry (kMaterialKindEffect).
+		// Must be the first port registered so that it gets kind 1.
 		static_assert(kMaterialKindEffect == 1);
 		static const Api::MaterialPortContribution port{
 			.name = "effect",
@@ -181,13 +160,10 @@ namespace DCLF::Features::Effects
 				.first = { kEffectVSFirstVariable[0], kEffectVSFirstVariable[1], kEffectVSFirstVariable[2] }, .names = kEffectVSNames },
 			.ps = { .variables = kEffectPSVariables, .groups = { kEffectPSGroups[0], kEffectPSGroups[1], kEffectPSGroups[2] },
 				.first = { kEffectPSFirstVariable[0], kEffectPSFirstVariable[1], kEffectPSFirstVariable[2] }, .names = kEffectPSNames },
-			// Pass enum + 0x4000002C; the DEFERRED pixel bit; no ProjectedUV binding (a variant); TexcoordOffset (VS 9) from the frame; no
-			// Lighting technique row; BSShader_BeginTechnique's raw permutation; no signature component; the emittance colour listed
-			// whatever the flags; the billboards' turned shapes and the particle systems are its leaves.
 			.rules = { .passEnumBase = kEffectPassEnumBase, .deferredPixelBit = EffectFlag::Deferred, .projectedPassBit = 0, .frameVSVariable = kEffectVSTexcoordOffset,
 				.techniqueRows = false, .rawPermutation = true, .signatureComponents = false, .emissiveAlwaysListed = true, .turnedByBillboards = true,
 				.particleGeometry = true },
-			// The falloff and the base colour: the frame's (Features/TextureTransforms patches their rows every frame).
+			// Features/TextureTransforms patches these rows every frame.
 			.frameVariables = kEffectFrameVariables,
 			.capture = &CaptureEffectProperty,
 			.derive = &DeriveEffect,

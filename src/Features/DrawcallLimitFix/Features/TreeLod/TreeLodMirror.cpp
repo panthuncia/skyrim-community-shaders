@@ -1,5 +1,4 @@
-// Tree LOD: the hooks' push (any thread; events onto events, from the feature's hooks on the refill, block update, AddGroup and
-// RemoveGroup), the refill's packing rule, and the render thread's Mirror (Drain, slots, mesh leases) the depth commit uploads from.
+// Tree LOD: the hooks' push, the refill's packing rule, and the render thread's Mirror the depth commit uploads from.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
@@ -21,7 +20,7 @@ namespace DCLF::Features::TreeLod
 		constexpr Engine::Offset kHalfToFloat{ { 76218 }, { 74492 } }, kFloatToHalf{ { 76217 }, { 74491 } };
 		constexpr Engine::Offset kCos{ { 109720 }, { 102264 } }, kSin{ { 109721 }, { 102265 } };  // the CRT's, as the refill calls them
 
-		// The render thread's id, from its first drain; the hooks count the events pushed from another thread.
+		// The render thread's id, from its first drain, so pushes from other threads can be counted.
 		std::atomic<std::uint32_t> drainThread{ 0 };
 		std::atomic<std::uint64_t> offThread{ 0 };
 
@@ -103,8 +102,7 @@ namespace DCLF::Features::TreeLod
 				return;
 			}
 			if (a_event.intended) {
-				// The rule's records after a block update: applied where they differ from the engine's (the shape is mirrored: its
-				// attach's refill was pushed before).
+				// After a block update, apply the rule's records where they differ from the engine's.
 				const auto it = groups.find(a_event.shape);
 				if (it == groups.end() || it->second.instances == a_event.instances)
 					return;
@@ -192,7 +190,6 @@ namespace DCLF::Features::TreeLod
 		const auto it = a_key ? meshes.find(a_key) : meshes.end();
 		if (it == meshes.end() || --it->second.users)
 			return;
-		// Its leases outlive the frames in flight (TakeRetired), and its slot's row is not drawn by any shape until reused.
 		for (auto* owner : { &it->second.vertexOwner, &it->second.indexOwner })
 			if (*owner)
 				retired.push_back(std::move(*owner));
@@ -212,10 +209,10 @@ namespace DCLF::Features::TreeLod
 
 	void Mirror::TakeChanges(std::vector<std::uint32_t>& a_slots, std::vector<std::uint32_t>& a_meshes)
 	{
-		// The render thread's registry (GpuResources::Frame): the scene work leases the geometry slots' buffers from its own, on its thread.
+		// The scene work leases the geometry slots' buffers from its own registry on its own thread.
 		auto& gpu = GpuResources::Frame();
 		gpu.BeginFrame();
-		// The new meshes' buffers, leased (they stay pinned while the mesh lives); a mesh that cannot be leased has no indices.
+		// A mesh that cannot be leased has no indices.
 		std::vector<std::uint32_t> pending;
 		for (const std::uint32_t slot : changedMeshes) {
 			const auto* key = slot < meshSlots.size() ? meshSlots[slot] : nullptr;

@@ -1,5 +1,4 @@
-// Billboards' turn on the CPU (Orient): the port of the engine's (0x140d3e650), the vertex stage's arithmetic, for the feature's parity
-// (Diagnostics/BillboardTurns.cpp).
+// A CPU port of the engine's billboard turn (0x140d3e650), for the parity check. It keeps the engine's order of operations.
 
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
 
@@ -11,10 +10,7 @@ namespace DCLF::Features::Billboards
 {
 	namespace
 	{
-		// 0x140d3e650's and FUN_140d3f240's constants, by their bits: DAT_141ad27f8 (an axis or a distance this short is zero),
-		// DAT_141ad280c (a centre mode's camera this close to the pivot leaves the node unturned), DAT_14193aca4 (the camera's axis
-		// already this aligned with the direction to the pivot: no turn), DAT_141ad28ac (pi: the angle of opposite directions), DAT_1419afb08
-		// (the up modes' horizontal distance below which the node is left unturned).
+		// The engine's own constants, bit for bit: DAT_141ad27f8, DAT_141ad280c, DAT_14193aca4, DAT_141ad28ac and DAT_1419afb08.
 		const float kShort = std::bit_cast<float>(0x358637bdu);
 		const float kNear = std::bit_cast<float>(0x3a83126fu);
 		const float kAligned = std::bit_cast<float>(0x3f7fffefu);
@@ -26,18 +22,15 @@ namespace DCLF::Features::Billboards
 			float x, y, z;
 		};
 		V3 Load(const float (&a_v)[3]) { return { a_v[0], a_v[1], a_v[2] }; }
-		// R0^T v: a world vector in the node's base frame (0x140d3e650's sums, in its order).
+		// R0^T v, summed in the engine's order.
 		V3 ToBase(const float (&a_r)[3][3], const V3& a_v)
 		{
 			return { a_r[1][0] * a_v.y + a_r[0][0] * a_v.x + a_r[2][0] * a_v.z, a_r[1][1] * a_v.y + a_r[0][1] * a_v.x + a_r[2][1] * a_v.z,
 				a_r[1][2] * a_v.y + a_r[0][2] * a_v.x + a_r[2][2] * a_v.z };
 		}
 
-		/**
-		 * @brief FUN_140d3f240: the camera's axes for the centre modes (ALWAYS_FACE_CENTER, RIGID_FACE_CENTER), a_toward (-forward), a_up and
-		 * a_right turned by the rotation that takes -forward onto the direction from the pivot to the camera. False (the node left unturned)
-		 * when the camera is within kNear (squared) of the pivot.
-		 */
+		// FUN_140d3f240. Rotates the camera's axes so -forward points from the pivot to the camera, for the centre modes.
+		// Returns false, leaving the node unturned, when the camera is too close to the pivot.
 		bool CentreAxes(const Camera& a_camera, const float (&a_pivot)[3], V3& a_toward, V3& a_up, V3& a_right)
 		{
 			float dx = a_camera.eye[0] - a_pivot[0], dy = a_camera.eye[1] - a_pivot[1], dz = a_camera.eye[2] - a_pivot[2];
@@ -105,7 +98,7 @@ namespace DCLF::Features::Billboards
 				if (a_mode == 3 && !CentreAxes(a_camera, a_pivot, toward, up, right))
 					break;
 				const V3 a = ToBase(base, toward), u = ToBase(base, up), rr = ToBase(base, right);
-				// Turned about the toward axis until the right axis has no base-frame y.
+				// Turn about the toward axis until the right axis has no base-frame y.
 				const float length = std::sqrt(rr.y * rr.y + u.y * u.y);
 				if (length <= kShort) {
 					m[0][0] = -rr.x;
@@ -129,7 +122,7 @@ namespace DCLF::Features::Billboards
 				m[2][2] = a.z;
 				break;
 			}
-		case 1:  // ROTATE_ABOUT_UP: about the base's y, toward the camera (the node's scale, which the engine divides by, cancels)
+		case 1:  // ROTATE_ABOUT_UP. The engine divides by the node's scale, which cancels here
 			{
 				const V3 d = ToBase(base, { a_camera.eye[0] - a_pivot[0], a_camera.eye[1] - a_pivot[1], a_camera.eye[2] - a_pivot[2] });
 				const float length = std::sqrt(d.z * d.z + d.x * d.x);
@@ -160,7 +153,7 @@ namespace DCLF::Features::Billboards
 				m[2][2] = a.z;
 				break;
 			}
-		case 5:  // BSROTATE_ABOUT_UP: the base's rotation dropped, about the world's z toward the camera
+		case 5:  // BSROTATE_ABOUT_UP drops the base rotation and turns about world z
 			{
 				for (int i = 0; i < 3; ++i)
 					for (int j = 0; j < 3; ++j)

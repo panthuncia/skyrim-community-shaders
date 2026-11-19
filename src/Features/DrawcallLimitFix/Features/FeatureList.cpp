@@ -1,6 +1,5 @@
-// The one ordered list of DCLF's features (see the header). A feature's place is the order its registrations run in beside the others':
-// its pools after the earlier features' pools, its passes' setups after theirs, its products after theirs
-// (where its passes run is the schedule's: Schedule/Frame.cpp).
+// The one ordered list of DCLF's features. A feature's place sets the order its registrations run in beside the others'.
+// Where its passes run is the schedule's (Schedule/Frame.cpp).
 
 #include "Features/DrawcallLimitFix/Features/FeatureList.h"
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"

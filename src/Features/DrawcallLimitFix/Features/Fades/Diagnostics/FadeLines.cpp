@@ -1,5 +1,4 @@
-// Fades' report lines (CS_DCLF_STATS): among the primary cull's, the fade port parity (PrimaryCullParity) and the fade roots' line
-// (PrimaryCullLast); first in the draws' async work, the fade write-back and the fade writers (AsyncWorkWriteBack).
+// Fades' CS_DCLF_STATS report lines: the port parity, the fade roots, the write-back and the fade writers.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRoots.h"
@@ -17,7 +16,7 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		/** @brief CS_DCLF_FADE_PARITY: the port check's line, when it checked a root since the last report. */
+		/** @brief Prints only when the port check ran on a root since the last report. */
 		void PortLines(std::uint32_t)
 		{
 			const auto fadePort = TakePortCheck();
@@ -26,17 +25,15 @@ namespace DCLF::Features::Fades
 					fadePort.differ ? " <- FADE PORT" : " <- OK", fadePort.first.empty() ? "" : "; first: " + fadePort.first);
 		}
 
-		/** @brief The stood-in roots, the LOD skins that read their levels, and the cut's entries with engine-drawn parts. */
 		void RootsLines(std::uint32_t)
 		{
-			// LOD skins: records whose partitions BuildDraws picks by their root's level in FadeStateCS's state.
 			const auto& lodTables = Scene::FrameView::Get().GetTables();
 			const auto lodSkins = std::count_if(lodTables.skinLodPartitions.begin(), lodTables.skinLodPartitions.end(), [](std::uint32_t a_word) { return a_word != 0; });
 			logger::info("[DCLF] fade roots: {} stood in; {} LOD skins (partitions by their root's level on the GPU); {:.0f} entries with engine-drawn parts culled by the engine a frame",
 				Scene::FadeRootsStoodIn(), lodSkins, Reports::CutMixedPerFrame());
 		}
 
-		/** @brief The write-back's readback and stores since the last report (nothing without Fades' scene resources or their ring). */
+		/** @brief The write-back's readback and stores since the last report. */
 		void WriteBackText(std::string& a_text)
 		{
 			const auto* scene = IndirectDraws::Get().Scene();
@@ -51,8 +48,7 @@ namespace DCLF::Features::Fades
 					++sets;
 					listEvents = std::max(listEvents, set->events);
 				}
-				// The readback (a fixed per-frame-slot copy harvested on re-arm: a frame read whether it recorded or replayed), and the
-				// stores (Main::Update's entry, on the roots DCLF alone writes).
+				// The readback is harvested on re-arm, so replayed frames are read too.
 				if (applied || stale || busy || harvested || missed)
 					a_text += fmt::format("[DCLF] fade write-back (T7b4/T7b6): {} milestones written onto stood-in roots' nodes by the main thread at Main::Update's entry "
 										  "({:.1f} us in all), {} left (no longer DCLF's to write), {} dropped (DCLF off), {} stale (the root listed again or no longer stood "
@@ -63,7 +59,7 @@ namespace DCLF::Features::Fades
 			}
 		}
 
-		/** @brief The fade writers' line; nothing while nothing was skipped. */
+		/** @brief Prints only when a writer was skipped. */
 		void WritersText(std::string& a_text)
 		{
 			const auto c = TakeFadeWriterCounts();

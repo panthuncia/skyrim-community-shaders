@@ -35,25 +35,22 @@ namespace DCLF::Features::LocalLights
 	{
 		Api::SceneResourcesId sceneId;
 		constexpr const char* kObjectGatesName = "cs.dclf.object-gates";
-		// Interned gates past this are dropped whole (every object judged again): chains of freed nodes are not kept for ever.
+		// Past this many gates the table is dropped and rebuilt, so chains of freed nodes are not kept forever.
 		constexpr std::size_t kMaxGates = 4096;
 
-		/**
-		 * @brief The strict gates (Portals/StrictGates.h): the chains interned (gate 0 the empty one, ids stable while the table stands), the
-		 * fade roots' gates, and the object column's mirror (render thread).
-		 */
+		// Render thread. Gate 0 is the empty chain. Ids stay stable until the table is dropped.
 		struct Gates
 		{
 			std::map<std::vector<std::uintptr_t>, std::uint32_t> interned;
 			std::vector<Portals::GateChain> chains;
-			std::uint64_t generation = 0;  // bumped when the table is dropped
+			std::uint64_t generation = 0;  // Bumped when the table is dropped.
 			std::uint64_t rootsKey = 0;
 			bool rootsBuilt = false;
-			std::vector<std::uint32_t> rootGate;  // by root slot
+			std::vector<std::uint32_t> rootGate;  // By root slot.
 			std::uint64_t columnKey = 0;
 			bool columnBuilt = false;
-			std::vector<std::uint32_t> column;  // by object slot: the GPU column's words
-			// The column as last built, immutable: the CPU pipeline's culls read it off the render thread (FrameStrictGates).
+			std::vector<std::uint32_t> column;  // By object slot.
+			// Immutable copy, because the CPU pipeline's culls read it off the render thread.
 			std::shared_ptr<const std::vector<std::uint32_t>> published;
 			std::uint64_t unmodelled = 0, rootless = 0;
 
@@ -82,11 +79,8 @@ namespace DCLF::Features::LocalLights
 			}
 		};
 
-		/**
-		 * The publications' late-bound buffers (org::VersionedBuffer::CreateLateBound): what every reader of the atlas and of the gates'
-		 * verdicts declares (the cull bindings LightContexts and StrictGates answer them). Each publication's backing is a version of its
-		 * buffer while the publication lives, so a reader's batch on another queue waits for (or takes) the upload that fills it.
-		 */
+		// Readers declare these late-bound buffers. Each publication's backing becomes a version of one, so a reader on
+		// another queue waits for the upload that fills it.
 		constexpr const char* kAtlasStandInName = "cs.dclf.light-contexts.atlas.stand-in";
 		constexpr const char* kGatesStandInName = "cs.dclf.light-contexts.gates.stand-in";
 
@@ -95,12 +89,12 @@ namespace DCLF::Features::LocalLights
 			std::shared_ptr<org::services::BackingPool> pool;
 			std::shared_ptr<org::VersionedBuffer> atlasVersions, gateVersions;
 			std::shared_ptr<const LightContextPublication> current;
-			Draws::Versioned objectGates;  // by object slot: its gate (the cull binding ObjectGates)
-			org::services::FilledContents<> objectGatesFilled;  // the version the mirror is in, and the column key it holds
+			Draws::Versioned objectGates;  // By object slot.
+			org::services::FilledContents<> objectGatesFilled;  // Which version holds which column key.
 			Gates gates;
 		};
 
-		/** @brief A publication's GPU side: the atlas's and the verdicts' versions (each holds the lease keeping its words on the GPU). */
+		// Each version holds the lease that keeps its words on the GPU.
 		struct PublicationBackings
 		{
 			std::shared_ptr<const org::BufferVersion> atlas, gates;
@@ -128,7 +122,6 @@ namespace DCLF::Features::LocalLights
 			Draws::Register(a_graph.graph, org::ResourceIdentifier(kObjectGatesName), scene.objectGates);
 		}
 
-		// The column, by object: to the objects the revision holds.
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			Draws::UnitGroup{}.Add(a_requirements.State<Scene>().objectGates).Require(a_requirements.build, a_requirements.objectRows);
@@ -136,15 +129,12 @@ namespace DCLF::Features::LocalLights
 
 		void Fit(Api::SceneResourcesFit& a_fit)
 		{
-			// A set sealed before a revision required the column names none of it: no object fits it, never a throw.
+			// A set sealed before any revision required the column names none of it. Then no object fits, and nothing throws.
 			const auto units = Draws::NamedUnits(a_fit.sealed, a_fit.State<Scene>().objectGates);
 			a_fit.fit.objects = std::min(a_fit.fit.objects, static_cast<std::uint32_t>(std::min<std::uint64_t>(units, UINT32_MAX)));
 		}
 
-		/**
-		 * @brief Each object's gate, when the objects, the roots or the rooms' structure moved: its fade root's (the root's chain, kept while the
-		 * roots and rooms hold), its own chain without a root.
-		 */
+		// An object takes its fade root's gate. An object without a root gets its own chain.
 		void BuildColumn(Gates& a_gates, const SceneTables& a_tables)
 		{
 			if (a_gates.chains.size() > kMaxGates)
@@ -184,10 +174,7 @@ namespace DCLF::Features::LocalLights
 			a_gates.published = std::make_shared<const std::vector<std::uint32_t>>(a_gates.column);
 		}
 
-		/**
-		 * @brief The column into the adopted version: the words that differ from what that version holds, or every word for a version not
-		 * filled (a growth). Every commit while a strict context is published: the passes reading it are this frame's.
-		 */
+		// Uploads only the changed words, or all of them for a version not yet filled, such as after a growth.
 		void UploadColumn(Scene& a_scene, const Api::CommitContext& a_commit)
 		{
 			BuildColumn(a_scene.gates, a_commit.tables);
@@ -196,11 +183,11 @@ namespace DCLF::Features::LocalLights
 			const auto& version = a_commit.adopted.Of(*a_scene.objectGates);
 			const auto& column = a_scene.gates.column;
 			if (column.size() > version.units)
-				return;  // never: the revision required the column to its objects
+				return;  // Should not happen. The revision sized the column to its objects.
 			const auto filled = a_scene.objectGatesFilled.Since(version.serial);
 			if (filled && *filled == a_scene.gates.columnKey)
 				return;
-			static std::vector<std::uint32_t> sent;  // render thread: the version's words as last sent
+			static std::vector<std::uint32_t> sent;  // Render thread.
 			std::vector<std::uint32_t> differing;
 			if (!filled || sent.size() != column.size()) {
 				if (!column.empty())
@@ -217,10 +204,7 @@ namespace DCLF::Features::LocalLights
 			a_scene.objectGatesFilled.Filled(version.serial, a_scene.gates.columnKey);
 		}
 
-		/**
-		 * @brief The verdicts' words (Portals/StrictGates.h) for the atlas the selection encoded, each interned gate per context; empty without a
-		 * strict context.
-		 */
+		// One word per interned gate per context. Empty when no context is strict.
 		std::vector<std::uint32_t> EncodeVerdicts(const Gates& a_gates, const LightSelection::Frame& a_selection)
 		{
 			const auto& atlas = a_selection.portalContexts;
@@ -244,10 +228,7 @@ namespace DCLF::Features::LocalLights
 			return words;
 		}
 
-		/**
-		 * @brief A uint structured buffer of a_words, read as a ByteAddressBuffer (as the camera's programs publication), published as
-		 * a_buffer's version; a_descriptor its SRV index.
-		 */
+		// Shaders read this structured buffer as a ByteAddressBuffer.
 		std::shared_ptr<const org::BufferVersion> Upload(Scene& a_scene, const Api::CommitContext& a_commit, const std::vector<std::uint32_t>& a_words, const char* a_name,
 			org::VersionedBuffer& a_buffer, std::uint32_t& a_descriptor)
 		{
@@ -259,7 +240,7 @@ namespace DCLF::Features::LocalLights
 				throw std::runtime_error("missing GPU descriptor");
 			a_descriptor = (*lease)->srvIndex;
 			a_commit.uploads((*lease)->buffer, a_words.data(), a_words.size() * sizeof(std::uint32_t), 0);
-			// The buffer first: the lease moves into the version.
+			// Copy the buffer first, because the lease moves into the version.
 			auto buffer = (*lease)->buffer;
 			return a_buffer.PublishLate(std::move(buffer), std::move(lease));
 		}
@@ -286,7 +267,7 @@ namespace DCLF::Features::LocalLights
 					publication->words = words;
 					auto backings = std::make_shared<PublicationBackings>();
 					backings->atlas = Upload(*scene, a_commit, words, "cs.dclf.light-contexts.atlas", *scene->atlasVersions, publication->descriptor);
-					// The gates' column first (it interns the chains the verdicts cover), then each gate's verdict per context.
+					// The column must come first, because it interns the chains the verdicts cover.
 					if (std::any_of(selection->frameLights.begin(), selection->frameLights.end(), [](const auto& a_entry) { return a_entry.portalContext && a_entry.portalContext->strict; })) {
 						UploadColumn(*scene, a_commit);
 						publication->gateWords = EncodeVerdicts(scene->gates, *selection);
@@ -299,18 +280,17 @@ namespace DCLF::Features::LocalLights
 					publication->owner = std::move(backings);
 					scene->current = std::move(publication);
 				} catch (const std::exception& e) {
-					static std::uint64_t rejected = 0;  // render thread
+					static std::uint64_t rejected = 0;  // Render thread.
 					if (std::has_single_bit(++rejected))
 						logger::error("[DCLF][structural-gap] point-light context publication rejected at frame {}: {}. Occurrences: {}", a_commit.frame, e.what(), rejected);
 					return;
 				}
 			} else if (scene->current->gatesDescriptor)
-				UploadColumn(*scene, a_commit);  // a later commit's adopted version (the column is versioned): kept filled
+				UploadColumn(*scene, a_commit);  // The column is versioned, so a later commit's version must be filled too.
 			// Each execution retains the lease until GPU retirement, including executions sharing this frame's atlas.
 			a_commit.executionOwners.push_back(scene->current);
 		}
 
-		// The frame's publication's descriptor (0: none), and the buffer its readers declare.
 		template <bool Gates>
 		void SelectContexts(Api::CullBindingSelect& a_select)
 		{
@@ -329,11 +309,7 @@ namespace DCLF::Features::LocalLights
 
 	namespace
 	{
-		/**
-		 * @brief The CPU pipeline's strict gates (Direct::StrictGatesSource): this frame's verdicts and atlas (the publication's gateWords and
-		 * words, the GPU's StrictGates and LightContexts bindings) and the object column, as the GPU path binds them. None without a
-		 * portal-strict context.
-		 */
+		// Gives the CPU pipeline the same gates the GPU path binds.
 		Direct::StrictGates FrameStrictGatesOf(const Draws::SceneBuffers& a_scene, std::uint32_t a_frame)
 		{
 			const auto publication = CurrentLightContexts(a_scene, a_frame);

@@ -1,7 +1,7 @@
-// CS_DCLF_FADE_PARITY: FadeStateCS against the C++ port (Features/Fades/FadeState.h). Every 30th frame the depth commit has the pass log
-// kFadeLogEntries roots of a window (NextFadeLog keeps their static rows and the frame's inputs); the log is copied after the depth
-// epoch and checked three frames later (ReadFadeLog): each logged update made again by the port from the state it started from, with
-// the GPU's frustum verdict. And the root rows' inputs against the nodes (CheckFadeInputs).
+// CS_DCLF_FADE_PARITY checks FadeStateCS against the C++ port in FadeState.h.
+// Every 30th frame the pass logs a window of roots. The log is read back three frames later,
+// and the port replays each logged update from its starting state with the GPU's frustum verdict.
+// It also checks the root rows' inputs against the live nodes.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesInternal.h"
@@ -18,46 +18,37 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		/**
-		 * @brief The log window the depth commit logged (NextFadeLog), read back three frames after its depth epoch (ReadFadeLog), so
-		 * the port, from each update's starting state and the GPU's frustum verdict, reproduces it.
-		 */
 		struct FadeReadback
 		{
 			winrt::com_ptr<ID3D11Buffer> log;
 			std::uint32_t frame = 0, base = 0, framesLeft = 0;
 			std::vector<FadeRootStatic> roots;  // static rows from base, as uploaded that frame
 			FadeFrame inputs{};
-			// For a root with engine-drawn parts (not stood in): its node after the engine's OnVisible that frame, which
-			// FadeStateCS's update must equal.
+			// For roots the engine also draws, the node after the engine's OnVisible. FadeStateCS must match it.
 			std::vector<FadeNodeState> nodes;
 			std::vector<std::uint8_t> engine;
-			std::array<float, 4> worldCamera{};
-			std::vector<std::array<float, 3>> nodeCentres;  // world bound centres, read with the nodes
+			std::array<float, 4> worldCamera{};  // position and lodAdjust when the nodes were read
+			std::vector<std::array<float, 3>> nodeCentres;
 			std::vector<std::string> nodeNames;
 			std::vector<std::uint32_t> nodeFlags;
-			// FadeStateCS's inputs that frame: the main cull input's programs, each root's program and radius (the sun entry row).
 			std::vector<std::uint32_t> programs;
 			std::vector<std::uint32_t> rootPrograms;
-			std::vector<float> radii, nodeRadii;  // the engine's world root camera when the nodes were read: position, lodAdjust
+			std::vector<float> radii, nodeRadii;
 		};
 		struct FadeLogParity
 		{
 			std::uint64_t logs = 0, updates = 0, inView = 0, serviced = 0, exact = 0, rounding = 0, differ = 0;
-			std::uint64_t engineChecked = 0, engineExact = 0, engineRounding = 0, engineDiffer = 0;  // GPU state against the engine's node
-			// Skipped log entries: wrong row, another frame's update, another listing's (or none).
+			std::uint64_t engineChecked = 0, engineExact = 0, engineRounding = 0, engineDiffer = 0;
 			std::uint64_t skippedRoot = 0, skippedFrame = 0, skippedGeneration = 0;
-			// Row inputs against the nodes (fadeAmount, +0x109): a steady node whose row differs has a writer without an event.
+			// A steady node whose row differs means some writer changed it without an event.
 			std::uint64_t inputChecks = 0, inputRoots = 0, inputMoving = 0, inputDiffer = 0;
 			std::string first, engineFirst, skippedFirst, inputFirst;
 		};
 
-		// Render thread. Every other log window focuses on a root the set parity saw fade-rejected with its live bound in view
-		// (CS_DCLF_SET_PARITY: DrawsState::fadeLogFocus, the set parity's).
+		// Render thread. Every other window focuses on a root the set parity saw wrongly fade-rejected.
 		std::optional<FadeReadback> fadeReadback;
 		std::uint32_t fadeLogCursor = 0;
 		FadeLogParity fadeParity;
-		// Per node: fadeAmount and +0x109 at the last input check.
 		ankerl::unordered_dense::map<const void*, std::pair<float, std::uint8_t>> fadeInputsSeen;
 		std::uint32_t fadeLogTurn = 0;
 
@@ -69,16 +60,13 @@ namespace DCLF::Features::Fades
 
 	static void CheckFadeInputs(const SceneTables& a_tables)
 	{
-		// Every listed root's row inputs against its node: FadeStateCS reads fadeAmount and +0x109 from the row, which the listing
-		// and the events write (Actor::SetAlpha's, the placement snap's). The tables are the last publication's, an event or two
-		// behind a value the engine steps each frame, so only a node that held its value since the last check is judged.
+		// The tables can lag the engine by an event or two, so only nodes that held their value since the last check are judged.
 		auto& p = fadeParity;
 		++p.inputChecks;
 		const Api::RootListView list = Extensions::RootListOf(a_tables);
 		ankerl::unordered_dense::map<const void*, std::pair<float, std::uint8_t>> seen;
 		seen.reserve(list.rows.size());
-		// The rows FadeStateCS updates with: +0x109 is the seed's (the node's as the frame's values sampled it), fadeAmount the
-		// coordinator's. A root whose seed is not there yet is left out.
+		// Roots whose seed has not arrived yet are skipped.
 		const auto* seeds = SeedsIfDone(true);
 		for (std::size_t r = 0; r < list.rows.size() && r < list.nodes.size(); ++r) {
 			FadeRootStatic row;
@@ -91,7 +79,7 @@ namespace DCLF::Features::Fades
 			const float amount = Engine::At<float>(node, 0x100);
 			const std::uint8_t flags109 = Engine::At<std::uint8_t>(node, 0x109) & 0x3;
 			seen.emplace(node, std::make_pair(amount, flags109));
-			// +0x109's bits the state reads: 0 (always fade out) and 1 (the LOD thresholds' radius scale).
+			// +0x109 bit 0 is always fade out. Bit 1 scales the LOD thresholds by radius.
 			const std::uint8_t rowFlags109 = static_cast<std::uint8_t>(row.bits >> kFadeRootBitsShift) & 0x3;
 			if (std::memcmp(&amount, &row.fadeAmount, sizeof(amount)) == 0 && flags109 == rowFlags109)
 				continue;
@@ -114,10 +102,6 @@ namespace DCLF::Features::Fades
 		}
 	}
 
-	/**
-	 * @brief The window's FadeStateCS inputs from the main cull input (Api::MainCullInputContribution): its programs as the walk encoded
-	 * them, each root's program (judge, for the roots with a node; noProgram for the rest), and each root's radius and node.
-	 */
 	static void ReadWindowPrograms(FadeReadback& a_readback, const Api::RootListView& a_list, const SceneTables& a_tables)
 	{
 		const auto count = a_readback.roots.size();
@@ -171,8 +155,7 @@ namespace DCLF::Features::Fades
 		if (fadeReadback)
 			return ~0u;
 		const auto count = static_cast<std::uint32_t>(list.rows.size());
-		// The window starts at a live root: the slot table grows and frees rows, and FadeStateCS logs nothing for an empty one (a
-		// window of empty rows read back the last log written, and checked nothing). Every other window: the set parity's focus.
+		// Start the window at a live root. FadeStateCS logs nothing for empty rows, so such a window would check nothing.
 		const auto live = [&](std::uint32_t a_row) { return a_row < count && list.rows[a_row].generation != 0 && list.rows[a_row].object != ~0u; };
 		std::uint32_t base = ~0u;
 		if (const std::uint32_t focus = fadeLogFocus.exchange(~0u, std::memory_order_relaxed); (++turn & 1) && live(focus))
@@ -188,7 +171,7 @@ namespace DCLF::Features::Fades
 		readback.frame = a_frame;
 		readback.base = base;
 		readback.roots.assign(list.rows.begin() + base, list.rows.begin() + std::min(count, base + kFadeLogEntries));
-		// The rows FadeStateCS updates with: the seeds' node values with the coordinator's inputs (MergeFadeSeed).
+		// Merge the seeds so the rows match what FadeStateCS used.
 		if (const auto* seeds = SeedsIfDone(true))
 			for (std::size_t i = 0; i < readback.roots.size(); ++i)
 				MergeFadeSeed(readback.roots[i], seeds->data(), seeds->size(), static_cast<std::uint32_t>(base + i), readback.roots[i]);
@@ -198,13 +181,12 @@ namespace DCLF::Features::Fades
 		ReadWindowPrograms(readback, list, a_tables);
 		if (const auto* camera = RE::Main::WorldRootCamera())
 			readback.worldCamera = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, Engine::At<float>(camera, 0x184) };
-		// The engine's nodes as the list jobs left them (the port parity's snapshot): after this cull's OnVisible, before the next
-		// animation job's updates, which run beside the render thread.
+		// Nodes as the list jobs left them, before the next animation job runs beside the render thread.
 		const auto* snapshot = NodeSnapshot(a_frame);
 		for (std::size_t i = 0; i < readback.roots.size(); ++i) {
 			const auto bits = readback.roots[i].bits;
 			const auto* node = static_cast<const RE::NiAVObject*>(list.nodes[base + i]);
-			// A root DCLF writes (kFadeRootWritten: every listed root) has no engine OnVisible to compare.
+			// Roots DCLF writes have no engine OnVisible to compare against.
 			if (node && snapshot && base + i < snapshot->size() && !(bits & kFadeRootWritten)) {
 				readback.nodes[i] = (*snapshot)[base + i];
 				readback.engine[i] = 1;
@@ -223,7 +205,7 @@ namespace DCLF::Features::Fades
 		a_window.base = NextFadeLogBase(a_window.frame, a_window.tables, a_window.inputs);
 	}
 
-	/** @brief After the depth epoch that logged: the log into a staging buffer, read three frames later (false: the window dropped). */
+	/** @brief Copies the log to a staging buffer to read three frames later. False drops the window. */
 	static bool CopyFadeLog(FadeReadback& a_readback, const FadeScene* a_fades)
 	{
 		if (!a_fades || !a_fades->fadeLog || a_fades->fadeLogBase != a_readback.base || a_fades->fadeFrameNumber != a_readback.frame)
@@ -249,7 +231,7 @@ namespace DCLF::Features::Fades
 		return true;
 	}
 
-	/** @brief Whether entry is what the pass did that frame, for the row it had (else counted as skipped, and false). */
+	/** @brief Whether the entry is this frame's update for this row. Otherwise counts it as skipped. */
 	static bool EntryCurrent(const FadeReadback& a_done, std::uint32_t a_i, const FadeLogEntry& a_entry, const FadeRootStatic& a_root, FadeLogParity& a_p)
 	{
 		if (a_entry.root == a_done.base + a_i && a_entry.after.frame == a_done.frame && a_entry.after.generation == a_root.generation && a_root.generation)
@@ -262,17 +244,12 @@ namespace DCLF::Features::Fades
 		return false;
 	}
 
-	/**
-	 * @brief The first engine difference's detail: where each metric was measured from, the metric at this frame's eye, FadeStateCS's
-	 * test again (the main cull input's test on the programs the window saved) and the node's centre.
-	 */
+	/** @brief Detail for the first engine difference, to show which camera each side measured from. */
 	static std::string DescribeEngineDifference(const FadeReadback& a_done, std::uint32_t a_i, const FadeLogEntry& a_entry, const FadeRootStatic& a_root,
 		const std::string& a_differences)
 	{
 		const auto& n = a_done.nodes[a_i];
 		const auto& g = a_entry.after;
-		// Where each metric was measured from: the distance it implies at the frame's scale, against the root's
-		// distance from the fade eye and from the world camera.
 		const auto& in = a_done.inputs;
 		const auto distanceTo = [&](const float* a_eye) {
 			const float dx = a_entry.centre[0] - a_eye[0], dy = a_entry.centre[1] - a_eye[1], dz = a_entry.centre[2] - a_eye[2];
@@ -284,19 +261,19 @@ namespace DCLF::Features::Fades
 			a_entry.root, a_root.bits & kFadeRootPlanMask, g.verdict, a_differences, a_entry.centre[0], a_entry.centre[1], a_entry.centre[2], in.eye[0], in.eye[1],
 			in.eye[2], in.lodAdjust, distanceTo(in.eye), a_done.worldCamera[0], a_done.worldCamera[1], a_done.worldCamera[2], a_done.worldCamera[3],
 			distanceTo(a_done.worldCamera.data()), n.metric * perMetric);
-		// The metric at this frame's eye (the port's OnVisible on a copy): which side is current.
+		// Run the port at this frame's eye to see which side is current.
 		FadeNodeState now = a_entry.before;
 		FadeState::OnVisible(now, a_root, a_entry.centre, in);
 		text += fmt::format("; at this frame's eye the metric is {}; FadeStateCS's before {} lastVisible {} (after {}), the engine's lastVisible {}",
 			now.metric, a_entry.before.metric, a_entry.before.lastVisible, g.lastVisible, n.lastVisible);
 		{
-			// FadeStateCS's test again, on what it was given: the root's program, its centre and the radius it read.
+			// Repeat FadeStateCS's cull test on the inputs it had.
 			const std::uint32_t list = a_done.rootPrograms[a_i];
 			std::string why;
 			const auto* input = Extensions::MainCullInput();
 			const int port = input && input->contribution.test ? input->contribution.test(a_done.programs, list, a_entry.centre, a_done.radii[a_i], a_done.nodeFlags[a_i], why) : -1;
 			{
-				// How far below its listed entry the root is (the cut lists entries; the engine culls a child after its parents).
+				// Depth below the listed entry matters because the engine culls a child only after its parents.
 				const auto* node = static_cast<const RE::NiAVObject*>(Extensions::RootListOf(Scene::FrameView::Get().GetTables()).nodes[a_entry.root]);
 				std::uint32_t depth = 0;
 				const RE::NiAVObject* at = node;
@@ -315,7 +292,6 @@ namespace DCLF::Features::Fades
 		return text;
 	}
 
-	/** @brief A root the engine culls too: its OnVisible on the node and FadeStateCS's for the members, from the same state. */
 	static void CompareWithEngine(const FadeReadback& a_done, std::uint32_t a_i, const FadeLogEntry& a_entry, const FadeRootStatic& a_root, FadeLogParity& a_p)
 	{
 		++a_p.engineChecked;
@@ -335,7 +311,6 @@ namespace DCLF::Features::Fades
 		}
 	}
 
-	/** @brief The logged update made again by the port, from the state it started from and the GPU's verdict bits. */
 	static void CheckPortUpdate(const FadeReadback& a_done, const FadeLogEntry& a_entry, const FadeRootStatic& a_root, FadeLogParity& a_p)
 	{
 		++a_p.updates;
@@ -356,8 +331,7 @@ namespace DCLF::Features::Fades
 			++a_p.exact;
 			return;
 		}
-		// Rounding: the same integers and bits, the floats within a few units in the last place (the GPU's division and
-		// square root need not round as SSE does).
+		// The GPU's division and square root may round differently from SSE, so allow small float differences.
 		const auto& a = a_entry.after;
 		const bool rounding = verdict == a.verdict && port.flags == a.flags && port.lastVisible == a.lastVisible && (port.levels & 0xFFFF) == (a.levels & 0xFFFF) &&
 		                      Within(port.currentFade, a.currentFade) && Within(port.snapRadius, a.snapRadius) && Within(port.amountFade, a.amountFade) &&
@@ -368,7 +342,7 @@ namespace DCLF::Features::Fades
 				differences.empty() ? "the verdict" : differences);
 	}
 
-	/** @brief Every 10th log: the parity's lines, then its counts reset (the input checks' kept: CheckFadeInputs reports them). */
+	/** @brief Every 10th log. Resets the counts except the input checks, which CheckFadeInputs reports. */
 	static void LogFadeParity(FadeLogParity& a_p)
 	{
 		auto& p = a_p;
@@ -378,8 +352,7 @@ namespace DCLF::Features::Fades
 			p.logs, p.updates, p.inView, p.serviced, p.exact, p.rounding, p.differ, p.differ ? " <- FADE STATE" : " <- OK", p.first.empty() ? "" : "; first: " + p.first);
 		logger::info("[DCLF] fade state parity: log entries skipped: {} not the row asked for, {} another frame's update, {} another listing's{}", p.skippedRoot,
 			p.skippedFrame, p.skippedGeneration, p.skippedFirst.empty() ? "" : "; first: " + p.skippedFirst);
-		// Informational: DCLF's state is authoritative for its members, and the engine's node differs where its own cull
-		// visits the root differently (an actor's bound, a root its cull never reaches).
+		// Informational only. The engine's own cull may visit a root differently, and DCLF's state is the one that counts.
 		logger::info("[DCLF] fade state of roots with engine-drawn parts (FadeStateCS against the engine's node, informational): {} checked, {} exact, {} within rounding, {} differ{}{}",
 			p.engineChecked, p.engineExact, p.engineRounding, p.engineDiffer, p.engineDiffer ? " (the engine's own cull; DCLF's state stands)" : "",
 			p.engineFirst.empty() ? "" : "; first: " + p.engineFirst);
@@ -415,7 +388,6 @@ namespace DCLF::Features::Fades
 		for (std::uint32_t i = 0; i < done.roots.size(); ++i) {
 			const auto& entry = entries[i];
 			const auto& root = done.roots[i];
-			// Only what the pass did that frame, for the row it had.
 			if (!EntryCurrent(done, i, entry, root, p))
 				continue;
 			if (i < done.engine.size() && done.engine[i])

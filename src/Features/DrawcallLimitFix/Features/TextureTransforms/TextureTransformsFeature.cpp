@@ -1,7 +1,5 @@
-// Texture transforms: the materials' TexcoordOffset as the frame's shaders read it, and the ports' declared frame variables (the Effect
-// port's falloff and base colour) as the live material holds them, patched into the installed payload's material rows every frame (the
-// rows hold their records' captured value). The list of rows is a payload product, the frame's values a frame-value pool, the patch a
-// pass first in the depth segment.
+// Texture transforms: the materials' TexcoordOffset and the ports' declared frame variables, patched into the installed payload's
+// material rows every frame, since the rows hold their records' captured value.
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 
@@ -14,8 +12,7 @@ namespace DCLF::Features::TextureTransforms
 			RegisterPool(a_context);
 			RegisterPass(a_context);
 			RegisterProduct(a_context);
-			// Together they write every material row's TexcoordOffset (the ports' frame VS variable) and declared frame variables every
-			// frame: a capture or controller write that moved only those leaves the records as they are.
+			// So a capture or controller write that moved only these leaves the records as they are.
 			a_context.RegisterFrameVSVariablePatch();
 		}
 	}

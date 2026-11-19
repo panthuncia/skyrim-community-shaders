@@ -1,5 +1,4 @@
-// CS_DCLF_SET_PARITY: the effect members' withheld Lighting-variant passes (Effects.h, SubscribeLight): counted on the registering threads,
-// taken on the render thread.
+// CS_DCLF_SET_PARITY check of withheld Effect Lighting passes. Counted on the registering threads, taken on the render thread.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
@@ -14,8 +13,7 @@ namespace DCLF::Features::Effects
 	{
 		std::atomic<std::uint32_t> lightChecked{ 0 }, lightOther{ 0 }, lightCloud{ 0 };
 
-		// A blended pass (accumulation hint 1, the main modes' list insertion) of a member: the Effect shader's Lighting variant's. Its
-		// light 0 must be the light the port reads for it: the cloud light for a kCloudLOD property (CS_DCLF_EFFECT_CLOUD_LIGHT), else the sun.
+		// Light 0 must be the light the port reads, the cloud light for kCloudLOD and otherwise the sun.
 		void ListPass(const Diagnostics::MemberListPassWithheld& a_event)
 		{
 			const auto* pass = a_event.pass;

@@ -1,8 +1,6 @@
-// CS_DCLF_PERSISTENT_PARITY: tree LOD's mirror against the LOD trees root's shapes on parity frames: a shape it lacks, a shape it holds
-// that the root does not, and records that differ from the group's instances packed again by the refill's rule (a group whose
-// shaderPropertyUpToDate is clear is skipped: its refill is due). The refills run on the terrain manager's threads, so a group can be
-// refilled between a drain and the check: a shape that differs counts as late when its Add arrives at the next drain, and as differing
-// only when it does not.
+// CS_DCLF_PERSISTENT_PARITY: tree LOD's mirror against the LOD trees root's shapes on parity frames.
+// Refills run on the terrain manager's threads and can land between a drain and the check, so a differing shape counts as late
+// when its Add arrives at the next drain, and as differing only when it does not.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"

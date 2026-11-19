@@ -1,5 +1,4 @@
-// CS_DCLF_SET_PARITY: the billboards' observer (Billboards.h, InstallTurns): the thunk after NiBillboardNode::OnVisible, on whatever
-// thread runs the cull; the report takes its counts on the render thread.
+// CS_DCLF_SET_PARITY observer for billboards. Runs after NiBillboardNode::OnVisible on whatever thread runs the cull.
 
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -20,16 +19,14 @@ namespace DCLF::Features::Billboards
 		using DCLF::PlacementRows::BillboardFaceMode;
 		using DCLF::PlacementRows::SampleBillboardRow;
 
-		// NiBillboardNode's vtable slot OnVisible and what it holds (AE 0x140d3f720, SE 0x140c78d90).
+		// OnVisible holds AE 0x140d3f720, SE 0x140c78d90.
 		constexpr std::size_t kOnVisibleSlot = 0x34;
 		constexpr DCLF::Engine::Offset kOnVisible{ { 71063 }, { 69683 } };
-		// The observer's tolerance: a leaf whose world differs from the engine's by more than this (a rotation entry over its scale, a
-		// translation in units) is counted as differing. The port multiplies in a different order (R0 * M * relative against the
-		// engine's (R0 * M) then each child's local), so a few ulps are expected.
+		// We multiply in a different order from the engine, so a few ulps of difference are expected.
+		// Rotation is compared relative to scale, translation in game units.
 		constexpr float kRotationTolerance = 1e-4f;
 		constexpr float kTranslationTolerance = 0.01f;
 
-		// The observer's counts, since the last report.
 		std::atomic<std::uint64_t> checked{ 0 }, differ{ 0 }, turns{ 0 };
 		std::atomic<std::uint32_t> largestRotationBits{ 0 }, largestTranslationBits{ 0 };
 		std::atomic<std::uint32_t> firstState{ 0 };  // 0 free, 1 being written, 2 written
@@ -51,7 +48,7 @@ namespace DCLF::Features::Billboards
 			BindlessPlacement row{};
 			if (!SampleBillboardRow(a_leaf, row))
 				return;
-			// Only the leaves this node turns (SampleRow finds the nearest billboard: a nested one's leaves are its).
+			// Skip leaves of a nested billboard node, which turns them itself.
 			const RE::NiNode* nearest = a_leaf.parent;
 			while (nearest && !netimmerse_cast<RE::NiBillboardNode*>(const_cast<RE::NiNode*>(nearest)))
 				nearest = nearest->parent;
@@ -62,7 +59,7 @@ namespace DCLF::Features::Billboards
 			const float pivot[3]{ row.bound[0], row.bound[1], row.bound[2] };
 			float turn[3][3];
 			Orient(base, pivot, BillboardFaceMode(&a_node), a_camera, turn);
-			// The vertex stage's (DCLFBillboardWorld): G = turn * R0^T applied to the unturned world about the pivot.
+			// As DCLFBillboardWorld does it: G = turn * R0^T applied to the unturned world about the pivot.
 			float g[3][3];
 			for (int i = 0; i < 3; ++i)
 				for (int j = 0; j < 3; ++j)
@@ -87,7 +84,7 @@ namespace DCLF::Features::Billboards
 				differ.fetch_add(1, std::memory_order_relaxed);
 				std::uint32_t free = 0;
 				if (firstState.compare_exchange_strong(free, 1, std::memory_order_acquire)) {
-					// The node's own turn against the port's, to tell the turn from the leaf's relative transform.
+					// Compare the node's own turn too, to tell a turn error from a relative transform error.
 					const auto& n = a_node.world.rotate.entry;
 					float nodeError = 0.0f;
 					for (int i = 0; i < 3; ++i)
@@ -131,14 +128,13 @@ namespace DCLF::Features::Billboards
 		{
 			static void thunk(RE::NiBillboardNode* a_node, RE::NiCullingProcess* a_process, std::int32_t a_alphaGroup)
 			{
-				// What 0x140d3f720 tests: the node is turned only for a process with camera-related updates.
+				// 0x140d3f720 turns the node only for a process with camera-related updates.
 				const bool turned = a_node && a_process && a_process->cameraRelatedUpdates && a_process->camera;
 				func(a_node, a_process, a_alphaGroup);
 				if (!turned)
 					return;
 				turns.fetch_add(1, std::memory_order_relaxed);
-				// The culling camera as the engine's billboard code reads it (and as SetCameraData copies it into CameraView's rows).
-				Camera camera;
+					Camera camera;
 				const auto& world = a_process->camera->world;
 				for (int i = 0; i < 3; ++i) {
 					camera.forward[i] = world.rotate.entry[i][0];
@@ -148,7 +144,7 @@ namespace DCLF::Features::Billboards
 				camera.eye[0] = world.translate.x;
 				camera.eye[1] = world.translate.y;
 				camera.eye[2] = world.translate.z;
-				// The leaves below, now that the node's OnVisible has updated them (its children's UpdateDownwardPass, before it culled them).
+				// OnVisible has already run the children's UpdateDownwardPass, so the leaves are current.
 				for (const auto& child : Engine::Children(*a_node))
 					if (child)
 						CheckSubtree(*child, *a_node, camera, 0);

@@ -1,5 +1,5 @@
-// Water: the engine's BSWaterShader draws drawn by the render graph (CS_ORG_WATER=1, default off). The feature reserves the EngineDraws
-// anchor and installs the engine hooks; the rest is WaterCapture.cpp (the engine side) and WaterDraws.cpp (the graph side).
+// Water: the engine's BSWaterShader draws drawn by the render graph (CS_ORG_WATER=1, default off).
+// The engine side is WaterCapture.cpp and the graph side WaterDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "RenderGraph/Engine/Native/Native.h"

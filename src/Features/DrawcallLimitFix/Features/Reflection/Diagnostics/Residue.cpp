@@ -1,7 +1,6 @@
-// The reflection residue (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): what the engine registered into the reflection faces under the
-// LOD land and objects roots that is no reflection member. The watch's question (the view's residueDue: which updates keep the roots, their
-// registrations watched: PassCapture::WatchViewResidue), the residue's geometries read at the capture's drain (render thread), posted for
-// the next scene pass, which classifies them; and the classes, for the third report line.
+// The reflection residue, under CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: what the engine registered into the reflection
+// faces under the LOD land and objects roots that is not a reflection member. The render thread reads the geometries at the
+// capture's drain, and the next scene pass classifies them for the report.
 
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionView.h"
 
@@ -27,8 +26,6 @@ namespace DCLF::Features::Reflection
 	{
 		using V = Diagnostics::SceneView;
 
-		// The residue's classes: an Ineligible reason (tracked but ineligible), untracked, eligible but not bound, bound but not in the
-		// reflection phase, a reflection member.
 		inline constexpr std::size_t kResidueUntracked = static_cast<std::size_t>(Ineligible::Count), kResidueUnbound = kResidueUntracked + 1,
 									 kResidueNotReflection = kResidueUntracked + 2, kResidueReflection = kResidueUntracked + 3, kResidueKinds = kResidueUntracked + 4;
 		struct ResidueClasses
@@ -44,8 +41,8 @@ namespace DCLF::Features::Reflection
 		};
 
 		/**
-		 * @brief The frame's residue geometries with their names, read by the render thread at the drain: the scene pass classifies them a
-		 * frame later, past a Present that may have released them, so it dereferences none untracked.
+		 * @brief The frame's residue geometries and their names, read at the drain on the render thread.
+		 * The scene pass classifies them a frame later, past a Present that may have released them, so it dereferences none untracked.
 		 */
 		struct ResidueDrain
 		{
@@ -59,22 +56,18 @@ namespace DCLF::Features::Reflection
 
 		struct ResidueState
 		{
-			// The watch's updates (ResidueDue), render thread.
 			std::uint32_t updates = 0;
-			// The render thread's post (a post no scene pass took gives its residue to the next, so every residue geometry is classified
-			// once), and the pass's newest taken (none posted since the last pass leaves none).
+			// A post no scene pass took is given to the next one, so every residue geometry is classified once.
 			std::atomic<std::shared_ptr<const ResidueDrain>> posted;
 			std::shared_ptr<const ResidueDrain> drain;
-			// The classes: written by the coordinator, taken by the render thread's reflection report, under the lock.
+			// Written by the coordinator and taken by the render thread's report, under the lock.
 			std::mutex lock;
 			ResidueClasses classes;
 		} residueState;
 
 		void OnCaptureDrained(const Diagnostics::CaptureDrained&)
 		{
-			// The residue's geometries, classified by the next scene pass. Its watch is its own gate (the parities:
-			// IndirectDraws::ViewLodRootsOwned); taken every frame so it never accumulates. Their names are read here, where the frame
-			// registered them (the pass reading them runs past this frame's Present).
+			// Taken every frame so it never accumulates. Names are read here, because the pass that classifies them runs past this frame's Present.
 			auto& state = residueState;
 			const auto residue = PassCapture::Get().TakeViewResidueGeometries(kView);
 			if (residue.empty())
@@ -88,8 +81,7 @@ namespace DCLF::Features::Reflection
 																	geometry->GetRTTI() && geometry->GetRTTI()->name ? geometry->GetRTTI()->name : "?") :
 																std::string() });
 			}
-			// A post no scene pass took gives its residue to this one, so none is lost or classified twice. The take between this exchange
-			// and the store finds nothing and takes it next pass.
+			// A post no scene pass took is given to this one, so none is lost or classified twice.
 			if (const auto unread = state.posted.exchange(nullptr, std::memory_order_acq_rel))
 				drain->residue.insert(drain->residue.begin(), unread->residue.begin(), unread->residue.end());
 			state.posted.store(std::shared_ptr<const ResidueDrain>(std::move(drain)), std::memory_order_release);
@@ -97,16 +89,12 @@ namespace DCLF::Features::Reflection
 
 		void OnInputsTaken(const Diagnostics::On<Diagnostics::ScenePoint::AccumulateInputsTaken>&)
 		{
-			// None posted since the last pass leaves none, so no drain is classified twice.
 			residueState.drain = residueState.posted.exchange(nullptr, std::memory_order_acq_rel);
 		}
 
 		void ClassifyResidue(const Scene::Coordinator& a_store)
 		{
-			// What the engine registered into the reflection faces under the LOD land and objects roots that is no reflection member:
-			// untracked, tracked but ineligible (by reason), eligible but not bound, or bound but not in the reflection phase. The drain's
-			// (the frames since the last pass took one), by pointer and the names the render thread read (a geometry the engine released
-			// since is untracked here, and nothing of it is dereferenced).
+			// Classify by pointer and the names the render thread read. A geometry released since is untracked here and never dereferenced.
 			auto& state = residueState;
 			if (!state.drain)
 				return;
@@ -126,7 +114,6 @@ namespace DCLF::Features::Reflection
 				else
 					kind = (Scene::PhasesIn(V::tables(a_store), static_cast<std::uint32_t>(slot)) & kSetReflection) ? kResidueReflection : kResidueNotReflection;
 				++classes.counts[kind];
-				// How long a geometry stays in the residue (distinct geometries, and those seen on 10 frames or more this window).
 				if (auto& seen = classes.seen[geometry]; seen.frame != sceneFrame) {
 					seen.frame = sceneFrame;
 					if (++seen.frames == 10)
@@ -145,7 +132,7 @@ namespace DCLF::Features::Reflection
 
 	bool ResidueDue()
 	{
-		// The residue's watch (the reflection report's): every 30th update while the parities observe.
+		// Every 30th update while the parities observe.
 		return Diagnostics::Observe().claimsOrScene && residueState.updates++ % 30 == 0;
 	}
 
@@ -158,7 +145,6 @@ namespace DCLF::Features::Reflection
 
 	std::string ResidueKinds()
 	{
-		// The classes since the last call (render thread, the report).
 		ResidueClasses classes;
 		{
 			std::scoped_lock lock(residueState.lock);

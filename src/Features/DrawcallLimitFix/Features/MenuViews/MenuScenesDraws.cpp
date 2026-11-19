@@ -1,9 +1,6 @@
-// The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
-// batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). The clients are steps of the UI stage in every
-// frame kind (a world frame's inventory item and local map too) and only there (segment-only); a run's draw list is a frame input: the
-// commit stores it for its run (RunSlots) and the pass records it at execution, so the stage's kept recording never changes with the
-// draws.
+// The menu scenes family's render graph side. One client per batch at the EngineDraws anchor draws the latched draws in engine order.
+// The clients are steps of the UI stage in every frame kind. The draw list is a frame input stored per run, so the stage's kept
+// recording never changes with the draws.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -49,10 +46,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 		constexpr std::size_t kMaxImports = 4;
 
-		/**
-		 * @brief The push block of both builds, in list order: Utility.hlsl's (UTILITY_ORG_RESOURCES under UTILITY_ORG_SCENE) and
-		 * Lighting.hlsl's (LIGHTING_ORG_RESOURCES: its UNREAD entries take no words).
-		 */
+		/** @brief The push block of both builds, in list order. Lighting's UNREAD entries take no words. */
 		struct UtilityBlock
 		{
 			SharedConstants::Handles shared;
@@ -62,15 +56,13 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		};
 		static_assert(sizeof(UtilityBlock) == 40, "the scene builds' push block is 40 bytes");
 
-		/** @brief A client's state, which its pass shares. */
 		struct Client
 		{
 			View view = View::LocalMap;
 			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
-			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it.
+			// Only this client's commit opens the gate.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			// The view's colour targets (TargetsOf) and kMAIN's depth, as imported at the registration, and their formats.
 			std::array<FrameAnchors::Texture, kMaxImports> colours;
 			std::array<std::uint32_t, kMaxImports> colourFormats{};
 			std::uint32_t colourCount = 0;
@@ -78,11 +70,10 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			std::uint32_t depthFormat = 0;
 			std::uint32_t depthTarget = 0;  // RE::RENDER_TARGETS_DEPTHSTENCIL: kMAIN, or the shadow maps for the shadow batch
 			std::uint32_t depthSlices = 1;  // the slices its passes draw into
-			// Every published id the batch's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Render thread writes, the host's thread reads.
+			// Written by the render thread, read by the host's thread.
 			std::shared_ptr<const Run> run;
-			// Each run's draws, stored by the commit for the pass recorded at execution (a frame input).
 			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 			bool targetLogged = false;
@@ -119,7 +110,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			}
 		}
 
-		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
+		/** @brief Records a run's draws in engine order. */
 		class ScenePass final : public org::TypedRenderGraphPass<ScenePass, Frame, Bindings>
 		{
 		public:
@@ -138,15 +129,13 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				const auto declared = a_builder.DepthReadWrite(client->depth, std::span<const org::DsvView>(slices.data(), client->depthSlices));
 				for (std::uint32_t slice = 0; slice < client->depthSlices; ++slice)
 					bindings.depth[slice] = declared.View(slice);
-				// The published inputs, each with the view whose index the draws' latches carry.
 				bindings.inputs = client->inputs.Declare(a_builder);
 				// A particles draw pulls its positions from the engine's dynamic ring (EffectSceneConstants::streamRef).
 				::RenderGraph::Engine::Buffers::DeclareRingRead(a_builder);
 				return bindings;
 			}
 
-			// The run's draws (their programs, targets, stencil references and viewports). Recorded at execution, the pass reads the run
-			// its commit stored when it records: the run is not part of it, so a recording made ahead stays current when the draws change.
+			// The pass reads the run at execution, so the run is not part of the revision and a kept recording stays current.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				if (atExecution)
@@ -161,7 +150,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
 			}
 
-			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.client)
@@ -209,7 +198,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 												  .constants = ShaderBindings::Data(block),
 												  .debugName = DebugName(c.view),
 												  .stencilReference = draw.stencilRef,
-												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
 												  .indirect = &c.gate->Latch(),
 												  .indirectOffset = c.gate->Offset(i) });
 				}
@@ -220,11 +208,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
-		/**
-		 * @brief The programs a Utility vertex descriptor CS loads can be drawn with: the base texture, the fog of war, depth and the
-		 * shadow maps (Utility.hlsl's UTILITY_ORG_SCENE). The family keys its programs by the vertex descriptor (both stages take its
-		 * defines), as the water family does.
-		 */
+		/** @brief The programs a Utility vertex descriptor can be drawn with. Programs are keyed by the vertex descriptor. */
 		void UtilityStagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
 			using Flags = SIE::ShaderCache::UtilityShaderFlags;
@@ -238,7 +222,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
 		}
 
-		/** @brief Everything here: the render thread's. */
+		/** @brief Render-thread state. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
@@ -246,8 +230,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 																			 .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																			 .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
 																			 .stagesOf = &UtilityStagesOf } };
-			// Lighting's programs are not precompiled per descriptor (CS loads thousands): a key is built at its first draw, then
-			// prebuilt from the manifest in the next session.
+			// Lighting has thousands of descriptors, so a key is built at its first draw and prebuilt from the manifest next session.
 			Family::EngineDrawPrograms lighting{ "menu scenes (Lighting)", { .source = "Lighting.hlsl",
 																			   .languageVersion = L"2018",  // FXC's semantics, as DCLF compiles it
 																			   .constantWords = ShaderBindings::Words<UtilityBlock>(),
@@ -287,9 +270,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		}
 
 		/**
-		 * @brief Every published id a batch's draws can read: the material textures are imports, so only the engine targets a slot may
-		 * hold: the shadow mask a Lighting draw reads at t14 (drawn by the shadow mask family's graph pass). An export of an id not listed
-		 * here is an inherent refusal, logged once with the id: add the id here.
+		 * @brief Every published id a batch's draws can read. Material textures are imports, so only engine targets are listed.
+		 * Exporting an id not listed here is refused and logged once. Add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
@@ -299,7 +281,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			a_inputs.AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL::kMAIN_COPY);
 		}
 
-		/** @brief The client of a_view, registered with the anchor. Null, logged, when a target cannot be imported. */
+		/** @brief Makes the client of a_view. Null, logged, when a target cannot be imported. */
 		std::shared_ptr<Client> MakeClient(View a_view)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -352,7 +334,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				.make = [client]() -> std::shared_ptr<org::RenderPass> {
 					return std::make_shared<ScenePass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
-				// The run's draws are known after its commit: recorded then, the pass reads them without a recording made again.
 				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
@@ -360,7 +341,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				// For the pass recorded at execution, by this run (null: nothing drawn).
 				client->runs.Store(latchRun, run);
 				if (!run)
 					return;
@@ -375,18 +355,17 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					logger::info("[DCLF] menu scenes: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			// Passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
+			// UI stage passes only. A batch while no open stage holds the client is a mismatch.
 			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);
 				return nullptr;
 			}
-			// Register asked for the builds that hold the client: the UI stage's in native mode, the anchor's own graph in guest mode.
 			logger::info("[DCLF] menu scenes: the {} client registered at setup", client->id);
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: its draws' programs, targets, stencil references, offsets and viewports. */
+		/** @brief What a run's recording depends on. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -458,7 +437,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		const auto client = ClientOf(a_view);
 		if (!client)
 			return false;
-		// A target made again (a resolution change) is another import: the batch stays the engine's until the next start.
+		// A target made again after a resolution change is another import, so the batch stays the engine's until the next start.
 		bool same = FrameAnchors::EngineDepth(client->depthTarget) == client->depth;
 		const auto targets = TargetsOf(a_view);
 		for (std::uint32_t i = 0; i < client->colourCount && same; ++i)
@@ -468,7 +447,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				logger::warn("[DCLF] menu scenes: a target changed since the {} client registered; that batch stays the engine's", client->id);
 			return false;
 		}
-		// Native mode: the UI stage holds the batch in every frame kind.
 		return Family::HeldForBatch("menu scenes", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Ui));
 	}
 

@@ -1,10 +1,5 @@
-// The blood splatter family's engine side: the screen splatter batch's hook, which lets the engine's batch run with its draws latched
-// and hands them to the anchor's pass; the family's DrawTriShape taker, which latches a splatter draw in place of drawing it; its
-// BSBloodSplatterShader::SetupGeometry watcher, which counts the batch's passes; and the setup where the client is made once. Render
-// thread.
-//
-// A batch the family cannot take, or the rest of one after a refused draw, is drawn by the engine with nobody vouching for it: under the
-// flush latch it is skipped and the residue census counts it, since every such case is a defect of the family.
+// The blood splatter engine hooks. The batch hook latches the engine's draws and hands them to the anchor's pass. Render thread.
+// A batch the family cannot take falls back to the engine. Under the flush latch it is skipped and counted as a defect.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -35,23 +30,21 @@ namespace DCLF::Features::BloodSplatter
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 
-		// RE::RENDER_TARGETS::kFRAMEBUFFER: the back buffer, which Main::RenderScreenSplatter binds.
+		// RE::RENDER_TARGETS::kFRAMEBUFFER, the back buffer.
 		constexpr std::int32_t kFramebuffer = 0;
-		// The most draws one run latches (BloodSplatterDraws' latch has room for this many); a batch with more draws in several runs.
+		// The draw latch's capacity. A bigger batch is split into several runs.
 		constexpr std::size_t kMaxLatched = 32;
 
-		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
 		{
 			static Util::ReasonLog log("[DCLF] blood splatter: the engine draws", spdlog::level::warn);
 			return log;
 		}
 
-		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
 			bool active = false;
-			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
+			bool failed = false;  // a draw was refused, so the rest of the batch is the engine's
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
 		};
@@ -62,7 +55,7 @@ namespace DCLF::Features::BloodSplatter
 			return capture;
 		}
 
-		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		// Runs now so the latched draws stay ahead of anything the engine draws next.
 		void FlushLatched(Capture& a_capture)
 		{
 			auto run = std::move(a_capture.run);
@@ -75,7 +68,6 @@ namespace DCLF::Features::BloodSplatter
 			BloodSplatterDraws::Submit(std::move(run));
 		}
 
-		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason and technique. */
 		void Refuse(Capture& a_capture, std::string_view a_reason, std::uint32_t a_technique)
 		{
 			a_capture.failed = true;
@@ -83,10 +75,9 @@ namespace DCLF::Features::BloodSplatter
 			FlushLatched(a_capture);
 		}
 
-		/** @brief A splatter draw latched (null); the reason when it cannot be (the engine draws it then). */
+		// Returns null on success, else the reason the engine must draw it.
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
-			// A full run is drawn now and the batch goes on in a new one: no draw is refused for the count.
 			if (a_capture.run->draws.size() >= kMaxLatched) {
 				FlushLatched(a_capture);
 				a_capture.run = std::make_shared<Run>();
@@ -99,7 +90,7 @@ namespace DCLF::Features::BloodSplatter
 			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::BloodSplatter)
 				return "the bound shader is not BSBloodSplatterShader";
 			const auto engine = Pipeline::EngineDrawState::Latch();
-			// SetupTechnique turns the depth test off (depth mode 0) and the screen blood uses no stencil: the program has no depth target.
+			// The program has no depth target. SetupTechnique normally turns depth off and the blood uses no stencil.
 			if (engine.depthMode != 0 || engine.stencilMode != 0)
 				return "it tests depth or stencil";
 			if (static_cast<std::int32_t>(rss.renderTargets[0]) != kFramebuffer || static_cast<std::int32_t>(rss.renderTargets[1]) >= 0 ||
@@ -107,7 +98,7 @@ namespace DCLF::Features::BloodSplatter
 				return "its targets are not the back buffer alone";
 
 			Draw draw{};
-			// The descriptor CS looks its shader up by (State::ModifyShaderLookup), which ShaderCompilationTask compiled the stages for.
+			// The descriptor CS uses for its shader lookup (State::ModifyShaderLookup).
 			draw.key.descriptor = state->modifiedPixelDescriptor;
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra), nullptr,
@@ -122,7 +113,7 @@ namespace DCLF::Features::BloodSplatter
 			if (!draw.key.colourFormats[0])
 				return "no back buffer";
 
-			// SetupGeometry's constants, VS b2 c0-c5 (WorldViewProj, LightLoc, Ctrl) and PS b2 c0 (Alpha), as the engine constants capture saw them.
+			// SetupGeometry's constants: VS b2 c0-c5 (WorldViewProj, LightLoc, Ctrl) and PS b2 c0 (Alpha).
 			auto& constants = draw.constants;
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
@@ -154,7 +145,7 @@ namespace DCLF::Features::BloodSplatter
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// t0-t3 as the shadow state holds them (the splatter's colour and alpha, the flare's colour and HDR texture).
+			// The splatter's colour and alpha, or the flare's colour and HDR texture.
 			for (std::uint32_t t = 0; t < 4; ++t) {
 				auto* view = Unwrap(rss.PSTexture[t]);
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
@@ -179,7 +170,6 @@ namespace DCLF::Features::BloodSplatter
 			return nullptr;
 		}
 
-		/** @brief FinishAccumulatingScreenSplatter's RenderBatches (SE 99956 +0x1D, AE 106601 +0x21): the screen blood's batch. */
 		struct SplatterBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
@@ -189,7 +179,6 @@ namespace DCLF::Features::BloodSplatter
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				// The client's back buffer, and an anchor that can run now: otherwise the engine draws the batch (logged once each).
 				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !BloodSplatterDraws::Available() || (Family::BeginBatch(), !BloodSplatterDraws::CanTake())) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
@@ -207,7 +196,6 @@ namespace DCLF::Features::BloodSplatter
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The family's DrawTriShape taker: during a latched splatter batch, the draw is latched instead. */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
@@ -224,7 +212,7 @@ namespace DCLF::Features::BloodSplatter
 			return true;
 		}
 
-		/** @brief After BSBloodSplatterShader::SetupGeometry: counts the pass; one that will not reach DrawTriShape ends the latched part. */
+		// A pass that will not reach DrawTriShape ends the latched part.
 		void OnSetupGeometry(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
@@ -253,7 +241,7 @@ namespace DCLF::Features::BloodSplatter
 		}
 		stl::write_thunk_call<SplatterBatch>(REL::Offset(Address::kSplatterBatch).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::BloodSplatter>(RE::VTABLE_BSBloodSplatterShader[0], &OnSetupGeometry);
-		// The client is made on the main thread once the graph runs (the main menu), before any blood is drawn.
+		// The client is made on the main thread once the graph runs, before any blood is drawn.
 		Family::AddSetup("blood splatter", [] { return BloodSplatterDraws::Setup(); });
 		logger::info("[DCLF] blood splatter: hooks installed (the screen blood batch, BSBloodSplatterShader::SetupGeometry)");
 	}

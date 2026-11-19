@@ -1,5 +1,4 @@
-// Tree wind's scene resources (the tree rows, clocks, frame row and wind rows, made with the scene's tables), the commits' uploads into
-// them (the commit hook), and the wind rows the frame's draws read at t124 (the frame binding).
+// Tree wind's scene resources, the commits' uploads into them, and the wind rows the frame's draws read at t124.
 
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindTables.h"
@@ -29,8 +28,7 @@ namespace DCLF::Features::TreeWind
 		REL::Relocation<std::uintptr_t> treeWindTimerScale{ REL::Offset(Address::kTreeWindTimerScale) };
 		// A pointer to the object whose +0x304 holds the global wind magnitude.
 		REL::Relocation<std::uintptr_t> treeWindSource{ REL::Offset(Engine::Address::kShadowSceneNode) };
-		// BSTreeManager* (+0x78 the gust's speed, +0x80 the squared range of its update), and the frame's seconds it advances the
-		// clocks by (FUN_140437d40's argument; GetSecondsPassed reads it).
+		// BSTreeManager: +0x78 is the gust speed, +0x80 the squared range of its update.
 		REL::Relocation<std::uintptr_t> treeManager{ REL::Offset(Address::kTreeManager) };
 		REL::Relocation<std::uintptr_t> frameSeconds{ REL::Offset(Address::kFrameSeconds) };
 
@@ -39,7 +37,7 @@ namespace DCLF::Features::TreeWind
 			return *reinterpret_cast<const float*>(a_at.address());
 		}
 
-		/** @brief The frame's tree clock inputs (render thread, any time after Main::Update). */
+		/** @brief The frame's tree clock inputs. Render thread, any time after Main::Update. */
 		TreeWindFrame SampleTreeWindFrame()
 		{
 			TreeWindFrame frame;
@@ -60,12 +58,11 @@ namespace DCLF::Features::TreeWind
 			return frame;
 		}
 
-		// The scene's tables are made (the first frame with a device): the program and the buffers, after the face positions.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			using org::services::GrowableContents;
 			auto scene = std::make_shared<TreeWindScene>();
-			// Without the tree wind program, trees keep the wind they joined with (the wind buffers, t124, exist and stay zero).
+			// Without the program, trees keep the wind they joined with. The wind buffers at t124 exist and stay zero.
 			scene->treeWind = ComputeProgram::Load(a_setup.device, { .source = kShader, .constantWords = kTreeWindConstantWords });
 			std::uint32_t trees = 0;
 			if (scene->treeWind) {
@@ -78,7 +75,7 @@ namespace DCLF::Features::TreeWind
 			} else {
 				logger::warn("[DCLF] The tree wind program could not be created; trees keep the wind they joined with");
 			}
-			// The nodeless trees' entry, then a unit per tree slot; every version zero-filled (a zero generation is never a listing's).
+			// The nodeless entry, then one unit per tree slot. Zero-filled, since a zero generation is never a listing's.
 			for (std::uint32_t h = 0; h < 2; ++h)
 				scene->treeWindRows[h] = Draws::MakeVersioned(a_setup.StructuredBuffer((trees + 1) * kTreeWindEntryRows, 16, h ? "cs.dclf.tree-wind1" : "cs.dclf.tree-wind0", true),
 					{ .extent = { kTreeWindEntryRows * 16, kTreeWindEntryRows * 16, 16 }, .contents = GrowableContents::Zero });
@@ -97,7 +94,6 @@ namespace DCLF::Features::TreeWind
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.tree-frame"), scene.treeFrameBuffer);
 		}
 
-		// Tree rows, clocks and wind by tree slot.
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			const auto& s = a_requirements.State<TreeWindScene>();
@@ -105,7 +101,6 @@ namespace DCLF::Features::TreeWind
 				Draws::UnitGroup{}.Add(s.trees).Add(s.treeClocks).Add(s.treeWindRows[0]).Add(s.treeWindRows[1]).Require(a_requirements.build, TreesOf(a_requirements.tables).trees.size());
 		}
 
-		// Without the tree wind program no draw reads the wind rows by its tree slot (the records keep their own wind).
 		void Fit(Api::SceneResourcesFit& a_fit)
 		{
 			const auto& scene = a_fit.State<TreeWindScene>();
@@ -116,10 +111,7 @@ namespace DCLF::Features::TreeWind
 				a_fit.fit.familyRows[TreeFamilyId().index] = std::min({ units(scene.trees), units(scene.treeWindRows[0]), units(scene.treeWindRows[1]) });
 		}
 
-		/**
-		 * @brief A commit's tree uploads into the versions a_sealed (the adopted set) names. a_frameRow: also the frame row (only the
-		 * Z-prepass's TreeWindPass reads it).
-		 */
+		/** @brief Uploads a commit's tree rows into the versions a_sealed names. a_frameRow also uploads the frame row. */
 		void UploadTrees(const Draws::NamedVersions& a_sealed, const TreeTables& a_tables, std::uint32_t a_frame, TreeWindScene& a_scene, Draws::CommitUploads& a_uploads,
 			bool a_frameRow)
 		{
@@ -142,21 +134,20 @@ namespace DCLF::Features::TreeWind
 				if (Policy::FreezeTreeWind())
 					a_scene.treeInputs.deltaTime = 0.0f;
 			}
-			// Every Z-prepass commit: the pass's invocation is prepared ahead of it.
 			if (a_frameRow && a_scene.treeFrameBuffer) {
 				const TreeWindFrameRow row{ a_scene.treeCount, 0, a_scene.treeFrame, SeedsIndex(), a_scene.treeInputs, {} };
 				a_uploads(a_scene.treeFrameBuffer, &row, sizeof(row), 0);
 			}
 		}
 
-		// Every commit (depth, colour, shadow) with the scene's streams; only the depth commit's graph runs the pass that reads the frame row.
+		// Every commit uploads, but only the depth commit's graph runs the pass that reads the frame row.
 		void Commit(const Api::CommitContext& a_commit)
 		{
 			if (auto* scene = SceneOf(a_commit.scene))
 				UploadTrees(a_commit.adopted, TreesOf(a_commit.tables), a_commit.frame, *scene, a_commit.uploads, a_commit.kind == Api::CommitKind::Depth);
 		}
 
-		// t124: the wind buffer a frame's draws read (the one the previous frame wrote).
+		// t124 reads the wind buffer the previous frame wrote.
 		void SelectWind(Api::FrameBindingSelect& a_select)
 		{
 			if (const auto* scene = SceneOf(a_select.scene))
@@ -178,7 +169,6 @@ namespace DCLF::Features::TreeWind
 	{
 		sceneId = a_context.RegisterSceneResources({ .name = "tree-wind", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit });
 		a_context.RegisterCommitHook({ .name = "tree-wind", .commit = &Commit });
-		// Named as the named-address parity names it.
 		a_context.RegisterFrameBinding({ .name = "tree wind SRV", .textureRegister = kWindRegister, .select = &SelectWind });
 	}
 }

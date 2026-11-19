@@ -1,6 +1,4 @@
-// Faces' vertex stream (Api::VertexStreamContribution): the face positions buffer as scene resources (made with the scene's tables, the
-// vertex stream's first; its graph registration, each revision's requirement from the stream rows and its fit), and the commits' uploads
-// of the face shapes' rows into it.
+// The face positions vertex stream. A GPU buffer of face shape positions, uploaded by each commit.
 
 #include "Features/DrawcallLimitFix/Features/Faces/Faces.h"
 #include "RenderGraph/BufferRefs.h"
@@ -24,27 +22,23 @@ namespace DCLF::Features::Faces
 {
 	namespace
 	{
-		// The positions buffer's first capacity in vertices, doubled by the scene's set to what the stream rows need (Require).
+		// In vertices.
 		constexpr std::uint32_t kInitialFaceVertices = 1u << 18;
 
-		/** @brief The face regions a positions version holds (render thread): region -> snapshot generation, for the version filled. */
+		/** @brief Maps region to the snapshot generation uploaded into this version. */
 		struct FaceUploads
 		{
 			org::services::FilledVersion version;
 			ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> regions;
 		};
 
-		/**
-		 * @brief The positions buffer (Api::SceneResources' state, render thread but for the handle, made once at setup): a float4 per
-		 * vertex of each drawn face shape, in its region (its stream row's range), and what the commits uploaded into its versions.
-		 */
+		/** @brief One float4 per vertex of each drawn face shape. Render thread, except for the handle. */
 		struct FacePositions
 		{
 			Draws::Versioned positions;
 			FaceUploads uploaded;
 		};
 
-		/** @brief A device-local buffer the shaders read by buffer view ref. */
 		std::shared_ptr<org::Buffer> DeviceBuffer(std::uint64_t a_bytes, const char* a_name)
 		{
 			auto created = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, a_bytes, false);
@@ -52,15 +46,14 @@ namespace DCLF::Features::Faces
 			return created;
 		}
 
-		// The scene's tables are made (the first frame with a device), the vertex stream's first. Face positions are a vertex buffer; its
-		// ref and capacity are the sealed set's. Without a buffer view ref there is none, and the scene's tables are not made.
+		// Without a buffer view ref there is no state, and the scene's tables are not made.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto state = std::make_shared<FacePositions>();
 			state->positions = Draws::MakeVersioned(DeviceBuffer(std::uint64_t(a_setup.smallStart ? 1024u : kInitialFaceVertices) * Draws::kStreamVertexBytes,
 														"cs.dclf.face-positions"),
 				{ .extent = { 0, Draws::kStreamVertexBytes, 0 } });
-			// Only a check that a ref can be made: readers take each sealed version's ref (DCLF::RefOf) and declare the positions.
+			// Only checks that a ref can be made. Readers use each sealed version's ref.
 			if (!RenderGraph::DeclaredRefOf(a_setup.device, *state->positions->Get()))
 				return nullptr;
 			return state;
@@ -71,7 +64,6 @@ namespace DCLF::Features::Faces
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.face-positions"), a_graph.State<FacePositions>().positions);
 		}
 
-		// Every face shape's region of the publication's tables.
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			std::uint64_t faceVertices = 0;
@@ -81,7 +73,6 @@ namespace DCLF::Features::Faces
 			Draws::SceneBufferSet::Get().Require(a_requirements.build, a_requirements.State<FacePositions>().positions, faceVertices);
 		}
 
-		// A face shape whose region is past the version's vertices waits (ObjectFits).
 		void Fit(Api::SceneResourcesFit& a_fit)
 		{
 			a_fit.fit.streamVertices = static_cast<std::uint32_t>(std::min<std::uint64_t>(Draws::NamedUnits(a_fit.sealed, a_fit.State<FacePositions>().positions), UINT32_MAX));
@@ -92,9 +83,8 @@ namespace DCLF::Features::Faces
 			a_select.buffer = &a_select.State<FacePositions>().positions;
 		}
 
-		// A commit's face uploads (render thread): a region at a time, and only when the head's snapshot is not the one the version the
-		// adopted set names holds (a version it did not fill holds none). The snapshot stays the walk's until its next walk, which is after
-		// the commit. A region past that version's vertices waits for the requirement that grows it.
+		// Uploads a region only when the version does not already hold the head's current snapshot.
+		// A region past the version's vertices waits for the growth.
 		std::uint32_t Upload(const Api::VertexStreamUpload& a_upload)
 		{
 			auto& uploaded = a_upload.State<FacePositions>().uploaded;
@@ -121,7 +111,6 @@ namespace DCLF::Features::Faces
 	void RegisterPositions(Api::InstallContext& a_context)
 	{
 		const auto resources = a_context.RegisterSceneResources({ .name = "face-positions", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit });
-		// Named as the named-address parity names it.
 		a_context.RegisterVertexStream({ .name = "face positions", .entryClass = Api::EntryClass::FaceShape, .resources = resources, .select = &Select, .upload = &Upload });
 	}
 }

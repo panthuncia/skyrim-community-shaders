@@ -1,6 +1,6 @@
-// CS_DCLF_PERSISTENT_PARITY: tree wind parity. Every 120th colour epoch the records of up to 64 tree members are read back (3 frames
-// later) and checked against the engine's formulas and clocks; and both wind buffers whole, every listed tree's entry. A member whose
-// entry holds another generation than its listing's draws with its record's values (DCLFTreeWindEntry), and is counted, not checked.
+// CS_DCLF_PERSISTENT_PARITY tree wind parity. Every 120th colour epoch, up to 64 tree members' records are read back 3 frames later
+// and checked against the engine's formulas and clocks, along with both wind buffers whole.
+// A member whose entry holds another generation draws with its record's values and is counted, not checked.
 
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindTables.h"
@@ -34,9 +34,7 @@ namespace DCLF::Features::TreeWind
 			return (1.5f - a_value * 0.5f * estimate * estimate) * estimate * a_value;
 		}
 
-		/**
-		 * @brief Up to 64 tree members' records, read back and checked against the engine's formulas; timer drift is reported.
-		 */
+		/** @brief Up to 64 tree members' records, read back and checked against the engine's formulas. */
 		struct TreeReadback
 		{
 			winrt::com_ptr<ID3D11Buffer> records;
@@ -65,35 +63,28 @@ namespace DCLF::Features::TreeWind
 			float nearLargestModel = 0.0f;
 		};
 
-		// Render thread (the colour epoch's MainEpochDone): the readbacks in flight, the nodes' timers at the last member readback, the
-		// colour epochs counted.
 		std::optional<TreeReadback> treeReadback;
 		ankerl::unordered_dense::map<const void*, std::pair<float, float>> treeTimers;  // node -> engine's and GPU's timers at the last readback
 		std::uint32_t treeEpochs = 0;
 		std::optional<WholeReadback> whole;
 
-		// One member readback's tallies (HarvestMembers).
 		struct MemberCheck
 		{
 			std::uint32_t checked = 0, paramsDiffer = 0, fadeDiffer = 0, gustDiffer = 0, gusts = 0;
-			// Members drawn with their records' values: their entry is not their listing's (TreeWindCS wrote none for it yet: its
-			// seed not ready, or a reused slot's earlier listing).
+			// Members whose entry is not their listing's yet, so they draw with their record's values.
 			std::uint32_t fallbacks = 0;
 			float drift = 0.0f;
 			std::string first;
-			// The engine's clock rate against the GPU's, per node, since the last readback that saw it: by distance (within the
-			// manager's range or not) and whether the model has bones (+0xB8, the near loop's condition).
+			// The engine's clock rate against the GPU's per node, by range and by whether the model has bones (+0xB8).
 			std::array<std::array<std::uint32_t, 4>, 4> rates{};  // [near * 2 + bones][ratio ~0, ~1, ~2, other]
 			ankerl::unordered_dense::map<const void*, std::pair<float, float>> seen;
 		};
 
-		// One member's record (TreeParams, WindTimers) against the engine's formulas and its node's clock.
 		void CheckMember(const TreeReadback::Sample& a_sample, const float (&tree)[8], const TreeWindFrame& in, const TreeTables& tables, MemberCheck& c)
 		{
 			++c.checked;
 			const bool nodeless = a_sample.tree == kNodelessTree;
-			// The tree's static row, while the node is still listed under the same slot.
-			// The row TreeWindCS takes, its seed's values (the seeds' pool) with the coordinator's generation.
+			// The row TreeWindCS takes: its seed's values with the coordinator's generation.
 			TreeStatic merged;
 			const auto* treeSeeds = SeedsIfDone(true);
 			const TreeStatic* row = !nodeless && a_sample.tree < tables.trees.size() && tables.treeNode[a_sample.tree] == a_sample.node && treeSeeds &&
@@ -135,7 +126,6 @@ namespace DCLF::Features::TreeWind
 			}
 		}
 
-		// The member readback, three frames after its copy: every member checked, the clock rates and the parity's lines.
 		void HarvestMembers(TreeReadback& a_readback, const TreeTables& a_tables, ID3D11DeviceContext* a_context)
 		{
 			D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -166,7 +156,6 @@ namespace DCLF::Features::TreeWind
 				c.first.empty() ? "" : "; first: ", c.first);
 		}
 
-		// One wind buffer of the whole readback (mapped rows): every member's entry, its line's part.
 		std::string CheckWholeBuffer(const WholeReadback& a_whole, std::uint32_t a_buffer, const float* a_rows)
 		{
 			std::uint32_t bad = 0, stale = 0, checked = 0;
@@ -203,7 +192,6 @@ namespace DCLF::Features::TreeWind
 				first.empty() ? "" : " (first " + first + ")", worst.empty() ? "" : " (largest: " + worst + ")");
 		}
 
-		// The whole readback, three frames after its copies: both buffers' lines.
 		void HarvestWhole(const WholeReadback& a_whole, ID3D11DeviceContext* a_context)
 		{
 			std::string text;
@@ -284,8 +272,7 @@ namespace DCLF::Features::TreeWind
 			whole = std::move(next);
 		}
 
-		// The first 64 members, each one's tree entry (TreeParams, WindTimers and the generation) of the wind buffer this frame's draws
-		// read (the frame binding's): the one the frame before wrote, from its inputs.
+		// The first 64 members' entries from the wind buffer this frame's draws read, which the previous frame wrote.
 		void KickMembers(const TreeWindScene& a_wind, const Draws::NamedVersions& a_adopted, const TreeTables& a_tables, ID3D11DeviceContext* a_context)
 		{
 			TreeReadback readback;
@@ -340,8 +327,7 @@ namespace DCLF::Features::TreeWind
 			if (!wind)
 				return;
 			const auto& buffers = *wind;
-			// Both wind buffers whole, every listed tree's entry: non-finite values, an amplitude far past its model's, or a
-			// generation that is not its listing's (a draw then falls back to its record).
+			// Flag non-finite values, an amplitude far past its model's, or a generation that is not its listing's.
 			if (whole) {
 				if (--whole->framesLeft == 0) {
 					HarvestWhole(*whole, context);
@@ -353,8 +339,8 @@ namespace DCLF::Features::TreeWind
 			}
 			if ((treeEpochs++ % 120) != 0 || !buffers.treeWind || tables.treeObjects.empty() || !adopted.Names(buffers.trees) || buffers.TreesContentEpoch(adopted) != tables.treesContentEpoch)
 				return;
-			// Not this frame's own buffer: the compute queue writes that beside the epoch, and nothing orders a copy of it after the
-			// write. Only once a frame before this one has run the pass (the first frame's draws read the zeroed buffer).
+			// Never copy this frame's own buffer, since the compute queue writes it beside the epoch with nothing ordering the copy after.
+			// The first frame's draws read a zeroed buffer.
 			if (buffers.previousTreeFrame + 1 != buffers.treeFrame || buffers.previousTreesContentEpoch != tables.treesContentEpoch)
 				return;
 			KickMembers(buffers, adopted, tables, context);
@@ -363,7 +349,6 @@ namespace DCLF::Features::TreeWind
 
 	void SubscribeParity()
 	{
-		// A colour epoch's readbacks, after Core's (Diagnostics/Draws/DrawsInstall.cpp).
 		Diagnostics::Subscribe<Diagnostics::MainEpochDone>(&ReadTreeWind);
 	}
 }

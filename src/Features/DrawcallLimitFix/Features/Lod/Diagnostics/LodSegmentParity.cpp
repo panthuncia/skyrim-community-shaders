@@ -1,5 +1,4 @@
-// CS_DCLF_PERSISTENT_PARITY: every tracked object LOD shape's drawn ranges (kept by its segment events) against its live state, every 60th
-// pass, once in it, after the pass's segment events. Reported with the segments' line (LodSegmentChannel.cpp).
+// CS_DCLF_PERSISTENT_PARITY check. Compares each tracked object LOD shape's kept ranges with its live segments.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegmentEvents.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegments.h"
@@ -26,7 +25,7 @@ namespace DCLF::Features::Lod
 			++l.checks;
 			std::vector<Api::EntryRange> live;
 			for (const auto& [shape, ranges] : entryRanges) {
-				// An item's lease (the scene work may run beside the engine's update).
+				// One lease per shape, since scene work may run beside the engine's update.
 				const EngineReadWindow::Lease lease;
 				if (!lease)
 					break;

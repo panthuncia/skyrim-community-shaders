@@ -1,7 +1,6 @@
-// Tree LOD's passes: its cull (TreeLodCullCS) in the depth segment's two phases, right before each phase's depth draw, and its list
-// counts' readback once both phases are done, from the tables (the scene resources) and the depth segment's latch.
+// Tree LOD's passes: the cull in the depth segment's two phases, before each phase's depth draw, and the counts' readback.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -40,14 +39,12 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Tree LOD's cull (TreeLodCullCS.hlsl) in the depth segment's two phases, like BuildDraws: phase 1 tests every instance
-	 * against the frustum and last frame's HZB; phase 2 retests phase 1's occluded ones against the HZB rebuilt this frame. Both
-	 * append to the list the passes draw.
+	 * @brief Tree LOD's cull in the depth segment's two phases. Phase 1 tests every instance against the frustum and last frame's HZB.
+	 * Phase 2 retests phase 1's occluded instances against this frame's HZB.
 	 */
 	class TreeLodCullPass final : public org::TypedRenderGraphPass<TreeLodCullPass, TreeLodCullPrepared, TreeLodCullBindings>
 	{
 	public:
-		// a_segment: its epoch's (the depth epoch's: the PassContext it was made with).
 		TreeLodCullPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const Features::TreeLod::TreeLodTables> a_tables, std::uint32_t a_phase,
 			RenderGraphRuntime::Segment a_segment) :
 			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment) {}
@@ -60,21 +57,17 @@ namespace DCLF::Draws
 			bindings.instances = a_builder.ShaderResource(*tables->instances).View();
 			bindings.draw = a_builder.ShaderResource(tables->draw).View();
 			bindings.visible = a_builder.UnorderedAccess(*tables->visible).View();
-			// Which HZB a phase sees depends on its place around the HZB build (GatherStructuralPasses).
 			if (resources->hzb)
 				bindings.hzb = a_builder.ShaderResource(resources->hzb).View();
 			return bindings;
 		}
 
-		// The recording depends on the tables' versions (a growth changes views and dispatch) and the depth segment's shape: the
-		// revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		TreeLodCullPrepared Prepare(const TreeLodCullBindings&, const org::PassPrepareContext& a_preparation) const
 		{
 			TreeLodCullPrepared prepared{};
 			const auto frame = CurrentFrame(a_preparation, segment);
-			// The shape slots every table the cull reads holds (the revision's versions).
 			const std::uint64_t shapes = std::min({ NamedUnitsOf(a_preparation, tables->shapes), NamedUnitsOf(a_preparation, tables->instances),
 				NamedUnitsOf(a_preparation, tables->visible) });
 			if (!tables->cull || !shapes || !frame || !frame->latch)
@@ -95,7 +88,6 @@ namespace DCLF::Draws
 			return prepared;
 		}
 
-		// The dispatch, from the latch's region of the run.
 		static void Record(const TreeLodCullBindings& a_bindings, const TreeLodCullPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
 			if (!a_frame.program || !a_frame.groups || !a_frame.latch)
@@ -107,7 +99,6 @@ namespace DCLF::Draws
 			constants.visibleIndex = a_recording.Index(a_bindings.visible);
 			if (a_frame.occlusion)
 				constants.hzbIndex = a_recording.Index(a_bindings.hzb);
-			// The depth segment's BuildDrawsLatch in this frame slot.
 			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
@@ -134,10 +125,7 @@ namespace DCLF::Draws
 		std::shared_ptr<org::Buffer> stages;  // CS_DCLF_TREE_LOD_STAGES
 	};
 
-	/**
-	 * @brief CS_DCLF_TREE_LOD_STAGES: the stamp ring as copied (TreeInstancesLayout.h): every frame the depth vertex stage stamped, older than
-	 * the newest (whose colour pass may not have run at the copy), judged once - each stage that did not stamp it logged.
-	 */
+	/** @brief Judges each stamped frame once, older than the newest, and logs each stage that did not stamp it. */
 	void JudgeTreeLodStages(Features::TreeLod::TreeLodCounts& a_counts, const std::uint32_t* a_words)
 	{
 		using namespace TreeInstances;
@@ -170,7 +158,7 @@ namespace DCLF::Draws
 				return fmt::format("({} {} {} {})", std::bit_cast<float>(w[a_word]), std::bit_cast<float>(w[a_word + 1]), std::bit_cast<float>(w[a_word + 2]),
 					std::bit_cast<float>(w[a_word + 3]));
 			};
-			// The first vertex's clip position, depth's against colour's (both drawn: the colour pass tests EQUAL against it).
+			// The colour pass tests EQUAL against depth, so the first vertex's clip position must match.
 			const bool clipDiffers = w[kStageColourVS] == frame && std::memcmp(w + 8, w + 12, 16) != 0;
 			a_counts.clipDiffers += clipDiffers ? 1 : 0;
 			if (clipDiffers && ++a_counts.clipLogged <= 100)
@@ -192,7 +180,6 @@ namespace DCLF::Draws
 				a_counts.stageMisses, a_counts.clipDiffers);
 	}
 
-	/** @brief Copies tree LOD's list header to the frame slot's host buffer after phase 2, first summing what the slot held. */
 	class TreeLodReadbackPass final : public org::TypedRenderGraphPass<TreeLodReadbackPass, TreeLodReadbackPrepared, TreeLodReadbackBindings>
 	{
 	public:
@@ -204,7 +191,6 @@ namespace DCLF::Draws
 			return { a_builder.CopySource(*tables->visible) };
 		}
 
-		// The list's version is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		TreeLodReadbackPrepared Prepare(const TreeLodReadbackBindings&, const org::PassPrepareContext&) const
@@ -217,7 +203,7 @@ namespace DCLF::Draws
 			if (!a_frame.counts)
 				return;
 			auto& counts = *a_frame.counts;
-			// The run's range: a published copy's (its lease retired before it recorded again, so the range's last copy is done).
+			// The range's last copy is done, since its lease retired before it recorded again.
 			const std::uint32_t slot = counts.ranges.Of(a_recording.Run());
 			if (slot >= counts.readback.size())
 				return;
@@ -254,7 +240,6 @@ namespace DCLF::Features::TreeLod
 {
 	namespace
 	{
-		// The passes' states: the cull's program and the counts' readbacks, as the tables' setup made them (fixed with the scene's tables).
 		std::shared_ptr<const void> CullSetup(const Api::PassSetup& a_setup)
 		{
 			return SharedTablesOf(a_setup.scene);
@@ -275,7 +260,7 @@ namespace DCLF::Features::TreeLod
 			return std::make_shared<Draws::TreeLodCullPass>(a_context.Main(), a_context.State<TreeLodTables>(), 1, a_context.segment);
 		}
 
-		// Phase 2's retest only with the HZB rebuilt this frame (the depth epoch's phase 2 block).
+		// Phase 2's retest only runs with the HZB rebuilt this frame.
 		std::shared_ptr<org::RenderPass> MakeCullPhaseTwo(const Api::PassContext& a_context)
 		{
 			if (a_context.Interior())
@@ -295,8 +280,6 @@ namespace DCLF::Features::TreeLod
 
 	void RegisterPasses(Api::InstallContext& a_context)
 	{
-		// Phase 1's list before the depth draw; phase 2's retest against the HZB rebuilt this frame; the list's counts read back once both
-		// phases are done.
 		a_context.RegisterPass({ .key = "tree-lod.cull", .passName = "cs.dclf.z.tree-lod-cull", .make = &MakeCullPhaseOne, .setup = &CullSetup, .cpuPipeline = true });
 		a_context.RegisterPass({ .key = "tree-lod.cull-phase2", .passName = "cs.dclf.tree-lod-cull-phase2", .make = &MakeCullPhaseTwo, .setup = &CullSetup });
 		a_context.RegisterPass({ .key = "tree-lod.counts", .passName = "cs.dclf.z.tree-lod-counts", .kind = Api::PassKind::Copy,

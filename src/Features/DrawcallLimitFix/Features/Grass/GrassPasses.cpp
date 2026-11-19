@@ -1,8 +1,7 @@
-// Grass's passes: its cull (GrassCullCS) and its draws' arguments (GrassArgsCS) in the depth segment's two phases, right before each
-// phase's depth draw; the colour draws' arguments once both phases are done (which zero the counts for the next frame); and the draws
-// header's readback, from the tables (the scene resources) and the depth segment's latch.
+// Grass's compute passes. The cull and draw-argument passes run before each depth phase's draw. The colour arguments pass runs after
+// both phases and zeroes the counts for the next frame. A readback pass copies the draws header for diagnostics.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h first. volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -36,19 +35,16 @@ namespace DCLF::Draws
 		Features::Grass::GrassCullConstants constants{};
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::uint32_t groups = 0;
-		bool occlusion = false;  // the HZB test: its view is bound
+		bool occlusion = false;  // true when the HZB view is bound
 	};
 
 	/**
-	 * @brief Grass's cull (GrassCullCS.hlsl) in the depth segment's two phases, like BuildDraws: phase 1 tests every live instance slot
-	 * (Grass Optimizations' distance, frustum, size, thinning and fade tests, then last frame's HZB), writes its frame values and
-	 * appends it to its bucket tier's visible range, or to the retest list; phase 2 retests phase 1's occluded ones against the HZB
-	 * rebuilt this frame and appends the ones it brings back after phase 1's.
+	 * @brief Two-phase cull, like BuildDraws. Phase 1 tests every instance against last frame's HZB and queues occluded ones for retest.
+	 * Phase 2 retests those against this frame's HZB and appends survivors after phase 1's.
 	 */
 	class GrassCullPass final : public org::TypedRenderGraphPass<GrassCullPass, GrassCullPrepared, GrassCullBindings>
 	{
 	public:
-		// a_segment: its epoch's (the depth epoch's: the PassContext it was made with).
 		GrassCullPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const Features::Grass::GrassTables> a_tables, std::uint32_t a_phase,
 			RenderGraphRuntime::Segment a_segment) :
 			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment) {}
@@ -65,21 +61,19 @@ namespace DCLF::Draws
 			bindings.frame = a_builder.UnorderedAccess(*tables->frame).View();
 			bindings.visible = a_builder.UnorderedAccess(*tables->visible).View();
 			bindings.draws = a_builder.UnorderedAccess(tables->draws).View();
-			// Which HZB a phase sees depends on its place around the HZB build (GatherStructuralPasses).
+			// Which HZB a phase sees depends on where it sits relative to the HZB build.
 			if (resources->hzb)
 				bindings.hzb = a_builder.ShaderResource(resources->hzb).View();
 			return bindings;
 		}
 
-		// The recording depends on the tables' versions (a growth changes views and dispatch) and the depth segment's shape: the
-		// revision's (the ticket's host data).
+		// Table versions are already part of the revision, so nothing is added here.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		GrassCullPrepared Prepare(const GrassCullBindings&, const org::PassPrepareContext& a_preparation) const
 		{
 			GrassCullPrepared prepared{};
 			const auto frame = CurrentFrame(a_preparation, segment);
-			// The instance slots every instance-slot table holds (the revision's versions).
 			const std::uint64_t slots = std::min({ NamedUnitsOf(a_preparation, tables->instances), NamedUnitsOf(a_preparation, tables->owners),
 				NamedUnitsOf(a_preparation, tables->frame), NamedUnitsOf(a_preparation, tables->visible) });
 			if (!tables->cull || !slots || !frame || !frame->latch)
@@ -88,19 +82,17 @@ namespace DCLF::Draws
 			prepared.latch = frame->latch;
 			auto& constants = prepared.constants;
 			constants.phase = phase;
-			// The retest list past the visible entries (GrassLayout.h): 12 bytes per unit the visible version holds.
 			constants.retestOffset = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, tables->visible) * GrassInstances::kRetestOffsetPerUnit);
 			if (Draws::OcclusionTested(*resources, *frame)) {
 				prepared.occlusion = true;
 				constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
 				constants.hzbMips = resources->hzbMips;
 			}
-			// Dispatched for full capacity; the shader stops at the draw row's slots (phase 1) or the retest count (phase 2).
+			// Dispatched for full capacity. The shader stops at the live slot count or the retest count.
 			prepared.groups = static_cast<std::uint32_t>((slots + Features::Grass::kGrassCullGroup - 1) / Features::Grass::kGrassCullGroup);
 			return prepared;
 		}
 
-		// The dispatch, from the latch's region of the run.
 		static void Record(const GrassCullBindings& a_bindings, const GrassCullPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
 			if (!a_frame.program || !a_frame.groups || !a_frame.latch)
@@ -116,7 +108,6 @@ namespace DCLF::Draws
 			constants.drawsIndex = a_recording.Index(a_bindings.draws);
 			if (a_frame.occlusion)
 				constants.hzbIndex = a_recording.Index(a_bindings.hzb);
-			// The depth segment's BuildDrawsLatch in this frame slot.
 			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
@@ -145,10 +136,8 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Grass's draws' arguments (GrassArgsCS.hlsl): a thread per draw slot (a bucket's tier) packs the slot's draw, if it has
-	 * instances, into its array - phase 1's depth draws (mode 1), phase 2's (2: the instances phase 2 appended after phase 1's), or the
-	 * colour draws of the bucket's colour program (3: every instance, then the slot's counts zeroed for the next frame) - and counts it
-	 * in the header, which the draws' ExecuteIndirect reads as its count.
+	 * @brief Packs one draw per non-empty draw slot into the indirect arguments. Mode 3, the colour pass, also zeroes the slot's
+	 * counts for the next frame.
 	 */
 	class GrassArgsPass final : public org::TypedRenderGraphPass<GrassArgsPass, GrassArgsPrepared, GrassArgsBindings>
 	{
@@ -167,7 +156,6 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The tables' versions are the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		GrassArgsPrepared Prepare(const GrassArgsBindings&, const org::PassPrepareContext& a_preparation) const
@@ -180,12 +168,11 @@ namespace DCLF::Draws
 			auto& constants = prepared.constants;
 			constants.mode = mode;
 			constants.drawSlots = static_cast<std::uint32_t>(buckets * GrassInstances::kTiers);
-			// Dispatched for the buckets the version holds; the shader stops at the draw row's bucket slots.
+			// Dispatched for capacity. The shader stops at the live bucket count.
 			prepared.groups = (constants.drawSlots + Features::Grass::kGrassArgsGroup - 1) / Features::Grass::kGrassArgsGroup;
 			return prepared;
 		}
 
-		// The dispatch.
 		static void Record(const GrassArgsBindings& a_bindings, const GrassArgsPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
 			if (!a_frame.program || !a_frame.groups)
@@ -217,7 +204,7 @@ namespace DCLF::Draws
 		std::shared_ptr<Features::Grass::GrassCounts> counts;
 	};
 
-	/** @brief Copies grass's draws header to the frame slot's host buffer once both phases are done, first summing what the slot held. */
+	/** @brief Sums the slot's previous readback, then copies this frame's draws header into it. */
 	class GrassReadbackPass final : public org::TypedRenderGraphPass<GrassReadbackPass, GrassReadbackPrepared, GrassReadbackBindings>
 	{
 	public:
@@ -260,7 +247,7 @@ namespace DCLF::Draws
 			if (!a_frame.counts)
 				return;
 			auto& counts = *a_frame.counts;
-			// The run's range: a published copy's (its lease retired before it recorded again, so the range's last copy is done).
+			// The range's lease retires before it records again, so its last copy has finished.
 			const std::uint32_t slot = counts.ranges.Of(a_recording.Run());
 			if (slot >= counts.readback.size())
 				return;
@@ -289,7 +276,6 @@ namespace DCLF::Features::Grass
 {
 	namespace
 	{
-		// The passes' states: the programs and the counts' readbacks, as the tables' setup made them (fixed with the scene's tables).
 		std::shared_ptr<const void> TablesSetup(const Api::PassSetup& a_setup)
 		{
 			return SharedTablesOf(a_setup.scene);
@@ -305,7 +291,7 @@ namespace DCLF::Features::Grass
 
 		std::shared_ptr<org::RenderPass> MakeCullPhaseOne(const Api::PassContext& a_context)
 		{
-			if (a_context.Interior())  // no grass in an interior: its passes are left out
+			if (a_context.Interior())  // interiors have no grass
 				return nullptr;
 			return std::make_shared<Draws::GrassCullPass>(a_context.Main(), a_context.State<GrassTables>(), 1, a_context.segment);
 		}
@@ -317,7 +303,7 @@ namespace DCLF::Features::Grass
 			return std::make_shared<Draws::GrassArgsPass>(a_context.State<GrassTables>(), kArgsPhaseOne);
 		}
 
-		// Phase 2's retest and its draws' arguments only with the HZB rebuilt this frame (the depth epoch's phase 2 block).
+		// Phase 2 exists only when the HZB is rebuilt this frame.
 		std::shared_ptr<org::RenderPass> MakeCullPhaseTwo(const Api::PassContext& a_context)
 		{
 			if (a_context.Interior())
@@ -336,7 +322,7 @@ namespace DCLF::Features::Grass
 			return std::make_shared<Draws::GrassArgsPass>(a_context.State<GrassTables>(), kArgsPhaseTwo);
 		}
 
-		// The colour draws' arguments, always (they zero the counts the next frame's cull appends with).
+		// Always runs, because it zeroes the counts the next frame's cull appends to.
 		std::shared_ptr<org::RenderPass> MakeArgsColour(const Api::PassContext& a_context)
 		{
 			if (a_context.Interior())
@@ -354,8 +340,6 @@ namespace DCLF::Features::Grass
 
 	void RegisterPasses(Api::InstallContext& a_context)
 	{
-		// Phase 1's lists and arguments before the depth draw; phase 2's retest against the HZB rebuilt this frame and its arguments; the
-		// colour draws' arguments once both phases are done; the header's counts read back.
 		a_context.RegisterPass({ .key = "grass.cull", .passName = "cs.dclf.z.grass-cull", .make = &MakeCullPhaseOne, .setup = &TablesSetup, .cpuPipeline = true });
 		a_context.RegisterPass({ .key = "grass.args", .passName = "cs.dclf.z.grass-args", .make = &MakeArgsPhaseOne, .setup = &TablesSetup, .cpuPipeline = true });
 		a_context.RegisterPass({ .key = "grass.cull-phase2", .passName = "cs.dclf.grass-cull-phase2", .make = &MakeCullPhaseTwo, .setup = &TablesSetup });

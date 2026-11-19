@@ -1,7 +1,5 @@
-// The first-person view's two epochs (their passes are Core's, ViewEpochRecord.cpp's): the depth epoch committed into the depth commit,
-// inside the depth epoch, which hosts its passes (Schedule/Frame.cpp: no epoch of their own), and the colour epoch at
-// Main::RenderFirstPersonView's accumulator render, on the view engine's inputs and submission; and the view's report lines. Render thread
-// (the report: wherever the draws' async work is composed).
+// The first-person view's two epochs and its report lines. The depth epoch has no epoch of its own. Its passes run
+// inside the main depth commit. The colour epoch runs at Main::RenderFirstPersonView's accumulator render. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPersonView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -21,23 +19,14 @@ namespace DCLF::Features::FirstPerson
 {
 	namespace
 	{
-		// The engine's first-person globals (AE 1.6.1170 and SE 1.5.97; skyrim-engine-notes.md, "The first-person view").
-		// DrawWorld (FUN_1414cafd0), filled by FUN_1406452c0 (Main::Draw's first call, before BeginSceneFrame): +0x00 the camera position
-		// (PlayerCamera::GetFirstPersonNodePosition), in world space.
-		// The first-person camera (an NiCamera*), set up by FUN_1414cb020 (FUN_140d2cda0: FOV firstPersonFOV + 0x14338c628, near the float at
-		// 0x14202a928, far the world scene graph's GetFarDistance, the screen's aspect; the world camera's rotation), translated into the
-		// root's space (its position minus the root's).
+		// The engine's first-person NiCamera, set up by FUN_1414cb020. Its translation is in the root's space, not world space.
 		constexpr Engine::Offset kFirstPersonCamera{ { 415007 }, { 528062 } };
-		// The viewport depth range both first-person passes set (FUN_140e57cb0(state, 0, max)): f1stPersonFarDepthRange, or
-		// f1stPersonFarDepthRangeControlDriven with RenderDepth's and FUN_1414cb6d0's second argument (the movement controller's vfunc 0x78).
+		// f1stPersonFarDepthRange and its ControlDriven variant, picked by RenderDepth's second argument.
 		constexpr Engine::Offset kFarDepthRange{ { 388994 }, { 512174 } }, kFarDepthRangeControlDriven{ { 388997 }, { 512176 } };
 
 		using ViewSubmit = IndirectDraws::ViewSubmit;
 
-		/**
-		 * @brief VS_PerFrame (b12) for the first-person camera as FUN_1414cb020 set it up: its frustum and rotation, and its position in
-		 * world space (DrawWorld +0x00: its translation is in the root's space here). False without the camera.
-		 */
+		// Builds VS_PerFrame (b12) for the first-person camera. The eye comes from DrawWorld +0x00, which is in world space.
 		bool CaptureCamera(FirstPersonFrame& a_f)
 		{
 			auto& f = a_f;
@@ -48,11 +37,9 @@ namespace DCLF::Features::FirstPerson
 			ShadowCameras::Camera view;
 			ShadowCameras::CameraMatrices(*camera, view);
 			const RE::NiPoint3 eye{ eyeWorld[0], eyeWorld[1], eyeWorld[2] };
-			// The rows are world space (FrameValues samples them before the first-person shift): CameraPosAdjust is the world eye, not the
-			// first-person camera's root-space translate.
+			// The rows were sampled before the first-person shift, so the eye must be the world eye too.
 			view.eye = { eye.x, eye.y, eye.z };
-			// VS_PerFrame (b12) for the camera, as the engine's SetCameraData builds it for the first-person draws (the accumulator renders'
-			// flags 3 and 0x43: jittered), over the renderer's last block; the motion vectors' previous camera last frame's, its own on the first.
+			// Jittered, like the engine's first-person draws. On the first frame the previous camera is the current one.
 			const Draws::PreviousCamera current{ view.viewProj, eye };
 			f.perFrame.fill(std::byte{ 0 });
 			Draws::PerFrameBlock(view, Draws::FrameBlockNow(), true, f.havePrevious ? &f.previous : &current, f.perFrame.data());
@@ -66,8 +53,7 @@ namespace DCLF::Features::FirstPerson
 
 	void TakeDepthRange(bool a_controlDriven)
 	{
-		// The engine's depth range for the frame (a revision input: the shapes' viewport; a change posts the revision inputs, outside any
-		// epoch's execution), by RenderDepth's second argument.
+		// The depth range is a revision input. Setting it here keeps the change outside any epoch's execution.
 		auto& draws = IndirectDraws::Get();
 		if (draws.ViewState(kView))
 			draws.SetViewDepthRange(kView, *REL::Relocation<float*>{ REL::Offset(a_controlDriven ? kFarDepthRangeControlDriven : kFarDepthRange) });
@@ -82,7 +68,6 @@ namespace DCLF::Features::FirstPerson
 		auto& f = FrameState();
 		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
 		auto skip = [&](std::uint32_t a_cause) { ++f.skipped[a_cause]; };
-		// The shape's depth range is the revision's (TakeDepthRange, at RenderDepth's first-person draw: a change reaches a later revision).
 		if (!Extensions::ViewOn(ActiveToggles(), kView) || !f.latch || f.latchFrame != frameNumber)
 			return skip(0);
 		const auto set = Scene::FrameView::Get().FrameClaims();
@@ -90,13 +75,10 @@ namespace DCLF::Features::FirstPerson
 			return skip(0);
 		if (!draws.ViewCovered(kView))
 			return skip(1);
-		// The first-person camera as Main::Draw set it up for the frame, before RenderDepth: already this frame's at the depth commit.
+		// Main::Draw sets the camera up before RenderDepth, so it is already this frame's here.
 		if (!CaptureCamera(f))
 			return skip(2);
-		// What the epoch draws from: the frame's scene list (the installed payload) with this frame's depth commit's index pool, inputs, object
-		// records and geometry rows - the frame's publication whole - committed into that commit (the depth epoch hosts the epoch's
-		// passes: its cull, its depth draw after the HZB and both phases' depth, its forward range's sort). Outside it (the depth epoch
-		// did not commit) nothing is drawn: NoRevision.
+		// The passes are committed into the main depth commit. If that did not commit, nothing is drawn.
 		IndirectDraws::ViewListed listed;
 		switch (draws.TakeViewInputs(kView, IndirectDraws::ViewInputsFrom::DepthThisFrame, listed)) {
 		case IndirectDraws::ViewInputsTaken::Stale:
@@ -133,8 +115,7 @@ namespace DCLF::Features::FirstPerson
 		auto skip = [&](std::uint32_t a_cause) { ++f.skipped[a_cause]; };
 		if (!Extensions::ViewOn(ActiveToggles(), kView) || !f.latch || f.latchFrame != frameNumber || !draws.ViewCovered(kView))
 			return;
-		// What it draws is what this frame's depth epoch culled (its sequences and bucket counts), with this frame's colour commit's frame
-		// constants (the frame record, the lighting at PS b13).
+		// The colour epoch draws what this frame's depth epoch culled.
 		if (f.depthFrame != frameNumber)
 			return skip(6);
 		IndirectDraws::ViewListed listed;
@@ -172,7 +153,6 @@ namespace DCLF::Features::FirstPerson
 			on ? "on" : "off", f.frames, f.latched, f.depthEpochs, f.colourEpochs, s[0], s[1], s[2], s[3], s[4], s[5], s[5] ? " <- EPOCH FAILED" : "", s[6],
 			s[6] ? " <- NO DEPTH EPOCH" : "", static_cast<int>(state->targets.colour), static_cast<int>(state->targets.colour2), static_cast<int>(state->targets.depth), f.slots,
 			f.pipelinesReady, draws.ViewDepthRange(kView));
-		// The palette rows classes' first-person writes (Features/Particles' particle members), counted by Core's FrameValues.
 		const auto particles = FrameValues::TakeFirstPersonPaletteStats();
 		text += fmt::format("[DCLF] first person's forward part (T7e): {:.1f} forward members a frame (blended Lighting, effects, particles; the main set's pipelines "
 							"through their state classes' colour signatures, sorted back to front); particle members: {} expansions of {} particles faced to the first-person eye, "
@@ -180,8 +160,7 @@ namespace DCLF::Features::FirstPerson
 			f.frames ? static_cast<double>(f.forwardMembers) / static_cast<double>(f.frames) : 0.0, particles.writes, particles.units, particles.farthest,
 			particles.farthest > 2000.0f ? " <- FIRST-PERSON PARTICLE SPACE" : "",
 			state->forwardCompatible.load(std::memory_order_acquire) ? "" : "; the main depth format is not kPOST_ZPREPASS_COPY's: forward members stay the engine's");
-		// The <- FIRST PERSON observer (CS_DCLF_SET_PARITY; PassCapture): the engine's first-person registrations of members, withheld, and
-		// those it was handed (a member registered while its epochs did not draw: 0 on every covered frame).
+		// memberKept counts members the engine drew itself. It should be 0 on every covered frame.
 		if (Diagnostics::Observe().claims || counts.memberKept)
 			text += fmt::format("[DCLF] first person's registrations (T7e, the first-person accumulator and RenderDepth's block): {} passes registered into the "
 								"first-person accumulator, {} member passes withheld, {} member passes the engine drew{}\n",

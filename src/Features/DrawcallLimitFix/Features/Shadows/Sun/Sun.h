@@ -1,40 +1,20 @@
 #pragma once
 
-// Shadows/Sun: the sun's shadow views, drawn by the shadow epoch (Features/Shadows/Engine, DEPENDS). The feature registers the Sun source (Api::ShadowSourceContribution,
-// Api/ShadowViews.h: the directional views draw while it is registered) and its source hooks: the accumulation's (SunAccumulation.h:
-// Accumulate, its cascade culls and registrations, the full-frustum cull, and the entry exclusion; it reads the board after its
-// bitsReady), then its camera hook (SunViews: BSShadowDirectionalLight::UpdateCamera, which writes the sun's cascades and full-frustum
-// planes into the feature's board, SunBoard, from the cameras it set up). Core reads the board through the source's camera (the shadow
-// views' capture) and the sun volume (Api::SunVolumeContribution, Api/SunVolume.h: the colour commits' cascades and the shadow inputs'
-// full-frustum planes); Features/Actors' actor rate reads it directly (DEPENDS).
-// The registration thunk also does the main registration's work for others: Core's (PrimaryCull's owned masks) and Features/Shadows/Local's
-// (the point lights' bits, LocalLightCull::NoteMainRegistration, a static call per main registration: so this feature DEPENDS on
-// Shadows/Local and is listed after it). Without this feature the point lights' culls stay off (LocalLightCull's install warns, at the
-// Point source's hooks), as when the call sites fail their check.
-// The exclusion it applies is Features/Shadows/Local's (SunExclusionSlot, over Core's EntrySpace; built by its ExclusionBuild, one build for
-// the sun's and the paraboloids', handed back by the shadow epoch through the exclusion contribution's publish, forwarded by its frameStart).
-// Its report lines are the accumulation's and the entry exclusion's (Api::ReportPoint::RenderThread), and its parity is its own
-// (Diagnostics/): the sun views' line, the accumulation's cascades against the cascade culls' and the entry rule's planes against the
-// full-frustum processes', under CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY, and the exclusion's watch (SunCasters) under
-// CS_DCLF_PERSISTENT_PARITY.
-//
-// Core keeps the shadow engine's scene side: the shadow epoch's commit and its capability and captures, the views list and the camera math
-// (Core/Render/Shadow/ShadowCameras.h), the views' tallies the shadow epochs' checks fill (Diagnostics::ShadowViewTally), the caster
-// phases, view bits and modes, and the shadows' toggle. The source owns no phase or view bit, and no switch or toggle: the
-// accumulation's skip and the entry exclusion are always on while DCLF draws the shadows. Included by the feature's sources only.
+// Shadows/Sun: the sun's shadow views, drawn by the shadow epoch. Registers the Sun source with its accumulation hooks
+// (SunAccumulation.h) and camera hook (SunViews.h), which records the cascades and full-frustum planes into the board.
+// The registration thunk also does main-registration work for Core and for Shadows/Local's point-light bits, so this feature depends
+// on Shadows/Local. Without it the point lights' culls stay off. The exclusion it applies is built by Shadows/Local.
+// The accumulation skip and entry exclusion are always on while DCLF draws the shadows. Included by the feature's sources only.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 namespace DCLF::Features::Shadows::Sun
 {
-	// SunFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 
-	// Diagnostics/SunViewParity.cpp, SunEntryPlanesParity.cpp: CS_DCLF_SET_PARITY's or CS_DCLF_PERSISTENT_PARITY's observers, subscribed
-	// by the feature's install.
+	// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY observers, subscribed at install.
 	void SubscribeSunViewParity();
 	void SubscribeSunEntryPlanesParity();
 
-	// Diagnostics/SunAccumulationReport.cpp: the accumulation's and the entry exclusion's lines (Api::ReportPoint::RenderThread).
 	void SunAccumulationLines(std::uint32_t a_frame);
 }

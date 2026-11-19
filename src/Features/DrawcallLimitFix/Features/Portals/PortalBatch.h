@@ -31,7 +31,7 @@ namespace DCLF::Features::Portals
 		std::shared_ptr<org::Buffer> dispatch;
 		std::array<std::shared_ptr<const ComputeProgram>, 9> programs;  // Clear .. Evaluate, then Inline
 		rhi::CommandSignaturePtr signature;
-		// Inline (the default; CS_DCLF_PORTAL_EVALUATOR=batched: off): no count, scan or scatter; one Inline dispatch over the queries.
+		// Inline is the default (CS_DCLF_PORTAL_EVALUATOR=batched turns it off): one dispatch over the queries.
 		bool inlineEvaluation = false;
 		// CS_DCLF_PORTAL_TRACE (inline only): each query's decision trace into the task buffer, by query (PortalPrograms.hlsli).
 		bool trace = false;
@@ -42,8 +42,7 @@ namespace DCLF::Features::Portals
 	/** @brief Register a batch under the same unique prefix used for its resource names. */
 	void RegisterBatch(org::RenderGraph& a_graph, const Batch& a_batch);
 	/**
-	 * @brief Shared count/scan/scatter or evaluation pass over its owner's query storage; the programs are the depth latch's publication.
-	 * An inline batch has no count/scan/scatter pass (null) and evaluates in one dispatch.
+	 * @brief The shared pass over its owner's queries. An inline batch has no count, scan or scatter pass and evaluates in one dispatch.
 	 */
 	std::shared_ptr<org::RenderPass> MakeBatchPass(std::shared_ptr<Draws::Resources> a_resources, std::shared_ptr<const Batch> a_batch,
 		RenderGraphRuntime::Segment a_segment, bool a_evaluate);

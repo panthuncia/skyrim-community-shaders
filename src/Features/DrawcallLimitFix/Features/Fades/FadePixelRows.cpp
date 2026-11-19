@@ -1,9 +1,6 @@
-// The frame's object rows (Common/DCLFObjects.hlsli, DCLFPixelObjectRow): every object slot's pixel-stage values, MaterialData with its LOD
-// fades and alpha fade, EmitColor and SSRParams.w, the cross-fade copy's alpha and the alpha test's reference, which Lighting.hlsl's pixel
-// stages computed per pixel from the object's rows, its fade node's LOD metric and its fade root's state, though they are the draw's. A
-// frame value pool the GPU alone writes ("pixel-rows", a row an object slot as the frame's shading rows hold), PixelRowsCS once a frame
-// first in the depth segment (fades.pixel-rows, after the latched copies, which put the frame record and constants it reads in place), the
-// pixel stages' t116 (a frame binding, kPixelObjectsRegister).
+// Per-object pixel-stage values (DCLFPixelObjectRow), such as material fades, EmitColor and the alpha test reference.
+// Lighting.hlsl used to compute these per pixel although they are constant per draw.
+// PixelRowsCS writes one row per object slot once a frame, first in the depth segment. Pixel shaders read them at t116.
 
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -35,8 +32,6 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		// PixelRowsCS.hlsl: the latch's frame rows (BuildDrawsLatch::frameRows), the frame record's texture registers and the frame's
-		// LodFadeFrame. Its threads stride over the rows.
 		constexpr const char* kPixelRowsShader = "DrawcallLimitFix/Features/Fades/PixelRowsCS.hlsl";
 		struct PixelRowsConstants
 		{
@@ -47,37 +42,32 @@ namespace DCLF::Draws
 		};
 		static_assert(sizeof(PixelRowsConstants) == 32);
 		constexpr std::uint32_t kPixelRowsConstantWords = sizeof(PixelRowsConstants) / 4;
-		constexpr std::uint32_t kPixelRowsGroups = 64;  // of PixelRowsCS's 64 threads
+		constexpr std::uint32_t kPixelRowsGroups = 64;  // groups of 64 threads that stride over the rows
 		constexpr std::uint32_t kPixelObjectRowBytes = 48;  // sizeof(DCLFPixelObjectRow)
 	}
 
 	struct PixelRowsBindings
 	{
-		RenderGraph::DeclaredRefs rows;  // the pixel rows pool it writes, with the ref its latch's frame rows carry
+		RenderGraph::DeclaredRefs rows;
 	};
 
 	struct PixelRowsPrepared
 	{
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
-		RenderGraph::BufferRef frameConstants;  // Resources::frameConstantsRef
-		// The full barriers before and after: an external epoch's execution (GraphConditions::cpuPipeline) has its own at its entry
-		// and exit, and no pass of it reads the rows.
+		RenderGraph::BufferRef frameConstants;
+		// A CPU-pipeline epoch has its own barriers at entry and exit, so these are skipped there.
 		bool outerBarriers = true;
 	};
 
 	/**
-	 * @brief The frame's object rows (PixelRowsCS.hlsl), first in the depth segment after the latched copies: every row of the latch's
-	 * backing written before any of the frame's draws reads it. It declares the pool written (FrameValues::DeclarePoolWrite) and the
-	 * draws declare it read; it still orders itself as the texture transforms' does, for guest mode's epochs: full memory barriers
-	 * before (the earlier frames' draws reading a backing the pool hands this frame again) and after (this frame's draws), on the
-	 * graphics queue the draws run on; it reads the frame constants
-	 * (after the latched copies) and declares the sequences as written (no view), which keeps it before the depth build and its draws.
+	 * @brief Writes every pixel row before any draw of the frame reads it.
+	 * Full memory barriers on both sides keep guest-mode epochs ordered, because the pool's backing is reused across frames.
+	 * Declaring the sequences as written keeps the pass before the depth build.
 	 */
 	class PixelRowsPass final : public org::TypedRenderGraphPass<PixelRowsPass, PixelRowsPrepared, PixelRowsBindings>
 	{
 	public:
-		// a_pool: the pixel rows' frame value pool, which the latch's frame rows name (PixelFrameRows).
 		PixelRowsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment,
 			Api::FrameValuePoolId a_pool) :
 			resources(std::move(a_resources)), program(std::move(a_program)), segment(a_segment), pool(a_pool),
@@ -90,14 +80,11 @@ namespace DCLF::Draws
 			const std::span<const org::UavView> noViews{};
 			(void)a_builder.ShaderResource(resources->frameConstants, noReads);
 			(void)a_builder.UnorderedAccess(*resources->sequences, noViews);
-			// The frame record's placements (t123), shading rows (t121) and pools: the fade seeds (t117), the CPU fade states (t120 in a
-			// CPU-pipeline frame) read, and the pixel rows it writes through the latch's frame rows (a buffer view ref).
 			PixelRowsBindings bindings;
 			FrameValues::Get().DeclarePoolWrite(a_builder, pool, FrameValues::kReadPlacements | FrameValues::kReadShading | FrameValues::kReadPools, bindings.rows);
 			return bindings;
 		}
 
-		// The shape (and whether it builds draws) is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(resources->frameConstantsAddress); }
 
 		PixelRowsPrepared Prepare(const PixelRowsBindings& a_bindings, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
@@ -105,7 +92,6 @@ namespace DCLF::Draws
 			const auto frame = CurrentFrame(a_preparation, segment);
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return {};
-			// The commit latched the pool's ref (PixelFrameRows). Phase 4 writes the frame rows here from the declaration instead.
 			RenderGraph::CheckDeclaredRefs(a_bindings.rows, a_preparation, "cs.dclf.z.pixel-rows");
 			return { program, frame->latch, resources->frameConstantsRef, outerBarriers };
 		}
@@ -115,14 +101,12 @@ namespace DCLF::Draws
 			RecordRows(a_recording.Commands(), a_frame, a_recording.Run());
 		}
 
-		// The barriers and the dispatch, from the latch's region of a_run.
 		static void RecordRows(rhi::CommandList& a_commands, const PixelRowsPrepared& a_frame, const org::RunRef& a_run)
 		{
 			if (!a_frame.program || !a_frame.latch || !a_frame.frameConstants)
 				return;
-			// The record's texture registers and LodFadeFrame, by buffer view ref: only this pass's shader reads these words.
 			const RenderGraph::BufferRef textures = a_frame.frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes + offsetof(DrawBindings, textures);
-			const RenderGraph::BufferRef lodFadeFrame = a_frame.frameConstants + LodFadeFrameAddress(0);  // its offset in the frame constants
+			const RenderGraph::BufferRef lodFadeFrame = a_frame.frameConstants + LodFadeFrameAddress(0);
 			PixelRowsConstants constants{};
 			SetLatchWords(constants, *a_frame.latch, a_run);
 			constants.recordTexturesLo = textures.viewSlot;
@@ -145,7 +129,7 @@ namespace DCLF::Draws
 		std::shared_ptr<const ComputeProgram> program;
 		RenderGraphRuntime::Segment segment;
 		Api::FrameValuePoolId pool;
-		bool outerBarriers = true;  // the graph's conditions at its build
+		bool outerBarriers = true;  // fixed at graph build
 	};
 }
 
@@ -153,11 +137,10 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		Api::FrameValuePoolId pixelRowsPool;  // install
-		std::uint32_t kickedRows = 0;  // render thread: the pool's last kick's rows
+		Api::FrameValuePoolId pixelRowsPool;
+		std::uint32_t kickedRows = 0;  // render thread
 
-		// A row an object slot the frame's shading rows hold. Nothing is sampled or sent: PixelRowsCS writes every row before the frame's
-		// draws read any.
+		// Nothing is sampled or sent, because only the GPU writes these rows.
 		Api::FrameValueInput PixelRowsKick(const Api::FrameValuePoolKick& a_kick)
 		{
 			DCLF_ZONE("CS.DCLF.FV.Kick.PixelRows");
@@ -167,14 +150,12 @@ namespace DCLF::Features::Fades
 		void PixelRowsSample(Api::FrameValuePoolProducer&) {}
 		void PixelRowsSend(Api::FrameValuePoolProducer&) {}
 
-		// t116: the frame's backing (a frame value pool's: only a frame record's commit names it).
 		void SelectPixelRowsBinding(Api::FrameBindingSelect& a_select)
 		{
 			if (a_select.renderThread)
 				a_select.index = FrameValues::Get().PoolIndex(pixelRowsPool);
 		}
 
-		// The latches' frame rows (Api::PassDef::frameRows): the frame's backing (none before the program: the pass writes nothing).
 		Api::FrameRows PixelFrameRows()
 		{
 			const auto& values = FrameValues::Get();
@@ -200,7 +181,7 @@ namespace DCLF::Features::Fades
 	void RegisterPixelRows(Api::InstallContext& a_context)
 	{
 		pixelRowsPool = a_context.RegisterFrameValuePool({ .name = "pixel-rows", .stride = Draws::kPixelObjectRowBytes, .deviceAddress = true,
-			.unorderedAccess = true,  // PixelRowsCS stores the rows: on D3D12 a buffer view ref's UAV is a null view without it
+			.unorderedAccess = true,  // without it, a buffer view ref's UAV is a null view on D3D12
 			.kick = &PixelRowsKick,
 			.sample = &PixelRowsSample, .send = &PixelRowsSend });
 		a_context.RegisterFrameBinding({ .name = "object rows SRV", .textureRegister = kPixelObjectsRegister, .select = &SelectPixelRowsBinding });

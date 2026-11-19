@@ -1,5 +1,5 @@
-// The shadow mask family's render graph side: a client per view at the EngineDraws anchor, made once, whose pass draws a batch's latched
-// draws into kSHADOW_MASK in the engine's order with CS's Utility.hlsl built for ORG (its shadow mask techniques).
+// The shadow mask family's render graph side. One client per view at the EngineDraws anchor draws a batch's latched draws into
+// kSHADOW_MASK in engine order with CS's Utility.hlsl.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -51,24 +51,20 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		};
 		static_assert(sizeof(ShadowMaskBlock) == 24, "Utility.hlsl's ORG push block is 24 bytes");
 
-		/** @brief A client's state, which its pass shares. */
 		struct Client
 		{
 			Shape shape;
 			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
-			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
-			// the anchor that another client keeps draws nothing of this client's older run.
+			// Only this client's commit opens the gate, so a run another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			// kSHADOW_MASK as last imported (Target). A new texture of the same format is the slot's next version; another format is a
-			// new slot, taken at the next batch (CanTake) and declared from the next build.
+			// A new texture of the same format is the slot's next version. Another format is a new slot, taken at the next batch.
 			FrameAnchors::Texture target;
 			mutable std::mutex targetMutex;  // the render thread replaces target, a build reads it
-			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
+			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Render thread writes, the host's thread reads.
+			// Written by the render thread, read by the host's thread.
 			std::shared_ptr<const Run> run;
-			// Each run's draws, stored by the commit for the pass recorded at execution (a frame input).
 			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 
@@ -93,7 +89,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			std::shared_ptr<const Client> client;
 		};
 
-		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
+		/** @brief Records a run's draws in engine order. */
 		class ShadowMaskPass final : public org::TypedRenderGraphPass<ShadowMaskPass, Frame, Bindings>
 		{
 		public:
@@ -105,14 +101,12 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
 				bindings.target = a_builder.RenderTarget(client->Target()).View();
-				// The published inputs, each with the view whose index the draws' latches carry. Every registered one is declared, read
-				// this frame or not, so a new Publish needs no new client.
+				// Every registered input is declared, read this frame or not, so a new Publish needs no new client.
 				bindings.inputs = client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
-			// The run's draws (their programs and viewports). Recorded at execution, the pass reads the run its commit stored when it records:
-			// a recording made ahead stays current when the draws change.
+			// The pass reads the run at execution, so a kept recording stays current when the draws change.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				if (atExecution)
@@ -127,7 +121,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
 			}
 
-			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.client)
@@ -162,7 +156,6 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3], .minDepth = draw.viewport.depthRange[0], .maxDepth = draw.viewport.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
 												  .debugName = "ShadowMask",
-												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
 												  .indirect = &c.gate->Latch(),
 												  .indirectOffset = c.gate->Offset(i) });
 				}
@@ -173,23 +166,18 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
-		/**
-		 * @brief The shadow mask programs a Utility pixel descriptor CS loads can be drawn with: those with a RenderShadowmask* technique
-		 * bit and RenderDepth (the world's and the menu scenes' masks: shadow-mask.md, "The shader"). Every other Utility descriptor is DCLF's or the
-		 * engine's.
-		 */
+		/** @brief The shadow mask programs a Utility pixel descriptor can be drawn with: a RenderShadowmask* bit plus RenderDepth. */
 		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
 			using Flags = SIE::ShaderCache::UtilityShaderFlags;
 			constexpr auto kMasks = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
 			                        static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb);
-			// Utility.hlsl's ORG build is RENDER_DEPTH with a RENDER_SHADOWMASK* technique only (its #error): a descriptor with a mask bit
-			// but no RenderDepth is another technique whose bits overlap (the legacy layouts), which the family never draws.
+			// A mask bit without RenderDepth is another technique whose bits overlap in the legacy layouts. The family never draws it.
 			if (a_pixel && (a_descriptor & kMasks) && (a_descriptor & static_cast<std::uint32_t>(Flags::RenderDepth)))
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Pixel });
 		}
 
-		/** @brief Everything here: the render thread's. */
+		/** @brief Render-thread state. */
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
@@ -210,11 +198,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		}
 
 		/**
-		 * @brief Every published id a view's draws can read, listed when its client is made at setup: the engine depths the slots hold
-		 * (shadow-mask.md, "The shader": the scene depth at t2, the light's shadow maps at t3 and t4), imported now so the first build
-		 * declares them, and what the ported features publish as the scene depth. Terrain Blending binds its blended depth at t2
-		 * ("TerrainBlending::BlendedDepth", R32) and lists its 16-bit copy in DCLF's registry at t17. An export of an id not listed here
-		 * is an inherent refusal, logged once with the id: add the id here.
+		 * @brief Every published id a view's draws can read, listed at setup. Terrain Blending binds its R32 blended depth at t2.
+		 * Exporting an id not listed here is refused and logged once. Add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
@@ -227,7 +212,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			a_inputs.Add(Family::RegisteredIdsAt(kSceneDepthRegister));
 		}
 
-		/** @brief The client of a_shape's view, registered with the anchor for a_shape. Null, logged, when the target cannot be imported. */
+		/** @brief Makes the client for a_shape's view. Null, logged, when the target cannot be imported. */
 		std::shared_ptr<Client> MakeClient(const Shape& a_shape)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -260,7 +245,6 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				.make = [client]() -> std::shared_ptr<org::RenderPass> {
 					return std::make_shared<ShadowMaskPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
-				// The run's draws are known after its commit (a frame input): recorded then.
 				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
@@ -268,7 +252,6 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				// For the pass recorded at execution, by this run (null: nothing drawn).
 				client->runs.Store(latchRun, run);
 				if (!run)
 					return;
@@ -284,21 +267,19 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 					logger::info("[DCLF] shadow mask: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			// A step of its stage only (pre-main for the world's, the UI stage for a menu scene's): a batch outside its stage's window is a
-			// tap error (CanTake).
+			// A step of its stage only. A batch outside the stage's window is a tap error.
 			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] shadow mask: the {} client could not be registered; those shadow masks stay the engine's", client->id);
 				return nullptr;
 			}
-			// Register asked for the builds that hold the client: its stage's in native mode, the anchor's own graph in guest mode.
 			const auto late = client->inputs.Unregistered();
 			logger::info("[DCLF] shadow mask: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
 				late.empty() ? std::string() : std::format("; not published yet: {}", late));
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: its draws' programs and viewports (the latched values and counts are not). */
+		/** @brief What a run's recording depends on: its draws' programs and viewports. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -359,9 +340,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
 		if (!client)
 			return false;
-		// kSHADOW_MASK made again at another size is the slot's next version (FrameAnchors rebuilds what took its size). Another format
-		// is a new slot: the client takes it and is built again with it (the import already asked every graph holding the old slot to be
-		// built again), and its batches wait for that build's attach below.
+		// kSHADOW_MASK remade at another size is the slot's next version. Another format is a new slot, so the client is built again
+		// with it and its batches wait for that build.
 		if (auto current = FrameAnchors::EngineTarget(kShadowMaskTarget); current && current != client->Target()) {
 			{
 				std::scoped_lock lock(client->targetMutex);

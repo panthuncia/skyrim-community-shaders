@@ -1,9 +1,7 @@
 #pragma once
 
-// Object LOD's segment events (dclf-architecture.md, "Object LOD: segments"): the writers' hooks and the channel's queue (LodSegmentHooks.cpp), the
-// engine channel, its coordinator component and report line (LodSegmentChannel.cpp), and the parity (Diagnostics/LodSegmentParity.cpp).
-// The drawn ranges themselves are Core's (Api::CoordinatorComponentContext::EntryRanges: the attach's capture, the walk's range slots);
-// the component keeps them up to date as the writers name the shapes. Included by the feature's sources only.
+// Object LOD's segment events. Hooks on the engine's segment writers name each changed shape, and a coordinator
+// component samples its drawn ranges again. Core owns the ranges. See dclf-architecture.md, "Object LOD: segments".
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
@@ -13,44 +11,36 @@
 
 namespace DCLF::Features::Lod
 {
-	/** @brief The component's state (scene lane): the events' counters and the parity's, since the last report. */
+	/** @brief Scene lane. Counters since the last report. */
 	struct SegmentState
 	{
 		struct Stats
 		{
 			std::uint64_t events = 0, changed = 0;
 		} stats;
-		// CS_DCLF_PERSISTENT_PARITY: the shapes' kept ranges against their live state.
 		struct Parity
 		{
 			std::uint64_t checks = 0, shapes = 0, differ = 0;
 			std::string first;
-			std::uint32_t pass = 0;  // the pass (PassStamp) that ran the check: once a pass
+			std::uint32_t pass = 0;  // the check runs once a pass
 		} parity;
 	};
 
-	// LodSegmentHooks.cpp.
-	/** @brief The feature's early hooks (the shell's Extensions::InstallEarlyHooks): every segment writer's call patched, or none. */
+	/** @brief Patches every segment writer's call, or none. */
 	void InstallSegmentHooks();
-	/** @brief Whether InstallSegmentHooks patched the writers (the report's "events not installed" otherwise). */
 	bool SegmentHooksInstalled();
-	/** @brief The channel's drain (Api::EngineChannel::drain): the scene lane, the queue's one consumer. */
+	/** @brief Scene lane, the queue's only consumer. */
 	std::size_t DrainSegmentEvents(Api::KeySink& a_sink);
 
-	// LodSegmentChannel.cpp.
-	/** @brief Registers the channel, its component and its report line (the feature's install). */
+	/** @brief Registers the channel, its component and its report line. */
 	void RegisterSegmentChannel(Api::InstallContext& a_context);
 
-	/**
-	 * @brief The hook point (Diagnostics::Notify; the scene lane): a pass's segment events applied (the shapes' drawn ranges sampled again),
-	 * every pass that applies a batch.
-	 */
+	/** @brief Notified on the scene lane after a pass applies its segment events. */
 	struct SegmentsApplied
 	{
 		const Api::CoordinatorComponentContext& context;
 	};
 
-	// Diagnostics/LodSegmentParity.cpp.
-	/** @brief CS_DCLF_PERSISTENT_PARITY (Diagnostics::Observe().scene): the parity's observer. */
+	/** @brief Checks the kept ranges against the live ones under CS_DCLF_PERSISTENT_PARITY. */
 	void SubscribeSegmentParity();
 }

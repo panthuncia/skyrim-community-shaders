@@ -1,8 +1,6 @@
 #pragma once
 
-// Fades' diagnostics, registered by RegisterDiagnostics (FadeDiagnostics.cpp): the report lines (FadeLines.cpp) and, under
-// CS_DCLF_FADE_PARITY (FadeParity), the port check (FadePortParity.cpp) and FadeStateCS's log (FadeLog.cpp). Included
-// by the feature's diagnostics sources only.
+// Fades' diagnostics: report lines, plus the port check and FadeStateCS's log under CS_DCLF_FADE_PARITY.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeState.h"
@@ -12,16 +10,15 @@
 
 namespace DCLF::Features::Fades
 {
-	/** @brief FadeLines.cpp: the fade port's line (PrimaryCullParity), the fade roots' (PrimaryCullLast), the write-back's and the writers' (AsyncWorkWriteBack). */
 	void RegisterReport(Api::InstallContext& a_context);
 
-	/** @brief FadePortParity.cpp, at install: <- FADE PORT (every 30th frame at the full frustum's end) and the nodes' snapshot (the list jobs' end). */
+	/** @brief Runs the port check and node snapshot every 30th frame. */
 	void SubscribePortParity();
-	/** @brief Render thread: the fade roots' nodes as the list jobs left them in a_frame (null: not taken that frame). */
+	/** @brief Render thread. The fade roots' nodes after the list jobs of a_frame, or null if no snapshot was taken then. */
 	const std::vector<FadeNodeState>* NodeSnapshot(std::uint32_t a_frame);
-	/** @brief Render thread (the report): the port check's counts since the last call. */
+	/** @brief Render thread. The port check's counts since the last call. */
 	FadeState::PortCheck TakePortCheck();
 
-	/** @brief FadeLog.cpp, at install: the log window at the depth commit (Diagnostics::FadeLogWindow), its readback after the depth epoch. */
+	/** @brief Opens the log window at the depth commit and reads it back after the depth epoch. */
 	void SubscribeFadeLog();
 }

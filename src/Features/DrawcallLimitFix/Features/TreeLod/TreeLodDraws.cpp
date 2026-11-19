@@ -1,7 +1,7 @@
-// Tree LOD's draw family (Api::DrawFamily::TreeInstances, dclf-architecture.md, "Tree LOD: the draws"): the mirror's drain, the frame's decision and its program source,
-// and its draws in the main passes (the depth segment's two phases and the colour segment); a trees view's faces are TreeLodFaces.cpp's.
+// Tree LOD's draw family: the mirror's drain, the frame's decision, the program source, and its draws in the main passes.
+// A trees view's faces are in TreeLodFaces.cpp.
 
-// volk must precede every Vulkan header of the translation unit (DrawPipelinesRhi.h's FamilyPipelines).
+// volk must precede every Vulkan header.
 #include <rhi_interop_vulkan.h>
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
@@ -23,21 +23,18 @@ namespace DCLF::Features::TreeLod
 {
 	namespace
 	{
-		// The frame: the mirror is the render thread's (the decision reads it at the frame's start), drained running or not.
+		// The mirror is drained every frame, running or not.
 		void Serve(const Api::DrawFamilyFrame& a_frame)
 		{
 			RenderMirror().Drain(a_frame.frame);
 		}
 
-		// DCLF's while there is something to draw (tables, the mirror's shapes) and, once the pipeline lane has built its pipelines (the
-		// DistantTree shader as input; until the frame's catalog has them the engine draws tree LOD), the atlas it draws with.
+		// DCLF's while there is something to draw, its pipelines are built and the atlas exists. Until then the engine draws tree LOD.
 		bool Decide(const Api::DrawFamilyFrame& a_frame)
 		{
-			// Nothing to draw: the engine's, which has nothing either.
 			if (!RenderMirror().Size())
 				return false;
-			// Something to draw, not ready yet (the tables, the engine's atlas): the family waits, its engine shapes' passes withheld, as
-			// while its pipelines build. Then nobody draws tree LOD for those frames, and a load's hold waits for it.
+			// Not ready yet: the family waits with its engine shapes' passes withheld. Nobody draws tree LOD for those frames, and a load's hold waits.
 			const bool ready = a_frame.scene && TablesOf(*a_frame.scene) && TreeLodAtlasReady();
 			const bool owned = a_frame.Pipelines(ready);
 			if (!ready && a_frame.waits)
@@ -50,15 +47,13 @@ namespace DCLF::Features::TreeLod
 			return Engine::Global<RE::BSShader*>(Address::kDistantTreeShader);
 		}
 
-		// The engine's tree LOD shapes: their shader property is a BSDistantTreeShaderProperty.
 		const void* EngineShapeVtable()
 		{
 			return reinterpret_cast<const void*>(RE::VTABLE_BSDistantTreeShaderProperty[0].address());
 		}
 
-		// DistantTree's descriptors (ShaderCache.h, DistantTreeShaderTechniques and DistantTreeShaderFlags), as the engine's main view draws
-		// tree LOD (BSDistantTreeShader::SetupTechnique): colour Deferred and AlphaTest, depth the Depth technique (bit 0) and AlphaTest; a
-		// view's forward program AlphaTest alone.
+		// DistantTree's descriptors as the engine's main view uses them: colour Deferred and AlphaTest, depth Depth and AlphaTest.
+		// A view's forward program uses AlphaTest alone.
 		using TreeTechnique = SIE::ShaderCache::DistantTreeShaderTechniques;
 		using TreeFlag = SIE::ShaderCache::DistantTreeShaderFlags;
 		constexpr std::uint32_t kTreeAlphaTest = static_cast<std::uint32_t>(TreeFlag::AlphaTest);
@@ -76,10 +71,7 @@ namespace DCLF::Features::TreeLod
 		static_assert(kProgram.descriptors.colour == 0x10100 && kProgram.descriptors.depth == 0x10001 && kProgram.descriptors.forward == 0x10000,
 			"tree LOD's descriptors are not the engine's (Deferred | AlphaTest, Depth | AlphaTest, AlphaTest)");
 
-		/**
-		 * @brief Records tree LOD's draw (dclf-architecture.md, "Tree LOD: the draws"): push data is the draw row's buffer view ref and whether this is phase 2's depth draw;
-		 * arguments come from the list's header (TreeInstances::VisibleHeader).
-		 */
+		/** @brief Records tree LOD's draw. Arguments come from the visible list's header. */
 		void RecordTreeLodDraw(rhi::CommandList& a_commands, const FamilyPipelines& a_pipelines, bool a_colour, bool a_phaseTwo, RenderGraph::BufferRef a_draw,
 			rhi::ResourceHandle a_visible)
 		{
@@ -92,7 +84,6 @@ namespace DCLF::Features::TreeLod
 			a_commands.ExecuteIndirect(a_pipelines.drawSignature, a_visible, arguments, {}, 0, 1);
 		}
 
-		// The main passes: its arguments, the draw row's ref (in its push data) and the tables its vertex stage reads by ref.
 		void MainDeclare(Api::DrawFamilyDeclare& a_declare)
 		{
 			const auto* tables = TablesOf(a_declare.scene);
@@ -107,8 +98,7 @@ namespace DCLF::Features::TreeLod
 			builder.ShaderResource(tables->draw, noViews);
 		}
 
-		// The CPU pipeline's main draw (main.direct): MainDeclare's arguments, the visible list's version the frame adopted
-		// (its header the depth commit latched, its counts the depth site's single-phase cull wrote), and the draw row's ref.
+		// The CPU pipeline's main draw: the visible list's adopted version and the draw row's ref.
 		bool MainDirect(Api::DrawFamilyDirect& a_draw)
 		{
 			const auto* tables = TablesOf(a_draw.scene);
@@ -122,13 +112,12 @@ namespace DCLF::Features::TreeLod
 			return true;
 		}
 
-		// Its pipelines (built late, rebuilt on a target change).
+		// Its pipelines, built late and rebuilt on a target change.
 		void MainRevision(const Api::DrawFamilyRevision& a_revision, std::vector<std::uint64_t>& a_out)
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(a_revision.pipelines.get()));
 		}
 
-		// The depth passes: one instanced draw of the phase's culled records; the colour pass: EQUAL against its Z-prepass draw.
 		void MainRecord(const Api::DrawFamilyRecord& a_record)
 		{
 			RecordTreeLodDraw(a_record.commands, a_record.Drawn<FamilyPipelines>(), a_record.pass == Api::DrawFamilyPass::Colour,

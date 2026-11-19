@@ -1,8 +1,7 @@
-// Grass's scene resources (the Grass family's tables, its cull and arguments programs and counts' readbacks, made with the scene's
-// tables), what they post with the revision's inputs and latch in the depth commit, and the depth commit's uploads into them (the commit
-// hook): the mirror's changes, the buckets' bindings, the draw row with the engine's per-frame grass values.
+// Grass's GPU tables and programs, and the depth commit hook that uploads the mirror's changes and the per-frame draw row into them.
+// The draw row also carries the engine's per-frame grass values (wind, sun, fade), read where BSGrassShader reads them.
 
-// Helpers.h first: volk must precede every Vulkan header of the translation unit.
+// Helpers.h first. volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
@@ -42,24 +41,18 @@ namespace DCLF::Features::Grass
 	{
 		using namespace GrassInstances;
 
-		Api::SceneResourcesId tablesId;  // install
+		Api::SceneResourcesId tablesId;
 
-		// The tables' first capacities (instance, shape, bucket and mesh slots), doubled as the mirror needs.
 		constexpr std::uint32_t kInitialInstances = 256 * 1024, kInitialShapes = 4096, kInitialMeshes = 256;
 
-		/*
-		 * Stage 0's values (reverse-engineered: BSGrassShader::SetupGeometry's and SetupTechnique's): what the engine's grass passes bind
-		 * per frame. The family's write mode is GrassDraws.cpp's kWriteMode.
-		 */
-		// stage 0: the vertex stage's WindTimer is this times the shape's wave period: the shader manager's timer at 0x142033090, scaled
-		// as BSGrassShader::SetupGeometry does (1/600 of a turn).
+		// The values below are reverse-engineered from BSGrassShader::SetupGeometry and SetupTechnique.
+		// The shader multiplies this by the shape's wave period. Timer at 0x142033090, scaled to 1/600 of a turn as the engine does.
 		float WindTimeBase()
 		{
 			return Engine::Global<float>(Address::kWindTimer) * (1.0f / 600.0f) * 6.28318f;
 		}
 
-		// stage 0: WindVector's strength: the grass wind's (clamped to 60) times fWindGrassMultiplier:Display. Its direction, the shape's
-		// model +Y in world space, is the bucket's (BucketRow::windDirection).
+		// Wind strength is the grass wind clamped to 60, times fWindGrassMultiplier:Display. The direction lives in each bucket row.
 		void SampleWind(float (&a_wind)[4])
 		{
 			a_wind[0] = 0.0f;
@@ -68,8 +61,7 @@ namespace DCLF::Features::Grass
 			a_wind[3] = 0.0f;
 		}
 
-		// stage 0: the sun as SetupGeometry reads it: ShadowSceneNode 0's sun light (an NiDirectionalLight): -direction, diffuse, ambient;
-		// ShadowClampValue (fShadowClampValue:Display) and FogNearColor.w beside them.
+		// The sun as SetupGeometry reads it, from ShadowSceneNode 0's sun light.
 		void SampleLight(DrawRow& a_row)
 		{
 			a_row.dirLightDirection[3] = Engine::Global<float>(Address::kShadowClampValue);
@@ -99,10 +91,7 @@ namespace DCLF::Features::Grass
 			return setting ? setting->GetFloat() : a_fallback;
 		}
 
-		/**
-		 * @brief The cull's values (Grass Optimizations' CullParams, GrassOptimizations.cpp: its settings, or the vanilla-equivalent
-		 * defaults without it) and the eye; false without a camera.
-		 */
+		// The cull values follow Grass Optimizations' CullParams. Returns false without a camera.
 		bool SampleCull(DrawRow& a_row)
 		{
 			auto* camera = RE::Main::WorldRootCamera();
@@ -129,7 +118,6 @@ namespace DCLF::Features::Grass
 			cull.projScale = top > 0.0f ? static_cast<float>(screenHeight) / (2.0f * top) : 0.0f;
 			cull.maxDistSq = maxDistance * maxDistance;
 			cull.edgeFadeStart = std::clamp(settings.EdgeFadeStart, 0.0f, 1.0f);
-			// stage 0: the vertex stage's distance fade, read where SetupGeometry reads it.
 			cull.alphaParam1 = Engine::Global<float>(Address::kAlphaParams);
 			cull.alphaParam2 = Engine::Global<float>(Address::kAlphaParams + 4);
 			cull.invisibleFadeCull = settings.InvisibleFadeCull;
@@ -139,7 +127,7 @@ namespace DCLF::Features::Grass
 			cull.midLodPx = settings.MidLODPixelSize;
 			cull.farLodPx = settings.EnableMidLOD ? std::min(settings.FarLODPixelSize, settings.MidLODPixelSize) : settings.FarLODPixelSize;
 			cull.lodBandPx = std::max(0.0f, settings.MeshLODBandPixels);
-			// The thinning's distance ramp spans the INI distance whatever the override (Grass Optimizations' densityDistanceRcp).
+			// Thinning ramps over the INI distance even when the distance is overridden, as Grass Optimizations does.
 			cull.densityDistanceRcp = 1.0f / std::max(vanillaMax, 1e-4f);
 			cull.flags = (settings.EnableMeshLOD && settings.EnableMidLOD ? kCullMidLod : 0u) | (settings.EnableMeshLOD && settings.EnableFarLOD ? kCullFarLod : 0u) |
 			             (settings.EnableOcclusionCulling ? kCullOcclusion : 0u);
@@ -151,7 +139,7 @@ namespace DCLF::Features::Grass
 			return a_texture && a_texture->rendererTexture ? reinterpret_cast<ID3D11ShaderResourceView*>(a_texture->rendererTexture->resourceView) : nullptr;
 		}
 
-		// The engine's default textures (a PBR bucket's missing maps; the shadow mask without bShadowsOnGrass).
+		// Stands in for a PBR bucket's missing maps, and for the shadow mask without bShadowsOnGrass.
 		ID3D11ShaderResourceView* DefaultView(bool a_normal)
 		{
 			auto* state = globals::game::graphicsState;
@@ -161,7 +149,6 @@ namespace DCLF::Features::Grass
 			return ViewOf(a_normal ? data.defaultTextureNormalMap.get() : data.defaultTextureWhite.get());
 		}
 
-		/** @brief a_view's binding into a_row's a_field (its owner the row's); false when there is no view or it cannot be bound. */
 		template <class Row>
 		bool Bind(OwnedRow<Row>& a_row, DescriptorIndex Row::*a_field, ID3D11ShaderResourceView* a_view)
 		{
@@ -174,12 +161,7 @@ namespace DCLF::Features::Grass
 			return a_row.Bind(a_field, GpuTextures::Get().SamplerBinding(a_address, a_filter));
 		}
 
-		/**
-		 * @brief A bucket's texture and sampler bindings into its row (an OwnedRow: its uploads make them the bucket table's content
-		 * owners), bound again when the bindings' generation moves. The diffuse texture with the material's address mode, trilinear for
-		 * the depth draws and anisotropic for the colour draws (BSGrassShader's); with TruePBR its maps (the engine's defaults where it
-		 * has none) and their sampler. False while the diffuse texture has no view (the row keeps its last bindings).
-		 */
+		// Rebinds when the binding generation moves. Returns false while the diffuse has no view, and the row keeps its last bindings.
 		bool BindBucket(Bucket& a_bucket, std::uint32_t a_generation)
 		{
 			if (a_bucket.bound && a_bucket.bindingGeneration == a_generation)
@@ -188,9 +170,8 @@ namespace DCLF::Features::Grass
 			OwnedRow<BucketRow> row(a_bucket.row.Plain());
 			auto& source = a_bucket.source;
 			const std::uint32_t address = std::min(a_bucket.key.clampMode, 3u);
-			// The diffuse is sampled clamped whatever the material's mode, as the engine's grass technique sets sampler 0 (address mode 0,
-			// BSGrassShader::SetupTechnique; Grass Optimizations forces it too): a card's UVs reach the texture's edge, and wrapping filters
-			// the opposite edge's opaque stems into its corners, which then pass the alpha test.
+			// Always clamp the diffuse, as BSGrassShader::SetupTechnique does. With wrap, the opposite edge's stems bleed into the
+			// card's corners and pass the alpha test.
 			constexpr std::uint32_t kDiffuseAddress = 0;
 			bool bound = Bind(row, &BucketRow::diffuseIndex, ViewOf(source.diffuse.get())) && BindSampler(row, &BucketRow::depthSampler, kDiffuseAddress, 2) &&
 			             BindSampler(row, &BucketRow::colourSampler, kDiffuseAddress, 3);
@@ -211,7 +192,7 @@ namespace DCLF::Features::Grass
 			return true;
 		}
 
-		/** @brief The buckets naming a texture that moved bind again: a superseded import holds its old storage, and that storage's chunk. */
+		// Rebind buckets whose textures moved. A superseded import still holds its old storage until then.
 		void FollowRelocatedTextures(GrassTables& a_tables, Mirror& a_mirror)
 		{
 			std::vector<ID3D11ShaderResourceView*> moved;
@@ -239,7 +220,6 @@ namespace DCLF::Features::Grass
 			}
 		}
 
-		// The scene's tables are made (the first frame with a device): the programs, then the tables.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto tables = std::make_shared<GrassTables>();
@@ -252,8 +232,7 @@ namespace DCLF::Features::Grass
 			const bool smallStart = a_setup.smallStart;
 			tables->smallStart = smallStart;
 			const std::uint32_t instances = smallStart ? 4u : kInitialInstances;
-			// The instance tables grow a quarter past the slots asked, not to a power of two: a large list's grass runs to millions of
-			// instances, and the four of them hold 68 bytes an instance.
+			// Instance tables grow by a quarter, not to a power of two. Large lists reach millions of instances at 68 bytes each.
 			auto make = [](std::uint32_t a_units, std::uint32_t a_unitBytes, bool a_uav, const char* a_name, org::services::GrowthPolicy a_policy = {}) {
 				return Draws::MakeVersioned(Draws::CreateWords(std::uint64_t(a_units) * a_unitBytes / 4, a_uav, a_name), { .extent = { 0, a_unitBytes, 4 }, .policy = a_policy });
 			};
@@ -268,10 +247,7 @@ namespace DCLF::Features::Grass
 			tables->draw = Draws::CreateWords(sizeof(DrawRow) / 4, false, "cs.dclf.grass-draw");
 			tables->draws = Draws::CreateWords(kDrawsBytes / 4, true, "cs.dclf.grass-draws");
 			auto device = a_setup.device;
-			// The vertex and pixel stages read every table through its buffer view ref (RunGrass.hlsl). The draw row's ref is pushed to the
-			// main passes, which declare the row (GrassDraws' MainDeclare; the cull and arguments passes declare it too). The versioned
-			// tables' refs are only made here to check that a ref can be made: the draw row carries each sealed version's ref
-			// (DCLF::RefOf), and the same passes declare the tables.
+			// The versioned tables' refs are made here only to check that refs can be made. Each frame's draw row carries the real ones.
 			auto refOf = [&](org::Buffer& a_buffer) { return RenderGraph::DeclaredRefOf(device, a_buffer); };
 			tables->drawRef = refOf(*tables->draw);
 			bool addressed = static_cast<bool>(tables->drawRef);
@@ -307,10 +283,8 @@ namespace DCLF::Features::Grass
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.grass-draws"), tables.draws);
 		}
 
-		// The tables by the mirror's posted slots, never below their first capacity, and the buckets at the draws buffer's slots
-		// (kMaxBuckets: past them, the decision keeps grass the engine's). Asked by the mirror's counts alone, an interior shrank them
-		// (CS_DCLF_SHRINK), and the first commits after a return to an exterior could not fit its grass, so they drew none while the
-		// engine's passes were withheld. The floors cost what the tables held at the start (about 17 MB, nearly all instances).
+		// Never below the first capacity. Shrinking in an interior left the first exterior commits unable to fit grass, so none drew.
+		// The floors cost about 17 MB.
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			const auto& tables = a_requirements.State<GrassTables>();
@@ -324,7 +298,6 @@ namespace DCLF::Features::Grass
 			set.Require(a_requirements.build, tables.meshes, floor(kMeshSlotsInput, kInitialMeshes));
 		}
 
-		// The mirror's slots: what the tables must hold.
 		void PostInputs(std::span<std::uint32_t> a_words)
 		{
 			const auto& mirror = RenderMirror();
@@ -334,7 +307,6 @@ namespace DCLF::Features::Grass
 			a_words[kMeshSlotsInput] = mirror.MeshSlots();
 		}
 
-		// The depth commit's draw row and the draws buffer's header (its counts and counters, zero).
 		void Latched(Api::SceneResourcesLatch& a_latch)
 		{
 			const auto& tables = a_latch.State<GrassTables>();
@@ -342,7 +314,6 @@ namespace DCLF::Features::Grass
 			a_latch.Latch(tables.draws, sizeof(DrawsHeader));
 		}
 
-		/** @brief The units every table holds in the versions a_sealed names: whether the mirror fits them (and the draws buffer's slots). */
 		bool Fits(const Draws::NamedVersions& a_sealed, const Mirror& a_mirror, const GrassTables& a_tables)
 		{
 			const std::uint64_t instances = std::min({ a_sealed.Of(*a_tables.instances).units, a_sealed.Of(*a_tables.owners).units, a_sealed.Of(*a_tables.frame).units,
@@ -352,11 +323,7 @@ namespace DCLF::Features::Grass
 			       a_mirror.MeshSlots() <= a_sealed.Of(*a_tables.meshes).units;
 		}
 
-		/**
-		 * @brief The mirror's changes into the versions a_sealed names: freed instance ranges' owners (~0u) first, then each changed shape
-		 * slot's row, records and owners, each changed mesh's row and each changed bucket's row with its bindings (a bucket whose texture
-		 * has no view yet is sent with no instances and asked again at the next commit).
-		 */
+		// A bucket whose texture has no view yet is sent with no instances and retried at the next commit.
 		void SendChanges(const Draws::NamedVersions& a_sealed, Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads)
 		{
 			auto& filled = a_tables.filled;
@@ -397,7 +364,6 @@ namespace DCLF::Features::Grass
 				const std::uint64_t offset = std::uint64_t(slot) * sizeof(BucketRow);
 				auto* bucket = a_mirror.SlotBucket(slot);
 				if (!bucket) {
-					// A free slot: zero, its last bucket's bindings released with the content.
 					const BucketRow none{};
 					a_uploads(a_tables.buckets, &none, sizeof(none), offset);
 					continue;
@@ -417,10 +383,7 @@ namespace DCLF::Features::Grass
 			a_tables.bucketsSent += changes.buckets.size();
 		}
 
-		/**
-		 * @brief Grass Collision's texture for the draw row. When it is the published texture's export, the published texture's own
-		 * descriptor (Extensions::GraphTextureIndex; the main passes declare it: MainDeclare). Otherwise the view's import.
-		 */
+		// Prefer the graph texture's own descriptor when the view is its export. Otherwise import the view.
 		bool BindCollision(OwnedRow<DrawRow>& a_row, const GrassShared::Collision& a_collision)
 		{
 			static constexpr std::string_view kIds[] = { GrassShared::kCollisionGraphId };
@@ -430,7 +393,6 @@ namespace DCLF::Features::Grass
 			return Bind(a_row, &DrawRow::collisionIndex, a_collision.texture);
 		}
 
-		/** @brief The frame's shadow mask (bShadowsOnGrass: the engine's, else its white default) and Grass Collision's published state. */
 		bool BindFrameTextures(OwnedRow<DrawRow>& a_row)
 		{
 			static auto* shadowsOnGrass = RE::GetINISetting("bShadowsOnGrass:Display");
@@ -440,7 +402,7 @@ namespace DCLF::Features::Grass
 				mask = reinterpret_cast<ID3D11ShaderResourceView*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].SRV);
 				engineMask = true;
 			}
-			// The engine's mask is a render target the frame writes: its published texture, which the main passes declare (MainDeclare).
+			// The engine's mask is written this frame, so bind its graph texture rather than the view.
 			std::uint32_t maskIndex = 0;
 			if (engineMask && Extensions::EngineTargetTextureIndex(Extensions::GraphTextureReader::Grass, 1, "grass shadow mask", mask,
 								  Extensions::ShadowMaskGraphTextureIds(), maskIndex)) {
@@ -449,7 +411,6 @@ namespace DCLF::Features::Grass
 			} else if (!Bind(a_row, &DrawRow::shadowMaskIndex, mask)) {
 				return false;
 			}
-			// The collision of the frames DCLF owns grass (its stood-down update, from the decision): none without Grass Collision.
 			GrassShared::Collision collision;
 			if (GrassShared::LatestCollision(collision) && BindCollision(a_row, collision))
 				a_row.Plain().collision = collision.perFrame;
@@ -458,11 +419,7 @@ namespace DCLF::Features::Grass
 			return true;
 		}
 
-		/**
-		 * @brief The depth commit's draw row (the adopted versions' refs, the engine's frame values, the cull's), the draws buffer's
-		 * zero header (and, once after the tables were made or grass became DCLF's, its zero counts: grass.args-colour zeroes them every
-		 * frame after). The cull walks the slots the tables hold (sent*Slots) only while a_draw and the frame's textures are bound.
-		 */
+		// Counts are zeroed once here when grass becomes DCLF's. After that grass.args-colour zeroes them every frame.
 		void WriteDrawRow(const Draws::NamedVersions& a_sealed, const Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads, bool a_draw)
 		{
 			OwnedRow<DrawRow> owned;
@@ -500,12 +457,7 @@ namespace DCLF::Features::Grass
 				a_tables.ready.store(true, std::memory_order_release);
 		}
 
-		/**
-		 * @brief The depth commit's grass uploads, into the versions a_sealed (the adopted set) names: their capacities and the draw row's
-		 * addresses are theirs. Retired mesh leases go to the execution (a_owners); the rows' descriptors go with the rows (OwnedRow).
-		 * A mirror past the capacities keeps its changes and its retired leases, and the commit draws what the tables hold (the last sent
-		 * changes: a growth copy keeps them), so grass outgrowing its tables appears when the growth is adopted, with no frame undrawn.
-		 */
+		// When the mirror outgrows the tables, it keeps its changes and the commit draws the last sent state until growth is adopted.
 		void UploadGrass(const Draws::NamedVersions& a_sealed, Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads,
 			std::vector<std::shared_ptr<const void>>& a_owners, bool a_owned)
 		{
@@ -515,8 +467,6 @@ namespace DCLF::Features::Grass
 			if (a_owned && !a_tables.owned)
 				a_tables.countsZeroed = false;
 			a_tables.owned = a_owned;
-			// Capacities are reserved before the epoch; a mirror past them keeps its changes (and the leases the tables' rows still
-			// name) until a commit they fit.
 			const bool fits = Fits(a_sealed, a_mirror, a_tables);
 			if (fits) {
 				for (auto& owner : a_mirror.TakeRetired())
@@ -533,8 +483,7 @@ namespace DCLF::Features::Grass
 			WriteDrawRow(a_sealed, a_mirror, a_tables, a_uploads, a_owned && a_mirror.BucketSlots() <= kMaxBuckets);
 		}
 
-		// Grass (dclf-architecture.md, "Grass: the draws"): the mirror's changes and the draw row, for the depth cull, the arguments and the
-		// passes' draws; the depth commit's only, after the other features' hooks (its uploads go through the commit's latched uploads).
+		// See dclf-architecture.md, "Grass: the draws".
 		void Commit(const Api::CommitContext& a_commit)
 		{
 			if (a_commit.kind != Api::CommitKind::Depth)
@@ -545,7 +494,7 @@ namespace DCLF::Features::Grass
 			auto& mirror = RenderMirror();
 			const bool owned = IndirectDraws::Get().DrawFamilyOwned(Api::DrawFamily::Grass);
 			UploadGrass(a_commit.adopted, mirror, *tables, *a_commit.latched, a_commit.executionOwners, owned);
-			// The engine's passes were withheld: a commit that cannot draw the grass the mirror holds leaves a hole (none held: nothing to draw).
+			// The engine's passes were withheld, so grass that cannot draw here leaves a visible hole.
 			if (owned && mirror.InstanceSlots() && !tables->ready.load(std::memory_order_acquire))
 				Diagnostics::Notify(GrassMissed{ a_commit.frame, mirror.InstanceSlots(), a_commit.adopted.Of(*tables->instances).units, mirror.BucketSlots(),
 					a_commit.adopted.Of(*tables->buckets).units, mirror.ShapeSlots(), a_commit.adopted.Of(*tables->shapes).units, mirror.MeshSlots(),

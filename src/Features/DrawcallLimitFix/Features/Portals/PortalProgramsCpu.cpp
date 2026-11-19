@@ -1,5 +1,4 @@
-// PortalPrograms.hlsli on the CPU (PortalProgramsCpu.h): PortalTestAt, PortalProgramRun, PortalPlaneSetTest and StrictGateRejects, word for
-// word over the same encodings. Keep the three in step with the shader.
+// PortalPrograms.hlsli on the CPU, word for word over the same encodings. Keep these functions in step with the shader.
 
 #include "Features/DrawcallLimitFix/Features/Portals/PortalProgramsCpu.h"
 
@@ -53,9 +52,8 @@ namespace DCLF::Portals
 		thread_local std::uint64_t threadSteps = 0, threadPlanes = 0;
 
 		/**
-		 * @brief PortalPlaneSetTest (7: not outside, 8: not contained). The shader's is one fixed six-plane calculation; the verdict is an OR
-		 * over the active planes, so stopping at the first plane that decides it (each plane's distance as the shader computes it) is
-		 * the same verdict (Direct::kExpPortalEarly; cleared, the fixed calculation).
+		 * @brief PortalPlaneSetTest. The verdict is an OR over the active planes, so stopping at the first deciding plane gives the
+		 * same answer as the shader's fixed six-plane calculation.
 		 */
 		bool PlaneSetTest(const Words& a_w, std::size_t a_set, std::uint32_t a_kind, const float a_c[3], float a_r)
 		{
@@ -213,10 +211,7 @@ namespace DCLF::Portals
 			                                                &PlaneChunksSse;
 		}
 
-		/**
-		 * @brief The batch test walked once over all a_count bounds: the program's operators in order (each mask it sets is an operator after
-		 * the one setting it), each over every 16-bound chunk routed to it.
-		 */
+		/** @brief The batch test walked once over all a_count bounds, each operator over the 16-bound chunks routed to it. */
 		void WalkOpMajor(const std::uint32_t* a_w, const std::uint32_t* a_records, const std::uint32_t* a_programSets, std::uint32_t a_sets, std::uint32_t a_ops,
 			std::uint32_t a_first, std::uint32_t a_flags, bool a_viewOnly, Direct::Simd::PlaneChunksFn a_chunksTest, const float* a_x, const float* a_y, const float* a_z,
 			const float* a_r, const std::uint16_t* a_lanes, std::uint32_t a_count, std::uint8_t* a_rejected)
@@ -232,12 +227,11 @@ namespace DCLF::Portals
 				if (r[k] != 0.0f)
 					live[k / 16] |= static_cast<std::uint16_t>(1u << (k % 16));  // a zero radius: culled
 			}
-			// The camera's view planes (the header's plane set), then the walk from the first operator.
 			a_chunksTest(a_w, 7u, x.data(), y.data(), z.data(), r.data(), live.data(), pass.data(), chunks);
 			if (a_viewOnly) {
 				inView.assign(pass.begin(), pass.end());
 			} else if (a_first < a_ops) {
-				// Each operator's chunk masks (routes[op * chunks + c]), cleared as the walk takes them: zero between calls.
+				// Zero between calls, because the walk clears each operator's masks as it takes them.
 				if (routes.size() < std::size_t(a_ops) * chunks)
 					routes.resize(std::size_t(a_ops) * chunks, 0u);
 				std::uint16_t* firstRoute = routes.data() + std::size_t(a_first) * chunks;
@@ -272,7 +266,6 @@ namespace DCLF::Portals
 					for (std::uint32_t c = 0; c < chunks; ++c)
 						m[c] = 0;
 				}
-				// Operators the walk stopped before (any was false: none reached) hold none; those past the last reached were cleared.
 			}
 			for (std::uint32_t k = 0; k < a_count; ++k)
 				a_rejected[a_lanes[k]] = (inView[k / 16] >> (k % 16)) & 1u ? 0u : 1u;
@@ -289,7 +282,6 @@ namespace DCLF::Portals
 	void PortalTestCpuBatch(std::span<const std::uint32_t> a_programs, std::uint32_t a_program, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		const std::uint16_t* a_lanes, std::uint32_t a_count, std::uint8_t* a_rejected)
 	{
-		// The producer's programs are trusted (PortalPrograms.h): forward-only operators within their bounds, read in place.
 		const std::uint32_t* w = a_programs.data();
 		const std::uint32_t count = a_programs.size() > kSetWords ? w[kSetWords] : 0u;
 		if (a_program == kPortalNoProgram || a_program >= count) {
@@ -304,7 +296,6 @@ namespace DCLF::Portals
 		const std::uint32_t sets = w[entry + 2], first = w[entry + 3];
 		const std::uint32_t* records = w + recordsBase + std::size_t(w[entry + 4]) * kOpWords;
 		const std::uint32_t* programSets = w + setsBase + std::size_t(w[entry + 5]) * kSetWords;
-		// The whole program's verdict, whatever the bound (PortalTestCpuAt's order; a zero radius is culled before them).
 		int whole = -1;
 		if (a_program != 0u && !(flags & kPortalReached))
 			whole = 0;
@@ -319,7 +310,7 @@ namespace DCLF::Portals
 			return;
 		}
 		const std::uint32_t group = 16u;
-		// Each operator's bounds, cleared as the walk takes them (every mask it sets is an operator after the one setting it): zero between calls.
+		// Zero between calls, because the walk clears each operator's bounds as it takes them.
 		thread_local std::vector<std::uint32_t> masks;
 		if (masks.size() < ops)
 			masks.resize(ops, 0u);
@@ -338,13 +329,11 @@ namespace DCLF::Portals
 			if (whole >= 0) {
 				inView = whole == 1 ? live : 0u;
 			} else if (live) {
-				// The camera's view planes: the header's plane set.
 				const std::uint32_t inCamera = planeGroup(w, 7u, x, y, z, r, live);
 				if (viewOnly) {
 					inView = inCamera;
 				} else {
 					const std::uint32_t walk = (flags & kPortalSkipView) ? live : inCamera;
-					// ProgramRun for the group at once: each operator in order, its bounds' mask to the operator its test sends each to.
 					if (walk && first < ops) {
 						masks[first] = walk;
 						for (std::uint32_t op = first; op < ops; ++op) {

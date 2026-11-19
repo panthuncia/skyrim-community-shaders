@@ -28,12 +28,11 @@ namespace DCLF::Features::Landscape
 		std::unordered_set<std::uint32_t> candidates;
 		std::unordered_map<std::uint32_t, Captured> captured;
 		std::uint32_t generation = ~0u;
-		// The seams fix's change count and the relocation log's cursor at the last capture. While neither moves, a captured quad
-		// changes only through its slot, its geometry or its textures' views, so the frame checks those alone.
+		// While neither moves, a captured quad can only change through its slot, geometry or texture views.
 		std::uint64_t seamsChanges = ~0ull;
 		std::uint64_t relocationCursor = 0;
 		std::vector<ID3D11ShaderResourceView*> moved;
-		std::vector<std::uint32_t> dirty;  // the frame's slots to capture again
+		std::vector<std::uint32_t> dirty;  // Slots to capture again this frame.
 
 		Views ViewsOf(const LandscapeSeamsFix::Resources& a_source)
 		{
@@ -47,7 +46,7 @@ namespace DCLF::Features::Landscape
 			return views;
 		}
 
-		/** @brief Whether a captured quad's row still holds, when the seams fix changed nothing and the relocation log is complete. */
+		// Only valid when the seams fix changed nothing and the relocation log is complete.
 		bool Unchanged(const Captured& a_previous, const RE::BSGeometry* a_geometry)
 		{
 			if (a_previous.geometry != a_geometry || !a_previous.source || ViewsOf(*a_previous.source) != a_previous.views)
@@ -56,7 +55,6 @@ namespace DCLF::Features::Landscape
 				// An unresolved binding is tried again every frame.
 				if (a_previous.bindings[t].index == GpuTextures::kInvalid)
 					return false;
-				// A view in the relocation log since the last capture: its import was superseded.
 				if (a_previous.views[t] && !moved.empty() && std::binary_search(moved.begin(), moved.end(), a_previous.views[t]))
 					return false;
 			}
@@ -68,10 +66,7 @@ namespace DCLF::Features::Landscape
 			return a_slot < a_capture.objectGeometry.size() ? a_capture.objectGeometry[a_slot] : nullptr;
 		}
 
-		/**
-		 * @brief One candidate's row, put when it changed (a_forced: its slot changed). Returns false when the slot is no land quad, which
-		 * leaves the candidates.
-		 */
+		// Returns false when the slot is not a land quad, which drops it from the candidates.
 		bool CaptureSlot(Api::ShadingFieldCapture& a_capture, std::uint32_t a_slot, bool a_changedDevice, bool a_forced)
 		{
 			auto& textures = GpuTextures::Get();
@@ -100,8 +95,7 @@ namespace DCLF::Features::Landscape
 			std::vector<std::shared_ptr<const void>> owners;
 			owners.reserve(views.size());
 			bool valid = views[0] && views[1];
-			// The seam fix's weights and quad data are D3D11 IMMUTABLE resources made with their contents (CreateResources), and the
-			// borrowed layers are file textures: all exempt from graph tracking, so an import per view is enough.
+			// These are IMMUTABLE D3D11 resources or file textures, exempt from graph tracking, so one import per view is enough.
 			for (std::size_t t = 0; t < views.size(); ++t) {
 				auto& binding = previous.bindings[t];
 				binding = textures.ResolveBinding(views[t], GpuTextures::Tag(GpuTextures::Source::FrameSlot, LandscapeSeamsFix::FirstPSTexture + static_cast<std::uint32_t>(t)));
@@ -124,7 +118,7 @@ namespace DCLF::Features::Landscape
 			DCLF_ZONE("CS.DCLF.Landscape.Seams");
 			ZoneValue(candidates.size());
 			auto& textures = GpuTextures::Get();
-			// Both read before any quad: a change after them is seen at the next capture.
+			// Read before any quad, so a later change is seen at the next capture.
 			const std::uint64_t changes = LandscapeSeamsFix::GetInstance().ResourceChanges();
 			moved.clear();
 			const bool relocationsComplete = textures.RelocatedViews(relocationCursor, moved);
@@ -144,8 +138,7 @@ namespace DCLF::Features::Landscape
 				}
 				return;
 			}
-			// Nothing changed the seams fix's quads: a land quad still without resources stays so. The changed slots are captured, and the
-			// captured quads whose row no longer holds.
+			// With no seams fix change, a quad without resources stays that way. Recapture changed slots and stale rows.
 			dirty.assign(a_capture.changedObjects.begin(), a_capture.changedObjects.end());
 			for (const auto& [slot, previous] : captured)
 				if (!Unchanged(previous, GeometryOf(a_capture, slot)))

@@ -1,5 +1,4 @@
-// Blood splatter: the engine's screen blood drawn by the render graph (CS_ORG_BLOOD_SPLATTER=1, default off). The feature reserves the
-// EngineDraws anchor and installs the engine hooks; the rest is BloodSplatterCapture.cpp and BloodSplatterDraws.cpp.
+// Blood splatter feature entry, off by default (CS_ORG_BLOOD_SPLATTER=1 turns it on).
 
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -16,7 +15,7 @@ namespace DCLF::Features::BloodSplatter
 		{
 			if (!Enabled())
 				return;
-			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
+			// Must run before the render graph initializes, because the anchors' epochs are fixed then.
 			BloodSplatterDraws::Reserve();
 			InstallHooks();
 			logger::info("[DCLF] blood splatter: on (CS_ORG_BLOOD_SPLATTER=1): the screen blood is drawn at the EngineDraws anchor");

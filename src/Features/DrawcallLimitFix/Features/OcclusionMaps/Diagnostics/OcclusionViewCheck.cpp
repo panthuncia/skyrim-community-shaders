@@ -1,5 +1,5 @@
-// The occlusion maps' views (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY), render thread: DCLF's view of each map against where, with
-// which camera and state, the engine's RenderMask has just drawn it (the shadow capture's 0x1C capture), reported every 300 maps.
+// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: DCLF's view of each occlusion map against where and how the engine's RenderMask
+// just drew it. Reported every 300 maps. Render thread.
 
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsState.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
@@ -17,10 +17,7 @@ namespace DCLF::Features::OcclusionMaps
 	{
 		void CheckOcclusionView(const Diagnostics::OcclusionCaptured& a_captured)
 		{
-			// Where the engine's RenderMask has just drawn the map (the clear, and whatever SetupMask registered), with which camera and
-			// state, against DCLF's view of it this frame (OcclusionView). The renderer's state here is what the view's last pass left, or
-			// whatever came before when nothing drew; the cull mode is the Utility shader's per pass, so only the fill, bias and scissor modes
-			// are compared.
+			// The renderer's state is what the view's last pass left. Cull mode is the Utility shader's per pass, so compare only fill, bias and scissor.
 			const std::uint32_t a_view = a_captured.view;
 			if (a_view >= kOcclusionViews || !ActiveToggles().shadows || IndirectDraws::Get().Failed() || !Extensions::OcclusionOn(ActiveToggles(), a_view))
 				return;
@@ -46,8 +43,7 @@ namespace DCLF::Features::OcclusionMaps
 			if (rasterState != mine.rasterState)
 				note(fmt::format("rasterizer state {} (fill {}, bias {}, scissor {}), DCLF's {}", rasterState, shadowState.rasterStateFillMode, shadowState.rasterStateDepthBiasMode,
 					shadowState.rasterStateScissorMode, mine.rasterState));
-			// The depth range against the camera state's (0x14202b130), as the shadow views' check: the renderer's viewport holds the last
-			// draw's, less its depth bias's step when it had one - a per-draw state, not the view's.
+			// The viewport holds the last draw's depth range, less its depth bias step. That is per-draw state, not the view's.
 			static const REL::Relocation<const float*> cameraDepthRange{ REL::Offset(Engine::Address::kCameraDepthRange) };
 			const float engineMin = cameraDepthRange.get()[0], engineMax = cameraDepthRange.get()[1];
 			if (theirs.dsvFormat != mine.dsvFormat || theirs.x != mine.x || theirs.y != mine.y || theirs.width != mine.width || theirs.height != mine.height ||

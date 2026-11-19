@@ -1,6 +1,5 @@
-// The hidden watch (CS_DCLF_HIDDEN_WATCH): the debug-register watchpoints, set on every thread by a helper thread, and the vectored
-// exception handler that records the flips. Armed by its observer of the coordinator's actor verdicts (below); reported on the render
-// thread, among the frame report's statistics.
+// CS_DCLF_HIDDEN_WATCH: debug-register watchpoints and a vectored exception handler that records kHidden flips.
+// A helper thread sets the registers, so every game thread is covered.
 
 #include "Features/DrawcallLimitFix/Features/HiddenNodes/HiddenNodes.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -15,7 +14,7 @@ namespace DCLF::Features::HiddenNodes
 {
 	namespace
 	{
-		Api::SwitchId watchSwitch;  // install
+		Api::SwitchId watchSwitch;
 
 		constexpr std::uint32_t kSlots = 4;
 		constexpr std::uint32_t kMaxHits = 16;
@@ -70,13 +69,13 @@ namespace DCLF::Features::HiddenNodes
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
-		/** @brief Every thread's debug registers but the caller's (a helper thread runs this, so the game's all get them). */
+		// Skips the calling thread, so it runs on a helper thread to reach every game thread.
 		void SetAll(const std::array<std::uintptr_t, kSlots>& a_addresses)
 		{
 			DWORD64 dr7 = 0;
 			for (std::uint32_t s = 0; s < kSlots; ++s)
 				if (a_addresses[s])
-					dr7 |= (1ull << (s * 2)) | (0b01ull << (16 + s * 4)) | (0b11ull << (18 + s * 4));  // local enable, write, 4 bytes
+					dr7 |= (1ull << (s * 2)) | (0b01ull << (16 + s * 4)) | (0b11ull << (18 + s * 4));  // Local enable, write, 4 bytes.
 			const DWORD self = GetCurrentThreadId();
 			const DWORD process = GetCurrentProcessId();
 			HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -179,7 +178,7 @@ namespace DCLF::Features::HiddenNodes
 	{
 		void OnVerdictUnannounced(const Diagnostics::ActorVerdictUnannounced& a_event)
 		{
-			// CS_DCLF_HIDDEN_WATCH: the chain's nearest four nodes, for the store that flips them next.
+			// Watch the chain's nearest four nodes.
 			std::array<const RE::NiAVObject*, 4> nodes{};
 			for (std::size_t i = 0; i < nodes.size() && i < a_event.chain.size(); ++i)
 				nodes[i] = a_event.chain[i];
@@ -188,7 +187,6 @@ namespace DCLF::Features::HiddenNodes
 
 		void Lines(std::uint32_t a_frame)
 		{
-			// The render thread's watch of the hidden bit stores.
 			if (const auto watch = TakeReport(a_frame); !watch.empty()) {
 				std::istringstream watchLines(watch);
 				for (std::string line; std::getline(watchLines, line);)
@@ -199,7 +197,6 @@ namespace DCLF::Features::HiddenNodes
 
 	void RegisterWatch(Api::InstallContext& a_context)
 	{
-		// Where Core's was listed: after the census.
 		watchSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_HIDDEN_WATCH", .kind = Api::SwitchKind::Diagnostic,
 			.description = "1: hardware watchpoints name the store behind a hidden change no event announced (with walk parity)", .after = "CS_DCLF_CENSUS" });
 		if (!Enabled())

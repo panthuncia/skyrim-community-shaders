@@ -7,8 +7,7 @@
 #include <cmath>
 #include <cstdint>
 
-// The engine's portal graph and occlusion shapes as PortalViews reads them (AE 1.6.1170): the layouts, and the arithmetic in the engine's
-// grouping (skyrim-engine-notes.md, "Portals, rooms and occluders"). PortalViews builds its programs from them; its observer compares them.
+// The engine's portal graph and occlusion shapes as PortalViews reads them (AE 1.6.1170), with arithmetic in the engine's grouping.
 
 namespace DCLF::PortalShapes
 {
@@ -30,17 +29,14 @@ namespace DCLF::PortalShapes
 	constexpr std::size_t kGraphOccluders = 0x10, kGraphPortals = 0x28, kGraphRooms = 0x40, kGraphRoomCount = 0x50;
 	constexpr std::size_t kListCount = 0x10;     // a list's count, from its head field
 	constexpr std::size_t kListNodeItem = 0x10;  // a list node: {next, prev, item}
-	// NiCamera.
 	constexpr std::size_t kCameraRotation = 0x7C, kCameraEye = 0xA0, kCameraWorldToCam = 0x110, kCameraFrustum = 0x150,
 						  kCameraViewport = 0x174;
 
-	// A light's room process's camera: the NiCamera constructor's (FUN_140d2afa0) frustum and viewport, and the
-	// world-to-camera matrix FUN_140d2c910 makes of them at the identity (nothing updates it after).
+	// A light's room process camera, as the NiCamera constructor (FUN_140d2afa0) and FUN_140d2c910 at identity leave it. Nothing updates it after.
 	constexpr float kLightWorldToCam[16]{ 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -2.0f, 1.0f, 0.0f, 0.0f, 0.0f };
 	constexpr float kLightFrustum[6]{ -0.5f, 0.5f, 0.5f, -0.5f, 1.0f, 2.0f };
 	constexpr float kLightViewport[4]{ 0.0f, 1.0f, 1.0f, 0.0f };
 
-	// The token words and the plane arithmetic are the program model's (PortalProgramModel.h).
 	using PortalModel::kAnd;
 	using PortalModel::kClose;
 	using PortalModel::kOccluderTest;
@@ -82,7 +78,7 @@ namespace DCLF::PortalShapes
 		const V x{ ex * M(a_box, 0, 0), ex * M(a_box, 1, 0), ex * M(a_box, 2, 0) };
 		const V y{ ey * M(a_box, 0, 1), ey * M(a_box, 1, 1), ey * M(a_box, 2, 1) };
 		const V z{ ez * M(a_box, 0, 2), ez * M(a_box, 1, 2), ez * M(a_box, 2, 2) };
-		// The engine's grouping (from its disassembly): corners 0 and 4 are ((X + C) + Y) +- Z.
+		// The engine's grouping, from its disassembly: corners 0 and 4 are ((X + C) + Y) +- Z.
 		const V yxc = Add(Add(x, c), y);
 		const V xcy = Sub(Add(x, c), y), cxy = Sub(Sub(c, x), y), ycx = Add(y, Sub(c, x)), cxy2 = Add(Sub(c, x), y);
 		return { Add(yxc, z), Add(xcy, z), Add(cxy, z), Add(ycx, z), Sub(yxc, z), Sub(xcy, z), Sub(cxy, z), Sub(cxy2, z) };

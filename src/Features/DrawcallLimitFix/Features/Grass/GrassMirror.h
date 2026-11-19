@@ -1,9 +1,8 @@
 #pragma once
 
-// Grass's channel and mirror: the engine's grass shapes by events (pushed by the feature's sink on GrassShared's capture,
-// GrassHooks.cpp), and the render thread's mirror of them - shapes in slots, their records in ranges of a flat instance table, their
-// buckets and meshes - for the Grass family's tables (GrassLayout.h), drained at the frame requests (the family's serve) and uploaded by
-// the depth commit (GrassTables.cpp). Included by the feature's sources only.
+// The render thread's mirror of the engine's grass shapes. The capture sink pushes events from any thread, the frame drains them,
+// and the depth commit uploads what changed into the GPU tables (GrassTables.cpp).
+// Shapes live in slots, their instances in ranges of one flat table.
 
 #include <array>
 #include <cstdint>
@@ -21,20 +20,17 @@ struct ID3D11Buffer;
 
 namespace DCLF::Features::Grass
 {
-	/** @brief A mesh's source (a grass shape's renderer data, or a Grass Optimizations LOD mesh), as the capture or the library hold it. */
+	/** @brief A grass shape's renderer mesh, or a Grass Optimizations LOD mesh. */
 	struct MeshSource
 	{
 		const void* key = nullptr;  // the BSGraphics::TriShape, or the LOD mesh entry
 		winrt::com_ptr<ID3D11Buffer> vertexBuffer, indexBuffer;  // held from the sink until the render thread leases them
 		std::uint64_t vertexDesc = 0;
 		std::uint32_t indexCount = 0;
-		float canopyHeight = 1.0f;  // a LOD mesh's (the LOD library's)
+		float canopyHeight = 1.0f;
 	};
 
-	/**
-	 * @brief What makes shapes draw alike (one bucket): the mesh, the material and texture, the vertex layout, the descriptors' bits,
-	 * the sampler's address mode, the alpha reference and the wind's direction (the shape's rotation, as Grass Optimizations' draw key).
-	 */
+	/** @brief Everything that must match for shapes to share one bucket. Wind direction matches Grass Optimizations' draw key. */
 	struct BucketKey
 	{
 		const void* mesh = nullptr;
@@ -54,7 +50,7 @@ namespace DCLF::Features::Grass
 		std::uint64_t operator()(const BucketKey& a_key) const noexcept;
 	};
 
-	/** @brief A bucket's material, as the capture read it (the textures referenced while the bucket lives). */
+	/** @brief A bucket's material. The textures stay referenced while the bucket lives. */
 	struct BucketSource
 	{
 		RE::NiPointer<RE::NiSourceTexture> diffuse, normal, rmaos, features0, features1, emissive;
@@ -67,10 +63,8 @@ namespace DCLF::Features::Grass
 	};
 
 	/**
-	 * @brief A grass shape's group's records as the capture took them (kind Add, replacing what the mirror holds of the group), the
-	 * group's removal (RemoveGroup: a cell's unload, from any shape), the shape's (Remove: every BSMultiStreamInstanceTriShape's
-	 * destruction, grass or not), or a group GrassShared could not read (Rejected: the engine still draws it, so the family must not be
-	 * DCLF's while it lives).
+	 * @brief One capture event. Remove fires for every BSMultiStreamInstanceTriShape destroyed, grass or not.
+	 * Rejected means the engine still draws the group, so the family must stay the engine's while it lives.
 	 */
 	struct Event
 	{
@@ -82,10 +76,10 @@ namespace DCLF::Features::Grass
 			Rejected
 		};
 		Kind kind = Kind::Add;
-		std::uint64_t seq = 0;        // GrassShared's: orders a shape's events across the capture's threads
-		const void* shape = nullptr;  // a key: never dereferenced by the drain (the shape may be dead)
-		std::uint32_t group = 0;      // the engine's group index in the shape (not Remove's)
-		void* lodMesh = nullptr;      // Add: the shape's GrassMeshLibrary::MeshRecord at capture (GrassShared::MeshOf), null before LoadGrassType named it
+		std::uint64_t seq = 0;        // orders a shape's events across the capture's threads
+		const void* shape = nullptr;  // a key only, never dereferenced. The shape may be dead.
+		std::uint32_t group = 0;      // unused by Remove
+		void* lodMesh = nullptr;      // GrassMeshLibrary::MeshRecord, null until LoadGrassType names it
 		std::vector<GrassInstances::Instance> instances;
 		std::array<float, 3> origin{};
 		BucketKey key;
@@ -93,29 +87,23 @@ namespace DCLF::Features::Grass
 		MeshSource mesh;
 	};
 
-	/**
-	 * @brief The engine's grass shapes by events: pushed by the sink (any thread: Push), drained by the render thread. The sink is
-	 * GrassShared's capture's (the feature's early hooks register it), which sets installed once it is in.
-	 */
+	/** @brief Pushed from any thread by GrassShared's capture sink, drained on the render thread. */
 	inline EventQueue<Event> events;
 	inline bool installed = false;
 
-	/** @brief The sink's push, any thread: a_event onto events. */
+	/** @brief Safe from any thread. */
 	void Push(Event&& a_event);
 
-	/**
-	 * @brief One group of a shape (a shape slot): its records, bucket, instance range and row. The engine adds a shape's instances in
-	 * groups, a cell's each (AddGroup, the GID buffers and files), and removes them as the cells unload, as Grass Optimizations' chunks.
-	 */
+	/** @brief One group of a shape, which takes one shape slot. The engine adds and removes groups per cell. */
 	struct Group
 	{
 		std::vector<GrassInstances::Instance> instances;
 		std::uint32_t bucket = 0;  // bucket slot
-		std::uint32_t first = 0;   // its range in the instance table
+		std::uint32_t first = 0;   // start of its range in the instance table
 		GrassInstances::ShapeRow row;
 	};
 
-	/** @brief A mirrored shape: its groups by the engine's index (each one's shape slot, kRejected for one the capture could not read, and the seq that put it there), and their records' total. */
+	/** @brief A mirrored shape's groups by engine index, with the seq that last set each. */
 	struct Shape
 	{
 		static constexpr std::uint32_t kRejected = ~0u;
@@ -128,7 +116,6 @@ namespace DCLF::Features::Grass
 		std::uint32_t records = 0;
 	};
 
-	/** @brief A shape's group, as the removed groups' tombstones key it. */
 	struct GroupKey
 	{
 		const void* shape = nullptr;
@@ -142,7 +129,7 @@ namespace DCLF::Features::Grass
 		std::uint64_t operator()(const GroupKey& a_key) const noexcept;
 	};
 
-	/** @brief A mesh shared by buckets: its slot, its users, and its buffers' leases once resolved. */
+	/** @brief A mesh shared by buckets. */
 	struct Mesh
 	{
 		std::uint32_t slot = 0;
@@ -153,27 +140,22 @@ namespace DCLF::Features::Grass
 		bool resolved = false, failed = false;
 	};
 
-	/**
-	 * @brief A bucket: its slot, its shapes and their instances (its tiers' capacity), its meshes per tier, its material, and the
-	 * texture and sampler bindings its row names (the depth commit resolves them into the row: an OwnedRow, whose owners each upload of
-	 * it makes the bucket table's content owners for its slot).
-	 */
+	/** @brief A bucket of shapes drawn alike. The depth commit resolves its texture bindings into the row. */
 	struct Bucket
 	{
 		BucketKey key;
 		BucketSource source;
 		std::uint32_t slot = 0;
-		std::uint32_t shapes = 0;  // its users: the shapes' groups drawn in it
+		std::uint32_t shapes = 0;  // shape groups drawn in it
 		std::uint32_t total = 0;
 		std::array<const void*, GrassInstances::kTiers> meshes{};
-		// Its shapes' source mesh (a GrassMeshLibrary::MeshRecord, shared with Grass Optimizations), whose activeBuckets it holds while
-		// it lives, and whether its LOD tiers wait for the library's loads (resolved once both tiers' loads settle).
+		// Shared with Grass Optimizations. The bucket holds the record's activeBuckets while it lives.
 		void* lodMesh = nullptr;
 		bool lodPending = false;
 		OwnedRow<GrassInstances::BucketRow> row;
 		std::uint32_t bindingGeneration = ~0u;           // GpuTextures::Generation the bindings were resolved in
 		bool bound = false;
-		bool live = false;  // a free slot's is not
+		bool live = false;
 	};
 
 	struct Stats
@@ -182,24 +164,20 @@ namespace DCLF::Features::Grass
 	};
 
 	/**
-	 * @brief The grass mirror: every grass shape the capture handed the sink, with its records, in slots for the GPU's tables. Render
-	 * thread.
+	 * @brief The render thread's mirror of every captured grass shape, laid out in slots for the GPU tables.
 	 *
-	 * Drain applies the events in seq order per group: the queue drains its ring before its spill, so an event older than the one a
-	 * group last applied (or than the group's or its shape's removal, kept a while: kTombstoneDrains) is dropped (stale). A remove of an
-	 * unknown shape or group is nothing; an add of a known group replaces it. A shape's removal takes its groups older than it (a later
-	 * one is a new shape's at the same address).
+	 * Events can arrive out of order, so Drain applies them by seq per group. An event older than the group's last one, or than a
+	 * recent removal of the group or shape, is dropped as stale. A shape removal only takes groups older than it, because a later one
+	 * belongs to a new shape at the same address.
 	 *
-	 * The instance ranges come from a flat table by first fit (the free ranges coalesced); a freed range's owners are sent ~0u. When a
-	 * bucket's instance total changes, every bucket's visible bases are laid out again (a prefix over the buckets, a range per tier
-	 * with a mesh) and every bucket row is sent. The changes wait for the depth commit (TakeChanges), which uploads them.
+	 * When any bucket's instance total changes, every bucket's visible bases are laid out again and every bucket row is resent.
 	 */
 	class Mirror
 	{
 	public:
 		using Shapes = ankerl::unordered_dense::map<const void*, Shape>;
 		using Buckets = std::vector<Bucket>;  // by bucket slot
-		// Drains a removal's seq is kept for (the queue's reorder window is a drain or two).
+		// The queue's reorder window is a drain or two, so removals are remembered for longer than that.
 		static constexpr std::uint32_t kTombstoneDrains = 16;
 
 		void Drain(std::uint32_t a_frame);
@@ -207,50 +185,42 @@ namespace DCLF::Features::Grass
 		std::uint64_t InstanceCount() const { return instanceCount; }
 		std::size_t BucketCount() const { return bucketIndex.size(); }
 		std::size_t MeshCount() const { return meshes.size(); }
-		/** @brief Live groups whose capture was rejected: the engine draws them, so the family stays the engine's. */
+		/** @brief Live groups the engine still draws, which keep the family the engine's. */
 		std::size_t RejectedLive() const { return rejectedGroups; }
-		/** @brief The fade clock (the engine's frame time summed, as Grass Optimizations' timeAccum): the spawn fade's. */
+		/** @brief Summed engine frame time for the spawn fade, like Grass Optimizations' timeAccum. */
 		float FadeClock() const { return fadeClock; }
-		/** @brief The adds, removes, stale drops and rejections since the last call (the report's). */
 		Stats TakeStats() { return std::exchange(stats, {}); }
-		/** @brief How much of the mirror can draw: its meshes by lease state, its buckets with a drawn tier 0 (the report's). */
 		struct Readiness
 		{
 			std::uint32_t meshesResolved = 0, meshesFailed = 0, meshesPending = 0, bucketsDrawable = 0;
 		};
 		Readiness ReadinessOf() const;
-		/** @brief The mirrored shapes by shape, and the buckets by slot (the parity's). */
 		const Shapes& MirroredShapes() const { return shapes; }
 		const Buckets& MirroredBuckets() const { return buckets; }
 
-		/** @brief The slot tables' high-water marks: what the GPU's tables must hold. */
+		/** @brief High-water marks, which the GPU tables must hold. */
 		std::uint32_t InstanceSlots() const { return instanceSlots; }
 		std::uint32_t ShapeSlots() const { return static_cast<std::uint32_t>(slotShapes.size()); }
 		std::uint32_t BucketSlots() const { return static_cast<std::uint32_t>(buckets.size()); }
 		std::uint32_t MeshSlots() const { return static_cast<std::uint32_t>(meshSlots.size()); }
-		/** @brief Every slot, bucket and mesh again (a new backing of the tables). */
+		/** @brief Resend everything, for a new table backing. */
 		void MarkAllChanged();
 
-		/** @brief What the depth commit sends: the changed slots of each table, each once. */
 		struct Changes
 		{
 			std::vector<std::uint32_t> shapes, buckets, meshes;
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> freedRanges;  // instance ranges whose owners go ~0u
+			std::vector<std::pair<std::uint32_t, std::uint32_t>> freedRanges;  // instance ranges whose owners become ~0u
 		};
-		/**
-		 * @brief The changes since the last call. Leases the new meshes' buffers first (GpuResources::Frame, the render thread's): a mesh
-		 * that cannot be leased draws nothing, and its buckets' rows name mesh slot kNoMesh for its tier.
-		 */
+		/** @brief Leases new meshes first. A mesh that cannot be leased draws nothing, and its tier names kNoMesh. */
 		void TakeChanges(Changes& a_changes);
-		/** @brief A slot's row and records (count 0 when free). */
 		const GrassInstances::ShapeRow& SlotRow(std::uint32_t a_slot) const;
 		const std::vector<GrassInstances::Instance>* SlotInstances(std::uint32_t a_slot) const;
 		const GrassInstances::MeshRow& MeshSlotRow(std::uint32_t a_slot) const;
-		/** @brief A bucket slot's bucket (null when free), for the commit's row and bindings. */
+		/** @brief Null when the slot is free. */
 		Bucket* SlotBucket(std::uint32_t a_slot);
-		/** @brief A bucket slot's row again at the next commit (one whose bindings could not be resolved yet). */
+		/** @brief Resend a bucket row at the next commit. */
 		void MarkBucket(std::uint32_t a_slot);
-		/** @brief Leases and bindings no table names any more, for the next execution to hold until it retires. */
+		/** @brief Leases no table names any more. The next execution holds them until it retires. */
 		std::vector<std::shared_ptr<const void>> TakeRetired() { return std::exchange(retired, {}); }
 
 	private:
@@ -274,30 +244,25 @@ namespace DCLF::Features::Grass
 
 		Shapes shapes;
 		Buckets buckets;
-		ankerl::unordered_dense::map<BucketKey, std::uint32_t, BucketKeyHash> bucketIndex;  // the live buckets' slots
-		// Shape slots: each slot's shape (null when free), the free ones, the changed ones waiting for the commit.
-		std::vector<const void*> slotShapes;
+		ankerl::unordered_dense::map<BucketKey, std::uint32_t, BucketKeyHash> bucketIndex;
+		std::vector<const void*> slotShapes;  // null when free
 		std::vector<Group> groups;  // by shape slot
 		std::vector<std::uint32_t> freeSlots, changedSlots;
 		std::vector<std::uint8_t> slotChanged;
-		// Bucket slots: the free ones, the changed ones.
 		std::vector<std::uint32_t> freeBuckets, changedBuckets;
 		std::vector<std::uint8_t> bucketChanged;
 		bool totalsChanged = false;
-		// Meshes by key, their slots.
 		ankerl::unordered_dense::map<const void*, Mesh> meshes;
 		std::vector<const void*> meshSlots;
 		std::vector<std::uint32_t> freeMeshSlots, changedMeshes;
-		// The instance table: its high-water mark, its free ranges (first -> count, coalesced), the freed ranges waiting for the commit.
 		std::uint32_t instanceSlots = 0;
 		std::uint64_t instanceCount = 0;
-		std::map<std::uint32_t, std::uint32_t> freeRanges;
+		std::map<std::uint32_t, std::uint32_t> freeRanges;  // first to count, coalesced
 		std::vector<std::pair<std::uint32_t, std::uint32_t>> freedRanges;
-		// Removed shapes' and groups' seqs (a stale event after the removal is dropped), with the drain they were removed in.
+		// Removal seq and the drain it happened in, so stale events after a removal are dropped.
 		ankerl::unordered_dense::map<const void*, std::pair<std::uint64_t, std::uint32_t>> tombstones;
 		ankerl::unordered_dense::map<GroupKey, std::pair<std::uint64_t, std::uint32_t>, GroupKeyHash> groupTombstones;
 		std::size_t rejectedGroups = 0;
-		// Buckets whose LOD tiers wait for the library's loads.
 		std::uint32_t lodPending = 0;
 		std::vector<std::shared_ptr<const void>> retired;
 		std::uint32_t drains = 0;
@@ -305,9 +270,6 @@ namespace DCLF::Features::Grass
 		Stats stats;
 	};
 
-	/**
-	 * @brief The render thread's mirror (dclf-architecture.md, "Grass: the draws"): the engine's grass shapes and their records, by
-	 * events. Drained at the frame requests, running or not (the family's serve); the depth commit uploads what it changed.
-	 */
+	/** @brief See dclf-architecture.md, "Grass: the draws". Drained every frame, whether grass is DCLF's or not. */
 	Mirror& RenderMirror();
 }

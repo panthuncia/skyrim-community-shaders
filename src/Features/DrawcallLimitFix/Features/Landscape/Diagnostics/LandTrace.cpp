@@ -1,6 +1,5 @@
-// CS_DCLF_LAND_TRACE: main thread at the scene frame's start, with or without DCLF: every loaded land quad as the engine holds it (its
-// node's hidden flag, geometry, property, material, the material's layer count and texture paths), logged when first seen and whenever
-// any of it changes, so a terrain that draws the wrong textures can be told apart from one whose engine state changed.
+// CS_DCLF_LAND_TRACE: logs each loaded land quad's engine state when first seen and when it changes.
+// This tells a terrain drawing the wrong textures apart from one whose engine state really changed. Main thread.
 
 #include "Features/DrawcallLimitFix/Features/Landscape/Landscape.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -12,9 +11,8 @@ namespace DCLF::Features::Landscape
 {
 	namespace
 	{
-		std::uint32_t frame = 0;  // FrameBegin's count (main thread)
+		std::uint32_t frame = 0;
 
-		// (land, quad) -> the quad's description when last logged (main thread).
 		ankerl::unordered_dense::map<std::uint64_t, std::string> lastSeen;
 
 		std::string TextureName(const RE::NiSourceTexture* a_texture)

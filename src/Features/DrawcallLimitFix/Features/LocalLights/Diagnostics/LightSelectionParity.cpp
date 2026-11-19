@@ -1,4 +1,4 @@
-// The light selection's parity (LightSelectionParity.h): at LightSelection's detour of CalculateActiveShadowCasterLights, render thread.
+// Compares DCLF's light selection with the engine's. Runs in the CalculateActiveShadowCasterLights detour, render thread.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/Diagnostics/LightSelectionParity.h"
 
@@ -20,15 +20,14 @@ namespace DCLF::Diagnostics::LightSelectionParity
 		using Engine::Global;
 		using View = LightSelectionView;
 
-		// Engine::Offsets (Address Library ids).
-		constexpr Engine::Offset kLightCount{ { 415035 }, { 528090 } };   // the kept lights, the sun among them (the function's last store)
-		constexpr Engine::Offset kSlotCounter{ { 415036 }, { 528091 } };  // the next shadowLightsAccum slot; the next mask index at +4
-		constexpr Engine::Offset kFocusHost{ { 415267 }, { 528315 } };    // last frame's focus host (non-sun)
-		constexpr std::size_t kPortalEntry = 0x30190;       // a culling process's portal-graph entry
+		constexpr Engine::Offset kLightCount{ { 415035 }, { 528090 } };   // Kept lights, including the sun.
+		constexpr Engine::Offset kSlotCounter{ { 415036 }, { 528091 } };  // Next shadowLightsAccum slot. The next mask index is at +4.
+		constexpr Engine::Offset kFocusHost{ { 415267 }, { 528315 } };    // Last frame's focus host, never the sun.
+		constexpr std::size_t kPortalEntry = 0x30190;       // A culling process's portal-graph entry.
 
 		RE::ShadowSceneNode* SceneNode() { return Global<RE::ShadowSceneNode*>(Engine::Address::kShadowSceneNode); }
 
-		/** @brief FUN_140e14300: whether two portal-graph entries share a room, or both see every room (+0x130). */
+		// Port of FUN_140e14300. Also true when both entries see every room (+0x130).
 		bool SharesRoom(const void* a_light, const void* a_camera)
 		{
 			if (At<std::uint8_t>(a_light, 0x130) && At<std::uint8_t>(a_camera, 0x130))
@@ -45,12 +44,11 @@ namespace DCLF::Diagnostics::LightSelectionParity
 			return false;
 		}
 
-		// The engine's entries at the function's entry, per light.
 		struct EngineRooms
 		{
 			bool shares = false, visibleUnbound = false;
-			const void* entry = nullptr;      // descriptor 0's process's (the room test's)
-			const void* roomEntry = nullptr;  // the room process's (+0x128, the walk's)
+			const void* entry = nullptr;      // Descriptor 0's process, used by the room test.
+			const void* roomEntry = nullptr;  // The room process (+0x128), used by the walk.
 			std::array<float, 3> walkedFrom{};
 			std::vector<const void*> rooms;
 		};
@@ -61,8 +59,7 @@ namespace DCLF::Diagnostics::LightSelectionParity
 
 		void Sample(const On<EnginePoint::LightSelectionBegin>&)
 		{
-			// The engine's room test at the function's entry (FUN_140e14300 on the entries), and where the light's
-			// entry was last walked from (its room process's camera, +0x128 -> +0x18).
+			// The light's entry was last walked from its room process's camera (+0x128 -> +0x18).
 			engineRooms.clear();
 			auto* node = SceneNode();
 			const auto* processes = Global<const std::byte* const*>(Engine::Address::kListProcesses);
@@ -96,8 +93,7 @@ namespace DCLF::Diagnostics::LightSelectionParity
 
 		void CheckRooms(bool& a_differ, std::string& a_detail)
 		{
-			// Every light DCLF tested for a room against the engine's verdict at the function's entry. The engine's light entry is
-			// its last walk's: a light that moved since (its room process's camera elsewhere) is tallied apart.
+			// The engine tests a light's rooms from its last walk, so a light that moved since then is counted separately.
 			auto& p = tally;
 			const auto& roomVerdicts = View::RoomVerdicts();
 			const auto& lightRooms = View::LightRooms();
@@ -184,7 +180,7 @@ namespace DCLF::Diagnostics::LightSelectionParity
 			for (std::uint32_t s = 0; s < std::max<std::uint32_t>(engineSlots, static_cast<std::uint32_t>(frame.slots.size())); ++s) {
 				const RE::BSShadowLight* engine = s < engineSlots && s < accum.size() ? accum[s] : nullptr;
 				const RE::BSShadowLight* ours = s < frame.slots.size() ? frame.slots[s] : nullptr;
-				// A gap is not this frame's: whatever the slot held.
+				// A gap slot holds stale contents.
 				if (s < frame.slots.size() && !ours)
 					continue;
 				if (engine != ours) {
@@ -209,7 +205,6 @@ namespace DCLF::Diagnostics::LightSelectionParity
 				}
 			}
 			CheckRooms(differ, detail);
-			// The focus flags of the drawn lights, and last frame's host as the engine left it.
 			{
 				p.focusHosts += frame.focusHosts.size();
 				const auto checkFocus = [&](const RE::BSShadowLight* a_light) {

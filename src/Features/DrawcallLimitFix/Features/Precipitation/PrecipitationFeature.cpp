@@ -1,5 +1,5 @@
-// Precipitation: the engine's rain and snow drawn by the render graph (CS_ORG_PRECIPITATION=1, default off). The feature reserves the
-// EngineDraws anchor and installs the engine hook; the rest is PrecipitationCapture.cpp and PrecipitationDraws.cpp.
+// Precipitation: the engine's rain and snow drawn by the render graph (CS_ORG_PRECIPITATION=1, default off).
+// The engine side is PrecipitationCapture.cpp and the graph side PrecipitationDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
 #include "RenderGraph/Engine/Native/Native.h"

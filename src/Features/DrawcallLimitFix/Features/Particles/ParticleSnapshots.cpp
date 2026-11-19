@@ -1,6 +1,5 @@
-// ParticleSnapshots: the update-slot thunks (the writer, on whichever thread updates the system), the followed-record table and the
-// producer's expansion into the frame's palettes (FrameValues, on DCLF's pool, through the feature's palette rows class), FUN_140e51320's
-// port.
+// Particle snapshots: update-slot thunks capture each followed system, and the producer expands the snapshots into the frame's
+// palettes on DCLF's pool. The expansion ports FUN_140e51320.
 
 #include "Features/DrawcallLimitFix/Features/Particles/ParticleSnapshots.h"
 
@@ -26,10 +25,8 @@ namespace DCLF::Features::Particles
 
 	namespace
 	{
-		// The world scene graph, its camera at +0x128 (PrimaryCull's, PortalViews').
 		constexpr std::size_t kSceneGraphCamera = 0x128;
-		// The renderer's particle quads (FUN_140e4d280, at its initialisation): the quad index list (R16, 0x800 quads of 0,1,2 0,2,3) and
-		// the texture-coordinate stream (half2, the corners (0,1) (1,1) (1,0) (0,0) of each quad), both immutable from then on.
+		// The renderer's particle quads (FUN_140e4d280): an R16 index list and a half2 texcoord stream. Immutable once initialised.
 		constexpr Engine::Offset kQuadIndices{ { 411353 }, { 524734 } };
 		constexpr Engine::Offset kQuadTexcoords{ { 411354 }, { 524735 } };
 		// NiParticleSystem's vtable slots UpdateDownwardPass and UpdateSelectedDownwardPass, and what they hold (AE 0x140dd48a0, 0x140dd4910).
@@ -39,11 +36,10 @@ namespace DCLF::Features::Particles
 		constexpr Engine::Offset kUpdateSelected{ { 74502 }, { 72802 } };
 		// NiParticles +0x160: four distances (ushort) of the draw's per-particle fade by the camera's distance (FUN_140d40ba0).
 		constexpr std::size_t kParticlesFadeDistances = 0x160;
-		// FUN_140e51320's constants: a rotated particle whose faded alpha is at most this is drawn with no size (DAT_1417743ec); the colour
-		// scale of the packed vertex colour (DAT_141ad29a8).
+		// FUN_140e51320's constants: rotated particles with faded alpha at or under this get no size (DAT_1417743ec), and the vertex colour scale (DAT_141ad29a8).
 		constexpr float kRotatedAlphaCut = 0.05f;
 		constexpr float kColourScale = 255.0f;
-		// SetupGeometry's IndexedTexCoord block holds 0x80 rows (FUN_140e4acc0(renderer, 0x80, ...)), zero past the data's offsets.
+		// SetupGeometry's IndexedTexCoord block holds 0x80 rows, zero past the data's offsets.
 		constexpr std::uint32_t kSubtextureRows = 0x80;
 		// A record no plan named for this many runs leaves the table.
 		constexpr std::uint32_t kPruneRuns = 8;
@@ -51,12 +47,11 @@ namespace DCLF::Features::Particles
 		constexpr std::uint32_t kSlotMask = 3;
 		constexpr std::uint32_t kFresh = 4;
 
-		// One address per quad bucket (QuadSlotKey: an octave's step): DCLF's own, so no engine TriShape can share a geometry slot key with them.
+		// DCLF's own address per quad bucket, so no engine TriShape can share a geometry slot key with them.
 		constexpr std::uint32_t kOctaves = std::countr_zero(ParticleSnapshots::kMaxQuads) + 1;
 		constexpr std::uint32_t kBuckets = kOctaves * ParticleSnapshots::kOctaveSteps;
 		alignas(8) std::byte quadSlotKeys[kBuckets]{};
 
-		// The snapshots' move writer ("particle update"), reserved at the install before the update thunks go in.
 		Api::MoveWriterId moveWriter;
 
 		std::uint64_t Mix(const void* a_pointer)
@@ -93,8 +88,7 @@ namespace DCLF::Features::Particles
 			       (channel(a_colour[0]) & 0xFF);
 		}
 
-		// FUN_140d4ff00: the engine's quicksort of the particle order by depth, farthest first (the same partitioning, so ties fall as the
-		// engine's do).
+		// FUN_140d4ff00: the engine's quicksort by depth, farthest first. Same partitioning so ties fall the same way.
 		void SortByDepth(std::uint16_t* a_order, const float* a_depth, int a_first, int a_last)
 		{
 			while (true) {
@@ -121,7 +115,7 @@ namespace DCLF::Features::Particles
 		}
 	}
 
-	/** @brief A followed system's snapshots: a triple buffer, one writer at a time (writing) and the producer as its reader. */
+	/** @brief A followed system's snapshots: a triple buffer with one writer at a time and the producer as reader. */
 	class ParticleSnapshots::Record
 	{
 	public:
@@ -143,9 +137,8 @@ namespace DCLF::Features::Particles
 			float fadeDistances[4]{};
 			bool rotations = false;
 			bool aligned = false;
-			// The data's aspect flags (FUN_140e51320, without rotations): +0x88 the quads' long axis along the velocity projected on the
-			// view plane, +0x89 their aspect by that projected speed; aspect the data's +0x6c (the aspect, and the speed's first aspect),
-			// +0x70 (the second aspect), +0x74 and +0x78 (the two speeds).
+			// The data's aspect flags (FUN_140e51320, without rotations). +0x88 aligns the long axis with the projected velocity, and +0x89
+			// scales the aspect by that speed using +0x6c to +0x78.
 			bool alignVelocity = false, speedAspect = false;
 			float aspect[4]{};
 			std::uint64_t sequence = 0;  // 0: never written
@@ -161,19 +154,16 @@ namespace DCLF::Features::Particles
 		std::uint32_t readSlot = 2;   // the producer's
 		std::atomic<bool> writing{ false };
 		std::uint64_t written = 0;    // the writer's sequence
-		// The writer's: what its last capture was taken at (the system's lastUpdate and world transform), so an update pass that ran no
-		// system update and moved nothing (the engine passes a system twice a frame: the full and the selective downward pass) copies nothing.
+		// The engine passes a system twice a frame, so an update pass with no system update and no movement copies nothing.
 		float capturedTime = -1.0f;
 		RE::NiTransform capturedWorld;
 		bool captured = false;
-		// The producer's.
 		std::uint32_t listedRun = 0;
 		std::vector<std::uint16_t> order;
 		std::vector<float> depth;
-		// The producer's last run that expanded a snapshot of it (read by the observer on any thread).
+		// Read by the observer on any thread.
 		std::atomic<std::uint32_t> expandedRun{ 0 };
-		// The producer's: the snapshot sequence it last expanded, and for how many runs in a row it has been the same one (a system the engine
-		// stopped updating: frozen, its quads drawn from its last state).
+		// How many runs in a row the same snapshot was expanded. A system the engine stopped updating draws from its last state.
 		std::uint64_t expandedSequence = 0;
 		std::uint32_t sameRuns = 0;
 	};
@@ -237,7 +227,6 @@ namespace DCLF::Features::Particles
 
 	const void* ParticleSnapshots::QuadSlotKey(std::uint32_t a_quads)
 	{
-		// A size's octave, and its step in it (the rule's sizes: a power of two is step 0, the next octave's power step 0 of that).
 		const std::uint32_t quads = QuadsOf(a_quads);
 		const std::uint32_t octave = std::bit_floor(quads);
 		const std::uint32_t step = std::max(octave / kOctaveSteps, 1u);
@@ -249,14 +238,13 @@ namespace DCLF::Features::Particles
 	{
 		if (installed)
 			return;
-		// Both thunks call what the slots held first, so another plugin's hook there is chained onto (logged).
+		// Both thunks call what the slots held first, so another plugin's hook there is chained.
 		REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_NiParticleSystem[0] };
 		const auto* slots = reinterpret_cast<const std::uintptr_t*>(vtable.address());
 		if (slots[kUpdateDownwardSlot] != REL::Offset(kUpdateDownward).address())
 			logger::info("[DCLF] particle snapshots: NiParticleSystem::UpdateDownwardPass is hooked by {}; DCLF's thunk chains onto it", HookSites::ModuleOf(slots[kUpdateDownwardSlot]));
 		if (slots[kUpdateSelectedSlot] != REL::Offset(kUpdateSelected).address())
 			logger::info("[DCLF] particle snapshots: NiParticleSystem::UpdateSelectedDownwardPass is hooked by {}; DCLF's thunk chains onto it", HookSites::ModuleOf(slots[kUpdateSelectedSlot]));
-		// Its move writer, the report's "particle update" (the slot after Features/Actors' three, as Core's table had it).
 		moveWriter = a_context.ReserveMoveWriter("particle update");
 		stl::write_vfunc<kUpdateDownwardSlot, UpdateHook>(RE::VTABLE_NiParticleSystem[0]);
 		stl::write_vfunc<kUpdateSelectedSlot, SelectedHook>(RE::VTABLE_NiParticleSystem[0]);
@@ -272,7 +260,7 @@ namespace DCLF::Features::Particles
 
 	void ParticleSnapshots::BeginFrame()
 	{
-		// The renderer's quads, once it made them (render thread: the renderer's own globals, written at its initialisation alone).
+		// The renderer's own globals, written only at its initialisation.
 		if (!quadVertices.load(std::memory_order_relaxed) || !quadIndices.load(std::memory_order_relaxed)) {
 			auto* vertices = Global<ID3D11Buffer*>(kQuadTexcoords);
 			auto* indices = Global<ID3D11Buffer*>(kQuadIndices);
@@ -281,8 +269,7 @@ namespace DCLF::Features::Particles
 				quadIndices.store(indices, std::memory_order_release);
 			}
 		}
-		// The main camera, as Main::Draw's camera setup left it (PrimaryCull::BeginFrameCamera's): SetCameraData gives the renderer's view
-		// data its world rotation's columns (viewForward the first, viewUp the second, viewRight the third) and posAdjust its translation.
+		// SetCameraData gives the view data the world rotation's columns: forward first, up second, right third.
 		frameCamera = {};
 		const auto* sceneGraph = Global<const std::byte*>(Engine::Address::kWorldSceneGraph);
 		const auto* camera = sceneGraph ? At<const RE::NiCamera*>(sceneGraph, kSceneGraphCamera) : nullptr;
@@ -302,7 +289,7 @@ namespace DCLF::Features::Particles
 
 	const ParticleSnapshots::Table* ParticleSnapshots::PinTable() const
 	{
-		// Counted in first, then the table read: a table replaced after this read is not freed until the count is seen at zero (EndRun).
+		// Count in before reading the table. A replaced table is not freed until EndRun sees the count at zero.
 		writersInside.fetch_add(1, std::memory_order_seq_cst);
 		return current.load(std::memory_order_seq_cst);
 	}
@@ -313,11 +300,10 @@ namespace DCLF::Features::Particles
 		Record* record = table ? table->Find(&a_system) : nullptr;
 		if (record) {
 			if (record->writing.exchange(true, std::memory_order_acquire)) {
-				// Another thread is writing it (the engine updating it twice at once): that capture stands.
+				// Another thread is writing it because the engine updated it twice at once. That capture stands.
 				contended.fetch_add(1, std::memory_order_relaxed);
 			} else if (const float time = a_system.GetParticleSystemRuntimeData().lastUpdate;
 					   record->captured && time == record->capturedTime && std::memcmp(&a_system.world, &record->capturedWorld, sizeof(RE::NiTransform)) == 0) {
-				// Nothing new since the last capture (no system update ran, nothing moved): the published snapshot stands.
 				record->writing.store(false, std::memory_order_release);
 				unchanged.fetch_add(1, std::memory_order_relaxed);
 			} else {
@@ -331,7 +317,6 @@ namespace DCLF::Features::Particles
 				slot.rotations = slot.aligned = slot.alignVelocity = slot.speedAspect = false;
 				if (data) {
 					const auto& p = static_cast<const RE::NiParticlesData*>(data)->GetParticlesRuntimeData();
-					// The draw's count (FUN_1414f2ad0: the active vertex count, at most 0x800).
 					const std::uint32_t count = std::min<std::uint32_t>(p.numVertices, kMaxQuads);
 					if (p.positions && p.radii && p.sizes) {
 						slot.particles.resize(count);
@@ -343,8 +328,6 @@ namespace DCLF::Features::Particles
 						slot.aspect[1] = p.speedToAspectAspect2;
 						slot.aspect[2] = p.speedToAspectAspect1;
 						slot.aspect[3] = p.speedToAspectSpeed2;
-						// The velocities the aligned quads are built from (NiPSysData's; the mirror's `velocities` keeps any other data the
-						// engine's).
 						const RE::NiParticleInfo* info = nullptr;
 						if (slot.aligned)
 							if (const auto* psys = netimmerse_cast<RE::NiPSysData*>(const_cast<RE::NiObject*>(static_cast<const RE::NiObject*>(data))))
@@ -368,8 +351,7 @@ namespace DCLF::Features::Particles
 							out.velocity[0] = info ? info[i].velocity.x : 0.0f;
 							out.velocity[1] = info ? info[i].velocity.y : 0.0f;
 							out.velocity[2] = info ? info[i].velocity.z : 0.0f;
-							// The vertex stage's IndexedTexCoord[index] (SetupGeometry's block: the data's offsets, zero past them), applied when
-							// the data has subtextures (FUN_1414bde90's TexCoordIndex); the identity otherwise.
+							// Apply IndexedTexCoord[index] when the data has subtextures (FUN_1414bde90's TexCoordIndex).
 							if (p.subTextureOffsetsCount) {
 								const std::uint32_t index = p.textureIndices ? p.textureIndices[i] : 0u;
 								if (index < subtextures) {
@@ -407,12 +389,11 @@ namespace DCLF::Features::Particles
 				record->writeSlot = previous & kSlotMask;
 				record->writing.store(false, std::memory_order_release);
 				captures.fetch_add(1, std::memory_order_relaxed);
-				// The system's move event (MoveEvents, keyed by the geometry): the scene pass's light path takes it then, not every frame.
+				// The move event lets the scene pass's light path take the system only when it moves.
 				if (Extensions::GeometryTypeOn(SceneToggles(), static_cast<std::uint8_t>(RE::BSGeometry::Type::kParticles))) {
 					Extensions::PushReservedMove(moveWriter, &a_system, Api::MoveReach::ScenePass);
 				}
-				// The system's update moves its nearest BSOrderedNode's bound (exact type, as FrameValues' StoreForwardSort finds it), which
-				// the blended leaves beside it sort by: the node keys them (FrameValues alone). Fires' and waterfalls' effects.
+				// The update moves the nearest BSOrderedNode's bound, which the blended leaves beside it sort by. Fires and waterfalls rely on this.
 				static const REL::Relocation<const RE::NiRTTI*> orderedRtti{ RE::BSOrderedNode::Ni_RTTI };
 				for (const auto* node = a_system.parent; node; node = node->parent)
 					if (node->GetRTTI() == orderedRtti.get()) {
@@ -443,11 +424,8 @@ namespace DCLF::Features::Particles
 		using Particle = ParticleSnapshots::Record::Particle;
 
 		/**
-		 * @brief The camera in a system's model space and its quads' axes (FUN_140e51320's): the camera's up and right (the world rotation's
-		 * transpose times the view data's), the plain quads' corner directions, and for aligned quads (its aspect flags, without rotations)
-		 * the quad's axes A (first the camera's up) and B (its right), which the velocity alignment replaces particle by particle and the next
-		 * particle starts from (as the engine's registers carry them), the view normal E = B x A, and the aspect, which the speed's aspect
-		 * replaces and the next particle keeps likewise.
+		 * @brief The camera in a system's model space and its quads' axes, as FUN_140e51320 computes them.
+		 * For aligned quads the axes and aspect carry over from one particle to the next, as the engine's registers do.
 		 */
 		struct QuadFrame
 		{
@@ -478,7 +456,7 @@ namespace DCLF::Features::Particles
 			a_frame.aspect = a_slot.aspect[0];
 		}
 
-		// Back to front: the model-space positions' distance along the camera's forward (FUN_140d4fcb0, then FUN_140d4ff00's sort).
+		// Back to front by distance along the camera's forward (FUN_140d4fcb0, then FUN_140d4ff00).
 		void OrderBackToFront(ParticleSnapshots::Record& a_record, const Slot& a_slot, const ParticleSnapshots::Camera& a_camera, std::uint32_t a_count)
 		{
 			auto& order = a_record.order;
@@ -495,7 +473,6 @@ namespace DCLF::Features::Particles
 			}
 		}
 
-		// An aligned quad's half-diagonals, the frame's axes and aspect carried on to the next particle.
 		void AlignedAxes(const Slot& a_slot, const Particle& a_particle, QuadFrame& a_frame, float (&a_x)[3], float (&a_y)[3])
 		{
 			auto& axisA = a_frame.axisA;
@@ -503,7 +480,6 @@ namespace DCLF::Features::Particles
 			const auto& normal = a_frame.normal;
 			const auto& v = a_particle.velocity;
 			if (a_slot.speedAspect) {
-				// The velocity projected on the view plane; its length clamped to the two speeds picks the aspect between the two.
 				const float onB = v[0] * axisB[0] + v[1] * axisB[1] + v[2] * axisB[2];
 				const float onA = v[0] * axisA[0] + v[1] * axisA[1] + v[2] * axisA[2];
 				const float p0 = onA * axisA[0] + onB * axisB[0], p1 = onA * axisA[1] + onB * axisB[1], p2 = onA * axisA[2] + onB * axisB[2];
@@ -517,7 +493,7 @@ namespace DCLF::Features::Particles
 				a_frame.aspect = ((clamped - a_slot.aspect[2]) / (a_slot.aspect[3] - a_slot.aspect[2])) * (a_slot.aspect[1] - a_slot.aspect[0]) + a_slot.aspect[0];
 			}
 			if (a_slot.alignVelocity) {
-				// A along the projected velocity (XMVector3Normalize: zero for a zero one), B = A x E, both carried to the next particle.
+				// A along the projected velocity (zero for a zero one), B = A x E. Both carry to the next particle.
 				const float onB = v[0] * axisB[0] + v[1] * axisB[1] + v[2] * axisB[2];
 				const float onA = v[0] * axisA[0] + v[1] * axisA[1] + v[2] * axisA[2];
 				float a[3]{ axisA[0] * onA + onB * axisB[0], axisA[1] * onA + onB * axisB[1], axisA[2] * onA + onB * axisB[2] };
@@ -539,7 +515,6 @@ namespace DCLF::Features::Particles
 			}
 		}
 
-		// A particle's quad half-diagonals: rotated, aligned or plain.
 		void QuadAxes(const Slot& a_slot, const Particle& a_particle, float a_fade, bool a_alignedQuads, QuadFrame& a_frame, float (&a_x)[3], float (&a_y)[3])
 		{
 			if (a_slot.rotations) {
@@ -560,8 +535,7 @@ namespace DCLF::Features::Particles
 			}
 		}
 
-		// A quad's rows: its four corners relative to the model bound's centre, which the placement's translation carries (the engine's
-		// vertices and World alike), the packed colour as w's bits; then its subtexture rect.
+		// Corners are relative to the model bound's centre, which the placement's translation carries. The packed colour is w's bits.
 		void WriteQuad(const Slot& a_slot, const Particle& a_particle, const float (&a_x)[3], const float (&a_y)[3], float a_colour, float* a_out)
 		{
 			const auto& p = a_particle.position;
@@ -575,8 +549,7 @@ namespace DCLF::Features::Particles
 			std::copy_n(a_particle.rect, 4, a_out + 16);
 		}
 
-		// The placement: the world rotation and scale, the model bound's centre folded into the translation (BSEffectShader::SetupGeometry
-		// for particles, 0x1414eab10), the previous transform the same; the world bound the update left.
+		// The model bound's centre is folded into the translation, as BSEffectShader::SetupGeometry does for particles (0x1414eab10).
 		void PlacementOf(const Slot& a_slot, ParticleSnapshots::Expanded& a_out)
 		{
 			const auto& r = a_slot.world.rotate.entry;
@@ -597,7 +570,6 @@ namespace DCLF::Features::Particles
 	{
 		a_out = {};
 		const std::size_t rows = std::size_t(a_quads) * kRowsPerParticle;
-		// The newest snapshot, when the writer published one since the last take.
 		if (a_record.latest.load(std::memory_order_acquire) & kFresh)
 			a_record.readSlot = a_record.latest.exchange(a_record.readSlot, std::memory_order_acq_rel) & kSlotMask;
 		const auto& slot = a_record.slots[a_record.readSlot];
@@ -617,7 +589,6 @@ namespace DCLF::Features::Particles
 		for (std::uint32_t k = 0; k < count; ++k) {
 			const auto& particle = slot.particles[a_record.order[k]];
 			const auto& p = particle.position;
-			// The particle's world position, for its distance fade.
 			const float world[3]{ (p[0] * r[0][0] + p[1] * r[0][1] + p[2] * r[0][2]) * scale + t[0], (p[0] * r[1][0] + p[1] * r[1][1] + p[2] * r[1][2]) * scale + t[1],
 				(p[0] * r[2][0] + p[1] * r[2][1] + p[2] * r[2][2]) * scale + t[2] };
 			const float fade = DistanceFade(slot.fadeDistances, a_camera.eye, world);
@@ -644,7 +615,6 @@ namespace DCLF::Features::Particles
 	void ParticleSnapshots::EndRun()
 	{
 		const std::uint32_t run = runs.load(std::memory_order_relaxed) + 1;
-		// The records no plan named lately leave the table (a system that left the scene, or stopped being a member).
 		for (auto it = records.begin(); it != records.end();) {
 			if (run - it->second->listedRun > kPruneRuns) {
 				retired.push_back(std::move(it->second));
@@ -674,8 +644,7 @@ namespace DCLF::Features::Particles
 			replaced = true;
 			published.fetch_add(1, std::memory_order_relaxed);
 		}
-		// No writer inside after the store: every later one reads the newest table, so the older tables and the records retired before this
-		// point are no writer's.
+		// With no writer inside after the store, every later writer reads the newest table, so older tables and retired records are free.
 		if ((replaced || tables.size() > 1 || !retired.empty()) && writersInside.load(std::memory_order_seq_cst) == 0) {
 			if (tables.size() > 1)
 				tables.erase(tables.begin(), tables.end() - 1);

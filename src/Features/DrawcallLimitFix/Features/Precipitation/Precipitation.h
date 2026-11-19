@@ -2,20 +2,11 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Precipitation (CS_ORG_PRECIPITATION): the engine's rain and snow (BSParticleShader's ENVCUBE techniques, the sky's precipitation
-// geometry, Blackreach's spores among them) drawn by the render graph in the engine's place.
-//
-// The engine draws them through the grouped alphas (AE 107673 +0x1F3, the geometry-type dispatcher, DrawTriShape). The engine's CPU code
-// runs unchanged: its BeginPass, SetupTechnique and SetupGeometry (CS's and Rain Refraction's hooks with them) set the draw up, and the
-// engine draw families' DrawTriShape detour (Core/Engine/Family) latches the draw instead of drawing it: the shadow state, the constants
-// the Setup functions wrote (the engine constants capture), the four material slots and their samplers, the headers CS binds, the
-// geometry. Each draw is then drawn at once by an ORG pass at the EngineDraws anchor, at its place in the grouped alphas, with CS's
-// Particle.hlsl built for ORG (PrecipitationDraws.cpp). There is no batch to hook: the grouped alphas mix the precipitation with
-// every other blended draw, so a draw is a run of its own.
-//
-// The family is the primary path for the precipitation (docs/development/p5/primary-path.md): its stages compile when CS loads the
-// ENVCUBE descriptors, its programs are prebuilt from the manifest, and its client is made at setup with every published input its
-// draws can read. A draw it cannot take is drawn by the engine, logged once per reason, and nobody vouches for it under the flush latch.
+// Precipitation (CS_ORG_PRECIPITATION): the render graph draws the engine's rain and snow (BSParticleShader ENVCUBE techniques)
+// in the engine's place.
+// They draw through the grouped alphas (AE 107673 +0x1F3), mixed with every other blended draw, so there is no batch to hook.
+// Each draw is latched at DrawTriShape and drawn at once as its own run at the EngineDraws anchor, with CS's Particle.hlsl.
+// A draw the family cannot take is drawn by the engine, logged once per reason, with nobody vouching for it.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -33,24 +24,21 @@
 
 namespace DCLF::Features::Precipitation
 {
-	/** @brief BSParticleShader's techniques the family draws (ShaderCache::ParticleShaderTechniques): EnvCubeSnow and EnvCubeRain. */
+	/** @brief Whether a particle technique is EnvCubeSnow or EnvCubeRain. */
 	inline constexpr bool PrecipitationTechnique(std::uint32_t a_descriptor) { return a_descriptor == 4 || a_descriptor == 5; }
 	/** @brief EnvCubeRain: the technique Rain Refraction draws its refractive rain with. */
 	inline constexpr std::uint32_t kRainTechnique = 5;
 
 	/**
-	 * @brief The engine targets a draw may name, imported once by the client: kMAIN, and the second targets the grouped alphas may leave
-	 * bound (kNORMAL_TAAMASK_SSRMASK, its swap, kMOTION_VECTOR, and kTEMPORAL_AA_WATER_1 and _2: the water drawn before the rain in the
-	 * same grouped alphas leaves its temporal mask bound, and the engine's rain then writes its normal output there, which the water's
-	 * temporal blend reads). A draw naming another second target draws into kMAIN alone (PrecipitationCapture.cpp).
+	 * @brief The engine targets a draw may name. The water drawn earlier leaves its temporal mask bound, and the rain writes its
+	 * normal there for the water's temporal blend. A draw naming another second target draws into kMAIN alone.
 	 */
 	inline constexpr std::array<std::int32_t, 6> kTargets{ 1, 4, 5, 7, 85, 86 };
-	/** @brief The colour targets Particle.hlsl's pixel stage writes (PS_OUTPUT: Color, Normal). */
 	inline constexpr std::uint32_t kMaxColours = 2;
 
-	/** @brief The material slots a draw samples (Particle.hlsl's t0-t3): the source, the grayscale, the occlusion map, the underwater mask. */
+	/** @brief The material slots a draw samples: source, grayscale, occlusion map, underwater mask. */
 	inline constexpr std::uint32_t kMaterialSlots = 4;
-	/** @brief Whether an ENVCUBE draw samples slot a_slot: the grayscale (t1) is not read by those techniques. */
+	/** @brief Whether an ENVCUBE draw samples slot a_slot. Those techniques do not read the grayscale (t1). */
 	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot != 1; }
 
 	/** @brief Rain Refraction's raindrop normals (Particle.hlsl's t80), which CS binds for refractive rain. */
@@ -59,7 +47,7 @@ namespace DCLF::Features::Precipitation
 	/** @brief The rows of each engine constant group the latch takes: VS b0 (ScaleAdjust), VS b2 (ENVCUBE's 23), PS b2 (2). */
 	inline constexpr std::uint32_t kVSTechniqueRows = 1, kVSGeometryRows = 23, kPSGeometryRows = 2;
 
-	/** @brief ParticleOrgDraw in Particle.hlsl: a draw's latched values, 592 bytes. */
+	/** @brief ParticleOrgDraw in Particle.hlsl, 592 bytes. */
 	struct DrawConstants
 	{
 		float vsTechnique[kVSTechniqueRows][4];
@@ -82,7 +70,7 @@ namespace DCLF::Features::Precipitation
 	};
 	static_assert(sizeof(DrawConstants) == 592, "ParticleOrgDraw's layout");
 
-	/** @brief One draw's latch region: its values, Light Limit Fix's strict lights, then the directional shadow record (as the water's). */
+	/** @brief One draw's latch region: values, strict lights, then the directional shadow record, as the water's. */
 	struct DrawLatch
 	{
 		DrawConstants constants;
@@ -91,7 +79,6 @@ namespace DCLF::Features::Precipitation
 	};
 	static_assert(sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
 
-	/** @brief One latched draw. */
 	struct Draw
 	{
 		Family::ProgramKey key;
@@ -104,10 +91,7 @@ namespace DCLF::Features::Precipitation
 		DrawLatch latch{};
 	};
 
-	/**
-	 * @brief A draw's run, as the anchor's pass records it. The headers are the water's (Particle.hlsl's push block is laid out as
-	 * Water.hlsl's: Water::kHeaderRegisters), each a heap index resolved for the draw.
-	 */
+	/** @brief A draw's run. Particle.hlsl's push block uses the water's header layout. */
 	struct Run
 	{
 		std::vector<Draw> draws;
@@ -116,39 +100,32 @@ namespace DCLF::Features::Precipitation
 		Family::Owners owners;
 	};
 
-	// PrecipitationFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 
 	/** @brief Whether CS_ORG_PRECIPITATION=1 turned the family on (read at install). */
 	bool Enabled();
 
-	// PrecipitationCapture.cpp: the engine hooks, from the feature's install.
 	void InstallHooks();
 	void PreflightHooks();
 
-	// PrecipitationDraws.cpp: the render graph's side (render thread).
 	namespace PrecipitationDraws
 	{
-		/** @brief Whether the anchor exists and the runtime is up; false for good once the client failed. */
+		/** @brief Whether the anchor and runtime are up. False for good once the client failed. */
 		bool Available();
-		/** @brief Reserves the EngineDraws anchor (the feature's install). */
+		/** @brief Reserves the EngineDraws anchor. */
 		void Reserve();
-		/**
-		 * @brief The family's setup (Family::AddSetup, main thread): the stage precompile started, the manifest's programs queued, the client
-		 * made and its build asked for. True once done (or refused for good, logged); false while the render graph has no host yet.
-		 */
+		/** @brief Makes the client and queues its programs. Main thread. False while the render graph has no host yet. */
 		bool Setup();
-		/** @brief Whether a draw is taken: the client exists and a run of the anchor now would draw. False is logged once. */
+		/** @brief Whether a draw is taken now. False is logged once. */
 		bool CanTake();
-		/** @brief How the client reads a_id, the published id a bound header or slot exports (Family::PublishedInputs::Resolve). */
+		/** @brief How the client reads the published id a bound header or slot exports. */
 		Family::InputResult ReadPublished(std::string_view a_id, std::uint32_t& a_index);
-		/** @brief The program for a key (Family::EngineDrawPrograms::Get): null when it cannot be built. */
+		/** @brief The program for a key, or null when it cannot be built. */
 		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
 		/** @brief Keeps a refused draw's imports and leases as long as a run's. */
 		void Keep(Family::Owners&& a_owners);
-		/** @brief Runs the anchor with a_run's draws. True when the run was submitted; otherwise its draws were not drawn (logged). */
+		/** @brief Runs the anchor with a_run's draws. False means they were not drawn, and that is logged. */
 		bool Submit(std::shared_ptr<Run> a_run);
-		/** @brief One status line. */
 		std::string Status();
 	}
 }

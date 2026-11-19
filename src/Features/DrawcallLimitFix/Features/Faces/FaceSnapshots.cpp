@@ -1,5 +1,5 @@
-// FaceSnapshots: the morph-job and stage-join thunks (the engine's face morphing threads) and the head records the coordinator's scene walk
-// keeps (through the feature's component, FaceShapes.cpp); the open-addressed head table they share.
+// Face snapshot hooks in the engine's morph job and stage join, and the head records the scene walk keeps.
+// Writers and the walk share an open-addressed table keyed by head.
 
 #include "Features/DrawcallLimitFix/Features/Faces/FaceSnapshots.h"
 
@@ -17,12 +17,12 @@ namespace DCLF::Features::Faces
 {
 	namespace
 	{
-		// The table's capacity (a power of two): far above the heads a scene loads at once.
+		// Power of two, far above the number of heads loaded at once.
 		constexpr std::uint32_t kCapacity = 2048;
-		// latest: the slot index in bits 0-1, and whether it holds a snapshot the reader has not taken.
+		// latest holds the slot index in bits 0-1, plus a flag for a snapshot the reader has not taken.
 		constexpr std::uint32_t kSlotMask = 3;
 		constexpr std::uint32_t kFresh = 4;
-		// A key whose record was retired: probing continues past it, and an insert may reuse it.
+		// Probing continues past a tombstone, and an insert may reuse it.
 		const RE::BSFaceGenNiNode* const kTombstone = reinterpret_cast<const RE::BSFaceGenNiNode*>(std::uintptr_t{ 1 });
 		constexpr std::uint32_t kStatsInterval = 600;
 
@@ -45,26 +45,24 @@ namespace DCLF::Features::Faces
 			struct Shape
 			{
 				RE::NiPointer<RE::BSDynamicTriShape> shape;
-				std::uint32_t offset = 0;  // in floats, within a slot
+				std::uint32_t offset = 0;  // in floats
 				std::uint32_t vertexCount = 0;
 			};
 
 			RE::NiPointer<RE::BSFaceGenNiNode> head;
 			std::uint64_t recordId = 0;
 			std::vector<Shape> shapes;  // immutable once the record is in the table
-			std::uint32_t floats = 0;   // a slot's size: four per vertex of every shape
+			std::uint32_t floats = 0;   // per slot, four per vertex of every shape
 			org::async::LeasedArraySlots<float, 3> storage;
-			// Written by the writer for its slot before it publishes the slot, read by the reader after it takes it.
+			// The writer sets this before publishing the slot. The reader reads it after taking the slot.
 			std::array<std::uint64_t, 3> slotGeneration{};
 			std::atomic<std::uint32_t> latest{ 1 };
-			std::uint32_t writeSlot = 0;  // the writer's (one at a time: a job, then the stage's join)
-			std::uint32_t readSlot = 2;   // the walk's
-			// A first snapshot is wanted from the stage's join; set until any capture publishes.
+			std::uint32_t writeSlot = 0;  // one writer at a time, a job then the stage join
+			std::uint32_t readSlot = 2;
+			// Asks the stage join for a first snapshot. Cleared once any capture publishes.
 			std::atomic<bool> wantsCapture{ true };
-			// A capture found a shape whose vertex count or data changed: the walk rebuilds the record.
+			// Set when a capture sees a changed shape. The walk then rebuilds the record.
 			std::atomic<bool> stale{ false };
-			// The walk's: the walk that last compared the record against its head's shapes (Shape), and whether its staleness
-			// was reported (BeginWalk).
 			std::uint32_t seenWalk = 0;
 			bool staleReported = false;
 			std::uint64_t retiredAtStage = 0;
@@ -83,7 +81,6 @@ namespace DCLF::Features::Faces
 		std::atomic<std::uint64_t> stagesCompleted{ 0 };
 		std::atomic<std::uint32_t> jobCaptures{ 0 }, stageCaptures{ 0 }, mismatches{ 0 }, stages{ 0 };
 
-		// The walk's.
 		std::vector<Record*> live;
 		std::vector<Record*> retired;
 		std::uint32_t walk = 0;
@@ -107,7 +104,7 @@ namespace DCLF::Features::Faces
 			return entry ? entry->record.load(std::memory_order_acquire) : nullptr;
 		}
 
-		// The walk's: the record goes in before the key, so a writer that finds the key finds the record.
+		// The record goes in before the key, so a writer that finds the key also finds the record.
 		bool Insert(const RE::BSFaceGenNiNode* a_head, Record* a_record)
 		{
 			Entry* free = nullptr;
@@ -140,8 +137,7 @@ namespace DCLF::Features::Faces
 			}
 		}
 
-		// The writer's: every registered shape of the head into the write slot, published as one snapshot. Only
-		// ever called by the thread that has just morphed the head, or after the stage's join.
+		// Only called by the thread that just morphed the head, or after the stage join.
 		bool Capture(Record& a_record)
 		{
 			float* out = a_record.storage.PrepareWrite(a_record.writeSlot, a_record.floats).data();
@@ -163,8 +159,7 @@ namespace DCLF::Features::Faces
 			return true;
 		}
 
-		// The face shapes of a head as the walk sees it now: its direct children that are dynamic shapes, which
-		// are the ones its morph job writes.
+		// The head's direct dynamic-shape children, which are the ones its morph job writes.
 		static void ShapesOf(RE::BSFaceGenNiNode& a_head, std::vector<Record::Shape>& a_out)
 		{
 			a_out.clear();
@@ -198,9 +193,7 @@ namespace DCLF::Features::Faces
 			++stats.retired;
 		}
 
-		// A retired record is freed once a morph stage has completed after its retirement: every job that could
-		// have found it belonged to a stage that has joined since.
-		/** @brief a_record's references into released, then the record freed. */
+		// Freed only after a later morph stage completes. Any job that could have found the record has joined by then.
 		void Free(Record* a_record)
 		{
 			released.emplace_back(std::move(a_record->head));
@@ -223,7 +216,7 @@ namespace DCLF::Features::Faces
 
 		std::vector<Record::Shape> scratch;
 		std::vector<ShapeInput> inputs;
-		std::vector<RE::NiPointer<RE::NiRefObject>> released;  // the freed records' references (TakeReleased)
+		std::vector<RE::NiPointer<RE::NiRefObject>> released;
 	};
 
 	FaceSnapshots::FaceSnapshots() :
@@ -243,7 +236,7 @@ namespace DCLF::Features::Faces
 		return hooksInstalled;
 	}
 
-	/** @brief After a head's morph job has reset and morphed its shapes (FUN_140432550), on that job's thread. */
+	/** @brief Runs on the job's thread right after it morphs a head (FUN_140432550). */
 	struct FaceSnapshots::MorphHook
 	{
 		static void thunk(RE::BSFaceGenNiNode* a_head, std::uint8_t a_flag)
@@ -258,7 +251,7 @@ namespace DCLF::Features::Faces
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	/** @brief After the face morphing stage's JobList::Finish: no morph job runs until the next stage. */
+	/** @brief Runs after the morph stage's JobList::Finish. No morph job runs until the next stage. */
 	struct FaceSnapshots::StageJoinHook
 	{
 		static void thunk(void* a_jobList)
@@ -278,8 +271,7 @@ namespace DCLF::Features::Faces
 
 	namespace
 	{
-		// The per-head job FUN_1404334e0 calls FUN_140432550 at +0x13; Job_Face_morphing (RELOCATION_ID 38139, 39096)
-		// calls JobList::Finish (FUN_140cf6810) at +0x4D (SE: the same offsets).
+		// FUN_1404334e0 calls FUN_140432550 at +0x13. Job_Face_morphing calls JobList::Finish at +0x4D. Same offsets on SE.
 		constexpr Engine::Offset kMorphCallSite{ { 26999, 0x13 }, { 26418, 0x13 } };
 		constexpr Engine::Offset kJoinCallSite{ { 39096, 0x4d }, { 38139, 0x4d } };
 	}
@@ -294,7 +286,7 @@ namespace DCLF::Features::Faces
 	{
 		if (hooksInstalled)
 			return;
-		// Chained onto whatever the calls hold (Preflight required CALLs).
+		// Chains onto whatever the calls hold. Preflight requires CALLs.
 		const auto morphCall = REL::Offset(kMorphCallSite).address();
 		const auto joinCall = REL::Offset(kJoinCallSite).address();
 		stl::write_thunk_call<MorphHook>(morphCall);
@@ -358,7 +350,7 @@ namespace DCLF::Features::Faces
 			return {};
 		auto* record = d.Lookup(a_head);
 		if (!record || record->seenWalk != d.walk) {
-			// The first shape of the head this walk: its record against the head's shapes as the caller has them now.
+			// On the head's first shape this walk, check the record against the head's current shapes.
 			d.inputs.clear();
 			a_shapes(d.inputs);
 			d.scratch.clear();
@@ -382,8 +374,7 @@ namespace DCLF::Features::Faces
 				rebuilt->shapes = d.scratch;
 				for (const auto& shape : rebuilt->shapes)
 					rebuilt->floats += shape.vertexCount * 4;
-				// Allocate the normal triple-buffer working set here, not in the engine's
-				// morph job. A writer allocates again only if an older payload pins its slot.
+				// Allocate the triple buffer here, not in the engine's morph job. A writer reallocates only if an old payload pins its slot.
 				for (std::size_t slot = 0; slot < 3; ++slot)
 					(void)rebuilt->storage.PrepareWrite(slot, rebuilt->floats);
 				if (record) {
@@ -393,8 +384,7 @@ namespace DCLF::Features::Faces
 				}
 				if (!d.Insert(a_head, rebuilt)) {
 					d.Free(rebuilt);
-					// The scratch's copies too, into released (the render thread drops them: TakeReleased), never cleared here later
-					// as the last holders.
+					// Hand the scratch copies to the render thread too, so they are never the last release here.
 					for (auto& shape : d.scratch)
 						d.released.emplace_back(std::move(shape.shape));
 					d.scratch.clear();
@@ -403,7 +393,7 @@ namespace DCLF::Features::Faces
 				d.live.push_back(rebuilt);
 				record = rebuilt;
 			}
-			d.scratch.clear();  // its references are the record's to hold
+			d.scratch.clear();  // the record now holds these references
 			record->seenWalk = d.walk;
 			if (record->slotGeneration[record->readSlot] == 0)
 				++d.stats.withoutSnapshot;
@@ -426,7 +416,7 @@ namespace DCLF::Features::Faces
 		auto& d = *impl;
 		for (auto& reference : d.released)
 			if (auto* object = reference.get()) {
-				object->IncRefCount();  // the caller's count, the reference's let go (never the last)
+				object->IncRefCount();  // the caller now owns one count. The reference drop is never the last.
 				reference.reset();
 				a_out.push_back(object);
 			}

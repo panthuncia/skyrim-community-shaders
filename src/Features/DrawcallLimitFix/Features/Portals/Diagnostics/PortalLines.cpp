@@ -1,5 +1,4 @@
-// Portals' report lines (Portals.h), each self-scheduled by what it reports: the portal views' parity line every 300 builds
-// (PortalParity's window), the room visibility's every 300 published VisibleSets (PortalViews' window).
+// Portals' report lines, each self-scheduled: the parity line every 300 builds, room visibility every 300 published VisibleSets.
 
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"

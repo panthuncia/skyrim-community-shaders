@@ -1,9 +1,6 @@
 #pragma once
 
-// The fade roots: the fade-root table as a journaled table family (FadeRootTables, its columns) and the coordinator component that lists
-// and steps its rows (FadeRoots.cpp: RegisterScene, which holds their ids; the channels' are FadesFeature.cpp's). The coordinator
-// counts an unmirrored root (NoteFadeRootUnmirrored: Core/Scene/Coordinator/Coordinator.h, Residents.cpp) and reports the stood-in count
-// through it.
+// The fade-root table, a journaled table family, and the coordinator component that maintains its rows.
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Api/TableFamilies.h"
@@ -24,11 +21,8 @@ namespace DCLF::Api
 namespace DCLF::Scene
 {
 	/**
-	 * @brief The fade-root family's columns (Records.h, FadeRootStatic): a slot per fade node a member draws under, refcounted by
-	 * members, its row rewritten when an input event arrives (a tree's LOD switch: fadeRootSwitch). A row's object is one of its members
-	 * (whose fade node row is the centre), rechosen when membership changes. Each object's root is the family's objectRow (kNoFadeRoot:
-	 * none); the rows written since what the depth commit holds are the family's journal (Extensions::TableFamilyColumns::Mark), which it
-	 * sends as runs, not the whole table.
+	 * @brief One row per fade node, refcounted by the member slots that draw under it.
+	 * A row's object is one of its members and is rechosen when membership changes.
 	 */
 	struct FadeRootTables
 	{
@@ -36,17 +30,17 @@ namespace DCLF::Scene
 		std::vector<std::uint32_t> fadeRootRefs, fadeRootFree;
 		std::vector<const void*> fadeRootNode;
 		ankerl::unordered_dense::map<const void*, std::uint32_t> fadeRootIndex;
-		ankerl::unordered_dense::map<const void*, std::uint32_t> fadeRootSwitch;  // a tree root's LOD switch -> its root slot
+		ankerl::unordered_dense::map<const void*, std::uint32_t> fadeRootSwitch;  // tree LOD switch to root slot
 		std::uint32_t fadeRootGenerations = 0;
 	};
 
-	// The ids Fades' install took (FadeRoots.cpp: the family and the component; FadesFeature.cpp: the channels; none before InstallFeatures).
+	// Invalid before InstallFeatures.
 	Api::TableFamilyId FadeRootFamilyId();
 	Api::CoordinatorComponentId FadeRootComponentId();
 	Api::EngineChannelId FadeSnapsChannelId();
 	Api::EngineChannelId FadeAmountsChannelId();
 
-	// The family's callbacks (Api::TableFamily; FadeRoots.cpp).
+	// Api::TableFamily callbacks.
 	std::shared_ptr<void> MakeFadeRoots();
 	void AssignFadeRoots(void* a_to, const void* a_from);
 	void AssignFadeRootRow(void* a_to, const void* a_from, std::uint32_t a_row);
@@ -54,41 +48,30 @@ namespace DCLF::Scene
 	void ClearFadeRoots(void* a_columns);
 	void RecycleFadeRoot(void* a_columns, std::uint32_t a_row);
 	std::uint32_t FadeRootRows(const void* a_columns);
-	/** @brief Api::RootStatesContribution::view: the roots' rows, nodes and index of a_columns. */
 	void ViewFadeRoots(const void* a_columns, Api::RootListView& a_out);
 
-	/**
-	 * @brief The component's registration (Api::CoordinatorComponent "fade roots"): listed at a slot's record writes and its entry's
-	 * fade node answer (slots.written), unlisted at its release (slots.released), rows stepped by the snaps and amounts (events.keys),
-	 * the tree LOD switches (events.switched) and the primary cull's admitted roots (events.admitted); its owners handed back with the
-	 * slot tables (retirement.reset). Registered last, so every shared point keeps today's order.
-	 */
+	/** @brief Must be registered last of the coordinator components. */
 	Api::CoordinatorComponent FadeRootComponent();
 
-	/** @brief The report (EnginePrimaryCull): the admitted roots the primary cull stands in for (kFadeRootStoodIn). */
+	/** @brief Admitted roots the primary cull stands in for. */
 	std::size_t FadeRootsStoodIn();
 
-	/** @brief The coordinator's report (SceneCoordinatorLastPass): the owners, how many only they keep alive, and the roots listed. */
 	void OwnerLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
 
-	/**
-	 * @brief Which code last changed a root's row on the scene lane, for the diagnostic capture's fade census. WriteBack is never stored
-	 * here: the census names it when the write-back's last judged store is newer than the scene lane's write.
-	 */
+	/** @brief Which code last changed a root's row, for the fade census. WriteBack is never stored, only reported. */
 	enum class FadeRootWriter : std::uint8_t
 	{
 		None,
-		Listed,       // the row made from the mirror when the root was listed
-		EngineEvent,  // a fadeAmount event (Actor::SetAlpha) changed the row's fadeAmount
-		Recheck,      // the seeds' recheck of a newly seeded actor root changed it (RecheckFadeAmount)
-		Reseed,       // a placement snap rebuilt the row from the mirror
-		WriteBack,    // the fade write-back judged a store for the node (census only)
+		Listed,
+		EngineEvent,  // fadeAmount event from Actor::SetAlpha
+		Recheck,      // recheck of a newly seeded actor root
+		Reseed,       // placement snap
+		WriteBack,
 	};
-	/** @brief The writer's name, for the census. */
 	std::string_view FadeRootWriterName(FadeRootWriter a_writer);
 
-	/** @brief The diagnostic capture's census of the fade roots component (FadeRoots.cpp). */
+	/** @brief Diagnostic capture. */
 	void FadeRootsCensus(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
-	/** @brief The diagnostic capture's growth lines of the fade roots component (FadeRoots.cpp). */
+	/** @brief Diagnostic capture. */
 	void FadeRootsGrowth(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
 }

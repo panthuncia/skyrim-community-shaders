@@ -1,5 +1,4 @@
-// The local shadow lights' views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY), render thread: the Lights board's views against
-// the engine's (the tally, Diagnostics::ShadowViewTally, filled by the shadow epochs' checks).
+// The local shadow lights' views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the Lights board against the engine's views. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
 
@@ -14,7 +13,7 @@ namespace DCLF::Features::Shadows::Local
 	{
 		Reports::Window lightWindow;
 
-		/** @brief The light views' parity line, logged, the tally reset: every 300 frames with local views. */
+		/** @brief Logs the light views' parity line every 300 frames with local views, and resets the tally. */
 		void LightViewsLines()
 		{
 			auto& p = Diagnostics::ShadowViewTally(Diagnostics::ShadowView::Light);

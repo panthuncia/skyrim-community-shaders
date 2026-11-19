@@ -1,6 +1,4 @@
-// Tree LOD's report lines: its draws and two-phase cull in the draws' async work (ReportPoint::AsyncWorkFamilies), and its mirror's line
-// with its parity's among the render thread's scene lines (ReportPoint::SceneFrame); and the depth commits' holes' log (always on), which
-// the draws' line counts.
+// Tree LOD's report lines: its draws and two-phase cull, its mirror and parity, and the depth commits' holes log, which is always on.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
@@ -81,8 +79,7 @@ namespace DCLF::Features::TreeLod
 
 	void RegisterReport(Api::InstallContext& a_context)
 	{
-		// Where Core printed them: after the draws' async work features' lines, before the frame values' line; after the extras parity's
-		// line, before the mirror watch's.
+		// Printed where Core printed them, to keep the report order.
 		a_context.RegisterReportLines({ .name = "tree-lod draws", .point = Api::ReportPoint::AsyncWorkFamilies, .text = &DrawsText });
 		a_context.RegisterReportLines({ .name = "tree-lod mirror", .point = Api::ReportPoint::SceneFrame, .text = &MirrorText });
 		// The depth commits' holes (TreeLodTables.cpp's commit hook), logged whatever the observers.

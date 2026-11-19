@@ -1,5 +1,5 @@
-// Sky: the engine's BSSkyShader draws drawn by the render graph (CS_ORG_SKY=1, default off). The feature reserves the Sky anchors and
-// installs the engine hooks; the rest is SkyCapture.cpp (the engine side) and SkyDraws.cpp (the graph side).
+// Sky: the engine's BSSkyShader draws drawn by the render graph (CS_ORG_SKY=1, default off).
+// The engine side is SkyCapture.cpp and the graph side SkyDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 #include "RenderGraph/Engine/Native/Native.h"

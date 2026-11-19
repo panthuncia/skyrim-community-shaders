@@ -1,6 +1,5 @@
-// The water reflection's face cameras (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the face the engine has just drawn, as its
-// accumulator render left it - the bound colour target's face and VS_PerFrame (b12) from the mirror - against DCLF's (FaceOriented).
-// Render thread; the reflection report takes the counts (FaceCameraCounts).
+// The water reflection's face cameras (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the bound face and VS_PerFrame (b12) after
+// the engine's draw, against DCLF's. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionView.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"

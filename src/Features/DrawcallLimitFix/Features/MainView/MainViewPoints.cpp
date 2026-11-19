@@ -1,5 +1,4 @@
-// The main pass's points (Api::PrimaryViewContribution), called by Core's FrameDriver from the shell's hooks: the main pass's capture where
-// its opaque batches start, and the colour epoch (Core's IndirectDraws::ExecuteColour) where they end, under the opaque.after trigger.
+// The main pass's points, called by Core's FrameDriver: the capture where the opaque batches start, and the colour epoch where they end.
 
 #include "Features/DrawcallLimitFix/Features/MainView/MainView.h"
 
@@ -16,7 +15,6 @@ namespace DCLF::Features::MainView
 {
 	namespace
 	{
-		// Render thread, after the install: the colour epoch's trigger (opaque.after), and whether the capture's failure was logged.
 		Api::TriggerId opaqueAfter;
 		bool loggedCaptureFailure = false;
 
@@ -51,16 +49,13 @@ namespace DCLF::Features::MainView
 			if (formats.colorCount == 0 || formats.depth == DXGI_FORMAT_UNKNOWN)
 				return false;
 			DrawPipelines::Get().SetTargetFormats(formats);
-			// What the main pass binds, for this frame's indirect draws (run before the composite).
 			IndirectDraws::Get().CaptureMainPass();
-			// The engine's state objects the pipeline lane asked for, read here because this is inside the deferred pass, where the blend table
-			// holds the deferred variants.
+			// Read here because inside the deferred pass the blend table holds the deferred variants.
 			DrawPipelines::Get().CaptureEngineStates();
 			return true;
 		}
 
-		// The main pass's bindings for this frame's colour epoch, where the opaque batches start (FrameDriver applied the engine's pending
-		// state first: the engine binds the G-buffer only when a draw applies its state).
+		// The engine binds the G-buffer only when a draw applies its state, so FrameDriver applied the pending state first.
 		bool BeforeOpaque()
 		{
 			const bool captured = CaptureMainPass();
@@ -73,16 +68,15 @@ namespace DCLF::Features::MainView
 
 		void AfterOpaque()
 		{
-			// DCLF's objects must be in the G-buffer and the depth before Terrain Blending draws its held terrain (alpha blended onto the
-			// G-buffer, its alpha the distance to the object beneath, with depth writes): drawn after that terrain, a buried object would be
-			// missing from what the terrain blended onto, and the terrain's depth writes would fail DCLF's EQUAL test where it overlapped.
+			// DCLF's objects must be in the G-buffer and depth before Terrain Blending draws its held terrain. Drawn after it, a buried object
+			// would be missing from what the terrain blended onto, and the terrain's depth writes would fail DCLF's EQUAL test.
 			auto& draws = IndirectDraws::Get();
 			globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);  // the epoch writes the G-buffer the context has bound
 			draws.ProbeTargets("before colour");
 			Extensions::TriggerScope trigger(opaqueAfter);
 			draws.ExecuteColour();  // the colour pass, against the depth written at the first draw
 			draws.ProbeTargets("after colour");
-			// DCLF's epoch leaves the context's bindings to the engine's state tracking: its targets rebound for the rest of the pass.
+			// DCLF's epoch leaves bindings to the engine's state tracking, so the targets are rebound for the rest of the pass.
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 		}
 	}

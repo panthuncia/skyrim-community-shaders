@@ -1,8 +1,5 @@
-// CS_DCLF_PERSISTENT_PARITY: grass's mirror against the capture's live set on parity frames. The sink's observer keeps every captured
-// group the capture still holds (any thread, under a lock: parity only), with its record count and seq, by shape; a check compares it with the
-// mirror's shapes - a live shape the mirror lacks or holds with another count, a mirrored shape no longer live. An event pushed but not
-// drained yet makes a shape differ at the check: a shape that differs counts as late when its event arrives at the next drain, and as
-// differing only when it does not.
+// CS_DCLF_PERSISTENT_PARITY check of the grass mirror against the capture's live set.
+// An event not yet drained makes a shape differ, so a difference only counts if the next drain does not resolve it.
 
 #include "Features/DrawcallLimitFix/Features/Grass/Grass.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
@@ -35,8 +32,7 @@ namespace DCLF::Features::Grass
 			std::uint32_t count = 0;
 		};
 
-		// The capture's live grass groups by shape (the sink's threads write, under the capture's lock, so in seq order; the render
-		// thread's check reads).
+		// Written by the sink threads under the capture's lock, so in seq order.
 		std::mutex liveLock;
 		ankerl::unordered_dense::map<const void*, Live> live;
 
@@ -51,7 +47,6 @@ namespace DCLF::Features::Grass
 			}
 			if (it == live.end() && a_event.kind != GrassCaptured::Kind::Add)
 				return;
-			// A group's add replaces what it held; its removal or a rejection (no records mirrored) takes it.
 			auto& entry = it != live.end() ? it->second : live[a_event.shape];
 			if (const auto group = entry.groups.find(a_event.group); group != entry.groups.end()) {
 				entry.count -= group->second.count;
@@ -65,10 +60,7 @@ namespace DCLF::Features::Grass
 				live.erase(a_event.shape);
 		}
 
-		/**
-		 * @brief The mirror's records placed as the cull places them, against the last draw row's eye and distance: how many lie within
-		 * it and the nearest. Grass culled as beyond the distance while these say it is near points at the placement, not the cull.
-		 */
+		/** @brief Places records as the cull does. If grass culled as far is near here, the cull is wrong, not the placement. */
 		void CheckPlacement(const Mirror& a_mirror, GrassParityState& a_stats)
 		{
 			a_stats.withinDistance = 0;
@@ -117,7 +109,7 @@ namespace DCLF::Features::Grass
 				else if (it->second.records != entry.count)
 					suspects[shape] = fmt::format("a shape mirrored with {} records, captured with {}", it->second.records, entry.count);
 			}
-			// A mirrored shape with records the capture no longer holds: its removal was missed (one with only rejected groups mirrors none).
+			// Mirrored records the capture no longer holds mean a missed removal.
 			for (const auto& [shape, mirrored] : shapes)
 				if (mirrored.records && !live.contains(shape))
 					suspects[shape] = fmt::format("a mirrored shape ({} records) no longer captured", mirrored.records);
@@ -135,7 +127,7 @@ namespace DCLF::Features::Grass
 
 		void OnDrained(const GrassDrained& a_event)
 		{
-			// Suspects with no event since the check: the mirror missed or misapplied one.
+			// No event since the check means the mirror missed or misapplied one.
 			auto& stats = ParityState();
 			for (auto& [shape, text] : stats.suspects) {
 				if (text.starts_with("a captured"))

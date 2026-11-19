@@ -1,5 +1,4 @@
-// Fades' scene resources ("fade roots", Api::SceneResources): FadeStateCS's program and buffers made with the scene's tables, their graph
-// registration, each revision's requirements, the fit of the roots they hold, and the write-back's staging for each sealed set.
+// Fades' per-scene GPU resources: FadeStateCS's program and buffers, and the write-back's staging sets.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
@@ -27,17 +26,15 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		Api::SceneResourcesId sceneId;  // install
-		// The revision inputs' words (postInputs): the event list's ask, so a growth is a new revision's inputs (a kept make, Impl::MakeRevision's
-		// reuse, runs the requirements again for it).
+		Api::SceneResourcesId sceneId;
+		// Revision input words. Posting the wanted event count here makes a growth trigger new requirements.
 		constexpr std::uint32_t kEventsWantedInput = 0, kBucketsInput = 1, kInputWords = 2;
-		// The scene's write-back (render thread: Setup, PostInputs), for the ask PostInputs posts; the scene holds it.
+		// Render thread. The scene owns the write-back.
 		std::weak_ptr<FadeWriteBack> postedWriteBack;
 
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			using org::services::GrowableContents;
-			// Without the fade state program, fades stay the CPU's.
 			auto fadeState = ComputeProgram::Load(a_setup.device, { .source = Draws::kFadeStateShader, .constantWords = Draws::kFadeStateConstantWords });
 			if (!fadeState) {
 				logger::warn("[DCLF] The fade state program could not be created; fades stay the CPU's");
@@ -51,7 +48,7 @@ namespace DCLF::Features::Fades
 				return nullptr;
 			}
 			scene->fadeState = std::move(fadeState);
-			// By root slot. New state is reseeded from the static rows; the frame-ahead outputs are zero-filled.
+			// Indexed by root slot. New state is reseeded from the static rows. The published outputs are zero-filled.
 			const std::uint32_t roots = a_setup.smallStart ? 4u : Draws::kInitialFadeRoots;
 			scene->fadeRoots = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(FadeRootStatic), "cs.dclf.fade-roots"),
 				{ .extent = { 0, sizeof(FadeRootStatic), sizeof(FadeRootStatic) } });
@@ -64,7 +61,6 @@ namespace DCLF::Features::Fades
 			scene->fadeRootPrograms = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-root-programs"), { .extent = { 0, 4, 4 } });
 			scene->fadeAnimated = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-animated"), { .extent = { 0, 4, 4 } });
 			scene->fadeLog = a_setup.StructuredBuffer(kFadeLogEntries, sizeof(FadeLogEntry), "cs.dclf.fade-log", true);
-			// The fade write-back: events, the roots' reported milestones, and a staging set (a host buffer per readback range).
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				const std::uint32_t events = a_setup.smallStart ? 4u : kInitialFadeEvents;
 				scene->fadeEvents = Draws::MakeVersioned(Draws::CreateWords(FadeWriteBack::BytesFor(events) / 4, true, "cs.dclf.fade-events"),
@@ -101,8 +97,7 @@ namespace DCLF::Features::Fades
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			const auto& s = a_requirements.State<FadeScene>();
-			// By root slot, to the root states' family's rows: the static rows, the GPU state, the programs, the animation stamps and the
-			// write-back's words.
+			// Every per-root buffer grows to the root family's row count.
 			Draws::UnitGroup roots;
 			roots.Add(s.fadeRoots).Add(s.fadeRootPrograms).Add(s.fadeAnimated).Add(s.fadeStates).Add(s.fadeReported);
 			roots.Add(s.fadeStatesOut[0]).Add(s.fadeStatesOut[1]);
@@ -111,13 +106,11 @@ namespace DCLF::Features::Fades
 			roots.Require(a_requirements.build, Extensions::TableFamilyRows(a_requirements.tables.families, Extensions::RootStatesFamily()));
 			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.counts, 2ull * std::max(1u, a_requirements.inputs[kBucketsInput]));
 			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.offsets, 2ull * std::max(1u, a_requirements.inputs[kBucketsInput]));
-			// The event list, to the most a frame wanted (dropped roots append again), as posted with the revision's inputs; its staging sets
-			// follow the named capacity.
+			// Grow the event list to the most a frame wanted. Roots dropped by overflow append again next frame.
 			if (s.fadeEvents && s.fadeWriteBack)
 				Draws::SceneBufferSet::Get().Require(a_requirements.build, s.fadeEvents, a_requirements.inputs[kEventsWantedInput]);
 		}
 
-		// The event list's ask (the most a frame wanted: the write-back's harvest grows it).
 		void PostInputs(std::span<std::uint32_t> a_words)
 		{
 			const auto& encoded = PortalViews::Get().Encoded();
@@ -126,8 +119,7 @@ namespace DCLF::Features::Fades
 				a_words[kEventsWantedInput] = writeBack->wanted.load(std::memory_order_acquire);
 		}
 
-		// What the versions a set names hold of the roots (the root states' family's rows): one past them waits for their growth. Without
-		// the fade program no draw reads them.
+		// How many root rows the sealed versions hold. Rows past that wait for the buffers to grow.
 		void Fit(Api::SceneResourcesFit& a_fit)
 		{
 			const auto& fades = a_fit.State<FadeScene>();
@@ -140,7 +132,7 @@ namespace DCLF::Features::Fades
 			a_fit.fit.familyRows[family.index] = std::min({ units(fades.fadeRoots), units(fades.fadeStatesOut[0]), units(fades.fadeStatesOut[1]) });
 		}
 
-		// The write-back's staging set for the capacity the sealed set names, before any shape of it.
+		// Adds a staging set for the sealed capacity before any pass uses it.
 		void Sealed(const Api::SceneResourcesSealed& a_sealed)
 		{
 			if (const auto& fades = a_sealed.State<FadeScene>(); fades.fadeEvents && fades.fadeWriteBack)

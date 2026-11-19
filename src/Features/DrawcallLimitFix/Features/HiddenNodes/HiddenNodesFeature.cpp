@@ -1,5 +1,4 @@
-// Hidden nodes: the hidden events' source (the patched stores, its early hooks) and the watch that names a store it misses (its switch,
-// observer and report lines).
+// Hidden nodes feature registration.
 
 #include "Features/DrawcallLimitFix/Features/HiddenNodes/HiddenNodes.h"
 
@@ -9,15 +8,13 @@ namespace DCLF::Features::HiddenNodes
 	{
 		void Install(Api::InstallContext& a_context)
 		{
-			// CS_DCLF_HIDDEN_WATCH.
 			RegisterWatch(a_context);
 		}
 	}
 
 	Api::Feature Feature()
 	{
-		// The stores go in early, where Core's scene events left them: before the diagnostics, Core's engine side (the primary cull's
-		// kept scene lists) and Features/Lod's LOD gates install, which follow the events once Scene::HiddenStoresLive answers.
+		// Early hooks, because the kept scene lists and Features/Lod's gates check Scene::HiddenStoresLive when they install.
 		return { "hidden-nodes", &Install, &InstallStores };
 	}
 }

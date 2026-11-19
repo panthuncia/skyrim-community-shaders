@@ -1,7 +1,5 @@
-// The menu scenes family's engine side: the batches' calls (the local map's two SubmitAccumulator calls, a menu model's depth
-// StartAccumulating and colour SubmitAccumulator), which run with their draws latched and hand them to the anchor's pass; the
-// family's DrawTriShape taker, which latches a scene draw in place of drawing it; and its SetupGeometry watchers, which count a
-// batch's passes and end the latched part at a pass of a shader the family has no program for. Render thread.
+// Engine-side hooks for the menu scenes family. Each batch call runs with its draws latched, DrawTriShape latches a scene draw
+// instead of drawing it, and a pass of a shader with no ORG program flushes the latched part. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -48,14 +46,14 @@ namespace DCLF::Features::MenuViews::Scenes
 			return log;
 		}
 
-		/** @brief Whether the DrawData copy's taker is installed (InstallHooks): the particles' passes are then the family's too. */
+		/** @brief Whether the DrawData copy's taker is installed. Only then are the particles' passes the family's. */
 		bool& DynamicTakerInstalled()
 		{
 			static bool installed = false;
 			return installed;
 		}
 
-		/** @brief The batch being latched (render thread). */
+		/** @brief The batch being latched, on the render thread. */
 		struct Capture
 		{
 			bool active = false;
@@ -63,7 +61,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			View view = View::LocalMap;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
-			// The DrawData copy's draw being latched (TakeDynamicDraw): its geometry is two streams. Null for a DrawTriShape draw.
+			// The DrawData copy's draw being latched, which has two streams. Null for a DrawTriShape draw.
 			const Family::DynamicDrawData* dynamic = nullptr;
 		};
 
@@ -73,7 +71,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return capture;
 		}
 
-		/** @brief Whether a Utility vertex descriptor is one of UTILITY_ORG_SCENE's techniques (Utility.hlsl's #error). */
+		/** @brief Whether a Utility vertex descriptor is one of UTILITY_ORG_SCENE's techniques. */
 		bool SceneTechnique(std::uint32_t a_descriptor)
 		{
 			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar) |
@@ -85,7 +83,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return (a_descriptor & kScene) && !(a_descriptor & kNot);
 		}
 
-		/** @brief The latched part of the batch, run now: in the engine's order, before anything the engine draws after it. */
+		/** @brief Runs the latched part of the batch now, before anything the engine draws after it. */
 		void FlushLatched(Capture& a_capture)
 		{
 			auto run = std::move(a_capture.run);
@@ -99,16 +97,15 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief Whether the draw's vertex PerGeometry (b2) is there as its shader reads it: bound, or not declared by the shader at all
-		 * (no group buffer of its own: a skinned depth draw takes its transforms from the bones). An undeclared group copies as zeros,
-		 * which the same descriptor's ORG build does not read either.
+		 * @brief Whether the draw's vertex PerGeometry (b2) is bound or not declared at all.
+		 * A skinned depth draw has none and takes its transforms from the bones. An undeclared group copies as zeros.
 		 */
 		bool HasVertexPerGeometry(Family::Constants::UseId a_use, const RE::BSGraphics::VertexShader* a_vs)
 		{
 			return Family::ConstantBytes(a_use, Stage::Vertex, 2) != 0 || !a_vs || !a_vs->constantBuffers[2].buffer;
 		}
 
-		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason and view. */
+		/** @brief Runs the latched part and leaves the rest of the batch to the engine. Logged once per reason and view. */
 		void Refuse(Capture& a_capture, std::string_view a_reason, std::string_view a_detail = {})
 		{
 			a_capture.failed = true;
@@ -116,10 +113,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			FlushLatched(a_capture);
 		}
 
-		/**
-		 * @brief The draw's colour targets as SetDirtyStates would bind them, looked up in the view's imports: the first a_outputs render
-		 * targets the pixel stage writes, up to the first unbound one. Null when mapped, else why not.
-		 */
+		/** @brief Maps the draw's colour targets to the view's imports. Returns null when mapped, else why not. */
 		const char* MapTargets(View a_view, std::uint32_t a_outputs, Draw& a_draw)
 		{
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -153,7 +147,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return a_draw.key.depthFormat ? nullptr : "no depth import";
 		}
 
-		/** @brief A skinned draw's palettes (VS b9, b10) appended to the run's latch; its offset in a_offset. False when they do not fit. */
+		/** @brief Appends a skinned draw's palettes (VS b9, b10) to the run's latch. False when they do not fit. */
 		bool LatchBones(Family::Constants::UseId a_use, Run& a_run, std::uint32_t& a_offset)
 		{
 			std::array<std::byte, kBonesBytes> bones{};
@@ -164,10 +158,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return a_offset != ~0u;
 		}
 
-		/**
-		 * @brief The draw's FrameBuffer (b12: the camera SetCameraData wrote for it) appended to the run's latch, its matrices transposed
-		 * (kFrameMatrices); its offset in a_offset. False when it is not bound or does not fit.
-		 */
+		/** @brief Appends the draw's FrameBuffer (b12) to the latch with its matrices transposed. False when unbound or full. */
 		bool LatchFrame(Family::Constants::UseId a_use, Run& a_run, std::uint32_t& a_offset)
 		{
 			const auto stage = Family::ConstantBytes(a_use, Stage::Vertex, 12) ? Stage::Vertex : Stage::Pixel;
@@ -185,11 +176,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return a_offset != ~0u;
 		}
 
-		/**
-		 * @brief A Utility draw, latched: the shadow state SetDirtyStates would apply, the constants the Utility shader's Setup functions
-		 * wrote (the engine constants capture), the palettes of a skinned one, the slots' textures and samplers, the geometry. Null when
-		 * latched; otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
-		 */
+		/** @brief Latches a Utility draw. Returns null when latched, else why the engine must draw it. */
 		const char* TryLatchUtility(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
@@ -204,8 +191,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Utility;
-			// The vertex descriptor CS looks its shader up by (State::ModifyShaderLookup): it holds the technique's bits and the
-			// geometry's (TEXTURE, VC, NORMALS, SKINNED, LOD_LANDSCAPE, TREE_ANIM), and its defines serve both stages.
 			draw.key.descriptor = descriptor;
 			draw.key.defineStage = Family::DefineStage::Vertex;
 			if (const char* why = MapTargets(a_capture.view, 1, draw))
@@ -215,7 +200,6 @@ namespace DCLF::Features::MenuViews::Scenes
 				return "a depth-stencil, blend or rasterizer state with no description";
 			draw.stencilRef = engine.stencilRef;
 
-			// The constant groups as the Setup functions wrote them, and the alpha test reference SetDirtyStates would write into b11.
 			UtilitySceneConstants constants{};
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
@@ -237,7 +221,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (!draw.program)
 				return "its ORG program cannot be built";
 
-			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
+			// The geometry is read by device address. The run holds its leases until the GPU is done.
 			Family::Owners owners;
 			Family::Geometry geometry;
 			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
@@ -251,8 +235,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// The slots the build reads as the shadow state holds them (an empty slot reads a null view of its declared kind) and their
-			// samplers. Every other slot reads a null view and the first sampler, whatever is bound there.
+			// Slots the build does not read get a null view and the first sampler, whatever is bound there.
 			for (std::uint32_t t = 0; t < kUtilitySlots; ++t) {
 				const bool read = UtilitySlotRead(t);
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
@@ -279,7 +262,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (draw.latchOffset == ~0u)
 				return "more constants than the batch's latch holds";
 
-			// The viewport SetDirtyStates would set, with the depth bias mode's offset taken off its maximum depth.
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
 			for (auto& owner : owners)
@@ -290,15 +272,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief A Lighting draw, latched: the shadow state SetDirtyStates would apply, both stages' constants as the Lighting shader's
-		 * Setup functions wrote them, CS's permutation block for the draw (State's SetupGeometry hooks filled it), the palettes of a
-		 * skinned one, t0-t15 and s0-s15 as the shadow state holds them, the geometry. Null when latched; otherwise why not.
-		 */
-		/**
-		 * @brief The point lights of the pass being drawn, in the PerGeometry rows the scene build reads (PointLightPosition c15, PointLightColor
-		 * c22, the count in c29.x). Light Limit Fix replaces the engine's point light setup (its SetupGeometry hook): the engine leaves those
-		 * rows empty and CS's D3D11 shader reads its strict lights instead. The scene build has no Light Limit Fix, so the strict lights of
-		 * this pass go into the rows: each position relative to the eye with its radius, and its colour with its fade.
+		 * @brief Writes the pass's strict lights into the PerGeometry point light rows (c15, c22, c29.x).
+		 * Light Limit Fix leaves those rows empty, and the scene build has no Light Limit Fix to read its strict lights instead.
 		 */
 		void LatchPointLights(LightingSceneConstants& a_constants)
 		{
@@ -323,6 +298,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				a_constants.psGeometry[kCount][0] = static_cast<float>(count);
 		}
 
+		/** @brief Latches a Lighting draw. Returns null when latched, else why not. */
 		const char* TryLatchLighting(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
@@ -332,14 +308,12 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Lighting;
-			// The pixel descriptor's defines serve both stages, but VC and SKINNED describe the vertex stage's inputs and the engine's pixel
-			// descriptor does not follow them. They come from the vertex descriptor, as the engine's own vertex shader has them.
+			// VC and SKINNED describe the vertex inputs, and the engine's pixel descriptor does not follow them. Take them from the vertex descriptor.
 			using LightingFlags = SIE::ShaderCache::LightingShaderFlags;
 			constexpr auto kVertexInputs = static_cast<std::uint32_t>(LightingFlags::VC) | static_cast<std::uint32_t>(LightingFlags::Skinned);
 			draw.key.descriptor = (state->modifiedPixelDescriptor & ~kVertexInputs) | (state->modifiedVertexDescriptor & kVertexInputs);
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			// The forward stage writes three targets (the colour, the motion vectors, the normals and masks); the deferred one more, which
-			// a menu scene does not bind.
+			// The deferred stage's fourth target is never bound in a menu scene.
 			if (const char* why = MapTargets(a_capture.view, kMaxColours, draw))
 				return why;
 			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
@@ -369,7 +343,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.effectRadius = permutation.EffectRadius;
 			constants.baseTextureIsWorking = permutation.BaseTextureIsWorking;
 			constants.renderToUI = permutation.RenderToUI;
-			// Lighting's vertex flag 1 << 1: SKINNED (Permutation::LightingFlags::Skinned).
 			if ((state->modifiedVertexDescriptor & 0x2u) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
 			if (!LatchFrame(use, run, draw.frameOffset))
@@ -392,15 +365,12 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.firstIndex = geometry.firstIndex;
 			draw.indexCount = geometry.indexCount;
 
-			// The null 2D view: what the build reads at a register past t15 (the features it turns off).
 			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
 			if (null.index == GpuTextures::kInvalid)
 				return "no null view";
 			constants.nullTexture = null.index;
 			if (null.owner)
 				owners.push_back(std::move(null.owner));
-			// Every slot the build declares as the shadow state holds it (a bound view's import, in its own dimension; an empty or undeclared
-			// slot a null 2D view) and its sampler.
 			for (std::uint32_t t = 0; t < kLightingSlots; ++t) {
 				auto* view = LightingSlotRead(draw.key.descriptor, t) ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
@@ -433,11 +403,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return nullptr;
 		}
 
-		/**
-		 * @brief An Effect draw, latched as a Lighting one is: both stages' constants, the permutation block, the palettes of a skinned
-		 * one, t0-t4 and s0-s4, the geometry. A draw with indexed texture coordinates (particles' subtextures: b11, not latched) is
-		 * refused. Null when latched; otherwise why not.
-		 */
+		/** @brief Latches an Effect draw. Indexed texture coordinates are refused. Returns null when latched, else why not. */
 		const char* TryLatchEffect(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
@@ -449,8 +415,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Effect;
-			// The pixel descriptor's defines serve both stages. SKINNED comes from the vertex descriptor as for Lighting, or a skinned
-			// draw's vertex stage could be built without its bones.
+			// SKINNED comes from the vertex descriptor, or a skinned draw's vertex stage could be built without its bones.
 			constexpr auto kSkinned = static_cast<std::uint32_t>(EffectFlags::Skinned);
 			draw.key.descriptor = state->modifiedPixelDescriptor | (state->modifiedVertexDescriptor & kSkinned);
 			draw.key.defineStage = Family::DefineStage::Pixel;
@@ -493,7 +458,6 @@ namespace DCLF::Features::MenuViews::Scenes
 
 			Family::Owners owners;
 			Family::Geometry geometry;
-			// A DrawData copy's draw (the particles) pulls its position from stream 1, the dynamic ring.
 			const auto latched = a_capture.dynamic ?
 			                         Family::LatchDynamicGeometry(a_capture.dynamic, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail) :
 			                         Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
@@ -531,8 +495,6 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
-			// A particle draw's indexed texture coordinates (VS b11: each particle's subtexture rectangle) follow its constants in the latch
-			// (Effect.hlsl's ORG build reads the row a vertex names).
 			std::vector<std::byte> bytes(sizeof(EffectSceneConstants) + (texCoordIndex ? kEffectIndexedTexCoordBytes : 0));
 			std::memcpy(bytes.data(), &constants, sizeof(EffectSceneConstants));
 			if (texCoordIndex) {
@@ -553,7 +515,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return nullptr;
 		}
 
-		/** @brief The draw the engine is about to make, latched by its shader's kind. Null when latched; otherwise why not. */
+		/** @brief Latches the draw by its shader's kind. Returns null when latched, else why not. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			if (a_capture.run->draws.size() >= kMaxDraws)
@@ -562,7 +524,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto* state = globals::state;
 			if (!rss.currentVertexShader || !state || !state->currentShader)
 				return "no shader bound";
-			// A depth-only Utility draw (the menu model's depth batch) binds no pixel shader: its scene build draws the depth alone.
 			if (!rss.currentPixelShader && state->currentShader->shaderType.get() != RE::BSShader::Type::Utility)
 				return "no pixel shader bound";
 			if (a_capture.dynamic && state->currentShader->shaderType.get() != RE::BSShader::Type::Effect)
@@ -580,8 +541,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief One batch's engine call: with the view's switch on, the batch runs with its draws latched, then the anchor's pass draws
-		 * them at this point. Otherwise, or when the batch cannot be taken now, the engine draws it.
+		 * @brief One batch's engine call. With the view's switch on, the draws are latched and the anchor draws them here.
+		 * Otherwise, or when the batch cannot be taken now, the engine draws it.
 		 */
 		template <View kView, class Call>
 		void RunBatch(Call&& a_call)
@@ -607,7 +568,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			FlushLatched(capture);
 		}
 
-		/** @brief A batch of SubmitAccumulator or StartAccumulating (the same arguments). */
+		/** @brief A SubmitAccumulator or StartAccumulating batch. They take the same arguments. */
 		template <View kView>
 		struct SceneBatch
 		{
@@ -629,9 +590,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		};
 
 		/**
-		 * @brief The family's DrawTriShape taker: during a latched batch, the draw is latched instead. A taken draw then applies the
-		 * engine's pending state as the draw function's own SetDirtyStates would: the clears the batch's setup asked for land before the
-		 * anchor's run, and the dirty bits are consumed as before.
+		 * @brief Latches a draw during a latched batch. Applies the engine's pending state as SetDirtyStates would.
+		 * That way the batch's clears land before the anchor's run and the dirty bits are consumed as before.
 		 */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -650,7 +610,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return true;
 		}
 
-		/** @brief TakeDraw for DrawDynamicTriShape's DrawData copy (the particles): latched as a two-stream draw. */
+		/** @brief TakeDraw for DrawDynamicTriShape's DrawData copy, latched as a two-stream draw. */
 		bool TakeDynamicDraw(const Family::DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
 			auto& capture = GetCapture();
@@ -662,7 +622,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return taken;
 		}
 
-		/** @brief After the SetupGeometry of a shader the family draws: counts the pass; one that will not reach DrawTriShape ends the latched part. */
+		/** @brief Counts the pass after SetupGeometry. A pass that will not reach DrawTriShape flushes the latched part. */
 		void OnProgramSetup(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
@@ -672,10 +632,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape");
 		}
 
-		/**
-		 * @brief After the SetupGeometry of a shader the family has no program for (tree LOD): the latched part ends before the engine
-		 * draws the pass, so the rest of the batch is the engine's in order.
-		 */
+		/** @brief Flushes the latched part before a pass with no ORG program, such as tree LOD, so the engine draws the rest in order. */
 		void OnOtherSetup(RE::BSRenderPass*)
 		{
 			auto& capture = GetCapture();
@@ -754,7 +711,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			logger::warn("[DCLF] menu scenes: no DrawTriShape detour; the menu scenes stay the engine's");
 			return;
 		}
-		// The particles (a loading-screen model's) draw through the DrawData copy; without it they stay the engine's.
 		DynamicTakerInstalled() = Family::AddDynamicDrawTaker("menu scenes", &TakeDynamicDraw);
 		if (MapEnabled()) {
 			if (LocalMapKnown()) {
@@ -775,7 +731,6 @@ namespace DCLF::Features::MenuViews::Scenes
 		Family::WatchSetupGeometry<RE::BSShader::Type::Lighting>(RE::VTABLE_BSLightingShader[0], &OnProgramSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::Effect>(RE::VTABLE_BSEffectShader[0], &OnProgramSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::DistantTree>(RE::VTABLE_BSDistantTreeShader[0], &OnOtherSetup);
-		// The clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("menu scenes", [] { return SceneDraws::Setup(); });
 		logger::info("[DCLF] menu scenes: hooks installed (local map {}, menu models {})", MapEnabled() ? "on" : "off", Menu3DEnabled() ? "on" : "off");
 	}

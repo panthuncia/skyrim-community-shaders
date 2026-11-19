@@ -1,7 +1,6 @@
-// Tree LOD's scene resources (the TreeInstances family's tables, its cull program and counts' readbacks, made with the scene's tables),
-// what they post with the revision's inputs and latch in the depth commit, and the depth commit's uploads into them (the commit hook).
+// Tree LOD's scene resources, what they post and latch in the depth commit, and the depth commit's uploads into them.
 
-// Helpers.h first: volk must precede every Vulkan header of the translation unit.
+// Helpers.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
@@ -49,22 +48,18 @@ namespace DCLF::Features::TreeLod
 		// The tables' first capacities (shape slots, mesh slots), doubled as the mirror needs.
 		constexpr std::uint32_t kInitialShapes = 1024, kInitialMeshes = 256;
 
-		// The tables' sizes in words (TreeInstancesLayout.h): per shape slot its row, records and visible/retest list entries; per mesh
-		// slot its row; plus the list header.
 		std::uint32_t ShapeWords(std::uint32_t a_slots) { return a_slots * static_cast<std::uint32_t>(sizeof(ShapeRow) / 4); }
 		std::uint32_t InstanceWords(std::uint32_t a_slots) { return a_slots * kMaxGroupInstances * static_cast<std::uint32_t>(sizeof(Instance) / 4); }
 		std::uint32_t MeshWords(std::uint32_t a_slots) { return a_slots * static_cast<std::uint32_t>(sizeof(MeshRow) / 4); }
 		std::uint32_t VisibleWords(std::uint32_t a_slots) { return kVisibleHeaderWords + 2 * a_slots * kMaxGroupInstances; }
 
-		// The vertex stage reads every table through its buffer view ref (DistantTree.hlsl). The draw row's ref is pushed to the main
-		// passes, which declare the row and the tables (TreeLodDraws' MainDeclare). The versioned tables' refs are only made here to
-		// check that a ref can be made: the draw row carries each sealed version's ref (DCLF::RefOf).
+		// The vertex stage reads every table by buffer view ref. These refs are made only to check that one can be. The draw row carries
+		// each sealed version's own ref.
 		RenderGraph::BufferRef RefOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
 			return RenderGraph::DeclaredRefOf(a_device, a_buffer);
 		}
 
-		// The scene's tables are made (the first frame with a device): the cull program, then the tables, after the face positions.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			// Without the tree LOD cull program, tree LOD stays the engine's.
@@ -74,7 +69,6 @@ namespace DCLF::Features::TreeLod
 				logger::warn("[DCLF] The tree LOD cull program could not be created; tree LOD stays native");
 				return nullptr;
 			}
-			// By shape slot: a row, its records, and a phase 1 and a retest entry per record after the visible list's header.
 			const std::uint32_t shapes = a_setup.smallStart ? 4u : kInitialShapes;
 			tables->shapes = Draws::MakeVersioned(Draws::CreateWords(ShapeWords(shapes), false, "cs.dclf.tree-lod-shapes"), { .extent = { 0, sizeof(ShapeRow), 4 } });
 			tables->instances = Draws::MakeVersioned(Draws::CreateWords(InstanceWords(shapes), false, "cs.dclf.tree-lod-instances"),
@@ -93,7 +87,7 @@ namespace DCLF::Features::TreeLod
 			}
 			if (debugStages) {
 				tables->stages = Draws::CreateWords(kStageSlots * kStageWords, false, "cs.dclf.tree-lod-stages");
-				// CS_DCLF_TREE_LOD_STAGES only: a debug ring the vertex stage stamps and no pass declares, so its ref stays a raw one.
+				// CS_DCLF_TREE_LOD_STAGES only. No pass declares this debug ring, so its ref stays raw.
 				tables->stagesRef = RenderGraph::BufferRefOf(device, tables->stages->GetAPIResource().GetHandle());
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
@@ -118,8 +112,6 @@ namespace DCLF::Features::TreeLod
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.tree-lod-visible"), tables.visible);
 		}
 
-		// The tables by the mirror's posted shape and mesh slots (a trees view's faces' lists hold the same shape slots: Core's, through
-		// the family's faces.lists).
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			const auto& tables = a_requirements.State<TreeLodTables>();
@@ -127,7 +119,6 @@ namespace DCLF::Features::TreeLod
 			Draws::SceneBufferSet::Get().Require(a_requirements.build, tables.meshes, a_requirements.inputs[kMeshSlotsInput]);
 		}
 
-		// The mirror's shape and mesh slots: what the tables must hold.
 		void PostInputs(std::span<std::uint32_t> a_words)
 		{
 			const auto& mirror = RenderMirror();
@@ -135,8 +126,7 @@ namespace DCLF::Features::TreeLod
 			a_words[kMeshSlotsInput] = mirror.MeshSlots();
 		}
 
-		// The depth commit's draw row and list header; not the next-frame state's frame rows (the features', the fades'), which the compute
-		// queue reads.
+		// Only the draw row and list header. The next-frame state's rows are read by the compute queue.
 		void Latched(Api::SceneResourcesLatch& a_latch)
 		{
 			const auto& tables = a_latch.State<TreeLodTables>();
@@ -144,10 +134,7 @@ namespace DCLF::Features::TreeLod
 			a_latch.Latch(tables.visible, sizeof(VisibleHeader));
 		}
 
-		/**
-		 * @brief The depth commit's tree LOD uploads, into the versions a_sealed (the adopted set) names: their capacities and the draw
-		 * row's refs are theirs. Retired mesh leases go to the execution (a_owners); the row's descriptors go with the row (OwnedRow).
-		 */
+		/** @brief Uploads the mirror's changes into the versions a_sealed names. Retired mesh leases go to the execution. */
 		void UploadTreeLod(const Draws::NamedVersions& a_sealed, Mirror& a_mirror, TreeLodTables& a_tables, Draws::LatchedUploads& a_uploads,
 			std::vector<std::shared_ptr<const void>>& a_owners, bool a_draw, std::uint32_t a_frame)
 		{
@@ -158,13 +145,12 @@ namespace DCLF::Features::TreeLod
 				a_owners.push_back(std::move(owner));
 			const auto &shapes = a_sealed.Of(a_tables.shapes), &records = a_sealed.Of(a_tables.instances), &meshRows = a_sealed.Of(a_tables.meshes),
 					   &visible = a_sealed.Of(a_tables.visible);
-			// The shape slots every shape-slot table holds (the visible list: its header, then a phase 1 and a retest entry per record).
 			const std::uint64_t visibleRecords = visible.bytes / 4 > kVisibleHeaderWords ? (visible.bytes / 4 - kVisibleHeaderWords) / 2 : 0;
 			const auto shapeSlots = static_cast<std::uint32_t>(std::min({ shapes.bytes / sizeof(ShapeRow), records.bytes / (kMaxGroupInstances * sizeof(Instance)),
 				visibleRecords / kMaxGroupInstances }));
 			const auto meshSlots = static_cast<std::uint32_t>(meshRows.bytes / sizeof(MeshRow));
-			// Capacities are reserved before the epoch; a mirror past them keeps its changes and draws nothing this commit. Versions this
-			// commit did not fill (a new backing holds nothing) are sent every slot and mesh.
+			// Capacities are reserved before the epoch. A mirror past them keeps its changes and draws nothing this commit.
+			// A new backing holds nothing, so it is sent every slot and mesh.
 			std::vector<std::uint32_t> slots, meshes;
 			const bool fits = a_mirror.ShapeSlots() <= shapeSlots && a_mirror.MeshSlots() <= meshSlots;
 			if (!fits) {
@@ -201,7 +187,7 @@ namespace DCLF::Features::TreeLod
 			row.maxIndices = std::max(a_mirror.MaxIndices(), 1u);
 			row.stats = a_tables.stagesRef;
 			row.frame = a_frame;
-			// The engine's tree LOD draws use the worldspace's atlas and alpha reference 128/255 (dclf-architecture.md, "Tree LOD: the draws").
+			// The engine's tree LOD draws use the worldspace's atlas and alpha reference 128/255.
 			if (a_draw && a_mirror.MaxIndices() && TreeLodTextureBinding(owned))
 				row.shapeSlots = shapeSlots;
 			a_uploads(a_tables.draw, owned, 0);
@@ -213,8 +199,7 @@ namespace DCLF::Features::TreeLod
 				a_tables.ready.store(true, std::memory_order_release);
 		}
 
-		// Tree LOD (dclf-architecture.md, "Tree LOD: the draws"): the mirror's changes, draw row and list arguments, for the depth cull and both passes' draws; the depth
-		// commit's only, after the other features' hooks (its uploads go through the commit's latched uploads).
+		// The depth commit's tree LOD uploads, after the other features' hooks.
 		void Commit(const Api::CommitContext& a_commit)
 		{
 			if (a_commit.kind != Api::CommitKind::Depth)
@@ -225,7 +210,7 @@ namespace DCLF::Features::TreeLod
 			auto& mirror = RenderMirror();
 			const bool owned = IndirectDraws::Get().DrawFamilyOwned(Api::DrawFamily::TreeInstances);
 			UploadTreeLod(a_commit.adopted, mirror, *tables, *a_commit.latched, a_commit.executionOwners, owned, a_commit.frame);
-			// The engine's passes were withheld: a commit that cannot draw leaves a hole.
+			// The engine's passes were withheld, so a commit that cannot draw leaves a hole.
 			if (owned && !tables->ready.load(std::memory_order_acquire))
 				Diagnostics::Notify(TreeLodMissed{ a_commit.frame, mirror.ShapeSlots(), a_commit.adopted.Of(tables->shapes).units });
 		}

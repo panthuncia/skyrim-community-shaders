@@ -1,8 +1,6 @@
 #pragma once
 
-// The Effect port's descriptors (its material port's derive and variants: EffectMaterial.cpp): a BSEffectShaderProperty geometry's pass
-// and shader descriptors, or why it stays native, from the capture records. Pure functions of the records, called on any thread Core
-// classifies, joins or runs a membership pass on. Included by the feature's sources only.
+// Effect shader pass descriptors and the variants DCLF cannot draw. Pure functions of the capture records, safe on any thread.
 
 #include <array>
 #include <cstdint>
@@ -26,17 +24,12 @@ namespace DCLF
 namespace DCLF::Features::Effects
 {
 	/**
-	 * @brief A BSEffectShaderProperty geometry's pass as its GetRenderPasses (0x1414bd890) and descriptor function (FUN_1414bde90)
-	 * make it in the main modes, with its shader descriptors: the blended mesh (hint 1: a_out.forward) or the decal (hints 2 and 3:
-	 * a_out.decalGroup, the DEFERRED pixel stage), either skinned through the palette path. EffectOpaque for a mesh without a blending
-	 * alpha property, EffectVariant for a variant not ported. Sets a_out.port (kMaterialKindEffect) on success: the Effect port's derive.
+	 * @brief Builds the pass and shader descriptors as GetRenderPasses (0x1414bd890) and FUN_1414bde90 would.
+	 * Returns why the pass stays native, or None.
 	 */
 	Ineligible DeriveEffectDescriptors(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf, LightingDescriptors& a_out);
 
-	/**
-	 * @brief CS_DCLF_EFFECTS: the effect variants DCLF does not draw, a bit each. Any but kEffectVariantBlendPair is
-	 * Ineligible::EffectVariant; the blend pair is too once the alpha property blends (a non-blending one is EffectOpaque first).
-	 */
+	/** @brief Effect variants DCLF does not draw. The blend pair counts only once the alpha property blends. */
 	enum EffectVariantBit : std::uint32_t
 	{
 		kEffectVariantShape = 1u << 0,          // any shape but a BSTriShape or a particle system (dynamic shapes)
@@ -49,8 +42,7 @@ namespace DCLF::Features::Effects
 		kEffectVariantBlood = 1u << 7,          // kWeaponBlood
 		kEffectVariantProjectedUv = 1u << 8,    // kProjectedUV
 		kEffectVariantBlendPair = 1u << 9,      // a blending pair the engine's alpha setup (FUN_14150bc80) leaves as it finds it
-		// Particle rejection causes (ParticleRejectionOf): toggle off; not exactly an NiParticleSystem (strip, mesh); no data or
-		// capacity; aspect flags without NiPSysData velocities; no blending alpha property (blend mode is the frame's); decal flags.
+		// Particle rejection causes, see ParticleRejectionOf.
 		kEffectVariantParticle = 1u << 10,
 		kEffectVariantParticleClass = 1u << 11,
 		kEffectVariantParticleData = 1u << 12,
@@ -62,19 +54,11 @@ namespace DCLF::Features::Effects
 	constexpr std::array<std::string_view, kEffectVariantCount> kEffectVariantNames{ "shape", "skinned", "decal", "sky-object", "wireframe",
 		"cloud-lighting", "lighting-without-llf", "blood", "projected-uv", "blend-pair", "particle: toggle off", "particle: class",
 		"particle: no data", "particle: aligned", "particle: unblended", "particle: decal" };
-	/** @brief Every particle cause bit. */
 	inline constexpr std::uint32_t kEffectVariantParticles = kEffectVariantParticle | kEffectVariantParticleClass | kEffectVariantParticleData |
 	                                                         kEffectVariantParticleAligned | kEffectVariantParticleUnblended | kEffectVariantParticleDecal;
 	/**
-	 * @brief The variants the port draws behind switches of their own (read once at install, EffectsFeature.cpp; before any
-	 * classification, so any thread reads them after):
-	 * - cloudLighting (CS_DCLF_EFFECT_CLOUD_LIGHT): the Lighting variant of a kCloudLOD property, lit by the scene's cloud light
-	 *   (EffectFrame.cpp's cloud light row, chosen by the shading row: EffectProperty.cpp);
-	 * - falloff (CS_DCLF_EFFECT_FALLOFF): a mesh with Falloff and no blending alpha property, drawn unblended in the forward sort;
-	 * - rigidSkins (CS_DCLF_EFFECT_RIGID_SKINS): a shape with a skin instance whose pass descriptor has no Skinned bit (the property
-	 *   without kSkinned, or vertices without skin data). The engine draws each partition with the unskinned vertex shader and
-	 *   World from the geometry's world (SetupGeometry writes World when the descriptor has no Skinned bit), as DCLF's partition
-	 *   slots and placement row do.
+	 * @brief Variants the port can draw, each behind its own switch. Read once at install, before any classification.
+	 * rigidSkins covers a skin instance without the Skinned bit, which the engine draws per partition with the unskinned shader.
 	 */
 	struct PortedVariants
 	{
@@ -84,15 +68,11 @@ namespace DCLF::Features::Effects
 	};
 	void SetPortedVariants(const PortedVariants& a_variants);
 	const PortedVariants& Ported();
-	/** @brief The EffectVariantBit set of an effect property on a leaf, from the records. */
 	std::uint32_t EffectVariantsOf(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);
-	/** @brief The effect pass descriptor's Skinned bit (FUN_1414bde90): the property's kSkinned and a skinned vertex description. */
+	/** @brief Needs both the property's kSkinned and a skinned vertex description, as FUN_1414bde90 does. */
 	bool EffectSkinned(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);
-	/** @brief The particle cause bits (kEffectVariantParticles) of a particle geometry's pass with a_flags property flags: 0 when taken. */
+	/** @brief Returns 0 when the particle pass is taken. */
 	std::uint32_t ParticleRejectionOf(const SceneCapture::LeafView& a_leaf, std::uint64_t a_flags);
-	/**
-	 * @brief Install: the "light limit fix" classify input the variants read (Integrations/LightLimitFix's: loaded), needed by name. Unbound
-	 * (the integration not installed) it reads false: kEffectVariantLightingNoLlf.
-	 */
+	/** @brief Reads false when the Light Limit Fix integration is not installed. */
 	void NeedLightLimitFix(Api::InstallContext& a_context);
 }
