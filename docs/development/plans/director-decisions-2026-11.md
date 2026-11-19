@@ -80,3 +80,10 @@ final until the user confirms it.
     has `update = none` in `.git/config`, so `git submodule update` skips it: check it out by hand after a bump.
 16. **`C:/Modding/MO2/mods/CS AB rv2` is left in place** for the user to delete. The permission check refused the lead's
     delete, and the director did not do it in its place.
+17. **Frame revision step 3 is merged** (`7707964b9`): ORG `AttachStagedEpochGraphs` and `EpochsDeclaring`, plus refusal
+    counts. The lead's calls are in the plan's section 9 (step 3), marked "to confirm". OpenRenderGraph `0f2efbf`
+    (`rev-step3-staged-attach`) is local only. Two ORG test failures already on the base are left alone:
+    - `PersistentVulkanHostTests leases` fails with "Synchronous frame capacity exhausted", then hangs.
+    - `ExternalResourceTests` exits early.
+18. **Frame revision step 4 has one lead** that gives the sub-steps 4a-4e to its own workers, at most two at a time, as the
+    plan's serial order allows. That keeps the user's "one subagent per part" rule: step 4 is one part with five sub-steps.
