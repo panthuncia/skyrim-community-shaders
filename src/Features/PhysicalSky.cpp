@@ -13,6 +13,7 @@
 #include "CloudShadows.h"
 #include "Deferred.h"
 #include "Effects11.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
 #include "Features/ViewAtmosphere.h"
 #include "I18n/I18n.h"
@@ -1783,6 +1784,8 @@ void PhysicalSky::SetupResources()
 
 	UpdateShaders();
 	ORGPhysicalSky::Get().Setup(*this);
+	// The cloud map generators on the render graph, after the managers made their twins.
+	ORGCloudMaps::Get().Setup(*this);
 }
 
 void PhysicalSky::ClearShaderCache()
@@ -1841,7 +1844,8 @@ bool PhysicalSky::ShadersOK()
 	// The cloud maps themselves are created lazily by the first generation
 	// dispatch, so readiness is a property of the generation shaders. The render
 	// path still verifies every texture before binding.
-	const bool ndfReady = (ndfManager.texHeight && ndfManager.texModeling && ndfManager.generatorProgram && ndfManager.noiseProgram);
+	// The graph modes generate the maps on the render graph, without the D3D11 programs.
+	const bool ndfReady = ndfManager.texHeight && ndfManager.texModeling && ((ndfManager.generatorProgram && ndfManager.noiseProgram) || ORGCloudMaps::Requested());
 	const bool cirrusMapsReady = !settings.cloudLayer.cirrus.enabled || cirrusMapManager.ShadersReady(settings.cloudLayer.cirrus);
 	bool volumetricShadersOk = !VolumetricCloudsEnabled() ||
 	                           (vsCloudBoundary && psCloudBoundary && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
@@ -2265,6 +2269,13 @@ void PhysicalSky::Prepass()
 			}
 			if (cloudCrossSectionDirty)
 				RenderCloudCrossSection();
+			if (ORGCloudMaps::Requested()) {
+				// The NDF clouds' voxel noise is a file texture the cloud renderer reads (ORGCloudInputs::Gather).
+				if (settings.cloudNoise.useVoxelNoise)
+					voxelCloudManager.Noise();
+				// The managers' work this frame is queued; a new step registers the cloud maps client again.
+				ORGCloudMaps::Get().EndFrame();
+			}
 			RenderVolumetricClouds(VolumetricCloudPass::kShadowVolume);
 		}
 

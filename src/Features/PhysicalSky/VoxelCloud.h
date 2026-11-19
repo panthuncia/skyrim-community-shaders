@@ -59,6 +59,12 @@ struct VoxelCloudManager
 	uint32_t Count() const { return static_cast<uint32_t>(active.size()); }
 	float2 Altitude() const { return altitude; }
 	std::array<uint32_t, 4> ScreenRect(float bottomZ, uint32_t width, uint32_t height) const;
+	/** @brief The views Bind binds at t60..t77: modeling 0-7, distance 0-7, the noise volume, the placements. */
+	const std::array<ID3D11ShaderResourceView*, kAssetSlots * 2 + 2>& Bindings() const { return bindings; }
+	/** @brief The noise volume if Noise() loaded it, else null. */
+	ID3D11ShaderResourceView* LoadedNoise() const { return noiseVoxel.get(); }
+	/** @brief The lighting cache (t85), null before UpdateLighting made it. */
+	ID3D11ShaderResourceView* Lighting() const { return lighting ? lighting->srv.get() : nullptr; }
 
 private:
 	struct Resource

@@ -1,4 +1,5 @@
 #include "Features/PhysicalSky.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -416,7 +417,8 @@ void PhysicalSky::SetupVolumetricResources()
 		desc.SampleDesc.Count = 1;
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		texCloudCrossSection = eastl::make_unique<Texture2D>(desc, "PhysicalSky::CloudCrossSection");
+		// A graph twin in the graph modes, where the graph draws it.
+		texCloudCrossSection = ORGCloudMaps::MakeTexture2D(desc, "PhysicalSky::CloudCrossSection");
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 		srv.Format = desc.Format;
 		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -844,7 +846,8 @@ void PhysicalSky::CompileVolumetricShaders()
 
 void PhysicalSky::RenderCloudCrossSection()
 {
-	if (!texCloudCrossSection || !csCloudCrossSection || !cloudCrossSectionCB ||
+	const bool graph = ORGCloudMaps::Requested();
+	if (!texCloudCrossSection || (!graph && !csCloudCrossSection) || !cloudCrossSectionCB ||
 		!ndfManager.texHeight || !ndfManager.texModeling || !cloudProfileLutSrv || !cloudAdjustmentLutSrv ||
 		!sampNoise || !sampTr)
 		return;
@@ -861,6 +864,26 @@ void PhysicalSky::RenderCloudCrossSection()
 	data.cameraSpan = float4(cameraMeters.x, cameraMeters.y, spanX, spanY);
 	data.shape = float4(low.bottomSpreadScale, low.bottomSpreadHeight, low.bottomSoftness, low.bottomSoftnessHeight);
 	data.shape2 = float4(low.topExpansionScale, low.densityScale, 0.f, 0.f);
+	if (graph) {
+		using Input = ORGCloudMaps::Input;
+		ORGCloudMaps::Dispatch step{ .step = "cross-section",
+			.order = ORGCloudMaps::kCrossSectionOrder,
+			.program = ORGCloudMaps::Program::CrossSection,
+			.inputs = { Input::Srv(ndfManager.texHeight->srv.get()), Input::Srv(ndfManager.texModeling->srv.get()), Input::Srv(cloudProfileLutSrv.get()),
+				Input::Srv(cloudAdjustmentLutSrv.get()), Input::Uav(texCloudCrossSection->resource.get(), 0), Input::SamplerOf(ORGCloudMaps::Sampler::Noise),
+				Input::SamplerOf(ORGCloudMaps::Sampler::Transmittance), Input::Latch() },
+			.groups = { (kCloudCrossSectionW + 7u) >> 3, (kCloudCrossSectionH + 7u) >> 3, 1 } };
+		step.Constants(data);
+		ORGCloudMaps::Work work;
+		work.dispatches.push_back(std::move(step));
+		// Not taken: the section stays dirty and is drawn next frame.
+		if (!ORGCloudMaps::Get().Submit(std::move(work)))
+			return;
+		cloudCrossSectionCamera = cameraMeters;
+		cloudCrossSectionDirty = false;
+		cloudCrossSectionReady = true;
+		return;
+	}
 	cloudCrossSectionCB->Update(data);
 
 	auto* context = globals::d3d::context;
