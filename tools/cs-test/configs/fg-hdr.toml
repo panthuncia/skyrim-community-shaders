@@ -1,0 +1,83 @@
+# FSR frame generation on, then HDR Display on and off under it: each HDR change replaces the frame generation swap chain.
+# fg+hdr would keep only hdr's steps (steps lists are replaced whole), so this config holds both. Compose it with a mode:
+# native-d3d12+fg-hdr, native-vulkan+fg-hdr, guest+fg-hdr. HDR shots are HDR10 PNGs.
+extends = ["base"]
+
+[run]
+timeout_s = 400
+
+[env]
+CS_VK_DRIVER_TRACE = "1"
+
+[features]
+HDRDisplay = true
+ExponentialHeightFog = false
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "fg"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fg-sdr"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "hdr"
+arg = "1"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fg-hdr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fg-hdr-menu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "hdr"
+arg = "0"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fg-sdr-after"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "fg"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fg-sdr", "fg-hdr", "fg-hdr-menu", "fg-sdr-after"]

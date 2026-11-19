@@ -532,6 +532,15 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 - Acceptance: as step 6 on D3D12; D3D12 InfoQueue clean with `--set org.validation=true` for a short run.
 - Risks: FFX DX12 creates its own compute queue and present thread; DRED on hangs (`DXVK_DEBUG=hang` turns on crash markers in native).
 - Size: L. NVIDIA: no.
+- Done 2026-11-19 (branch `org-native/fg-native-d3d12`, Streamline `org-native/fg-native-d3d12`). `sl.fsr_g`'s
+  `fsrGDX12.cpp` holds the D3D12 backend: its own FFX DX12 runtime and interpolation context, sharing the options, the
+  prepared frame and the present counters with the entry through `fsrGShared.h`. The CreateSwapChainForHwnd hook makes
+  `FOR_HWND_DX12` with the base factory and the native queue (the proxy queue's `StreamlineRetrieveBaseInterface`), and the
+  proxy wraps FFX's swap chain. The Destroyed hook unlinks, waits for FFX's presents and destroys the swap chain context. A
+  Present before-hook configures each present, and an after-hook counts it. CS needed nothing beyond step 6's native wiring
+  (`f02b54c80`). BasicRHI needed nothing: the waitable object is read through the proxy after each create, and FFX's
+  replacement buffers come from the proxy's `GetBuffer`. Decisions 31 to 36. Configs `native-d3d12-fg`, and `fg-hdr`, which
+  turns HDR on and off under frame generation (`fg+hdr` keeps only hdr's steps).
 
 ### Step 8: DLSS-G in native (D3D12, then Vulkan)
 - Scope: load `kFeatureDLSS_G` in native when `ProbeDLSSGHardware` passes; DLSS-G tags in the inputs pass (move `TagDLSSGResources`'s
@@ -620,6 +629,16 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 21 | The inputs pass declares the hudless as a legacy interop use, so it is in the common state (Vulkan GENERAL) from the pass to the present, not shader read. | `DescribeForCommands` describes every image in that state, as for the upscalers' evaluate; nothing touches the hudless before the present |
 | 22 | The plugin logs a present that finds a frame prepared for another frame ID (`sl.fsr_g` branch `org-native/fg-inputs-contract`), first one then one in 600, and passes it through. Making it fatal in native is step 6's. | Guest still discards on the render thread while its prepare records on DXVK's CS thread, so a fatal check there would only measure that race |
 
+**Step 7, decided by the agent, to confirm (2026-11-19).**
+
+| # | Decision | Why |
+|---|---|---|
+| 31 | The D3D12 backend never asks for a recreate. It wraps only when the host makes a swap chain while FSR-FG is enabled (the controller's "FSR-FG wrap" replacement), and unwraps when the host destroys it. | DXGI has no SUBOPTIMAL to send back, and native replaces the swap chain itself (step 5) |
+| 32 | A D3D12 failure (FFX context, link, configure, present wait) latches `dispatchFaulted` and returns an error to the host (`DXGI_ERROR_DEVICE_REMOVED` from the present, `E_FAIL` from the create), which native reports as fatal. No fallback to a plain swap chain, unlike the Vulkan backend. | Errors are fatal (decision 6); a quiet fallback would show 1x with frame generation on |
+| 33 | `amd_fidelityfx_dx12.dll` loads at the plugin's startup on D3D12, so a missing DLL makes FSR-FG unsupported there. | No vkCreateDevice re-entrancy on D3D12, and an unsupported feature is clearer than a failure at the first wrap |
+| 34 | The present count (2 or 1) is published from a Present after-hook, since FFX's interpolation dispatch runs inside the proxy's call to FFX's Present. | The before-hook runs before that dispatch |
+| 35 | On `ResizeBuffers` the backend unlinks, waits for FFX's presents and releases the interpolation context; the next present makes it again at the new size. An HDR change waits for the host's replacement. | FFX's DX12 swap chain resizes itself, but the context is sized to the display |
+| 36 | No HDR mastering metadata from the D3D12 backend. | FFX's DX12 swap chain reads the monitor's luminance range at creation (`getMonitorLuminanceRange`); only its Vulkan one starts at zero |
 
 1. **Is DLSS-G in native in scope?**
    (a) yes, last, in a session on the RTX 5080; (b) not now: build the interface so it fits, implement later; (c) D3D12 only.
