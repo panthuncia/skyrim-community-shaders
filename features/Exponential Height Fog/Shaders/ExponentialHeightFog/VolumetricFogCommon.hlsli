@@ -217,10 +217,10 @@ namespace ExponentialHeightFog
 	{
 		const float2 lower = min(startHeight, endHeight);
 		const float2 upper = max(startHeight, endHeight);
-		const float2 belowFraction = upper <= 0.0 ? 1.0 : saturate(-lower / max(upper - lower, 1e-6));
+		// lerp on the comparison, not a vector ?:, which DXC (HLSL 2021) rejects. Both sides are finite.
+		const float2 belowFraction = lerp(saturate(-lower / max(upper - lower, 1e-6)), 1.0, (float2)(upper <= 0.0));
 		const float2 falloff = heightFalloff * (max(upper, 0.0) - max(lower, 0.0));
-		const float2 integral = falloff > 0.01 ? (1.0 - exp2(-falloff)) / max(falloff, 1e-6) :
-		                                         0.69314718056 - 0.24022650695 * falloff;
+		const float2 integral = lerp(0.69314718056 - 0.24022650695 * falloff, (1.0 - exp2(-falloff)) / max(falloff, 1e-6), (float2)(falloff > 0.01));
 		return lerp(exp2(-heightFalloff * max(lower, 0.0)) * integral, 0.69314718056, belowFraction);
 	}
 

@@ -1,6 +1,11 @@
 #ifndef VOLUMETRIC_FOG_LIGHTING_HLSLI
 #define VOLUMETRIC_FOG_LIGHTING_HLSLI
 
+// An includer can read engine local shadows another way, such as by offset from a latch buffer.
+#ifndef VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW
+#	define VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW(i) EngineLocalShadows[i]
+#endif
+
 float SampleDirectionalShadowPCF(float3 positionLS, uint cascadeIndex)
 {
 	uint shadowWidth;
@@ -35,17 +40,17 @@ float SampleDirectionalShadow(float3 positionWS)
 	if (!VolumetricFogHasDirectionalShadowMap)
 		return 1.0f;
 
-	DirectionalShadowLightData directionalShadowLightData = DirectionalShadowLights[0];
+	// Read by index, not copied: a local copy indexed per thread became a private array, which AMD's compiler keeps in scratch memory.
 	float shadowMapDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(positionWS));
-	if (shadowMapDepth >= directionalShadowLightData.EndSplitDistances.y)
+	if (shadowMapDepth >= DirectionalShadowLights[0].EndSplitDistances.y)
 		return 1.0f;
 
-	float splitDenom = max(directionalShadowLightData.EndSplitDistances.x - directionalShadowLightData.StartSplitDistances.y, 1e-4f);
-	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - directionalShadowLightData.StartSplitDistances.y) / splitDenom));
+	float splitDenom = max(DirectionalShadowLights[0].EndSplitDistances.x - DirectionalShadowLights[0].StartSplitDistances.y, 1e-4f);
+	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - DirectionalShadowLights[0].StartSplitDistances.y) / splitDenom));
 	uint primaryCascade = (uint)cascadeSelect;
 
 	float3 absolutePositionWS = positionWS + FrameBuffer::CameraPosAdjust.xyz;
-	float3 positionLS = mul(directionalShadowLightData.ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+	float3 positionLS = mul(DirectionalShadowLights[0].ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 	if (any(positionLS.xy < 0.0f) || any(positionLS.xy > 1.0f))
 		return 1.0f;
 
@@ -54,14 +59,14 @@ float SampleDirectionalShadow(float3 positionWS)
 	[branch] if (cascadeSelect > 0.0f && cascadeSelect < 1.0f)
 	{
 		uint secondaryCascade = 1u - primaryCascade;
-		float3 secondaryLS = mul(directionalShadowLightData.ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+		float3 secondaryLS = mul(DirectionalShadowLights[0].ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 		if (!any(secondaryLS.xy < 0.0f) && !any(secondaryLS.xy > 1.0f)) {
 			float secondaryShadow = SampleDirectionalShadowPCF(secondaryLS, secondaryCascade);
 			shadow = lerp(shadow, secondaryShadow, cascadeSelect);
 		}
 	}
 
-	float fade = saturate(shadowMapDepth / max(directionalShadowLightData.EndSplitDistances.y, 1.0f));
+	float fade = saturate(shadowMapDepth / max(DirectionalShadowLights[0].EndSplitDistances.y, 1.0f));
 	float fadeFactor = 1.0f - pow(fade * fade, 8.0f);
 	return lerp(1.0f, shadow, fadeFactor);
 }
@@ -144,7 +149,7 @@ float SampleLocalLightShadow(LightLimitFix::Light light, float3 positionWS, floa
 	if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
 		if (!VolumetricFogHasEngineLocalShadows || light.shadowLightIndex >= 4u)
 			return 0.0f;
-		LightLimitFix::LocalShadowData data = EngineLocalShadows[light.shadowLightIndex];
+		LightLimitFix::LocalShadowData data = VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW(light.shadowLightIndex);
 		if (data.Params.y <= 0.0f)
 			return 0.0f;
 		return LightLimitFix::GetLocalShadow(EngineLocalShadowMaps, LinearSampler, data, (uint)data.Params2.z, positionWS, FrameBuffer::CameraPosAdjust.xyz, towardLight, false, noise, data.Params2.w, 1u, 0.0f);

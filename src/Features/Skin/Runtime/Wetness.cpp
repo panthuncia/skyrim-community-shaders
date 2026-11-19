@@ -61,6 +61,12 @@ float4 Skin::GetWetness(RE::BSGeometry* geometry)
 
 		auto [it, inserted] = actorWetnessMap.try_emplace(actorFormID);
 		auto& cached = it->second;
+		// A form ID can name another actor object after a reload, so its entry starts again.
+		if (!inserted && cached.actor != actor) {
+			cached = {};
+			inserted = true;
+		}
+		cached.actor = actor;
 		if (!inserted && cached.frameCount == currentFrame) {
 			return cached.wetness;
 		}

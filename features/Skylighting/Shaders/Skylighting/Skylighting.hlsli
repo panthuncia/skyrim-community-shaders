@@ -19,7 +19,9 @@ namespace Skylighting
 	Texture3D<sh2> SkylightingProbeArray : register(t50);
 #endif
 
-#if defined(SKYLIGHTING_COVERAGE_REGISTER)
+// The roof-leak coverage is D3D11's: the render graph and DCLF's draws bind neither texture yet.
+#if defined(CS_ORG_BINDLESS) || defined(DCLF_BINDLESS_DRAW)
+#elif defined(SKYLIGHTING_COVERAGE_REGISTER)
 	Texture3D<uint> SkylightingProbeCoverage : register(SKYLIGHTING_COVERAGE_REGISTER);
 	Texture2D<float> SkylightingZenithDepth : register(SKYLIGHTING_ZENITH_REGISTER);
 #	define SKYLIGHTING_COVERAGE
