@@ -167,6 +167,15 @@ namespace ORGPostChain
 		state.registered.emplace_back(a_resource.Name(), a_resource.Graph());
 	}
 
+	void Builder::Register(std::string_view a_name, std::shared_ptr<org::Resource> a_resource)
+	{
+		if (!a_resource) {
+			Fail(std::format("{} is missing", a_name));
+			return;
+		}
+		state.registered.emplace_back(std::string(a_name), std::move(a_resource));
+	}
+
 	void Builder::Publish(std::string_view a_name, const Image& a_image) { state.published.insert_or_assign(std::string(a_name), a_image); }
 
 	Image Builder::Find(std::string_view a_name) const
@@ -227,6 +236,8 @@ namespace ORGPostChain
 	}
 
 	std::shared_ptr<const org::LatchBlock> Builder::LatchBlock() const { return state.latch; }
+
+	std::shared_ptr<const RenderGraph::RunGate> Builder::RunGate() const { return state.gate; }
 
 	std::shared_ptr<const RasterProgram> Builder::Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
@@ -396,6 +407,8 @@ namespace
 			return ORGPostChain::MakeLocalExposure();
 		case Index::AutoExposure:
 			return ORGPostChain::MakeHistogramAutoExposure();
+		case Index::PhysicalLens:
+			return ORGPostChain::MakePhysicalLens();
 		default:
 			return nullptr;
 		}
@@ -421,6 +434,8 @@ namespace
 			return "cod-bloom";
 		case Index::LensFlare:
 			return "lens-flare";
+		case Index::PhysicalLens:
+			return "physical-lens";
 		case Index::Composite:
 			return "composite";
 		case Index::ColorGrading:

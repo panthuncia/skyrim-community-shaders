@@ -130,6 +130,7 @@ namespace ORGPostChain
 						GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
 				}
 				a_builder.Register(*focus);
+				a_builder.Publish(Published::kDoFFocus, Image{ focus->Graph(), kFocusFormat });
 				focusReset = kFocusResetCommits;
 
 				const auto& size = a_builder.GetShape();
