@@ -109,7 +109,7 @@ namespace DCLF::Features::Grass
 			auto& cull = a_row.cull;
 			cull.minPixelSize = settings.MinPixelSize;
 			cull.fullDetailPx = settings.FullDetailPixelSize;
-			cull.minKeep = settings.MinDensity;
+			cull.minKeep = std::clamp(settings.MinDensity, 0.0f, 1.0f);
 			cull.fadeBand = 0.15f;
 			cull.costBias = settings.MeshCostBias;
 			cull.costBiasStart = std::max(0.0f, settings.CostBiasStartDistance);
@@ -127,8 +127,8 @@ namespace DCLF::Features::Grass
 			cull.midLodPx = settings.MidLODPixelSize;
 			cull.farLodPx = settings.EnableMidLOD ? std::min(settings.FarLODPixelSize, settings.MidLODPixelSize) : settings.FarLODPixelSize;
 			cull.lodBandPx = std::max(0.0f, settings.MeshLODBandPixels);
-			// Thinning ramps over the INI distance even when the distance is overridden, as Grass Optimizations does.
-			cull.densityDistanceRcp = 1.0f / std::max(vanillaMax, 1e-4f);
+			cull.occlusionDepthBias = std::max(0.0f, settings.OcclusionDepthBias);
+			cull.occlusionTightness = std::clamp(settings.OcclusionTightness, 0.0f, 1.0f);
 			cull.flags = (settings.EnableMeshLOD && settings.EnableMidLOD ? kCullMidLod : 0u) | (settings.EnableMeshLOD && settings.EnableFarLOD ? kCullFarLod : 0u) |
 			             (settings.EnableOcclusionCulling ? kCullOcclusion : 0u);
 			return true;

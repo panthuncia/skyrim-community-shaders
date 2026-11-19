@@ -744,7 +744,8 @@ cbuffer AlphaTestRefCB : register(b11)
 #	if defined(RENDER_DEPTH)
 float SampleDepthAlpha(float2 uv)
 {
-#		ifdef GRASS_OPTIMIZATIONS
+#		if defined(GRASS_CULLED_INSTANCES)
+	// The mip of the footprint's shorter axis, so thin distant blades keep their alpha.
 	float width, height;
 	TexBaseSampler.GetDimensions(width, height);
 

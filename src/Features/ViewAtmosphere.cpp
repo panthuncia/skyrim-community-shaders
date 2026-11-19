@@ -13,6 +13,7 @@
 #include "Features/PhysicalSky.h"
 #include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
@@ -296,8 +297,10 @@ void ViewAtmosphere::Render()
 	const bool terrainReady = terrain.IsShadowMapReady();
 	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
 	const auto previousShadowFlags = data.flags.z & (1u | 256u | 512u);
+	// The graph's volumes while its probe update runs.
+	auto* probes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
 	data.flags.z = (shadowView && shadowData ? 1u : 0u) | (useIBL ? 4u : 0u) |
-	               (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (localLights ? 32u : 0u) |
+	               (probes ? 8u : 0u) | (localLights ? 32u : 0u) |
 	               (localShadows ? 64u : 0u) | (engineShadows ? 128u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u);
 	if ((data.flags.z & (1u | 256u | 512u)) != previousShadowFlags)
 		data.history.x = 0.0f;
@@ -323,7 +326,7 @@ void ViewAtmosphere::Render()
 	bind(35, localLights ? lights.lights->srv.get() : nullptr);
 	bind(36, localLights ? lights.lightIndexList->srv.get() : nullptr);
 	bind(37, localLights ? lights.lightGrid->srv.get() : nullptr);
-	bind(50, skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr);
+	bind(50, probes);
 	bind(60, terrainReady ? terrain.texShadowHeight->srv.get() : nullptr);
 	bind(61, sky.texTrLut->srv.get());
 	bind(76, useIBL ? ibl.envIBLTexture->srv.get() : nullptr);
@@ -473,7 +476,8 @@ void ViewAtmosphere::RenderReflection()
 	const float distance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
 	reflection.grids[0].depth = { 0, distance, offset, std::log2(1.0f + distance / offset) };
 	reflection.atlas = { 32, 32, 32, 0 };
-	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
+	auto* probes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
+	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (probes ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
 	reflectionParameters->Update(&reflection, sizeof(reflection));
 	auto bind = [&](UINT slot, ID3D11ShaderResourceView* srv) { context->CSSetShaderResources(slot, 1, &srv); };
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
@@ -484,7 +488,7 @@ void ViewAtmosphere::RenderReflection()
 	context->CSSetSamplers(0, 1, &sampler);
 	bind(2, sky.texMsLut->srv.get());
 	bind(25, cloudLayer ? cloudLayer->srv.get() : nullptr);
-	bind(50, skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr);
+	bind(50, probes);
 	bind(60, terrainReady ? terrain.texShadowHeight->srv.get() : nullptr);
 	bind(61, sky.texTrLut->srv.get());
 	bind(62, sky.texSvLut->srv.get());
@@ -625,14 +629,17 @@ void ViewAtmosphere::CompositeAfterWater()
 	context->CSSetShaderResources(110, 3, clouds.data());
 	auto* lightningChannels = sky.texLightningChannels ? sky.texLightningChannels->srv.get() : nullptr;
 	context->CSSetShaderResources(113, 1, &lightningChannels);
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	std::array<ID3D11ShaderResourceView*, 2> depths = {
-		renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV,
+		Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV),
 		sky.texVolFilteredAux ? sky.texVolFilteredAux->srv.get() : nullptr
 	};
 	context->CSSetShaderResources(40, 2, depths.data());
 	std::array<ID3D11SamplerState*, 5> samplers = { linearSampler.get(), nullptr, nullptr, linearSampler.get(), linearSampler.get() };
 	context->CSSetSamplers(0, 5, samplers.data());
-	context->CSSetUnorderedAccessViews(0, 1, &main.UAV, nullptr);
+	auto* mainUav = Unwrap(main.UAV);
+	context->CSSetUnorderedAccessViews(0, 1, &mainUav, nullptr);
 	context->CSSetShader(mediumCompositeCS.get(), nullptr, 0);
 	D3D11_TEXTURE2D_DESC desc;
 	main.texture->GetDesc(&desc);
@@ -735,5 +742,6 @@ std::pair<ID3D11ShaderResourceView*, ID3D11Buffer*> ViewAtmosphere::PrepareLocal
 	if (!engineLocalShadowCB)
 		engineLocalShadowCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<decltype(shadows)>(), "ViewAtmosphere::EngineLocalShadows");
 	engineLocalShadowCB->Update(shadows);
-	return { depthStencil.depthSRV, engineLocalShadowCB->CB() };
+	// The engine's field can be a tripwire handle: DXVK takes the wrapped object.
+	return { RenderGraph::Engine::Tripwire::Unwrap(depthStencil.depthSRV), engineLocalShadowCB->CB() };
 }

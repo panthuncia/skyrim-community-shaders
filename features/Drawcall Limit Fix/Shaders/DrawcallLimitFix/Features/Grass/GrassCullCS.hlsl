@@ -91,7 +91,8 @@ bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 }
 
 // Tests the HZB only in cull mode 2, with an HZB bound and Grass Optimizations' occlusion on.
-bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullFlags)
+// As Grass Optimizations, the sphere must lie behind the occluder by a_depthBias of the occluder's view depth.
+bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullFlags, float a_depthBias)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint hzbState = (a_cullFlags & kCullOcclusion) != 0 ? (latch.Load(LatchOffset + 16) & 0xFu) : 0u;
@@ -104,7 +105,20 @@ bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullF
 	view.BaseSize = HzbUnpackSize(HzbSizePacked);
 	view.Mips = HzbMips;
 	view.UvScale = HzbUnpackUvScale(latch.Load(LatchOffset + 24));
-	return HzbTest(view, a_centre, a_radius).Occluded;
+	const HzbResult hzb = HzbTest(view, a_centre, a_radius);
+	if (!hzb.Sampled)
+		return false;
+	// Perspective depth is k + c / w, with k and c from the projection's z and w rows.
+	const float4 rowZ = a_viewProj[2], rowW = a_viewProj[3];
+	const float wLengthSq = dot(rowW.xyz, rowW.xyz);
+	const float k = wLengthSq > 1e-12 ? dot(rowZ.xyz, rowW.xyz) / wLengthSq : 0.0;
+	const float c = rowZ.w - k * rowW.w;
+	const float occluderW = c / (hzb.Farthest - k);
+	// An invalid occluder W occludes nothing.
+	const float occluderDepth = occluderW > 0.0 ? occluderW : 3.402823466e+38;
+	const precise float3 centre = a_centre - view.Eye;
+	const float nearestW = dot(rowW.xyz, centre) + rowW.w - a_radius * sqrt(wLengthSq);
+	return nearestW > occluderDepth * (1.0 + a_depthBias);
 }
 
 // Common/Random.hlsli's pcg2d, seeded by the global instance slot so it is stable while the shape lives.
@@ -152,7 +166,8 @@ struct Cull
 	float SimpleShadingPx, CollisionDistSq, MidLodPx, FarLodPx;
 	float LodBandPx;
 	uint Flags;
-	float DensityDistanceRcp;
+	float OcclusionDepthBias;
+	float OcclusionTightness;
 };
 
 Cull LoadCull(ByteAddressBuffer a_draw)
@@ -161,7 +176,7 @@ Cull LoadCull(ByteAddressBuffer a_draw)
 	const float4 b = asfloat(a_draw.Load4(kRowCull + 16));
 	const float4 c = asfloat(a_draw.Load4(kRowCull + 32));
 	const float4 d = asfloat(a_draw.Load4(kRowCull + 48));
-	const uint3 e = a_draw.Load3(kRowCull + 64);
+	const uint4 e = a_draw.Load4(kRowCull + 64);
 	Cull cull;
 	cull.MinPixelSize = a.x;
 	cull.FullDetailPx = a.y;
@@ -181,7 +196,8 @@ Cull LoadCull(ByteAddressBuffer a_draw)
 	cull.FarLodPx = d.w;
 	cull.LodBandPx = asfloat(e.x);
 	cull.Flags = e.y;
-	cull.DensityDistanceRcp = asfloat(e.z);
+	cull.OcclusionDepthBias = asfloat(e.z);
+	cull.OcclusionTightness = asfloat(e.w);
 	return cull;
 }
 
@@ -205,7 +221,7 @@ bool Owner(uint a_index, out float3 a_origin, out float a_spawnStart, out uint a
 	return true;
 }
 
-// Grass Optimizations' occlusion sphere. The model bound turned by the instance's rotation and grown by its scale variance.
+// The frustum sphere. The model bound turned by the instance's rotation and grown by its scale variance.
 void Bound(uint4 a_raw0, uint4 a_raw1, float3 a_world, float3 a_boundCenter, float a_modelRadius, out float3 a_centre, out float a_radius)
 {
 	const float sizeVariance = f16tof32(a_raw1.z >> 16);
@@ -215,6 +231,18 @@ void Bound(uint4 a_raw0, uint4 a_raw1, float3 a_world, float3 a_boundCenter, flo
 	const float3 centre = a_boundCenter * (1.0 + max(sizeVariance, 0.0));
 	a_centre = a_world + float3(dot(rot0, centre), dot(rot1, centre), dot(rot2, centre));
 	a_radius = a_modelRadius * (1.0 + max(sizeVariance, 0.0)) + length(a_boundCenter) * abs(sizeVariance);
+}
+
+// Grass Optimizations' occlusion sphere: about the tier's canopy middle on the instance's up axis, without the frustum's padding.
+void OcclusionSphere(uint4 a_raw0, uint4 a_raw1, float3 a_world, uint a_bucketBase, uint a_tier, float a_tightness, out float3 a_centre, out float a_radius)
+{
+	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
+	const float sizeVariance = f16tof32(a_raw1.z >> 16);
+	// The rotation's z column: rows (h4, h5, h6), (h8, h9, h10) and (h12, h7, h11).
+	const float3 up = float3(f16tof32(a_raw0.w & 0xFFFF), f16tof32(a_raw1.y & 0xFFFF), f16tof32(a_raw1.y >> 16));
+	const float canopyMid = 0.5 * asfloat(buckets.Load(a_bucketBase + 200 + a_tier * 4));
+	a_centre = a_world + canopyMid * (1.0 + sizeVariance) * up;
+	a_radius = asfloat(buckets.Load(a_bucketBase + 216)) * max(1.0, abs(1.0 + sizeVariance)) * a_tightness;
 }
 
 // Counts the draw and writes the visible entry. Tiers 0 and 1 grow up from their base, tier 2 down from the end it shares with tier 1.
@@ -249,12 +277,12 @@ void Retest(uint a_id, RWByteAddressBuffer a_draws, Cull a_cull)
 	const uint4 raw1 = instances.Load4(index * kInstanceBytes + 16);
 	const uint bucketBase = bucket * kBucketRowBytes;
 	const float3 world = origin + float3(Halfs(raw0.x), f16tof32(raw0.y & 0xFFFF));
+	const uint tier = (frames.Load(index * kFrameBytes + 4) >> 16) & 3u;
 	float3 centre;
 	float radius;
-	Bound(raw0, raw1, world, asfloat(buckets.Load3(bucketBase + 48)), asfloat(buckets.Load(bucketBase + 60)), centre, radius);
-	if (Occluded(LatchViewProj(), centre, radius, a_cull.Flags))
+	OcclusionSphere(raw0, raw1, world, bucketBase, tier, a_cull.OcclusionTightness, centre, radius);
+	if (Occluded(LatchViewProj(), centre, radius, a_cull.Flags, a_cull.OcclusionDepthBias))
 		return;
-	const uint tier = (frames.Load(index * kFrameBytes + 4) >> 16) & 3u;
 	Append(a_draws, index, bucket, tier, kPhaseTwoInstances);
 }
 
@@ -343,19 +371,19 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 		return;
 	}
 
-	// The density thinning, ramped in over the INI grass distance.
+	// The density thinning. The fade band scales with the density, so fewer fading instances are kept.
 	const float pxScale = lerp(1.0, meshCost, effCostBias);
 	const float effMinPx = cull.MinPixelSize * pxScale;
 	float lodFade = 1.0;
 	const float effFullPx = cull.FullDetailPx * pxScale;
 	bool thinned = projPx < effMinPx;
 	if (!thinned && projPx < effFullPx) {
-		const float distanceRamp = saturate(dist * cull.DensityDistanceRcp);
-		const float t = saturate((effFullPx - projPx) / max(effFullPx - effMinPx, 1e-4)) * distanceRamp;
+		const float t = saturate((effFullPx - projPx) / max(effFullPx - effMinPx, 1e-4));
 		const float keep = lerp(1.0, cull.MinKeep, t);
 		const float h = RandFloat(rand.x);
-		thinned = h > keep + cull.FadeBand;
-		lodFade = saturate((keep + cull.FadeBand - h) / max(cull.FadeBand, 1e-4));
+		const float cutoff = keep * (1.0 + cull.FadeBand);
+		thinned = h > cutoff;
+		lodFade = saturate((cutoff - h) / max(keep * cull.FadeBand, 1e-4));
 	}
 	if (thinned) {
 		draws.InterlockedAdd(kStatThinned, 1u, scratch);
@@ -370,7 +398,9 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 	const float4 times = asfloat(draw.Load4(kRowTimeBase));  // timeBase, prevTimeBase, fadeNow, fadeInTimeRcp
 	const float spawnFade = saturate((times.z - spawnStart) * times.w);
 	const float fade = distFade * spawnFade * lodFade * edgeFade;
-	if (fade <= cull.InvisibleFadeCull) {
+	// Also a fade the alpha test discards everywhere, at the vertex stage's unorm16 precision.
+	const float storedFade = round(saturate(fade) * 65535.0) / 65535.0;
+	if (fade <= cull.InvisibleFadeCull || storedFade < asfloat(buckets.Load(bucketBase + 44)) - 1e-3) {
 		draws.InterlockedAdd(kStatFaded, 1u, scratch);
 		return;
 	}
@@ -386,7 +416,10 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 	frames.Store2(index * kFrameBytes, uint2(wind, uint(saturate(fade) * 65535.0 + 0.5) | (flags << 16)));
 
 	draws.InterlockedAdd(kTested, 1u, scratch);
-	if (Occluded(viewProj, centre, radius, cull.Flags)) {
+	float3 occlusionCentre;
+	float occlusionRadius;
+	OcclusionSphere(raw0, raw1, world, bucketBase, tier, cull.OcclusionTightness, occlusionCentre, occlusionRadius);
+	if (Occluded(viewProj, occlusionCentre, occlusionRadius, cull.Flags, cull.OcclusionDepthBias)) {
 		RWByteAddressBuffer visible = ResourceDescriptorHeap[VisibleIndex];
 		uint at;
 		draws.InterlockedAdd(kRetests, 1u, at);
