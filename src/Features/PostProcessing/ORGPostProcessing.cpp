@@ -1100,6 +1100,14 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 		s.failedKey.clear();
 	}
 
+	// A stage holds the Tonemap anchor, so the chain's work must land in a stage step whose built graph holds this registration.
+	// Frames of a kind without the post stage, such as the main menu's, have no such step. Neither does the post stage
+	// until a build with a new registration switches in. On those frames D3D11 runs the chain, so the image is still drawn.
+	if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Tonemap) && !FrameAnchors::CanTap(ORGPostChain::kClientId)) {
+		s.SetReason("no stage of this frame holds the chain's build yet, or the frame kind has no post stage");
+		return;
+	}
+
 	s.order = std::move(order);
 	s.linear = linear;
 	s.readsMainCopy = !single && (a_refraction || a_targets.input == mainCopyTarget);
