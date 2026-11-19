@@ -21,26 +21,20 @@ namespace RenderGraph::Engine
 {
 	void InstallGameHooks()
 	{
-		// CS_ORG_RESIDUE_CENSUS / CS_ORG_ENGINE_FLUSH_LATCH: first, so its DispatchCSShader detour is inside ImageSpace's and Hooks.cpp's;
-		// its SetDirtyStates detour is outside Hooks.cpp's, which is installed before this.
+		// First, so its DispatchCSShader detour sits inside ImageSpace's and Hooks.cpp's, and its SetDirtyStates detour outside Hooks.cpp's.
 		Flush::Install();
 		Textures::InstallHooks();
 		Buffers::InstallGameHooks();
 		Constants::InstallGameHooks();
-		// CS_ORG_BINK: the movie player's tiles on the render graph (reserves the Present anchor).
 		Bink::InstallHooks();
-		// CS_ORG_LOADING_THREAD: the render graph on whichever thread begins the engine's frame (the loading screen, the logo).
 		LoadingScreen::Install();
 		Pipeline::InstallGameHooks();
 		Targets::Install();
-		// CS_ORG_ENGINE_SKELETON: the engine's clear and depth copy call sites.
 		Skeleton::Install();
-		// CS_ORG_IMAGESPACE: the ImageSpace draws the graph takes (BSImagespaceShader::Render, the HDR effect, the pre-tonemap composites).
 		ImageSpace::Install();
 		Scaleform::Install();
-		// CS_ORG_OCCLUSION_QUERIES: the engine's BeginQuery, EndQuery and GetQueryData; a port's bracket answers its query from the graph.
 		OcclusionQueries::Install();
-		// CS_ORG_VOLUMETRIC_LIGHTING: the engine's VL render, apply and blur (native mode installs it with the feature off too).
+		// Native mode installs it with the feature off too.
 		ORGVolumetricLighting::Install();
 	}
 
@@ -53,28 +47,24 @@ namespace RenderGraph::Engine
 
 	void Setup()
 	{
-		// CS_ORG_ENGINE_TARGETS: the engine's targets, made on D3D11 before the graph existed, move to ORG before any feature reads them.
+		// Before any feature reads the targets.
 		Targets::TakeOver();
-		// CS_ORG_ENGINE_SKELETON: the engine's clears and its main depth copy on the graph, once its targets are where they stay.
+		// Once its targets are where they stay.
 		Skeleton::Setup();
-		// CS_ORG_IMAGESPACE: the ImageSpace draws on the graph; the client registers once the effects' shapes are known.
 		ImageSpace::Setup();
 	}
 
 	void PostSetup()
 	{
-		// CS_ORG_SCALEFORM: the framebuffer's and HDR's UI texture's surfaces (HDR made its texture in its SetupResources).
+		// After HDR made its UI texture.
 		Scaleform::Setup();
-		// CS_ORG_BINK: the movie player's client at the Present anchor, registered once for the session. After the features'
-		// SetupResources, so HDR's UI texture exists and its pass is in the client from the start: the startup logo's first tick
-		// then finds the client in the built graph instead of refreshing it.
+		// After SetupResources so HDR's UI texture is in the client from the start, and the startup logo needs no refresh.
 		Bink::Setup();
-		// CS_ORG_VOLUMETRIC_LIGHTING: after the features' SetupResources, which make Terrain and Cloud Shadows' inputs.
+		// After SetupResources, which make Terrain and Cloud Shadows' inputs.
 		(void)ORGVolumetricLighting::Get().Setup();
-		// Every client registered at setup joins its anchors' graphs now, not at the first frame's build point.
 		if (RenderGraphRuntime::Get().IsActive()) {
 			(void)FrameAnchors::BuildPending("CS's setup");
-			// The UI stage's first schedule, recorded now, so the first frame (the startup logo's first movie frame) draws it.
+			// Record the UI stage's first schedule now so the startup logo's first frame draws it.
 			FrameAnchors::PrimeStages("CS's setup");
 		}
 	}

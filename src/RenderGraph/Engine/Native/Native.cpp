@@ -17,7 +17,7 @@ namespace RenderGraph::Engine::Native
 {
 	namespace
 	{
-		/** @brief Switches that select a DXVK path native mode does not have: each one set is a startup error. */
+		/** @brief Switches that select a DXVK path native mode does not have. Each one set is a startup error. */
 		struct Conflict
 		{
 			const char* name;
@@ -31,14 +31,14 @@ namespace RenderGraph::Engine::Native
 		};
 
 		/**
-		 * @brief Switches that narrow a port to part of its work: set to anything but every part, each one is a startup error. The parts
-		 * left out stay the engine's draws, and native mode drops engine draws without a word.
+		 * @brief Switches that narrow a port to part of its work. Anything short of every part is a startup error, since native mode
+		 * silently drops the engine draws left out.
 		 */
 		struct Narrowing
 		{
 			const char* name;
-			std::string_view all;  // the parts, comma separated, that cover the whole port; unset covers it too
-			bool anyCase;          // the reader ignores case
+			std::string_view all;  // the parts that cover the whole port, comma separated. Unset covers it too.
+			bool anyCase;
 			const char* why;
 		};
 		constexpr std::array kNarrowings{
@@ -47,7 +47,6 @@ namespace RenderGraph::Engine::Native
 			Narrowing{ "CS_ORG_IMAGESPACE_EFFECTS", "all", true, "it leaves the ImageSpace effects it does not name to the engine" },
 		};
 
-		/** @brief Whether a narrowing switch names every part (or is unset), compared as its reader compares them. */
 		bool CoversAll(const Narrowing& a_switch)
 		{
 			const auto items = Switches::List(a_switch.name);
@@ -67,9 +66,8 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
-		 * @brief Drawcall Limit Fix on D3D12: what has no D3D12 port yet, kept off, and the plain draws D3D12 needs kept on. DCLF's D3D12
-		 * port draws only with its pulled builds and plain indirect draws (DrawPipelines, DxilStages). A value the environment sets
-		 * already is kept, so a run can try a part.
+		 * @brief DCLF switches for D3D12. Parts without a D3D12 port are kept off and the plain draws D3D12 needs kept on.
+		 * A value already set in the environment is kept, so a run can try a part.
 		 */
 		struct DclfSwitch
 		{
@@ -121,7 +119,7 @@ namespace RenderGraph::Engine::Native
 
 	namespace
 	{
-		/** @brief The value of an environment switch, read directly (Switches caches its reads); empty when unset or too long. */
+		/** @brief An environment switch read directly, since Switches caches its reads. Empty when unset or too long. */
 		std::string Environment(const char* a_name)
 		{
 			char value[32]{};
@@ -129,10 +127,7 @@ namespace RenderGraph::Engine::Native
 			return length != 0 && length < sizeof(value) ? std::string(value) : std::string();
 		}
 
-		/**
-		 * @brief Guest mode is DXVK with the render graph on: not native, not CS_ORG=0 or CS_ORG=features (no graph), not the system
-		 * D3D11 runtime. Read from the environment: this runs before the first cached read.
-		 */
+		/** @brief Whether this is guest mode, DXVK with the render graph on. Read from the environment because this runs before the first cached read. */
 		bool GuestMode()
 		{
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -164,14 +159,13 @@ namespace RenderGraph::Engine::Native
 			if (!CoversAll(narrowing))
 				Fail(fmt::format("{}={}", narrowing.name, Switches::Value(narrowing.name)), narrowing.why);
 		}
-		// Drawcall Limit Fix draws the world's geometry in native mode: without it the engine's draws would be dropped.
+		// DCLF draws the world's geometry in native mode, and without it the engine's draws would be dropped.
 		if (std::ranges::contains(Switches::List("CS_DISABLE_FEATURES"), std::string_view("DrawcallLimitFix")))
 			Fail("CS_DISABLE_FEATURES naming DrawcallLimitFix", "the world's draws it takes would stay the engine's");
 		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
 			Fail("CS_DCLF=0", "the world's draws Drawcall Limit Fix takes would stay the engine's");
 		Stage("switches", "no conflicting switch is set");
-		// D3D12: Drawcall Limit Fix's parts without a D3D12 port, by their own switches (read later, at DCLF's install).
-		// GraphicsAPI::ApplyAtBoot set CS_ORG_NATIVE_BACKEND already, so the cached read sees its value.
+		// GraphicsAPI::ApplyAtBoot already set CS_ORG_NATIVE_BACKEND, so the cached read sees its value.
 		if (!Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))
 			return;
 		std::string set, kept;
@@ -206,8 +200,7 @@ namespace RenderGraph::Engine::Native
 			Fail("another plugin", "a DXVK DLL is in the process (another mod loads DXVK)");
 		if (RenderDoc::IsLoaded())
 			Fail("the RenderDoc feature", "it captures the game's D3D11, which runs on DXVK");
-		// Upscaling runs: its TAA and depth upscale are graph passes (ORGUpscaling). Streamline stands down until it runs on the native
-		// device, so its upscalers and frame generation are unavailable and the method falls back to TAA (Upscaling::GetUpscaleMethod).
+		// Streamline stands down until it runs on the native device, so upscaling falls back to TAA.
 		Stage("checks", "DXVK is not loaded, and no feature that needs it is on");
 #endif
 	}

@@ -1,21 +1,13 @@
 #pragma once
 
-// The engine's occlusion queries answered by the render graph (CS_ORG_OCCLUSION_QUERIES=1, default off; docs/development/p5/occlusion-queries.md).
+// The engine's occlusion queries answered by the render graph, with CS_ORG_OCCLUSION_QUERIES=1 (default off).
 //
-// The engine keeps a ring of 64 D3D11 occlusion queries (Renderer::Init, SE 524740 / AE 411344). AcquireOcclusionQuery (75565 / 77366)
-// hands out the next entry; BeginQuery (75567 / 77368) and EndQuery (75568 / 77369) bracket the draws it counts; GetQueryData (75569 /
-// 77370) reads the count: the polling form returns 0xFFFFFFFF until the result is there, the blocking form spins until it is. Users: the
-// sun (Sun::SubmitOcclusionQuery -> SE 99958 / AE 106604, read by 99967 / 106605 for the sun glare) and the decals (SE 35563 / AE
-// 36562, read by SE 29262 / AE 30117).
+// The engine keeps a ring of 64 D3D11 occlusion queries, used by the sun glare and the decals. With the switch on, BeginQuery,
+// EndQuery and GetQueryData are detoured. A port opens a Bracket around the engine call that issues a query. The query inside
+// goes nowhere, and the port counts the draw with an ORG query instead. GetQueryData answers from the readback once that run's
+// GPU work is done, and returns not-ready until then, as D3D11 does. Queries outside any bracket stay on D3D11.
 //
-// With the switch on, the three functions are detoured. A port opens a Bracket around the engine's call that begins, draws and ends a
-// query: the BeginQuery and EndQuery inside it go nowhere, the port draws the bracket's draw on the graph with an ORG occlusion query
-// (RasterProgram::DrawDesc's), and its QueryRing resolves the count into a readback buffer. GetQueryData answers from it once that run's
-// GPU work is done, and returns not-ready until then, as D3D11 does. A query begun outside any bracket is the engine's on D3D11, as
-// before. Nothing about a bracket's query reaches D3D11. The ports: the sky family's sun client and the decal occlusion family
-// (Features/DrawcallLimitFix/Features/DecalOcclusion).
-//
-// Header free of ORG and Vulkan includes, except BasicRHI's rhi.h for the record-time helpers.
+// Free of ORG and Vulkan includes, except BasicRHI's rhi.h for the record-time helpers.
 
 #include <cstdint>
 #include <memory>
@@ -36,49 +28,40 @@ namespace org
 
 namespace RenderGraph::Engine::OcclusionQueries
 {
-	/** @brief The engine's ring of occlusion queries. */
 	inline constexpr std::uint32_t kRingSlots = 64;
 
-	/** @brief No ring slot. */
 	inline constexpr std::int32_t kNoSlot = -1;
 
-	/** @brief Whether CS_ORG_OCCLUSION_QUERIES=1 asks for the graph's occlusion queries (read once). */
+	/** @brief Read once. */
 	bool Requested();
 
-	/** @brief Whether the detours are installed: a Bracket then takes the engine's query. */
 	bool Active();
 
-	/**
-	 * @brief Main thread, Engine::InstallGameHooks: the BeginQuery, EndQuery and GetQueryData detours, when Requested(). With
-	 * CS_ORG_OCCLUSION_QUERY_LOG=1 alone, only GetQueryData's, which logs what D3D11 answers (the reference for a comparison).
-	 */
+	/** @brief Main thread. With only CS_ORG_OCCLUSION_QUERY_LOG=1, hooks just GetQueryData to log D3D11's answers for comparison. */
 	void Install();
 
 	/**
-	 * @brief A render-thread scope around an engine call that begins a query, draws and ends it (Sun::SubmitOcclusionQuery's draw, the
-	 * decal occlusion test). The engine's first BeginQuery inside it takes its ring slot for the graph: that BeginQuery and its EndQuery
-	 * go nowhere, and GetQueryData answers the slot from the graph. The port then commits the slot with its run (QueryRing::Commit), or
-	 * skips it (Skip): a skipped slot answers at once, with its last count, or with the bracket's skip answer when it has one. At the
-	 * scope's end a slot that was neither, or whose run was not submitted, is skipped.
-	 */
+	* @brief Render-thread scope around an engine call that begins a query, draws and ends it. That query goes to the graph instead.
+	* The port must Commit or Skip the slot. At scope end, a slot that was neither, or whose run was not submitted, is skipped.
+	*/
 	class Bracket
 	{
 	public:
-		/** @brief A skipped slot answers its last count (the sun: its glare holds while a draw is skipped). */
+		/** @brief A skipped slot answers its last count, so the sun glare holds while a draw is skipped. */
 		Bracket();
-		/** @brief A skipped slot answers a_skipAnswer (the decal test: a count of 1 places the decal as a visible one). */
+		/** @brief A skipped slot answers a_skipAnswer. For decals, 1 places the decal as visible. */
 		explicit Bracket(std::uint32_t a_skipAnswer);
 		~Bracket();
 		Bracket(const Bracket&) = delete;
 		Bracket& operator=(const Bracket&) = delete;
 
-		/** @brief The ring slot the engine began inside the scope, or kNoSlot. */
+		/** @brief kNoSlot if the engine began none inside the scope. */
 		std::int32_t Slot() const { return slot; }
 
-		/** @brief The slot's draw is not drawn: it answers its skip answer (logged once per reason). */
+		/** @brief Logged once per reason. */
 		void Skip(std::string_view a_why);
 
-		/** @brief The slot answers a_count at once, with no run: the bracket drew nothing, so nothing passed (the decal test's empty cull). */
+		/** @brief Answers at once with no run, for a bracket that drew nothing. */
 		void Answer(std::uint32_t a_count);
 
 	private:
@@ -91,71 +74,46 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 #if defined(CS_HAS_RENDER_GRAPH)
 	/**
-	 * @brief The ORG queries of one client's runs: a range of PerRun() occlusion queries per run, and a readback of their counts. A
-	 * run's range is its lease index's (org::RunRef::lease). The ranges come in chunks of kRunsPerChunk lease indices, each a query
-	 * pool and a readback buffer of its own. Create makes kSetupChunks of them, so the client's first build declares every readback
-	 * play needs; a commit that needs a later one makes it. Chunks never move. Every recording of the client's pass resets its run's range, counts each draw with one query (Pool and Index;
-	 * RasterProgram::DrawDesc::occlusionPool), and resolves the range (Resolve). The commit names the engine slots its run counts
-	 * (Commit); the executed callback marks the run submitted (Executed). A range's counts are read when the next run of its lease
-	 * index commits (the lease's last run retired before the index was opened again), or earlier when GetQueryData finds that work
-	 * done.
-	 *
-	 * The readback buffers are graph resources: the client's pass declares each as a copy destination (Readbacks), so the graph
-	 * orders and tracks the resolve that writes them. The pool stays the pass's own. A chunk made after the pass's build is declared
-	 * from the next build (the commit that made it says so); until then its runs' counts are not resolved, and their slots are skipped.
-	 */
+	* @brief The ORG queries of one client's runs. Each run's lease index owns a range of PerRun() queries.
+	* Ranges come in chunks of kRunsPerChunk lease indices, each with its own pool and readback buffer. Chunks never move.
+	* The readbacks are graph resources the pass declares, so a chunk made after a build is only resolved from the next build.
+	* A range's counts are read at the next commit of its lease index, or earlier when GetQueryData finds the work done.
+	*/
 	class QueryRing
 	{
 	public:
-		/** @brief Render thread, with the graph host up. Null, logged, when the pool or the readback cannot be made. */
+		/** @brief Render thread, with the graph host up. Null and logged on failure. */
 		static std::shared_ptr<QueryRing> Create(std::string_view a_name, std::uint32_t a_perRun);
 
 		std::uint32_t PerRun() const;
 
-		/** @brief The lease indices one query pool and readback serve. */
 		static constexpr std::uint32_t kRunsPerChunk = 64;
 
-		/**
-		 * @brief The chunks Create makes: lease indices for 256 runs in flight, above what the host reaches in play (every anchor's
-		 * runs over its frames in flight, plus the published copies). A chunk past them is still made at a commit, and refreshes the
-		 * client (logged by FrameAnchors).
-		 */
+		/** @brief Enough lease indices for 256 runs in flight, more than play reaches. A later chunk is still made at a commit and refreshes the client. */
 		static constexpr std::uint32_t kSetupChunks = 4;
 
-		/**
-		 * @brief The readback buffers made so far, in chunk order: what the client's pass declares as copy destinations at its build.
-		 * Any thread.
-		 */
+		/** @brief In chunk order. The client's pass declares these as copy destinations. Any thread. */
 		std::vector<std::shared_ptr<org::Resource>> Readbacks() const;
 
-		/** @brief Record time (any thread): the pool that holds a_run's range (invalid when its chunk was not made). */
+		/** @brief Record time, any thread. Invalid if the run's chunk was not made. */
 		rhi::QueryPoolHandle Pool(const org::RunRef& a_run) const;
-		/** @brief Record time: query a_query of a_run's range, in Pool(a_run). */
 		std::uint32_t Index(const org::RunRef& a_run, std::uint32_t a_query) const;
-		/**
-		 * @brief Record time, outside any render pass: queries a_first to a_first + a_count of a_run's range reset (every one by default),
-		 * before any of them is begun. A client with instances in one run resets each instance's own queries.
-		 */
+		/** @brief Record time, outside any render pass, before any of the queries is begun. */
 		void Reset(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_first = 0, std::uint32_t a_count = ~0u) const;
 		/**
-		 * @brief Record time, outside any render pass, after the range's draws: each query not in a_begun (a bit per query) begun and
-		 * ended with nothing in it, so all are available, then the range resolved into its chunk's readback. a_declared is how many
-		 * readbacks the recording's pass declared (Readbacks().size() at its build): a range whose readback is not among them is not
-		 * resolved, and its run's slots are skipped.
-		 */
+		* @brief Record time, outside any render pass, after the draws. Ends empty queries for those not in a_begun, then resolves the range.
+		* If the range's readback is not among the a_declared the pass knew, nothing is resolved and its slots are skipped.
+		*/
 		void Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared, std::uint32_t a_first = 0,
 			std::uint32_t a_count = ~0u) const;
 
 		/**
-		 * @brief The client's commit (render thread, the host's CurrentRun): the run counts engine ring slot a_slots[i] with query
-		 * a_first + i (kNoSlot: none). A slot named by several queries answers their sum (the decal test's draws). A second commit of the
-		 * same run (another instance's tap in one CS stage run) adds its queries; the first reads the counts of its lease index's last run.
-		 * Makes the range's chunk when it is new. A commit into a CS stage's staging run moves to the run that submits it at the stage's
-		 * commit (FrameStaging's RunSlotsRegistry); until that run is submitted its slots read not-ready.
-		 * @return Whether a chunk was made: the client's passes declare its readback from their next build (FrameAnchors::Refresh).
-		 */
+		* @brief Render thread. Maps a_slots[i] to query a_first + i. A slot named by several queries answers their sum.
+		* A second commit of the same run adds its queries. A staging run's slots read not-ready until the stage submits it.
+		* @return Whether a chunk was made, in which case the client's passes declare it from their next build.
+		*/
 		bool Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots, std::uint32_t a_first = 0);
-		/** @brief The client's executed callback (render thread): the run last committed was submitted. */
+		/** @brief Render thread. The run last committed was submitted. */
 		void Executed();
 
 		struct State;
@@ -167,6 +125,5 @@ namespace RenderGraph::Engine::OcclusionQueries
 	};
 #endif
 
-	/** @brief One status line: the answers given by path, the skips and the waits. */
 	std::string Status();
 }

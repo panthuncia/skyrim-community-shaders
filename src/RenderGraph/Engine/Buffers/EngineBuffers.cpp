@@ -1,4 +1,4 @@
-// The engine's static vertex and index buffers on ORG, and what both halves share (EngineBuffers.h).
+// The engine's static vertex and index buffers on ORG. See EngineBuffers.h.
 
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -43,7 +43,7 @@ namespace RenderGraph::Engine::Buffers
 	{
 		namespace
 		{
-			// Each failure kind is logged once: a load fails the same way for every buffer.
+			// A load fails the same way for every buffer, so each failure kind is logged once.
 			void WarnOnce(std::atomic_flag& a_flag, std::string_view a_what)
 			{
 				if (!a_flag.test_and_set())
@@ -58,10 +58,10 @@ namespace RenderGraph::Engine::Buffers
 			if (!runtime.IsActive() || !a_desc.ByteWidth)
 				return std::nullopt;
 			try {
-				// Made on loader threads too: the host's world is the render thread's (as DCLF's pooled backings).
+				// Also made on loader threads, but the host's world belongs to the render thread.
 				org::Resource::ScopedECSRegistrationSuppression suppressECS;
-				// Device-local and host-visible with resizable BAR, host memory otherwise: the CPU fills it with no GPU copy.
-				// Whole words, since raw views load whole words. An odd-sized index list ends halfway through its last word.
+				// Host-visible memory, so the CPU fills it with no GPU copy.
+				// Round up to whole words because raw views load whole words.
 				const UINT bytes = (a_desc.ByteWidth + 3) & ~3u;
 				auto buffer = org::Buffer::CreateShared(rhi::HeapType::GPUUpload, bytes);
 				buffer->SetName(a_name);
@@ -92,7 +92,7 @@ namespace RenderGraph::Engine::Buffers
 		winrt::com_ptr<ID3D11Buffer> EngineView(const D3D11_BUFFER_DESC& a_desc, const Backing& a_backing, const char* a_name)
 		{
 			std::shared_ptr<org::Resource> graph = a_backing.buffer;
-			// A handle only where the engine's context unwraps it: DXVK's own context casts what it is given.
+			// DXVK's own context casts what it is given, so use a handle only where the engine's context unwraps it.
 			if (Tripwire::GuestContextInstalled()) {
 				Tripwire::Options options;
 				options.name = a_name;
@@ -115,10 +115,10 @@ namespace RenderGraph::Engine::Buffers
 
 	namespace
 	{
-		// Above zero while this thread runs one of the geometry facade's creators: its CreateBuffer calls are the engine's VB/IB.
+		// Non-zero while this thread runs a geometry creator, whose CreateBuffer calls are the engine's VB/IB.
 		thread_local std::uint32_t creatingGeometry = 0;
 
-		/** @brief A geometry creator (75473, 75476, 75481): every one takes five arguments, passed through unchanged. */
+		/** @brief A geometry creator (75473, 75476, 75481). All take five arguments. */
 		template <int Creator>
 		struct CreateGeometry
 		{
@@ -132,7 +132,7 @@ namespace RenderGraph::Engine::Buffers
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The engine's static VB or IB: DEFAULT, one bind flag, no CPU access, and its contents given (R6.5). */
+		/** @brief DEFAULT, one bind flag, no CPU access, contents given. */
 		bool IsStaticGeometry(const D3D11_BUFFER_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data)
 		{
 			return a_data && a_data->pSysMem && a_desc.ByteWidth && a_desc.Usage == D3D11_USAGE_DEFAULT && !a_desc.CPUAccessFlags &&
@@ -145,12 +145,11 @@ namespace RenderGraph::Engine::Buffers
 			auto backing = detail::MakeBacking(a_desc, name);
 			if (!backing)
 				return nullptr;
-			// The contents are written here, before the handle exists: no lease can be taken before they are. There is no GPU copy,
-			// so there is no copy value to wait for: the memory is host-visible, and the next queue submission makes the writes visible.
+			// Write before the handle exists so no lease can come first. The memory is host-visible, so the next submission makes the writes visible.
 			std::memcpy(backing->data, a_contents, a_desc.ByteWidth);
 			auto view = detail::EngineView(a_desc, *backing, name);
 			if (view) {
-				// Filled once, here, and bound VB or IB only: immutable from here (the undeclared-access validator's exempt class).
+				// Filled once and bound VB or IB only, so immutable from here.
 				if (RenderGraph::UndeclaredAccess::On())
 					RenderGraph::UndeclaredAccess::NoteImmutable(backing->buffer);
 				auto& counters = detail::GetCounters();
@@ -160,7 +159,7 @@ namespace RenderGraph::Engine::Buffers
 			return view;
 		}
 
-		/** @brief ID3D11Device::CreateBuffer on DXVK's device: a geometry creator's VB and IB are made on ORG. */
+		/** @brief DXVK's CreateBuffer. A geometry creator's VB and IB are made on ORG. */
 		struct Device_CreateBuffer
 		{
 			static HRESULT STDMETHODCALLTYPE thunk(ID3D11Device* a_this, const D3D11_BUFFER_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data,
@@ -184,9 +183,9 @@ namespace RenderGraph::Engine::Buffers
 		if (!Requested())
 			return;
 		logger::info("[ORG] engine buffers (CS_ORG_ENGINE_BUFFERS=1): hooking the geometry creators and the dynamic ring");
-		stl::detour_thunk<CreateGeometry<0>>(REL::RelocationID(75473, 77259));  // CreateTriShape
-		stl::detour_thunk<CreateGeometry<1>>(REL::RelocationID(75476, 77262));  // CreateTriShapeSharedVertices
-		stl::detour_thunk<CreateGeometry<2>>(REL::RelocationID(75481, 77268));  // CreateDynamicTriShapeData
+		stl::detour_thunk<CreateGeometry<0>>(REL::RelocationID(75473, 77259));
+		stl::detour_thunk<CreateGeometry<1>>(REL::RelocationID(75476, 77262));
+		stl::detour_thunk<CreateGeometry<2>>(REL::RelocationID(75481, 77268));
 		detail::InstallRingHooks();
 	}
 
@@ -215,7 +214,7 @@ namespace RenderGraph::Engine::Buffers
 		const auto& ring = detail::RingVersions();
 		if (!ring)
 			return;
-		// No latch: a frame reads several chunks, so a pass's refs are not one version's.
+		// No latch, since a frame reads several chunks.
 		DeclaredRefs unchecked;
 		(void)DeclareLateRef(a_builder, ring, RefAccess::Read, "Engine::DynamicRing", nullptr, unchecked);
 	}
@@ -237,11 +236,10 @@ namespace RenderGraph::Engine::Buffers
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
 			direct.address = host->Device().GetBufferDeviceAddress({ api.GetHandle(), 0 });
 			if (detail::IsRingChunk(buffer.get())) {
-				// A chunk is a version of the ring's late-bound buffer. Every pass that reads a ring ref declares the ring
-				// (DeclareRingRead): the menu scenes' passes, the only readers of a dynamic draw's stream (LatchDynamicGeometry).
+				// Every pass that reads a ring ref must declare the ring with DeclareRingRead.
 				direct.ref = DeclaredRefOf(*buffer);
 			} else {
-				// Static geometry, noted immutable at creation: the exempt class. The validator judges it by the ORG buffer.
+				// Static geometry was noted immutable at creation.
 				direct.ref = BufferRefOf(*buffer);
 			}
 		}
@@ -263,7 +261,7 @@ namespace RenderGraph::Engine::Buffers
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the engine's buffers stay D3D11.
+// Without OpenRenderGraph the engine's buffers stay D3D11.
 namespace RenderGraph::Engine::Buffers
 {
 	void InstallGameHooks()

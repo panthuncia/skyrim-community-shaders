@@ -32,7 +32,7 @@ namespace RenderGraph::Engine::Scaleform
 
 		constexpr std::size_t kSlots = 58;
 
-		// The slots CS takes (engine-d3d11-surface.md R5, "Vtable"; CommonLib numbers 0-45 the same).
+		// Vtable slots CS takes. CommonLib numbers 0-45 the same way.
 		enum Slot : std::size_t
 		{
 			kSetDisplayRenderTarget = 7,
@@ -67,24 +67,22 @@ namespace RenderGraph::Engine::Scaleform
 			kDrawColorMatrixRect = 45,
 		};
 
-		// The renderer's 1/255 (DAT_141540648), multiplied as it multiplies.
+		// The renderer's 1/255 (DAT_141540648), used as it uses it so results match bit for bit.
 		constexpr float kByteToUnit = 0.003921568859368563f;
-		// GRenderer blend modes 0-14 to the renderer's blend states (table 0x1417d4468).
+		// GRenderer blend modes 0-14 to the renderer's blend states, from table 0x1417d4468.
 		constexpr std::array<std::uint8_t, 15> kBlendStates{ 1, 1, 1, 4, 1, 5, 6, 1, 2, 3, 1, 7, 7, 1, 1 };
 		constexpr std::uint32_t kBlendMultiply = 3;
 		constexpr std::uint32_t kBlendDarken = 6;
 		constexpr std::uint32_t kNoOffset = ~0u;
-		// GViewport flags.
 		constexpr std::uint32_t kViewportRenderTexture = 1;
 		constexpr std::uint32_t kViewportScissor = 4;
-		// A display count after which the totals are logged.
 		constexpr std::uint64_t kReportEvery = 1000;
 
 		/** @brief GRenderer::BitmapDesc. */
 		struct BitmapDesc
 		{
 			float coords[4];     // left, top, right, bottom
-			float texCoords[4];  // the same
+			float texCoords[4];  // same order
 			std::uint32_t color;
 		};
 		static_assert(sizeof(BitmapDesc) == 0x24);
@@ -101,7 +99,7 @@ namespace RenderGraph::Engine::Scaleform
 
 		/** @brief The D3D11 renderer's own slots. Written once, before the renderer is used. */
 		std::array<void*, kSlots + 1> g_original{};
-		/** @brief CS's vtable: element 0 is the word before the original's, so the object points at element 1. */
+		/** @brief CS's vtable. Element 0 is the word before the original's, so the object points at element 1. */
 		std::array<void*, kSlots + 1> g_vtable{};
 
 		template <class Fn>
@@ -125,9 +123,8 @@ namespace RenderGraph::Engine::Scaleform
 		using ColorMatrixFn = void (*)(void*, RE::GTexture*, const float*, const float*, const float*);
 
 		/**
-		 * @brief The census (docs/parity/scaleform.md, "Census"): what became of each display, and every draw or segment left out by
-		 * reason. A display is the graph's (every draw on the graph), on the graph with draws left out, or not on the graph (refused
-		 * whole: the D3D11 renderer gets it, which draws nothing in native mode or under the flush latch). Any thread.
+		 * @brief The census of what became of each display, with left-out draws and segments counted by reason. A refused display goes
+		 * to the D3D11 renderer, which draws nothing in native mode or under the flush latch. Any thread.
 		 */
 		struct Counters
 		{
@@ -135,9 +132,9 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint64_t graph = 0;
 			std::uint64_t mixed = 0;
 			std::uint64_t lost = 0;
-			std::uint64_t segments = 0;                    // graph segments drawn
-			std::uint64_t scratchSegments = 0;             // of them, into a scratch image (a GFx render target or a filter pass)
-			std::map<std::string, std::uint64_t> reasons;  // left out (a whole display counts once)
+			std::uint64_t segments = 0;
+			std::uint64_t scratchSegments = 0;             // into a scratch image, for a GFx render target or a filter pass
+			std::map<std::string, std::uint64_t> reasons;  // a whole display counts once
 		};
 
 		Counters& Count()
@@ -160,7 +157,7 @@ namespace RenderGraph::Engine::Scaleform
 				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons);
 		}
 
-		/** @brief Something of a display (or a whole one) the graph does not draw, and why: logged the first time a reason comes up. */
+		/** @brief Counts something the graph does not draw. Each reason is logged the first time. */
 		void NoteLost(const char* a_reason)
 		{
 			auto& counters = Count();
@@ -170,8 +167,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief A display without a video mode: the D3D11 renderer's BeginDisplay returns at once and every draw skips (SE 82819 tests
-		 * +0xC0 first), so it draws nothing either way. Counted as on the graph.
+		 * @brief A display without a video mode draws nothing either way, since the D3D11 renderer tests +0xC0 first (SE 82819).
+		 * Counted as on the graph.
 		 */
 		void CountEmpty()
 		{
@@ -181,7 +178,6 @@ namespace RenderGraph::Engine::Scaleform
 			Report(counters);
 		}
 
-		/** @brief A display that never began a capture: the D3D11 renderer gets it whole. */
 		void CountLost(const char* a_reason)
 		{
 			NoteLost(a_reason);
@@ -191,10 +187,7 @@ namespace RenderGraph::Engine::Scaleform
 			Report(counters);
 		}
 
-		/**
-		 * @brief A vertex or index array a segment sets. GFx's memory is valid while it is set (the D3D11 renderer reads it at every
-		 * draw); the copy in the segment's staging bytes is made at the first draw there that reads it.
-		 */
+		/** @brief A vertex or index array a segment sets. GFx's memory is valid only while set, so it is copied at its first draw. */
 		struct ArrayUse
 		{
 			const void* source = nullptr;
@@ -203,45 +196,36 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint32_t staging = kNoOffset;
 		};
 
-		/** @brief The display being captured. Render thread only. */
 		struct Capture
 		{
 			bool active = false;
-			Display display;  // the segment being captured
-			// The arrays the segment's draws read, each copied into its staging bytes once.
+			Display display;
 			std::vector<ArrayUse> arrays;
 			std::int32_t vertexArray = -1;  // the ArrayUse the renderer's vertex fields hold now
 			std::int32_t indexArray = -1;   // and its index fields
-			// The mirrored state.
 			std::uint32_t blendMode = 0;
-			// The renderer's blend stack (+0x728): the mode before each push still on it.
+			// The renderer's blend stack at +0x728, holding the mode before each push.
 			std::vector<std::uint32_t> blendStack;
 			bool inMask = false;
 			std::int32_t maskLevel = 0;
 			Stencil stencil = Stencil::Off;
 			std::uint32_t stencilRef = 0;
-			float viewMatrix[6]{};  // the user matrix times the viewport matrix
-			float texgen[4][4]{};   // the vertex constants' texgen rows, as the renderer keeps them between draws
+			float viewMatrix[6]{};
+			float texgen[4][4]{};   // the renderer keeps these between draws
 			std::unordered_map<ID3D11ShaderResourceView*, std::int32_t> textureIndex;
-			/**
-			 * @brief A render target GFx pushed inside the display (PushRenderTarget), drawn into a scratch image on the graph: what the
-			 * segment it interrupted draws onto, and the state PopRenderTarget gives back.
-			 */
+			/** @brief A render target GFx pushed inside the display, drawn into a scratch image. Holds what PopRenderTarget restores. */
 			struct TargetFrame
 			{
 				float viewport[4];
 				float viewMatrix[6];
-				std::int32_t scratch;  // the interrupted segment's target: a scratch image, or -1 for the display's target
+				std::int32_t scratch;  // a scratch image, or -1 for the display's target
 				bool inMask;
 				std::int32_t maskLevel;
 				Stencil stencil;
 				std::uint32_t stencilRef;
 			};
 			std::vector<TargetFrame> targets;
-			/**
-			 * @brief A texture of GFx's drawn into a scratch image in this display: draws that read the texture read the scratch image, with
-			 * the coordinates GFx made for the texture's size scaled to the scratch image's.
-			 */
+			/** @brief A GFx texture drawn into a scratch image. Reads go to the scratch image with coordinates rescaled to its size. */
 			struct Redirect
 			{
 				RE::GTexture* texture;
@@ -251,13 +235,11 @@ namespace RenderGraph::Engine::Scaleform
 			};
 			std::vector<Redirect> redirects;
 			std::uint64_t redirectSerial = 0;
-			std::uint32_t pinnedScratch = 0;  // scratch images a filter holds between its passes (a bit each)
-			// The display's fate so far: what was left out, and the segments drawn.
+			std::uint32_t pinnedScratch = 0;  // one bit per scratch image a filter holds between its passes
 			std::uint32_t leftOut = 0;
 			std::uint32_t graphSegments = 0;
-			// The pixel stage the renderer has bound, for a draw with the fill off (ApplyFillStyle sets nothing then): its kind,
-			// its textures and samplers, and its constants. pixelKind 0: none known yet; nullShader: a bitmap fill without a texture
-			// bound a null pixel shader.
+			// The pixel stage last bound, for a draw with the fill off, since ApplyFillStyle sets nothing then.
+			// pixelKind 0 means none known yet.
 			struct BoundFill
 			{
 				std::uint8_t pixelKind = 0;
@@ -267,7 +249,7 @@ namespace RenderGraph::Engine::Scaleform
 				float cxmul[4]{};
 				float cxadd[4]{};
 			} boundFill;
-			std::uint8_t boundVertexKind = 1;  // the vertex shader the renderer has bound (DrawIndexedTriList keeps it for some draws)
+			std::uint8_t boundVertexKind = 1;  // DrawIndexedTriList keeps it for some draws
 		};
 
 		Capture& Current()
@@ -276,13 +258,11 @@ namespace RenderGraph::Engine::Scaleform
 			return s_capture;
 		}
 
-		/** @brief Whether calls are captured now: a display is, on the render owner. */
 		bool Capturing()
 		{
 			return Current().active && FrameAnchors::IsRenderOwner();
 		}
 
-		/** @brief A new ArrayUse for the array the renderer's fields describe; its index. */
 		std::int32_t UseArray(const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
 		{
 			auto& arrays = Current().arrays;
@@ -295,7 +275,6 @@ namespace RenderGraph::Engine::Scaleform
 			return a_dxgiFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
 		}
 
-		/** @brief The segment's commands and arrays dropped. */
 		void ClearSegment()
 		{
 			auto& capture = Current();
@@ -305,45 +284,34 @@ namespace RenderGraph::Engine::Scaleform
 			capture.textureIndex.clear();
 		}
 
-		/** @brief A new segment of the display (after a render target was pushed or popped, or a filter's pass). */
+		/** @brief Starts a new segment after a render target push or pop, or a filter pass. */
 		void StartSegment(void* a_renderer)
 		{
 			auto& capture = Current();
 			ClearSegment();
-			// The renderer's texgen rows are the ones its last draw left.
 			std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
 		}
 
-		/** @brief A draw or segment of the display the graph does not draw, counted (its reason logged the first time). */
 		void NoteLeftOut(const char* a_reason)
 		{
 			++Current().leftOut;
 			NoteLost(a_reason);
 		}
 
-		/**
-		 * @brief Whether the UI stage holds the displays (the recipe: native mode, and guest mode since the UI stage runs there). Then no D3D11
-		 * renderer draws a display in the graph's place.
-		 */
+		/** @brief Whether the UI stage holds the displays. Then no D3D11 renderer draws one in the graph's place. */
 		bool StageDrawsDisplays()
 		{
 			return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Interface);
 		}
 
-		/**
-		 * @brief Where a stage holds the displays: a display the graph refused is a mismatch between the engine and CS's frame
-		 * (Frame::Driver::NoteTapError, fatal in development builds, logged once in release). No D3D11 renderer draws it in its place.
-		 */
+		/** @brief A display refused while a stage holds displays is a recipe mismatch. Fatal in development builds. */
 		void NoteRefused(const char* a_reason)
 		{
 			if (StageDrawsDisplays())
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
 		}
 
-		/**
-		 * @brief The segment drawn now by the graph; when it cannot be, it is left out (counted by the graph's reason). A refusal that is
-		 * not the schedule's lag is a mismatch in native mode.
-		 */
+		/** @brief Draws the segment on the graph, or counts it left out. A refusal not caused by schedule lag is a mismatch in native mode. */
 		void Flush(void*)
 		{
 			auto& capture = Current();
@@ -366,7 +334,6 @@ namespace RenderGraph::Engine::Scaleform
 				NoteRefused(reason);
 		}
 
-		/** @brief The display's fate, counted once its capture ends. */
 		void FinishDisplay()
 		{
 			const auto& capture = Current();
@@ -396,7 +363,7 @@ namespace RenderGraph::Engine::Scaleform
 			return mode == kBlendMultiply || mode == kBlendDarken;
 		}
 
-		/** @brief ApplyColor's constant: the BGRA colour as RGBA floats, towards white by its alpha for Multiply and Darken. */
+		/** @brief ApplyColor's constant as RGBA floats. Multiply and Darken move towards white by alpha. */
 		void ColorConstant(std::uint32_t a_color, float (&a_out)[4])
 		{
 			const auto* bytes = reinterpret_cast<const std::uint8_t*>(&a_color);
@@ -409,7 +376,7 @@ namespace RenderGraph::Engine::Scaleform
 					a_out[i] = (a_out[i] - 1.0f) * a_out[3] + 1.0f;
 		}
 
-		/** @brief ApplyCxform's constants: the multiplies, then the adds over 255. */
+		/** @brief ApplyCxform's constants, the multiplies then the adds over 255. */
 		void CxformConstants(const float (&a_cxform)[8], DrawRecord& a_record)
 		{
 			for (int i = 0; i < 4; ++i) {
@@ -418,7 +385,7 @@ namespace RenderGraph::Engine::Scaleform
 			}
 		}
 
-		/** @brief ApplyMatrix in 2D: mvp = (user times viewport) times a_matrix, as GMatrix2D's Prepend computes it. */
+		/** @brief ApplyMatrix in 2D, computed as GMatrix2D's Prepend does. */
 		void MatrixConstants(const float (&a_matrix)[6], DrawRecord& a_record)
 		{
 			const float* a = Current().viewMatrix;
@@ -433,14 +400,13 @@ namespace RenderGraph::Engine::Scaleform
 			std::memcpy(a_record.mvp, rows, sizeof(rows));
 		}
 
-		/** @brief Whether a_texture is a plain GTextureD3D1x (not a YUV one or another class): its fields are the ones read. */
+		/** @brief Whether a_texture is a plain GTextureD3D1x, whose fields are the ones read. */
 		bool IsPlainTexture(const RE::GTexture* a_texture)
 		{
 			static const std::uintptr_t vtable = REL::RelocationID(292188, 243114).address();
 			return a_texture && *reinterpret_cast<const std::uintptr_t*>(a_texture) == vtable;
 		}
 
-		/** @brief The redirect of a texture of GFx's drawn into a scratch image in this display, or null. */
 		const Capture::Redirect* FindRedirect(const RE::GTexture* a_texture)
 		{
 			for (const auto& redirect : Current().redirects)
@@ -449,10 +415,7 @@ namespace RenderGraph::Engine::Scaleform
 			return nullptr;
 		}
 
-		/**
-		 * @brief The display's index for a texture's view (DXVK's, referenced once per display), ScratchTexture(k) for a texture drawn
-		 * into scratch image k in this display; kNoTexture, the draw left out, when there is none.
-		 */
+		/** @brief The display's index for a texture, or for its scratch image. kNoTexture leaves the draw out. */
 		std::int32_t TextureIndex(void*, RE::GTexture* a_texture)
 		{
 			auto& capture = Current();
@@ -474,8 +437,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief ApplyFillTexture: stage a_stage's texture and sampler, and its texgen rows. False, the draw left out, when it cannot be
-		 * read: a texture that is not a plain GTextureD3D1x is a YUV one, which only GFx's video player makes (not linked in Skyrim).
+		 * @brief ApplyFillTexture for one stage. False when the texture is not a plain GTextureD3D1x.
+		 * That would be a YUV texture, which only GFx's video player makes, and Skyrim does not link it.
 		 */
 		bool BindTexture(void* a_renderer, const FillTexture& a_fill, std::uint32_t a_stage, Command& a_command)
 		{
@@ -488,7 +451,6 @@ namespace RenderGraph::Engine::Scaleform
 				return false;
 			a_command.textures[a_stage] = index;
 			a_command.samplers[a_stage] = static_cast<std::uint8_t>((a_fill.wrapMode * 2 + a_fill.sampleMode) & 3);
-			// A texture drawn into a scratch image: its coordinates scaled from the texture's size to the scratch image's.
 			const auto* redirect = FindRedirect(a_fill.texture);
 			const float scaleU = redirect ? redirect->scaleU : 1.0f;
 			const float scaleV = redirect ? redirect->scaleV : 1.0f;
@@ -503,9 +465,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief A two-texture gouraud fill without its second texture: ApplyFillTexture binds stage 1 only for a texture it has, so
-		 * the one the display bound there last stays, with its texgen rows (inferred from the fill-off rule, not read in Ghidra). Without
-		 * one in this display, stage 0's texture is read there (logged once).
+		 * @brief A two-texture gouraud fill without its second texture keeps whatever stage 1 held last. This is inferred from the
+		 * fill-off rule, not read in Ghidra. Without one in this display, stage 0's texture is used and logged once.
 		 */
 		bool BindStaleSecond(void* a_renderer, Command& a_command)
 		{
@@ -528,14 +489,13 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief The pixel stage a draw set, kept for a later draw with the fill off. */
 		void NoteBoundFill(const FillStyle& a_fill, const Command& a_command, const DrawRecord& a_record)
 		{
 			auto& bound = Current().boundFill;
 			bound.pixelKind = a_command.state.pixelKind;
 			bound.nullShader = a_command.noColour;
 			for (std::uint32_t stage = 0; stage < 2; ++stage) {
-				// A stage read from the stale binding (BindStaleSecond) keeps that binding.
+				// A stage read from the stale binding keeps that binding.
 				if (a_command.textures[stage] != kNoTexture && !a_fill.textures[stage].texture)
 					continue;
 				bound.textures[stage] = a_command.textures[stage] != kNoTexture ? a_fill.textures[stage].texture : nullptr;
@@ -545,10 +505,7 @@ namespace RenderGraph::Engine::Scaleform
 			std::memcpy(bound.cxadd, a_record.cxadd, sizeof(bound.cxadd));
 		}
 
-		/**
-		 * @brief A draw with the fill off: ApplyFillStyle sets nothing, so the pixel shader, its textures and its constants are the
-		 * ones the renderer's last draw bound in this display. False (nothing drawn, logged once) when no draw of the display bound one.
-		 */
+		/** @brief A fill-off draw reuses the pixel stage this display last bound. False and logged once when there is none. */
 		bool ReuseBoundFill(void* a_renderer, Command& a_command, DrawRecord& a_record)
 		{
 			const auto bound = Current().boundFill;
@@ -574,7 +531,7 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief ApplyFillStyle: the pixel shader, its constants and textures. False when nothing is drawn (left out, logged). */
+		/** @brief ApplyFillStyle. False when nothing is drawn. */
 		bool ApplyFill(void* a_renderer, const FillStyle& a_fill, std::int32_t a_vertexFormat, Command& a_command, DrawRecord& a_record)
 		{
 			switch (a_fill.mode) {
@@ -584,7 +541,7 @@ namespace RenderGraph::Engine::Scaleform
 				break;
 			case 2:
 				if (!a_fill.textures[0].texture) {
-					// ApplyFillStyle binds a null pixel shader: the draw writes no colour, its stencil still applies.
+					// ApplyFillStyle binds a null pixel shader here. The draw writes no colour, but its stencil still applies.
 					a_command.state.pixelKind = 1;
 					a_command.noColour = true;
 					break;
@@ -623,10 +580,7 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/**
-		 * @brief The vertex shader the draw binds: in 3D (a world matrix set) the 3D twin of its kind (the renderer's index + 6), and
-		 * noted as the one bound.
-		 */
+		/** @brief The vertex shader the draw binds. In 3D it is the 3D twin, at the renderer's index + 6. */
 		void FinishVertexKind(void* a_renderer, Command& a_command)
 		{
 			Current().boundVertexKind = a_command.state.vertexKind;
@@ -635,9 +589,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief ApplyMatrix (SE 82817, AE 84940) for a_matrix: in 2D from the view the capture computed (BeginDisplay's, which the
-		 * D3D11 renderer did not run); in 3D the renderer's own, which reads only the 3D fields and the user matrix and writes the
-		 * vertex constants' CPU copy (no D3D11 call), read back from there.
+		 * @brief ApplyMatrix (SE 82817, AE 84940). In 2D it uses the capture's view, since the D3D11 BeginDisplay did not run.
+		 * In 3D the renderer's own runs, which writes only the CPU copy of the vertex constants, and the result is read back.
 		 */
 		void DrawMatrix(void* a_renderer, const float* a_matrix, DrawRecord& a_record)
 		{
@@ -651,15 +604,12 @@ namespace RenderGraph::Engine::Scaleform
 			std::memcpy(a_record.mvp, &Field<float>(a_renderer, Layout::kVertexConstants), sizeof(a_record.mvp));
 		}
 
-		/**
-		 * @brief The array the renderer's fields hold, in the segment's staging bytes: copied once, at the segment's first draw that
-		 * reads it. Its offset.
-		 */
+		/** @brief Copies the array into the segment's staging bytes at its first draw, and returns its offset. */
 		std::uint32_t StageArray(std::int32_t& a_use, const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
 		{
 			auto& capture = Current();
 			if (a_use < 0 || capture.arrays[a_use].source != a_source || capture.arrays[a_use].count != a_count || capture.arrays[a_use].elementSize != a_elementSize)
-				a_use = UseArray(a_source, a_count, a_elementSize);  // GFx set another array since the segment's last draw
+				a_use = UseArray(a_source, a_count, a_elementSize);  // GFx set another array since the last draw
 			auto& use = capture.arrays[a_use];
 			if (use.staging == kNoOffset)
 				use.staging = capture.display.Append(a_source, static_cast<std::size_t>(std::max(a_count, 0)) * a_elementSize, 4);
@@ -678,7 +628,7 @@ namespace RenderGraph::Engine::Scaleform
 				IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat)));
 		}
 
-		/** @brief A draw: its record appended (192 bytes, 16-aligned) and its command. */
+		/** @brief Appends a draw's 192-byte record and its command. */
 		void Emit(Command& a_command, const DrawRecord& a_record)
 		{
 			auto& capture = Current();
@@ -690,10 +640,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.display.commands.push_back(a_command);
 		}
 
-		/**
-		 * @brief BeginDisplay's viewport and matrix: the viewport clipped to the buffer (and its scissor rectangle), the frame
-		 * rectangle moved with it, the matrix mapping it to clip space, times the user matrix (as GMatrix2D's Append does).
-		 */
+		/** @brief BeginDisplay's viewport clipped to the buffer, and the matrix mapping it to clip space, times the user matrix. */
 		void ComputeView(void* a_renderer, const Viewport& a_viewport, float a_x0, float a_x1, float a_y0, float a_y1)
 		{
 			auto& capture = Current();
@@ -758,7 +705,6 @@ namespace RenderGraph::Engine::Scaleform
 			float m[6] = { 2.0f / fw, 0.0f, 0.0f, 0.0f, -2.0f / fh, 0.0f };
 			m[2] = -1.0f - m[0] * fx0;
 			m[5] = 1.0f - m[4] * fy0;
-			// m = user times m.
 			const auto& u = Field<float[6]>(a_renderer, Layout::kUserMatrix);
 			const float m0 = m[0], m1 = m[1], m2 = m[2];
 			auto& out = capture.viewMatrix;
@@ -770,10 +716,7 @@ namespace RenderGraph::Engine::Scaleform
 			out[5] = m[5] * u[4] + m2 * u[3] + u[5];
 		}
 
-		/**
-		 * @brief The renderer's current render target (+0x740: SetDisplayRenderTarget's, or the top of its stack) as the display's
-		 * target: its RTV (+0x50) and DSV (+0x58), the views PushRenderTarget and PopRenderTarget bind. False when it has no RTV.
-		 */
+		/** @brief The renderer's current render target at +0x740 as the display's target, with its RTV at +0x50 and DSV at +0x58. */
 		bool ReadRendererTarget(void* a_renderer, Display& a_display)
 		{
 			auto* target = Field<std::byte*>(a_renderer, Layout::kRenderTarget);
@@ -804,10 +747,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief Render target 0 and the depth-stencil UI::DrawInterface bound, from the engine's shadow state (its render target and
-		 * depth-stencil indices, as its ApplyState bound them), never from D3D11: under the flush latch the context's state is stale.
-		 * The objects are DXVK's, whatever the engine's tables hold. A display into a render texture of GFx's (the book's pages), or one
-		 * with no target in the shadow state, draws onto the renderer's own current render target, which SetDisplayRenderTarget bound.
+		 * @brief The targets UI::DrawInterface bound, read from the engine's shadow state because the context's state is stale under
+		 * the flush latch. Render texture displays use the renderer's own current target.
 		 */
 		bool ReadTargets(void* a_renderer, Display& a_display, bool a_renderTexture)
 		{
@@ -848,9 +789,6 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		// The slots.
-
-		/** @brief The capture's state dropped at a display's end (render thread). */
 		void ClearDisplay()
 		{
 			auto& capture = Current();
@@ -861,7 +799,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.pinnedScratch = 0;
 		}
 
-		/** @brief A display that never ended (no EndDisplay before the next BeginDisplay): its last segment drawn. */
+		/** @brief Draws the last segment of a display that never got its EndDisplay. */
 		void EndDangling(void* a_renderer)
 		{
 			auto& capture = Current();
@@ -876,7 +814,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			auto& capture = Current();
 			const auto original = Original<BeginDisplayFn>(kBeginDisplay);
-			// The capture is the render owner's: another thread's display neither reads nor ends it.
+			// Only the render owner captures. Another thread's display neither reads nor ends it.
 			if (!FrameAnchors::IsRenderOwner()) {
 				CountLost("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
@@ -886,7 +824,6 @@ namespace RenderGraph::Engine::Scaleform
 				EndDangling(a_renderer);
 			if (!Passes::Ready()) {
 				CountLost("a whole display while the graph path is off (not set up, or failed)");
-				// Where a stage holds the displays, no D3D11 renderer draws in the graph's place.
 				if (StageDrawsDisplays()) {
 					NoteRefused("the graph path is off (not set up, or failed)");
 					return;
@@ -895,14 +832,13 @@ namespace RenderGraph::Engine::Scaleform
 				return;
 			}
 			if (!VideoModeSet(a_renderer)) {
-				// The D3D11 renderer draws nothing without a video mode; its calls in this display skip as well.
+				// The D3D11 renderer draws nothing without a video mode, so this display's calls skip too.
 				CountEmpty();
 				return;
 			}
 
 			ClearDisplay();
 			if (!ReadTargets(a_renderer, capture.display, (a_viewport->flags & kViewportRenderTexture) != 0)) {
-				// Neither the shadow state nor the renderer has a target to draw onto.
 				capture.display.Reset();
 				CountLost("a whole display with no render target bound");
 				if (StageDrawsDisplays()) {
@@ -918,21 +854,20 @@ namespace RenderGraph::Engine::Scaleform
 			const std::uint32_t background = *a_background;
 			const Viewport viewport = *a_viewport;
 
-			// What BeginDisplay resets, and the state it starts from.
 			capture.blendMode = Field<std::uint32_t>(a_renderer, Layout::kBlendMode);
 			capture.blendStack.clear();
 			capture.inMask = false;
 			capture.maskLevel = 0;
 			capture.stencil = Stencil::Off;
 			capture.stencilRef = 0;
-			// A fill-off draw reuses only what this display bound: an older display's textures may be gone.
+			// A fill-off draw reuses only what this display bound, since an older display's textures may be gone.
 			capture.boundFill = {};
 			capture.boundVertexKind = 1;
 			Field<const float*>(a_renderer, Layout::kWorld3D) = nullptr;
 			std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
 			ComputeView(a_renderer, viewport, a_x0, a_x1, a_y0, a_y1);
 
-			// The background: the frame rectangle in its colour, with the identity matrix (which stays set).
+			// The background is the frame rectangle in its colour, with the identity matrix left set.
 			if (reinterpret_cast<const std::uint8_t*>(&background)[3] != 0) {
 				static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
 				Original<SetMatrixFn>(kSetMatrix)(a_renderer, kIdentity);
@@ -941,7 +876,7 @@ namespace RenderGraph::Engine::Scaleform
 				const std::int16_t y0 = static_cast<std::int16_t>(static_cast<std::int32_t>(a_y0));
 				const std::int16_t y1 = static_cast<std::int16_t>(static_cast<std::int32_t>(a_y1));
 				const std::int16_t corners[8] = { x0, y0, x1, y0, x0, y1, x1, y1 };
-				const std::uint16_t strip[6] = { 0, 1, 2, 1, 3, 2 };  // the strip's two triangles
+				const std::uint16_t strip[6] = { 0, 1, 2, 1, 3, 2 };
 				DrawRecord record{};
 				MatrixConstants(kIdentity, record);
 				ColorConstant(background, record.cxmul);
@@ -963,10 +898,9 @@ namespace RenderGraph::Engine::Scaleform
 		void EndDisplay(void* a_renderer)
 		{
 			auto& capture = Current();
-			// The capture is the render owner's: another thread's display neither ends nor resets it.
+			// Only the render owner captures. Another thread's display neither ends nor resets it.
 			if (FrameAnchors::IsRenderOwner()) {
 				if (capture.active) {
-					// The last segment, on the graph.
 					Flush(a_renderer);
 					capture.active = false;
 					Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
@@ -974,14 +908,11 @@ namespace RenderGraph::Engine::Scaleform
 				}
 				ClearDisplay();
 			}
-			// Either way: it releases the textures GFx queued for release, and the targets a D3D11 BeginDisplay took.
+			// Always called, since it releases the textures GFx queued and the targets a D3D11 BeginDisplay took.
 			Original<VoidFn>(kEndDisplay)(a_renderer);
 		}
 
-		/**
-		 * @brief SetDisplayRenderTarget inside a display: the segment so far is drawn onto the old target, and the rest of the display
-		 * onto the new one (the renderer's current render target, as the D3D11 renderer then draws onto it).
-		 */
+		/** @brief SetDisplayRenderTarget inside a display. The segment so far draws onto the old target and the rest onto the new. */
 		void SetDisplayRenderTarget(void* a_renderer, void* a_target, bool a_setState)
 		{
 			auto& capture = Current();
@@ -992,14 +923,13 @@ namespace RenderGraph::Engine::Scaleform
 			ClearSegment();
 			capture.display.Reset();
 			if (!ReadRendererTarget(a_renderer, capture.display)) {
-				// No target to draw onto: neither has the D3D11 renderer. The rest of the display is left out.
+				// No target means the D3D11 renderer has none either, so the rest of the display is left out.
 				capture.display.scratch = Display::kLostScratch;
 				NoteLeftOut("SetDisplayRenderTarget inside a display to a target without a view (the rest of the display)");
 			}
 			StartSegment(a_renderer);
 		}
 
-		/** @brief The scratch images in use: the targets being drawn into and the textures read from them. */
 		std::uint32_t BusyScratch()
 		{
 			const auto& capture = Current();
@@ -1017,9 +947,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief A scratch image for a render target GFx pushed, a_width by a_height of a_texture (GFx's, its size at +0x38): a free one,
-		 * or the one the oldest redirect not being drawn into holds. The texture's reads go to it until it is pushed again or the display
-		 * ends. Display::kLostScratch when the target is larger than the scratch images or every one is being drawn into.
+		 * @brief A scratch image for a pushed GFx render target. Takes a free one or the oldest redirect's.
+		 * Returns kLostScratch when the target is too large or every image is being drawn into.
 		 */
 		std::int32_t AcquireScratch(RE::GTexture* a_texture, std::uint32_t a_width, std::uint32_t a_height)
 		{
@@ -1035,7 +964,6 @@ namespace RenderGraph::Engine::Scaleform
 				if (!(busy >> i & 1u))
 					scratch = static_cast<std::int32_t>(i);
 			if (scratch < 0) {
-				// The oldest texture whose scratch image is not being drawn into gives it up.
 				std::uint32_t drawing = capture.pinnedScratch;
 				if (capture.display.scratch >= 0)
 					drawing |= 1u << capture.display.scratch;
@@ -1061,12 +989,8 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief PushRenderTarget (SE 82887 / AE 85004) inside a captured display: the segment so far is drawn, the D3D11 renderer
-		 * keeps its own bookkeeping (its target stack, +0x740, the viewport struct, the 3D matrices through the vtable), and the draws
-		 * until the matching PopRenderTarget are drawn into a scratch image on the graph in the target's place, cleared first as the
-		 * renderer clears the target whole. The renderer's own transform there: the viewport (0, 0, target +0x60, target +0x64), the
-		 * view matrix mapping the frame rectangle to clip space ([2 / w, 0, -1 - 2 left / w; 0, -2 / h, 1 + 2 top / h], w and h at least
-		 * 1, no user matrix), the depth-stencil state off. PushTempRenderTarget makes its pooled target and pushes it through here.
+		 * @brief PushRenderTarget (SE 82887 / AE 85004) inside a captured display. Draws until the matching pop go into a cleared scratch
+		 * image on the graph, while the D3D11 renderer keeps its own target stack and matrices.
 		 */
 		void PushRenderTarget(void* a_renderer, const float* a_frame, void* a_target)
 		{
@@ -1115,11 +1039,11 @@ namespace RenderGraph::Engine::Scaleform
 
 		RE::GTexture* PushTempRenderTarget(void* a_renderer, const float* a_frame, std::uint32_t a_width, std::uint32_t a_height, bool a_stencil)
 		{
-			// The renderer pushes its pooled target through the vtable's PushRenderTarget (above).
+			// The renderer pushes its pooled target through the vtable's PushRenderTarget above.
 			return Original<PushTempTargetFn>(kPushTempRenderTarget)(a_renderer, a_frame, a_width, a_height, a_stencil);
 		}
 
-		/** @brief PopRenderTarget (SE 82882 / AE 85001) of a target pushed in the capture: its segment drawn, the interrupted one goes on. */
+		/** @brief PopRenderTarget (SE 82882 / AE 85001). Draws the pushed segment and resumes the interrupted one. */
 		void PopRenderTarget(void* a_renderer)
 		{
 			auto& capture = Current();
@@ -1151,14 +1075,12 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief DrawColorMatrixRect as a graph draw: FilterVS.hlsl and FilterPS.hlsl's FILTER 23 (24 for Multiply and Darken), with
-		 * the constants the D3D11 renderer writes (SE 0x140f5e840): the current matrix, the source rectangle over the texture's size,
-		 * the filters' blend array, the source bound clamped and linear. A source the graph cannot read leaves it out.
+		 * @brief DrawColorMatrixRect as a graph draw with FILTER 23, or 24 for Multiply and Darken. The constants match what the
+		 * D3D11 renderer writes at SE 0x140f5e840. A source the graph cannot read is left out.
 		 */
 		void CaptureColorMatrix(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
 			auto& capture = Current();
-			// The source rectangle, the destination rectangle and the matrix, copied one after the other.
 			std::array<float, 28> arguments;
 			std::memcpy(arguments.data(), a_sourceRect, sizeof(float) * 4);
 			std::memcpy(arguments.data() + 4, a_destRect, sizeof(float) * 4);
@@ -1185,7 +1107,6 @@ namespace RenderGraph::Engine::Scaleform
 				{ dest[0], dest[3], 0.0f, 1.0f, u0, v1 },
 				{ dest[2], dest[3], 0.0f, 1.0f, u1, v1 },
 			};
-			// The renderer's strip of four as two triangles.
 			constexpr int kOrder[6] = { 0, 1, 2, 2, 1, 3 };
 			for (int i = 0; i < 6; ++i)
 				std::memcpy(record.vertices[i], corners[kOrder[i]], sizeof(record.vertices[i]));
@@ -1200,18 +1121,18 @@ namespace RenderGraph::Engine::Scaleform
 			command.state.vertexKind = 0;
 			command.state.pixelKind = 0;
 			command.state.filter = Multiply() ? 24 : 23;
-			// The filters' blend array for the mode; nothing while a mask is drawn (the colour writes stay off, as the renderer leaves them).
+			// No blend while a mask is drawn, since the renderer leaves colour writes off then.
 			command.state.blend = capture.inMask ? 7 : static_cast<std::uint8_t>(8 + kBlendStates[capture.blendMode > 14 ? 0 : capture.blendMode]);
 			command.state.stencil = capture.stencil;
 			command.stencilRef = capture.stencilRef;
 			command.textures[0] = index;
-			command.samplers[0] = command.samplers[1] = 3;  // Bind(0, clamp, linear)
+			command.samplers[0] = command.samplers[1] = 3;  // clamp, linear
 			command.record = capture.display.Append(&record, sizeof(record), 16);
 			command.vertexCount = 6;
 			capture.display.commands.push_back(command);
 		}
 
-		/** @brief GRenderer::BlurFilterParams (17 dwords; DrawBlurRect SE 82836 reads them from its fifth argument). */
+		/** @brief GRenderer::BlurFilterParams, 17 dwords. DrawBlurRect (SE 82836) reads them from its fifth argument. */
 		struct BlurParams
 		{
 			std::uint32_t flags;
@@ -1219,19 +1140,16 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint32_t passes;
 			float offsetX, offsetY;
 			std::uint8_t color[4];   // B, G, R, A
-			std::uint8_t color2[4];  // the same
+			std::uint8_t color2[4];  // B, G, R, A
 			float strength;
 			float cxform[8];  // rMul, rAdd, gMul, gAdd, bMul, bAdd, aMul, aAdd
 		};
 		static_assert(sizeof(BlurParams) == 0x44);
 
-		// The filter pixel shader table's slot (PS-B, 1 to 26) to FilterPS.hlsl's FILTER.
+		// Maps the filter pixel shader table's slot to FilterPS.hlsl's FILTER.
 		constexpr std::array<std::uint8_t, 27> kFilterOfSlot{ 0, 1, 2, 4, 5, 3, 2, 6, 5, 7, 8, 11, 12, 10, 9, 14, 13, 15, 15, 17, 17, 19, 21, 20, 22, 23, 24 };
 
-		/**
-		 * @brief Where a slot's constants go in its 32-float PSConstants (the renderer's offset table, SE 0x141e0ac70), -1 for none, and
-		 * which textures it reads: the original source (srctex) and the pass's source (tex), by stage.
-		 */
+		/** @brief Where a slot's constants go in its 32-float PSConstants, from the renderer's offset table at SE 0x141e0ac70. -1 for none. */
 		struct FilterLayout
 		{
 			std::int32_t offset, scolor, scolor2, srctexscale, texscale;
@@ -1243,15 +1161,11 @@ namespace RenderGraph::Engine::Scaleform
 			if (a_slot <= 16)
 				return { 12, 16, 20, 24, 26, 0, 1 };
 			if (a_slot <= 20)
-				return { 12, 16, -1, -1, 20, -1, 0 };  // srctexscale's index is -1: see BlurConstants
+				return { 12, 16, -1, -1, 20, -1, 0 };  // srctexscale is -1, see BlurConstants
 			return { -1, -1, -1, -1, 12, -1, 0 };
 		}
 
-		/**
-		 * @brief One pass's PSConstants as DrawBlurRect writes them (docs/development/p5/scaleform.md, "The blur family"), for the
-		 * pass's source of a_width by a_height and the original source of a_originalWidth by a_originalHeight (the sizes the draws sample
-		 * in: a scratch image's for a texture drawn into one).
-		 */
+		/** @brief One pass's PSConstants as DrawBlurRect writes them. Sizes are those the draws sample, a scratch image's when redirected. */
 		void BlurConstants(const BlurParams& a_params, std::uint32_t a_slot, bool a_last, float a_width, float a_height, float a_originalWidth,
 			float a_originalHeight, float (&a_out)[32])
 		{
@@ -1288,8 +1202,8 @@ namespace RenderGraph::Engine::Scaleform
 			if (layout.offset >= 0) {
 				a_out[layout.offset] = -a_params.offsetX;
 				a_out[layout.offset + 1] = -a_params.offsetY;
-				// srctexscale: for slots 17-20 its index is -1, so the renderer writes the width ratio before the buffer and the height
-				// ratio over cxadd.r; the shadow-only shaders see that.
+				// For slots 17-20 the srctexscale index is -1, so the renderer writes the width ratio before the buffer and the height
+				// ratio over cxadd.r. The shadow-only shaders read those.
 				const float ratioU = a_width / a_originalWidth, ratioV = a_height / a_originalHeight;
 				if (layout.srctexscale >= 0) {
 					a_out[layout.srctexscale] = ratioU;
@@ -1310,7 +1224,7 @@ namespace RenderGraph::Engine::Scaleform
 			colour(a_params.color2, layout.scolor2);
 		}
 
-		/** @brief A filter draw's bytes with the blur family's 128-byte constants (Scaleform/Filter.hlsli reads the same offsets). */
+		/** @brief A filter draw's bytes. Scaleform/Filter.hlsli reads the same offsets. */
 		struct BlurRecord
 		{
 			float vertices[6][6];
@@ -1319,10 +1233,7 @@ namespace RenderGraph::Engine::Scaleform
 		};
 		static_assert(offsetof(BlurRecord, mvp) == kFilterMatrixOffset && offsetof(BlurRecord, constants) == kFilterConstantsOffset);
 
-		/**
-		 * @brief One blur pass's draw: the rectangle a_dest (in the matrix's space) sampling a_rect of the source over a_width by a_height,
-		 * with a_slot's shader and constants, the textures by stage, clamped and linear.
-		 */
+		/** @brief One blur pass's draw with a_slot's shader and constants, sampled clamped and linear. */
 		void EmitBlurPass(void* a_renderer, const float* a_matrix, const float* a_dest, const float* a_rect, float a_width, float a_height, std::uint32_t a_slot,
 			const float (&a_constants)[32], std::int32_t a_srctex, std::int32_t a_tex, std::uint8_t a_blend)
 		{
@@ -1355,24 +1266,21 @@ namespace RenderGraph::Engine::Scaleform
 			if (layout.srctex >= 0)
 				command.textures[layout.srctex] = a_srctex;
 			command.textures[layout.tex] = a_tex;
-			command.samplers[0] = command.samplers[1] = 3;  // Bind(stage, clamp, linear)
+			command.samplers[0] = command.samplers[1] = 3;  // clamp, linear
 			command.record = capture.display.Append(&record, sizeof(record), 16);
 			command.vertexCount = 6;
 			capture.display.commands.push_back(command);
 		}
 
 		/**
-		 * @brief DrawBlurRect (SE 82836 / AE 84957) on the graph: its passes before the last drawn into scratch images (each cleared, as
-		 * the renderer's PushTempRenderTarget clears its pooled target, onto {-1, -1, 1, 1} with the identity matrix), the last onto the
-		 * current target with the current matrix and a_destRect. The shaders, constants, textures and blends are the renderer's
-		 * (docs/development/p5/scaleform.md, "The blur family"). False, nothing captured, for a source the graph cannot read.
+		 * @brief DrawBlurRect (SE 82836 / AE 84957) on the graph. Passes before the last draw into cleared scratch images, and the last
+		 * draws onto the current target. False when the graph cannot read the source.
 		 */
 		bool CaptureBlur(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
 		{
 			auto& capture = Current();
 			const auto* redirect = FindRedirect(a_source);
 			if (!redirect) {
-				// A source the graph cannot read: the filter is left out (the caller counts it).
 				if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource))
 					return false;
 				auto* view = Field<ID3D11ShaderResourceView*>(a_source, Layout::kTextureView);
@@ -1390,8 +1298,8 @@ namespace RenderGraph::Engine::Scaleform
 			const float originalWidth = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureWidth), 1u)) / (redirect ? redirect->scaleU : 1.0f);
 			const float originalHeight = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureHeight), 1u)) / (redirect ? redirect->scaleV : 1.0f);
 
-			// The renderer's three parameter sets: passes alternate the first two, the last uses the third. A blur of more than 32 taps
-			// blurs one axis a pass, in twice the passes.
+			// Passes alternate the first two parameter sets and the last uses the third.
+			// A blur of more than 32 taps does one axis per pass, in twice the passes.
 			const bool split = params.blurX * params.blurY > 32.0f;
 			BlurParams sets[3] = { params, params, params };
 			if (split) {
@@ -1413,7 +1321,7 @@ namespace RenderGraph::Engine::Scaleform
 
 			static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
 			static constexpr float kUnitRect[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
-			std::int32_t source = original;  // the pass's source
+			std::int32_t source = original;
 			float sourceWidth = originalWidth, sourceHeight = originalHeight;
 			std::int32_t held = -1;  // the scratch image the last intermediate pass drew into
 			const std::uint32_t first = (params.flags & 0x20000) ? passes - 1 : 0;
@@ -1431,7 +1339,7 @@ namespace RenderGraph::Engine::Scaleform
 				}
 				float constants[32];
 				BlurConstants(set, slot, false, sourceWidth, sourceHeight, originalWidth, originalHeight, constants);
-				// The pass as its own segment into the scratch image; the interrupted segment's target and state come back after.
+				// Each pass is its own segment. The interrupted segment's target and state come back after.
 				Flush(a_renderer);
 				const std::int32_t interrupted = capture.display.scratch;
 				float viewport[4], viewMatrix[6];
@@ -1444,7 +1352,6 @@ namespace RenderGraph::Engine::Scaleform
 				capture.display.viewport[0] = capture.display.viewport[1] = 0.0f;
 				capture.display.viewport[2] = static_cast<float>((std::max)(width, 1u));
 				capture.display.viewport[3] = static_cast<float>((std::max)(height, 1u));
-				// PushRenderTarget's view matrix for the frame {-1, -1, 1, 1}.
 				const float unitView[6] = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f };
 				std::memcpy(capture.viewMatrix, unitView, sizeof(unitView));
 				capture.stencil = Stencil::Off;
@@ -1461,7 +1368,6 @@ namespace RenderGraph::Engine::Scaleform
 				capture.stencil = stencil;
 				capture.stencilRef = stencilRef;
 				StartSegment(a_renderer);
-				// The previous intermediate is read; this one is held for the next pass.
 				if (held >= 0)
 					capture.pinnedScratch &= ~(1u << held);
 				held = scratch;
@@ -1470,7 +1376,6 @@ namespace RenderGraph::Engine::Scaleform
 				sourceWidth = static_cast<float>(scratchWidth);
 				sourceHeight = static_cast<float>(scratchHeight);
 			}
-			// The last pass onto the current target: the filters' blend array for the mode, nothing while a mask is drawn.
 			float constants[32];
 			BlurConstants(sets[2], lastSlot, true, sourceWidth, sourceHeight, originalWidth, originalHeight, constants);
 			const std::uint8_t blend = capture.inMask ? 7 : static_cast<std::uint8_t>(8 + kBlendStates[capture.blendMode > 14 ? 0 : capture.blendMode]);
@@ -1493,7 +1398,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<SetBlendFn>(kPushBlendMode)(a_renderer, a_mode);
-			// The renderer's rule: the stack keeps the mode before; Normal and Layer keep the parent's mode.
+			// The renderer's rule. The stack keeps the previous mode, and Normal and Layer keep the parent's mode.
 			auto& capture = Current();
 			capture.blendStack.push_back(capture.blendMode);
 			if (a_mode > 2)
@@ -1507,7 +1412,7 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			if (capture.blendStack.empty())
 				return;
-			// The renderer's rule: the topmost mode on the stack above Layer, or None.
+			// The renderer's rule. The mode is the topmost on the stack above Layer, or None.
 			std::uint32_t mode = 0;
 			for (auto it = capture.blendStack.rbegin(); it != capture.blendStack.rend(); ++it)
 				if (*it > 2) {
@@ -1522,7 +1427,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a_base, a_min, a_count, a_start, a_triangles);
-			// The renderer's own early outs: nothing drawn.
+			// The renderer's own early outs.
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
 				!Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) || a_triangles <= 0)
 				return;
@@ -1530,9 +1435,8 @@ namespace RenderGraph::Engine::Scaleform
 			const std::int32_t format = Field<std::int32_t>(a_renderer, Layout::kVertexFormat);
 			auto& capture = Current();
 			Command command{};
-			// DrawIndexedTriList's vertex shader (SE 82838): gouraud fills by the vertex format (5 for type 3 of XY16iCF32), every
-			// other fill 1, which reads the position as R16G16_SINT whatever the format (XY32f too). A gouraud fill of another
-			// format sets nothing: the shader bound before stays.
+			// DrawIndexedTriList (SE 82838) picks the vertex shader by fill. Non-gouraud fills use 1, which reads positions as R16G16_SINT
+			// for any format. A gouraud fill of an unexpected format keeps the shader bound before.
 			if (fill.mode == 3) {
 				if (format == Layout::kVertexXY16iC32)
 					command.state.vertexKind = 3;
@@ -1549,7 +1453,6 @@ namespace RenderGraph::Engine::Scaleform
 			FinishVertexKind(a_renderer, command);
 			DrawMatrix(a_renderer, &Field<float>(a_renderer, Layout::kMatrix), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
-			// The draws read the arrays from the segment's staging bytes, copied at their first draw there.
 			const std::uint32_t indexSize = IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
 			record.vertexOffset = StageVertices(a_renderer);
 			record.vertexStride = Field<std::uint32_t>(a_renderer, Layout::kVertexStride);
@@ -1566,8 +1469,7 @@ namespace RenderGraph::Engine::Scaleform
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || a_lines <= 0)
 				return;
-			// DrawLineStrip (SE 82839): vertex shader 1 (7 in 3D), the line style through ApplyFillStyle, the current matrix, and a
-			// strip of the lines + 1 vertices from a_base.
+			// DrawLineStrip (SE 82839) uses vertex shader 1, or 7 in 3D, and draws lines + 1 vertices from a_base.
 			auto& capture = Current();
 			Command command{};
 			command.state.vertexKind = 1;
@@ -1592,7 +1494,7 @@ namespace RenderGraph::Engine::Scaleform
 			if (!Capturing())
 				return Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, a_bitmaps, a_listSize, a_start, a_count, a_texture, a_matrix, a_cache);
 			if (!VideoModeSet(a_renderer) || !a_bitmaps || !a_texture || a_count <= 0)
-				return;  // the renderer draws nothing (and its state changes are the next draw's anyway)
+				return;  // the renderer draws nothing, and its state changes belong to the next draw anyway
 			const auto* bitmaps = a_bitmaps + a_start;
 			const bool redirected = FindRedirect(a_texture) != nullptr;
 			if (!redirected && !IsPlainTexture(a_texture)) {
@@ -1600,7 +1502,7 @@ namespace RenderGraph::Engine::Scaleform
 				return;
 			}
 			if (!redirected && !Field<void*>(a_texture, Layout::kTextureResource)) {
-				// Its data was lost (the device was reset): GFx makes it again before it is drawn again.
+				// The device was reset. GFx remakes the data before drawing it again.
 				NoteLeftOut("bitmaps of a texture whose data is lost");
 				return;
 			}
@@ -1612,7 +1514,7 @@ namespace RenderGraph::Engine::Scaleform
 			if (index == kNoTexture)
 				return;
 			command.textures[0] = index;
-			command.samplers[0] = 3;  // Bind(0, clamp, linear)
+			command.samplers[0] = 3;  // clamp, linear
 			const auto* redirect = FindRedirect(a_texture);
 			const float scaleU = redirect ? redirect->scaleU : 1.0f;
 			const float scaleV = redirect ? redirect->scaleV : 1.0f;
@@ -1622,7 +1524,7 @@ namespace RenderGraph::Engine::Scaleform
 			DrawMatrix(a_renderer, a_matrix, record);
 			CxformConstants(Field<float[8]>(a_renderer, Layout::kCxform), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
-			// Six vertices a bitmap (x, y, u, v, colour): left-top, right-top, left-bottom, then left-bottom, right-top, right-bottom.
+			// Six vertices per bitmap, as two triangles.
 			struct GlyphVertex
 			{
 				float x, y, u, v;
@@ -1700,7 +1602,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.stencilRef = 0;
 		}
 
-		/** @brief Whether the object's vtable is GRendererD3D1x's: the slots CS replaces are the functions R5 names. */
+		/** @brief Whether the object's vtable is GRendererD3D1x's, so the slots CS replaces are the expected functions. */
 		bool IsD3D1xRenderer(void* const* a_vtable)
 		{
 			const std::pair<Slot, REL::RelocationID> checks[] = {
@@ -1716,7 +1618,7 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief CS's vtable on the renderer object: a copy of its own with CS's slots. */
+		/** @brief Puts CS's vtable on the renderer, a copy of its own with CS's slots. */
 		void Wrap(void* a_renderer)
 		{
 			auto** vtable = *static_cast<void***>(a_renderer);
@@ -1747,7 +1649,7 @@ namespace RenderGraph::Engine::Scaleform
 			logger::info("[ORG] Scaleform: the renderer has CS's vtable; displays are drawn on the render graph once it is up");
 		}
 
-		/** @brief The renderer's factory (SE 82831 / AE 84952, called by BSScaleformManager::InitRenderer, SE 80603 / AE 82730). */
+		/** @brief The renderer's factory, SE 82831 / AE 84952, called by BSScaleformManager::InitRenderer (SE 80603 / AE 82730). */
 		struct CreateRenderer
 		{
 			static void* thunk()

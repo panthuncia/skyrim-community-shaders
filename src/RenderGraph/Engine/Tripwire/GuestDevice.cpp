@@ -10,7 +10,7 @@ namespace RenderGraph::Engine::Tripwire
 {
 	namespace
 	{
-		/** @brief The installed handles. Never released: the engine keeps using them until the process ends. */
+		/** @brief The installed handles. Never released, since the engine uses them until the process ends. */
 		struct Guest
 		{
 			std::atomic<ID3D11Device*> device{ nullptr };
@@ -43,7 +43,7 @@ namespace RenderGraph::Engine::Tripwire
 		auto& data = renderer->GetRuntimeData();
 		auto* device = reinterpret_cast<ID3D11Device*>(data.forwarder);
 		auto* context = reinterpret_cast<ID3D11DeviceContext*>(data.context);
-		// Both globals are written once by the device creation (SE 75589 / AE 77396), from the same objects as RendererData's fields.
+		// Device creation (SE 75589 / AE 77396) writes both globals once, from the same objects as RendererData's fields.
 		REL::Relocation<ID3D11Device**> deviceGlobal{ REL::RelocationID(524729, 411348) };
 		REL::Relocation<ID3D11DeviceContext**> contextGlobal{ REL::RelocationID(524771, 411391) };
 		if (!device || !context || *deviceGlobal != device || *contextGlobal != context) {
@@ -56,9 +56,8 @@ namespace RenderGraph::Engine::Tripwire
 			return;
 		}
 
-		// The handles take their own references to DXVK's objects. The engine's reference on each moves to the handle it now holds
-		// (one each: the globals and RendererData's fields are copies of one pointer), and the extra reference kept here is never
-		// dropped. So an engine Release at shutdown frees nothing that is still used, and DXVK's objects outlive the handles.
+		// The engine's reference moves to the handle, and the extra reference here is never dropped.
+		// So an engine Release at shutdown frees nothing still in use, and DXVK's objects outlive the handles.
 		auto guestDevice = CreateDevice({ .name = "Engine::Device" }, device);
 		auto guestContext = CreateDeviceContext({ .name = "Engine::ImmediateContext" }, context);
 		PairDeviceAndContext(guestDevice.get(), guestContext.get());
@@ -83,7 +82,7 @@ namespace RenderGraph::Engine::Tripwire
 		auto& guest = GetGuest();
 		if (!a_device || !a_context || guest.context.load(std::memory_order_acquire))
 			return;
-		// The engine holds its own references; the ones taken here are never dropped, as the guest's are not.
+		// The reference taken here is never dropped, as with the guest's.
 		a_device->AddRef();
 		a_context->AddRef();
 		guest.device.store(a_device, std::memory_order_release);

@@ -1,37 +1,26 @@
-// The start stage's water effects as CS passes (native mode). Included by ImageSpace.cpp inside its anonymous namespace, after
-// WorldSteps.inl and ChainSteps.inl, whose step helpers it uses (StepDesc, MakeStepSpec, StepKey, StageStep).
+// The start stage's water effects as CS passes, for native mode. Included by ImageSpace.cpp after WorldSteps.inl and ChainSteps.inl.
 //
-// Main::RenderWaterEffects (35561 / 36560) runs after the reflection faces, inside the start stage's window. Its GPU work is drawn by
-// passes CS declares here, as steps of the start stage (one client at its ImageSpace step):
-// - the displacement simulation (ImageSpaceEffectWaterDisplacement's Render, SE 0x141303da0, AE 0x1414ef370): the texture offset into
-//   one target of the pair kWATER_DISPLACEMENT / kWATER_DISPLACEMENT_SWAP (each child effect writes its texture 0 and reads its texture
-//   1) from the other, one wading ripple a ripple into the same target, then the pair swaps, then the heightmap step zero or more times
-//   (a fixed time step, 0.025 s), each from one target into the other with a swap after it;
-// - the flow copies: each loaded flow texture copied into a rectangle of the flow map.
-// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision: each is a fixed set of instances,
-// all on in the description, and the k-th draw of its kind in the frame is instance k. An instance the engine does not use stays
-// closed in the run gate and does nothing on the GPU. The ripple's quad and the flow copy's source texture are frame inputs (the
-// geometry's buffers and the texture by heap index, in the latch).
+// Main::RenderWaterEffects runs the displacement simulation and the flow copies inside the start stage's window.
+// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a fixed set of
+// instances, all on, and the k-th draw of its kind is instance k. Unused instances stay closed in the run gate.
 
-/** @brief Instances of each repeated water step a frame. More in one frame is a mismatch (NoPass). */
-constexpr std::uint16_t kRippleInstances = 8;    // wading ripples into each target of the pair
-constexpr std::uint16_t kHeightmapInstances = 4;  // heightmap steps (0.025 s each; a frame of 0.1 s makes four)
-constexpr std::uint16_t kFlowInstances = 32;      // flow copies
+/** @brief Instances of each repeated water step a frame. More in one frame is a mismatch. */
+constexpr std::uint16_t kRippleInstances = 8;    // per target of the pair
+constexpr std::uint16_t kHeightmapInstances = 4;  // 0.025 s each, so a 0.1 s frame makes four
+constexpr std::uint16_t kFlowInstances = 32;
 
-/** @brief The start stage's water steps: their passes by key, and the running water update. */
 struct StartSteps
 {
-	bool on = false;          // native mode with the start stage: the water effects are CS passes
-	bool registered = false;  // registered for the targets below
-	bool retry = false;       // a pass was left out at a build (an effect not made yet): register again at a later frame
-	bool pending = false;     // a registration waits for the next frame boundary
+	bool on = false;          // native mode with the start stage
+	bool registered = false;
+	bool retry = false;       // a pass was left out at a build, so register again later
+	bool pending = false;
 	std::uint64_t registeredFrame = 0;
 	std::uint32_t displacementSize = 0, flowSize = 0;
 	std::map<StepKey, std::uint32_t> entries;
 	std::array<bool, kGateEntries> made{};
 	std::uint32_t count = 0;
-	// The running water update (the hooks): the scope, the target the next step writes (A), whether the pair swapped after the
-	// ripples, and each repeated step's draws so far this frame.
+	// The target the next step writes, whether the pair swapped after the ripples, and each step's count so far.
 	WorldScope scope = WorldScope::None;
 	std::int32_t target = -1;
 	bool swapped = false;
@@ -45,10 +34,7 @@ StartSteps& Start()
 	return start;
 }
 
-/**
- * @brief The target the water displacement update writes first (SE 0x143283ae0, AE 0x1433dcf10): kWATER_DISPLACEMENT or its swap. The
- * update sets it on a reset before it renders, and its Render writes it back at the end; read at the update's first draw.
- */
+/** @brief SE 0x143283ae0, AE 0x1433dcf10. The update may reset it before rendering, so read it at the first draw. */
 std::int32_t WaterDisplacementTarget()
 {
 	static REL::Relocation<const std::int32_t*> target{ REL::RelocationID(528286, 415236) };
@@ -57,10 +43,7 @@ std::int32_t WaterDisplacementTarget()
 
 void RegisterStartSteps();
 
-/**
- * @brief Begin of a frame: the start steps registered again when the displacement pair or the flow map was made again, or a build left
- * a pass out. The build runs off the render thread. Render owner.
- */
+/** @brief Re-registers when the displacement pair or flow map is remade, or a build left a pass out. Render owner. */
 void CheckStartSteps()
 {
 	auto& start = Start();
@@ -88,7 +71,7 @@ void CheckStartSteps()
 	}, RegisterStartSteps);
 }
 
-/** @brief Every pass of the start client is on: each does work only where its gate entry opens (the engine's late decisions). */
+/** @brief All on. Each pass only works where the engine opens its gate entry. */
 void StartRows(std::array<std::uint64_t, 4>& a_rows)
 {
 	const auto& start = Start();
@@ -96,7 +79,6 @@ void StartRows(std::array<std::uint64_t, 4>& a_rows)
 		a_rows[entry / 64] |= 1ull << (entry % 64);
 }
 
-/** @brief Registers the start client (the start stage's ImageSpace step) for the targets now. */
 void RegisterStartSteps()
 {
 	auto& state = IS();
@@ -133,7 +115,7 @@ void RegisterStartSteps()
 		a_desc.effect = a_effect;
 		steps.push_back({ { a_scope, a_effect, a_variant }, std::move(a_desc) });
 	};
-	// The displacement pair: each step by the target it writes (the variant's high byte; the other one is its input).
+	// The variant's high byte is the target each step writes. The other one is its input.
 	for (const std::int32_t out : { static_cast<std::int32_t>(T::kWATER_DISPLACEMENT), static_cast<std::int32_t>(T::kWATER_DISPLACEMENT_SWAP) }) {
 		const std::int32_t in = out == T::kWATER_DISPLACEMENT ? T::kWATER_DISPLACEMENT_SWAP : T::kWATER_DISPLACEMENT;
 		const auto high = static_cast<std::uint16_t>(out << 8);
@@ -153,7 +135,7 @@ void RegisterStartSteps()
 			add(WorldScope::WaterDisplacement, E::ISWaterWadingHeightmap, static_cast<std::uint16_t>(high | h), std::move(d));
 		}
 	}
-	// The flow copies into the flow map: each reads its loaded texture by the heap index in its latch (no declared input).
+	// Each reads its loaded texture by heap index, with no declared input.
 	if (start.flowSize)
 		for (std::uint16_t k = 0; k < kFlowInstances; ++k)
 			add(WorldScope::FlowCopy, E::ISCopySubRegionCS, k, StepDesc{ .name = fmt::format("flow.copy.{}", k), .output = engine(kFlowMapOutput) });
@@ -186,8 +168,7 @@ void RegisterStartSteps()
 					Start().retry = true;
 				return pass;
 			},
-			// Recorded at execution with the CPU's gate answer, not GPU-gated: an instance the engine did not use skips the run, and its
-			// barriers fold into the next pass that runs (most instances are empty in most frames).
+			// Most instances are empty most frames, so record at execution and let unused ones skip and fold their barriers.
 			.atExecution = true,
 			.gpuGated = false,
 			.row = static_cast<std::int16_t>(entry) });
@@ -205,7 +186,7 @@ void RegisterStartSteps()
 	};
 	desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 	desc.rows = StartRows;
-	// A tap per water update and per flow copy: each commits its own instances' entries, so the frame's taps add up.
+	// Each water update and flow copy taps its own instances, and the frame's taps add up.
 	desc.repeats = true;
 	desc.segmentOnly = true;
 	if (!FrameAnchors::Register(std::move(desc))) {
@@ -220,7 +201,6 @@ void RegisterStartSteps()
 		start.flowSize);
 }
 
-/** @brief The start scope a covered effect's draw is a step of now, or None. */
 WorldScope StartStepScope()
 {
 	const auto& start = Start();
@@ -229,10 +209,7 @@ WorldScope StartStepScope()
 	return start.scope;
 }
 
-/**
- * @brief A ripple's quad as a frame input: the shape DrawTriShape gets, its buffers' view refs written into a_pending's PerFrame words
- * (the ripple's vertex stage pulls the geometry; it reads no PerFrame), and its index count as the draw's count. Empty, or why not.
- */
+/** @brief Writes the ripple quad's buffer refs into the PerFrame words for its vertex stage. Returns why not, or empty. */
 std::string StageGeometry(Pending& a_pending)
 {
 	auto& state = IS();
@@ -257,11 +234,9 @@ std::string StageGeometry(Pending& a_pending)
 }
 
 /**
- * @brief A start step's data-only hook: the engine computed this step's constants and bound them; they are staged for the step's pass,
- * matched by the effect, the target the water update writes now (it alternates) and the instance (the draw's count of its kind this
- * frame). The ripple's quad and a flow copy's source texture are staged with them. The engine's draw is withheld (true). A step past
- * the declared instances, or one CS has no pass for, is a mismatch.
- */
+* @brief Stages the step's constants, matched by effect, the current target and the instance number.
+* A step past the declared instances, or with no pass, is a mismatch.
+*/
 bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
 	auto& state = IS();
@@ -294,7 +269,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			variant = static_cast<std::uint16_t>((start.target << 8) | instance);
 			break;
 		case E::ISWaterWadingHeightmap:
-			// The pair swaps after the ripples, then after each heightmap step (ImageSpaceEffectWaterDisplacement's Render).
+			// The pair swaps after the ripples, then after each heightmap step.
 			if (!start.swapped) {
 				start.swapped = true;
 				start.target = other(start.target);
@@ -312,7 +287,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		limit = kFlowInstances;
 		variant = instance;
 	}
-	// The plan against the target the engine binds, checked once a session: a difference means the RE of the update is wrong.
+	// Checked once a session. A difference means our RE of the update is wrong.
 	if (start.scope == WorldScope::WaterDisplacement) {
 		const auto bound = static_cast<std::int32_t>(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().renderTargets[0]);
 		const auto planned = static_cast<std::int32_t>(variant >> 8);
@@ -337,7 +312,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	const auto& rows = Frame::Driver::Current().Segment(segment).rows;
 	const bool scheduled = entry < 256 && (rows[entry / 64] >> (entry % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
 	if (!start.made[entry] || !scheduled) {
-		// The frame's schedule does not hold the client yet (its first build): nothing is drawn this frame.
+		// The schedule does not hold the client yet, so nothing is drawn this frame.
 		Frame::Driver::NoteStepLag(segment, client.id, fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant));
 		return true;
 	}
@@ -352,8 +327,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment, fmt::format("a wading ripple's quad could not be staged: {}", why));
 		}
 	} else if (id == E::ISCopySubRegionCS) {
-		// The loaded flow texture, by its heap index: a texture BGSAutoWater loaded from a file and never writes, the immutable class the
-		// graph exempts from declarations. Held until the run's GPU work retires.
+		// BGSAutoWater loads these and never writes them, so the graph exempts them from declarations. Held until the run retires.
 		auto* view = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().CSTexture[0];
 		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
 		auto binding = view ? DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag) : DCLF::GpuTextures::Binding{};
@@ -368,7 +342,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	return true;
 }
 
-/** @brief The water update's hook (31385 / 32176): its draws are start steps, from the target the water system holds at its entry. */
+/** @brief The water update (31385 / 32176). */
 struct WaterUpdateGuard
 {
 	WaterUpdateGuard() : active(Start().on && Start().registered && FrameAnchors::IsRenderOwner())
@@ -377,7 +351,7 @@ struct WaterUpdateGuard
 			return;
 		auto& start = Start();
 		start.scope = WorldScope::WaterDisplacement;
-		start.target = -1;  // read at the first draw: the update may reset the pair before it renders
+		start.target = -1;  // the update may reset the pair before it renders
 		start.swapped = false;
 		start.ripples = 0;
 		start.heightmaps = 0;
@@ -390,7 +364,7 @@ struct WaterUpdateGuard
 	bool active = false;
 };
 
-/** @brief A flow copy's call: its dispatch is the frame's next flow copy instance. */
+/** @brief Each dispatch is the frame's next flow copy instance. */
 struct FlowCopyGuard
 {
 	explicit FlowCopyGuard(bool a_flowCopy) : active(a_flowCopy && Start().on && Start().registered && FrameAnchors::IsRenderOwner())

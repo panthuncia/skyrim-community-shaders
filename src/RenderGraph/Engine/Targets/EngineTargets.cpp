@@ -36,24 +36,20 @@ namespace RenderGraph::Engine::Targets
 		using RE::BSGraphics::DepthStencilTargetProperties;
 		using RE::BSGraphics::RenderTargetProperties;
 
-		// Slots per table: room above the engine's counts (render targets SE 114 / AE 116, depth-stencils 12, one cubemap, three 3D).
+		// Room above the engine's counts: render targets SE 114 / AE 116, depth-stencils 12, one cubemap, three 3D.
 		constexpr std::uint32_t kColourSlots = 128;
 		constexpr std::uint32_t kDepthSlots = 32;
 		constexpr std::uint32_t kCubeSlots = 4;
 		constexpr std::uint32_t kVolumeSlots = 8;
-		// DepthStencilData has eight DSVs and eight read-only DSVs: one per slice.
+		// DepthStencilData has eight DSVs and eight read-only DSVs, one per slice.
 		constexpr std::uint32_t kMaxDepthSlices = 8;
 
-		// The private-data key of the token each ORG-made D3D11 texture carries.
 		constexpr GUID kRetireTokenKey{ 0x6c2f7a41, 0x93d5, 0x4c0e, { 0x8b, 0x1a, 0x52, 0x7e, 0x0d, 0x3f, 0x91, 0xc4 } };
 
 		std::mutex retiredLock;
 		std::vector<std::shared_ptr<const void>> retired;
 
-		/**
-		 * @brief Kept in a D3D11 texture's private data. DXVK releases it when it destroys the texture, after every view and
-		 * reference is gone: then the image it keeps goes to the retire queue.
-		 */
+		/** @brief Lives in a D3D11 texture's private data. DXVK releases it after the texture's last view and reference, and then the image is retired. */
 		class RetireToken final : public IUnknown
 		{
 		public:
@@ -88,7 +84,7 @@ namespace RenderGraph::Engine::Targets
 				return left;
 			}
 
-			/** @brief Takes the image back, so the last Release retires nothing (the texture refused the token). */
+			/** @brief Takes the image back when the texture refused the token, so the last Release retires nothing. */
 			std::shared_ptr<const void> Disarm() { return std::move(owner); }
 
 		private:
@@ -96,11 +92,7 @@ namespace RenderGraph::Engine::Targets
 			std::shared_ptr<const void> owner;
 		};
 
-		/**
-		 * @brief An engine target's graph texture: a versioned GraphResources twin whose D3D11 side is made by its owner. Its slot
-		 * (Versioned()) lasts while the target keeps its shape class: a target made again with the same format, mips and slices is the
-		 * slot's next version, so no graph is built again. PublishedResources publishes the slot by id.
-		 */
+		/** @brief An engine target's graph texture. A remake with the same format, mips and slices is the slot's next version, so no graph rebuilds. */
 		class EngineTexture final : public GraphResources::Resource
 		{
 		public:
@@ -108,13 +100,11 @@ namespace RenderGraph::Engine::Targets
 				Resource(std::move(a_name), { .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV, .versioned = true }) {}
 
 			/**
-			 * @brief Takes a new image and its SRV; the old one goes (its image lives while its D3D11 texture does, and the slot's old
-			 * version while a frame holds it). Of the same shape class, the image is the slot's next version. Otherwise it is a new slot,
-			 * and when the old image had been handed to a reader (Serve) the state notes that graphs holding it must be built again.
-			 */
+			* @brief Takes a new image. Same shape class means the slot's next version. Otherwise it is a new slot, and if the old image
+			* was served, graphs holding it must be rebuilt.
+			*/
 			void Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv);
 
-			/** @brief A reader was handed the image (Serve): a graph may hold it from now on. */
 			void MarkServed() { served = true; }
 
 			void AdoptImage(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
@@ -127,10 +117,7 @@ namespace RenderGraph::Engine::Targets
 				image = a_image.image;
 			}
 
-			/**
-			 * @brief Takes an unbacked texture (native mode, Frame/EngineTargetUse.h): a handle with no image. The record keeps it so
-			 * Find knows it, and has no graph resource and no slot.
-			 */
+			/** @brief Native mode: records a handle with no image so Find knows it. It has no graph resource and no slot. */
 			void AdoptUnbacked(winrt::com_ptr<ID3D11Resource> a_texture, std::string_view a_why)
 			{
 				Drop();
@@ -139,13 +126,11 @@ namespace RenderGraph::Engine::Targets
 				why = a_why;
 			}
 
-			/** @brief Whether the target is an unbacked record (AdoptUnbacked). */
 			bool Unbacked() const { return unbacked; }
 
-			/** @brief Why an unbacked target has no memory: its EngineTargetUse line. */
+			/** @brief The EngineTargetUse line that says why it has no memory. */
 			const std::string& Why() const { return why; }
 
-			/** @brief Lets the image go: nothing of it is kept here any more. */
 			void Drop()
 			{
 				external.reset();
@@ -155,23 +140,20 @@ namespace RenderGraph::Engine::Targets
 			}
 
 			const std::shared_ptr<org::ExternalTextureResource>& External() const { return external; }
-			/** @brief The handle readers declare: the slot, by the target's id. */
 			FrameAnchors::Texture Handle() const { return Versioned() ? FrameAnchors::Texture(Name(), Versioned()) : FrameAnchors::Texture(); }
 			const ID3D11Resource* D3D11Texture() const { return d3d11.get(); }
 			std::uint64_t Image() const { return image; }
 
-			/** @brief The resize generation moves once: the anchors build again and republish what changed. */
 			static void BumpGeneration(std::string_view a_who) { BumpResizeGeneration(a_who); }
 
 		private:
 			std::shared_ptr<org::ExternalTextureResource> external;
 			std::uint64_t image = 0;
-			bool served = false;    // a reader was handed the current image (Serve)
-			bool unbacked = false;  // a record with no image (AdoptUnbacked)
-			std::string why;        // an unbacked target's reason
+			bool served = false;
+			bool unbacked = false;
+			std::string why;
 		};
 
-		/** @brief A render target's shape: the engine's properties, a plan, or Recreate's description. */
 		struct ColourShape
 		{
 			UINT width = 0;
@@ -181,9 +163,9 @@ namespace RenderGraph::Engine::Targets
 			bool rtv = true;
 			bool uav = false;
 			bool copy = false;
-			DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;  // the copy texture's format; UNKNOWN is format
+			DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;  // UNKNOWN means the same as format
 
-			/** @brief Whether a_other makes the same texture (the copy aside). */
+			/** @brief The copy texture is not compared. */
 			bool SameTexture(const ColourShape& a_other) const
 			{
 				return width == a_other.width && height == a_other.height && format == a_other.format && srv == a_other.srv && rtv == a_other.rtv &&
@@ -193,12 +175,12 @@ namespace RenderGraph::Engine::Targets
 
 		struct Colour
 		{
-			RenderTargetProperties props{};  // the engine's last creation of the target
+			RenderTargetProperties props{};
 			bool known = false;
-			ColourShape shape{};  // what ORG made last
+			ColourShape shape{};
 			std::unique_ptr<EngineTexture> texture;
 			std::unique_ptr<EngineTexture> copy;
-			// The UAV given to the engine. WindowSizeChanged releases a target's texture, views and copy but never its UAV.
+			// WindowSizeChanged releases a target's texture, views and copy but never its UAV.
 			ID3D11UnorderedAccessView* uav = nullptr;
 		};
 
@@ -224,21 +206,19 @@ namespace RenderGraph::Engine::Targets
 		struct State
 		{
 			std::array<Colour, kColourSlots> colours;
-			// Features' plans for render targets (PlanTarget), set before the graph exists.
+			// Set before the graph exists.
 			std::array<std::optional<Plan>, kColourSlots> plans;
 			std::array<Depth, kDepthSlots> depths;
 			std::array<Cube, kCubeSlots> cubes;
 			std::array<Volume, kVolumeSlots> volumes;
-			bool changed = false;  // a target was made on ORG since the last EndSet
-			// An image a reader had been handed (EngineTexture::Served) was replaced since the last move: graphs may hold the old one, so
-			// the move bumps the resize generation (every anchor builds again). A target made for the first time, or one no reader asked
-			// for yet, only publishes: no graph holds it.
+			bool changed = false;
+			// A served image was replaced, so graphs may hold the old one and the move bumps the resize generation.
+			// A first creation, or one no reader asked for, only publishes.
 			bool heldReplaced = false;
-			// An image a reader had been handed became a version of another size. No graph needs a new resource, but passes that took
-			// the size when they were made are made again, once, off the render thread.
+			// A served image changed size. Passes that took the size are remade once, off the render thread.
 			bool heldResized = false;
-			bool inSet = false;  // between BeginSet and EndSet: the set's move is EndSet's
-			// Images whose texture refused the retire token: kept for the session rather than freed under DXVK.
+			bool inSet = false;
+			// Images whose texture refused the retire token. Kept for the session rather than freed under DXVK.
 			std::vector<std::shared_ptr<const void>> pinned;
 		};
 
@@ -258,7 +238,7 @@ namespace RenderGraph::Engine::Targets
 			const bool sameSize = old && a_image.graph && old->GetWidth() == a_image.graph->GetWidth() && old->GetHeight() == a_image.graph->GetHeight();
 			AdoptImage(a_image, a_srv);
 			if (AdoptSlot(std::move(previous), true)) {
-				// The same slot: readers keep declaring it, and every graph follows the new version.
+				// Same slot, so readers keep declaring it and every graph follows the new version.
 				served = held;
 				if (held && !sameSize)
 					Targets().heldResized = true;
@@ -268,10 +248,7 @@ namespace RenderGraph::Engine::Targets
 				Targets().heldReplaced = true;
 		}
 
-		/**
-		 * @brief After a move: the anchors build again once when a held image was replaced by a new slot (the resize generation), or
-		 * every graph is made again off the render thread when held images only changed size. Returns whether it asked for builds.
-		 */
+		/** @brief Bumps the resize generation once if a held image was replaced, or remakes graphs off-thread if held images only resized. */
 		bool Settle(std::string_view a_what)
 		{
 			auto& state = Targets();
@@ -288,13 +265,10 @@ namespace RenderGraph::Engine::Targets
 			return false;
 		}
 
-		/**
-		 * @brief After a target was made (or made again) on ORG: its id published again when a reader asked for it, and the resize
-		 * generation bumped only when an image a reader held was replaced. Returns whether it bumped.
-		 */
+		/** @brief Republishes the id if a reader asked for it, and bumps the resize generation only if a held image was replaced. */
 		bool Move(const std::unique_ptr<EngineTexture>& a_texture);
 
-		// The engine's tables, by index past CommonLib's array sizes (AE has 116 render targets where CommonLib declares 114).
+		// Indexed past CommonLib's array sizes, since AE has 116 render targets where CommonLib declares 114.
 		RE::BSGraphics::RenderTargetData& ColourData(std::uint32_t a_index) { return (&Renderer()->GetRuntimeData().renderTargets[0])[a_index]; }
 		RE::BSGraphics::DepthStencilData& DepthData(std::uint32_t a_index) { return (&Renderer()->GetDepthStencilData().depthStencils[0])[a_index]; }
 		RE::BSGraphics::CubemapRenderTargetData& CubeData(std::uint32_t a_index) { return (&Renderer()->GetRendererData().cubemapRenderTargets[0])[a_index]; }
@@ -326,25 +300,19 @@ namespace RenderGraph::Engine::Targets
 
 		bool Active() { return RenderGraphRuntime::Get().IsActive(); }
 
-		/** @brief Whether CS_ORG_ENGINE_TARGET_HANDLES=1 asks for tripwire handles in the engine's fields. */
 		bool HandlesRequested()
 		{
 			static const bool requested = RenderGraph::Engine::Native::GraphMode();
 			return requested;
 		}
 
-		/** @brief Whether the engine's device and immediate context are the tripwire's wrapping guests (P4.1). */
 		bool GuestsInstalled()
 		{
 			const auto& data = Renderer()->GetRuntimeData();
 			return Tripwire::IsHandle(static_cast<const void*>(data.context)) && Tripwire::IsHandle(static_cast<const void*>(data.forwarder));
 		}
 
-		/**
-		 * @brief Whether a target made now gets tripwire handles in the engine's fields: HandlesRequested, and the guests are installed.
-		 * Without the guests a handle would reach DXVK's own device or context and crash there. The targets made before the guests
-		 * get their handles from InstallHandles.
-		 */
+		/** @brief Without the guests a handle would reach DXVK's own device or context and crash. Earlier targets get handles from InstallHandles. */
 		bool UseHandles()
 		{
 			return HandlesRequested() && GuestsInstalled();
@@ -359,10 +327,7 @@ namespace RenderGraph::Engine::Targets
 			}
 		}
 
-		/**
-		 * @brief An image for an engine target, with the retire token on its D3D11 texture. Empty, logged, on failure. Dropping what
-		 * this returns is safe at any point: the token retires the image once DXVK destroys the texture.
-		 */
+		/** @brief Empty and logged on failure. Dropping the result is always safe, since the token retires the image once DXVK destroys the texture. */
 		GraphResources::ExportedTexture Export(const GraphResources::ExportDesc& a_desc, const std::string& a_name)
 		{
 			auto exported = GraphResources::ExportTexture(a_desc, a_name);
@@ -378,7 +343,6 @@ namespace RenderGraph::Engine::Targets
 			return exported;
 		}
 
-		/** @brief Options for a tripwire handle of an engine target's object. */
 		Tripwire::Options HandleOptions(const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph)
 		{
 			Tripwire::Options options;
@@ -387,8 +351,7 @@ namespace RenderGraph::Engine::Targets
 			return options;
 		}
 
-		// What goes into the engine's fields: DXVK's object, or a tripwire handle wrapping it (UseHandles). Each takes the reference
-		// a_object holds. A view's handle names a_resource, the texture as the engine holds it, for GetResource.
+		// Each takes the reference a_object holds. A view's handle names a_resource for GetResource.
 
 		ID3D11Texture2D* Give(winrt::com_ptr<ID3D11Texture2D> a_object, const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph, bool a_handles)
 		{
@@ -448,7 +411,7 @@ namespace RenderGraph::Engine::Targets
 			return Tripwire::CreateUnorderedAccessView(a_resource, desc, HandleOptions(a_name, a_graph), a_object.get()).detach();
 		}
 
-		/** @brief Withdraws a target's id and lets its image go, when ORG made it before and D3D11 makes it now. */
+		/** @brief For a target ORG made before that D3D11 makes now. */
 		void Forget(std::unique_ptr<EngineTexture>& a_texture)
 		{
 			if (a_texture && a_texture->Unbacked()) {
@@ -461,17 +424,17 @@ namespace RenderGraph::Engine::Targets
 			a_texture->Drop();
 		}
 
-		/** @brief Publishes the new image of a target whose id a reader already asked for (Find); the others wait for their first request. */
+		/** @brief Only targets a reader already asked for are republished. The others wait for their first request. */
 		void Republish(const std::unique_ptr<EngineTexture>& a_texture)
 		{
 			if (a_texture && a_texture->Graph() && PublishedResources::IsRegistered(a_texture->Name()))
 				PublishedResources::Publish(a_texture->Name(), *a_texture);
 		}
 
-		/** @brief The slot of a_texture, published on the first request. */
+		/** @brief Published on the first request. */
 		FrameAnchors::Texture Serve(const std::unique_ptr<EngineTexture>& a_texture)
 		{
-			// A reader asks for an unbacked target's image: a graph would use it. A recipe mismatch; release gives the reader nothing.
+			// A reader asked for an unbacked target, which is a recipe mismatch. Release builds give it nothing.
 			if (a_texture && a_texture->Unbacked()) {
 				Frame::Driver::NoteUnbackedUse(a_texture->Name(),
 					fmt::format("a graph import of {}, an engine target native mode keeps without memory ({}); the reader gets no texture",
@@ -499,10 +462,7 @@ namespace RenderGraph::Engine::Targets
 			return { a_props.width, a_props.height, static_cast<DXGI_FORMAT>(a_props.format.underlying()), true, true, a_props.supportUnorderedAccess, a_props.copyable };
 		}
 
-		/**
-		 * @brief The shape ORG makes render target a_index in: the engine's properties with the target's plan on top. A feature that
-		 * remakes the target then finds it in the shape it wants, so its first version already has its final shape class.
-		 */
+		/** @brief The engine's properties with the plan on top, so the first version already has the shape a feature will ask for. */
 		ColourShape PlannedShape(std::uint32_t a_index, const RenderTargetProperties& a_props)
 		{
 			auto shape = ShapeOf(a_props);
@@ -510,7 +470,7 @@ namespace RenderGraph::Engine::Targets
 			if (!plan)
 				return shape;
 			if (plan->format != DXGI_FORMAT_UNKNOWN) {
-				// The copy stays in the engine's format: HDR's upgrade replaces only the texture and its views.
+				// The copy stays in the engine's format. HDR's upgrade replaces only the texture and its views.
 				shape.copyFormat = shape.format;
 				shape.format = plan->format;
 			}
@@ -519,7 +479,7 @@ namespace RenderGraph::Engine::Targets
 				shape.rtv = (plan->bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 				shape.uav = (plan->bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			}
-			// kMAIN's last creation. Within a set the engine makes kMAIN early, so its properties are normally the new ones.
+			// The engine makes kMAIN early in a set, so its properties are normally already the new ones.
 			if (const auto& main = Targets().colours[RE::RENDER_TARGET::kMAIN]; plan->mainSize && main.known) {
 				shape.width = main.props.width;
 				shape.height = main.props.height;
@@ -529,16 +489,13 @@ namespace RenderGraph::Engine::Targets
 			return shape;
 		}
 
-		/**
-		 * @brief Whether ORG makes the target. The engine's own path stays for the swap chain's kFRAMEBUFFER, mip views of another
-		 * target (mipLevel != -1: views of that target's texture) and mip generation, which DXVK cannot wrap.
-		 */
+		/** @brief The engine keeps kFRAMEBUFFER, mip views of another target, and mip-generating targets, which DXVK cannot wrap. */
 		bool CanOwnColour(std::uint32_t a_index, const RenderTargetProperties& a_props)
 		{
 			return a_index != RE::RENDER_TARGET::kFRAMEBUFFER && a_props.mipLevel == -1 && !a_props.allowMipGeneration;
 		}
 
-		/** @brief The release WindowSizeChanged would have made: every field (the D3D11 path's objects, or ORG's when replaced). */
+		/** @brief The release WindowSizeChanged would have made. */
 		void ReleaseColourFields(RE::BSGraphics::RenderTargetData& a_data, bool a_copy)
 		{
 			ReleaseField(a_data.UAV);
@@ -551,19 +508,14 @@ namespace RenderGraph::Engine::Targets
 			}
 		}
 
-		/** @brief How MakeColour treats what the engine's fields hold. */
 		enum class Fields : std::uint8_t
 		{
-			Released,  // the engine released them (WindowSizeChanged) or never filled them: only the UAV it leaves is ours to release
-			Replace,   // replace every field (TakeOver, Recreate without the copy kept)
-			KeepCopy,  // replace the texture and its views, keep the copy (HDR Display's upgrade and its restore)
+			Released,  // released by WindowSizeChanged or never filled, so only the leftover UAV is ours
+			Replace,   // TakeOver, or Recreate without keeping the copy
+			KeepCopy,  // HDR Display's upgrade and restore
 		};
 
-		/**
-		 * @brief Makes render target a_index on ORG as Renderer::CreateRenderTarget's own-texture branch does: an RGBA texture with an
-		 * RTV and SRV of the whole texture (D3D11's default views), a UAV of mip 0 in the target's format when asked, and a copy
-		 * texture (SRV bind only) with its SRV when copyable. False, with the fields untouched, when ORG cannot make it.
-		 */
+		/** @brief Makes the target as Renderer::CreateRenderTarget's own-texture branch does. False, fields untouched, when ORG cannot. */
 		bool MakeColour(std::uint32_t a_index, Colour& a_record, const ColourShape& a_shape, Fields a_fields)
 		{
 			const auto name = ColourName(a_index);
@@ -576,7 +528,7 @@ namespace RenderGraph::Engine::Targets
 			desc.srv = a_shape.srv ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.rtv = a_shape.rtv ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.uav = a_shape.uav ? a_shape.format : DXGI_FORMAT_UNKNOWN;
-			// Native mode: a target nothing uses (Frame/EngineTargetUse.h) is a record with no image. Its copy texture too.
+			// Native mode: a target nothing uses gets a record with no image, and so does its copy.
 			const bool unbacked = Frame::EngineTargetUse::ColourUnbacked(a_index);
 			const auto make = [&](const GraphResources::ExportDesc& a_desc, const std::string& a_name) {
 				if (!unbacked)
@@ -633,7 +585,7 @@ namespace RenderGraph::Engine::Targets
 			} else {
 				ReleaseColourFields(data, a_fields == Fields::Replace);
 			}
-			// The records first: they keep their own references; the fields then take the ones made here.
+			// Records first, since they keep their own references.
 			if (!a_record.texture)
 				a_record.texture = std::make_unique<EngineTexture>(name);
 			const auto why = Frame::EngineTargetUse::ColourReason(a_index);
@@ -678,17 +630,17 @@ namespace RenderGraph::Engine::Targets
 				record.props = *a_properties;
 				record.known = true;
 				if (CanOwnColour(a_target, *a_properties) && Active() && MakeColour(a_target, record, PlannedShape(a_target, *a_properties), Fields::Released)) {
-					// Outside the set (a target the engine makes later): its own move.
+					// Outside a set, a target the engine makes later moves on its own.
 					if (!Targets().inSet)
 						Move(record.texture);
 					return;
 				}
-				// The D3D11 path: before the graph exists (TakeOver follows), for the targets ORG does not make, and on a failure.
+				// The D3D11 path runs before the graph exists, for targets ORG does not make, and on failure.
 				if (record.texture && record.texture->Graph())
 					logger::info("[ORG] {}: made on D3D11 again", record.texture->Name());
 				Forget(record.texture);
 				Forget(record.copy);
-				// The UAV ORG made last time is the one field the engine's release leaves.
+				// The engine's release leaves the UAV ORG made.
 				if (auto& data = ColourData(a_target); record.uav && data.UAV == record.uav)
 					ReleaseField(data.UAV);
 				record.uav = nullptr;
@@ -704,7 +656,7 @@ namespace RenderGraph::Engine::Targets
 			DXGI_FORMAT texture, dsv, srv;
 		};
 
-		/** @brief CreateDepthStencilTarget's formats: 32-bit float depth, 16-bit with use16BitsDepth, D24S8 with a stencil (which wins). */
+		/** @brief 32-bit float depth, 16-bit with use16BitsDepth, D24S8 with a stencil, which wins. */
 		DepthFormats FormatsOf(const DepthStencilTargetProperties& a_props)
 		{
 			if (a_props.stencil)
@@ -714,7 +666,7 @@ namespace RenderGraph::Engine::Targets
 			return { DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32_FLOAT };
 		}
 
-		/** @brief The release ZeroDepthStencilData makes, for a replacement the engine did not release itself. */
+		/** @brief The release ZeroDepthStencilData makes, for a replacement the engine did not release. */
 		void ReleaseDepthFields(RE::BSGraphics::DepthStencilData& a_data)
 		{
 			for (auto& view : a_data.views)
@@ -726,11 +678,7 @@ namespace RenderGraph::Engine::Targets
 			ReleaseField(a_data.texture);
 		}
 
-		/**
-		 * @brief Makes depth-stencil target a_index on ORG as Renderer::CreateDepthStencilTarget does: a typeless texture of arraySize
-		 * slices; per slice a DSV and a read-only DSV (read-only depth, and stencil when it has one); a depth SRV of every slice; a
-		 * stencil SRV (X24_TYPELESS_G8_UINT) with a stencil. A 2D view for one slice, 2D-array views for more.
-		 */
+		/** @brief Makes the target as Renderer::CreateDepthStencilTarget does. A 2D view for one slice, 2D-array views for more. */
 		bool MakeDepth(std::uint32_t a_index, Depth& a_record, bool a_replace)
 		{
 			const auto& props = a_record.props;
@@ -843,7 +791,7 @@ namespace RenderGraph::Engine::Targets
 			ReleaseField(a_data.texture);
 		}
 
-		/** @brief Makes cubemap target a_index on ORG as Renderer::CreateCubeMapRenderTarget does: six slices, an RTV per face, a cube SRV. */
+		/** @brief As Renderer::CreateCubeMapRenderTarget does. */
 		bool MakeCube(std::uint32_t a_index, Cube& a_record, bool a_replace)
 		{
 			const auto& props = a_record.props;
@@ -922,26 +870,20 @@ namespace RenderGraph::Engine::Targets
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// --- 3D targets (75470 / 77256): the volumetric lighting's accumulation volumes and noise, made when it renders ---
+		// --- 3D targets (75470 / 77256), made when volumetric lighting first renders ---
 
-		/**
-		 * @brief Texture3DTargetData as Renderer::Create3DRenderTarget fills it (CommonLib names the fields unk*): the texture, its UAV
-		 * (every depth slice of mip 0), its SRV, and a dword set to 1 once the texture exists.
-		 */
+		/** @brief Texture3DTargetData as Create3DRenderTarget fills it. CommonLib names these fields unk*. */
 		struct VolumeFields
 		{
 			ID3D11Texture3D* texture;            // 00
-			ID3D11UnorderedAccessView* uav;      // 08
+			ID3D11UnorderedAccessView* uav;      // 08, every depth slice of mip 0
 			ID3D11ShaderResourceView* srv;       // 10
-			std::uint32_t created;               // 18
+			std::uint32_t created;               // 18, set to 1 once the texture exists
 			std::uint32_t pad1C;                 // 1C
 		};
 		static_assert(sizeof(VolumeFields) == sizeof(RE::BSGraphics::Texture3DTargetData));
 
-		/**
-		 * @brief Makes 3D target a_index on ORG: DEFAULT usage, SRV and UAV bind, one mip. What the fields held is left as the engine
-		 * leaves it (Create3DRenderTarget overwrites them too).
-		 */
+		/** @brief DEFAULT usage, SRV and UAV bind, one mip. Old field values are overwritten as Create3DRenderTarget does. */
 		bool MakeVolume(std::uint32_t a_index, Volume& a_record, const char* a_label, UINT a_width, UINT a_height, UINT a_depth, DXGI_FORMAT a_format)
 		{
 			const auto name = a_label && *a_label ? fmt::format("Engine::3D::{}", a_label) : fmt::format("Engine::3D::Volume{}", a_index);
@@ -957,7 +899,7 @@ namespace RenderGraph::Engine::Targets
 			desc.bindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 			desc.srv = a_format;
 			desc.uav = a_format;
-			// Native mode: a volume nothing uses (Frame/EngineTargetUse.h) is a record with no image.
+			// Native mode: a volume nothing uses gets a record with no image.
 			const std::string_view label = a_label ? a_label : "";
 			const bool unbacked = Frame::EngineTargetUse::VolumeUnbacked(label);
 			GraphResources::ExportedTexture image;
@@ -998,8 +940,7 @@ namespace RenderGraph::Engine::Targets
 			data.srv = Give(std::move(srv), data.texture, name + " SRV", image.graph, handles);
 			data.uav = Give(std::move(uav), data.texture, name + " UAV", image.graph, handles);
 			data.created = 1;
-			// Made outside a set (the volumetric lighting makes its volumes when it first renders, in the first world frame): a first
-			// creation only publishes; an image a reader held makes the anchors build again.
+			// Made outside a set. A first creation only publishes. Replacing a served image rebuilds the anchors.
 			Move(a_record.texture);
 			return true;
 		}
@@ -1009,7 +950,7 @@ namespace RenderGraph::Engine::Targets
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_target, const char* a_name, std::uint32_t a_width, std::uint32_t a_height,
 				std::uint32_t a_depth, std::int32_t a_usage, std::uint32_t a_format)
 			{
-				// DEFAULT usage only: the dynamic and staging variants are CPU-visible, which an exported image is not.
+				// Dynamic and staging variants are CPU-visible, which an exported image is not.
 				if (a_target < kVolumeSlots && a_usage == D3D11_USAGE_DEFAULT && Active() &&
 					MakeVolume(a_target, Targets().volumes[a_target], a_name, a_width, a_height, a_depth, static_cast<DXGI_FORMAT>(a_format)))
 					return;
@@ -1020,12 +961,9 @@ namespace RenderGraph::Engine::Targets
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// --- Handles for the fields of targets made before the guests (InstallHandles) ---
+		// --- Handles for targets made before the guests (InstallHandles) ---
 
-		/**
-		 * @brief Puts a handle that wraps a_field's DXVK object into a_field, through Give. The handle takes the field's reference.
-		 * Null fields and handles stay as they are. True when it wrapped one.
-		 */
+		/** @brief The handle takes the field's reference. Null fields and existing handles stay. True when it wrapped one. */
 		template <class T>
 		bool WrapTexture(T*& a_field, const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph)
 		{
@@ -1037,7 +975,7 @@ namespace RenderGraph::Engine::Targets
 			return true;
 		}
 
-		/** @brief WrapTexture for a view: its handle answers GetResource with a_resource, the texture field's handle. */
+		/** @brief The view's handle answers GetResource with a_resource. */
 		template <class T>
 		bool WrapView(T*& a_field, ID3D11Resource* a_resource, const std::string& a_name, const std::shared_ptr<org::ExternalTextureResource>& a_graph)
 		{
@@ -1049,16 +987,12 @@ namespace RenderGraph::Engine::Targets
 			return true;
 		}
 
-		/**
-		 * @brief Whether ORG made the record's image, or native mode made it an unbacked record (only those get handles, as UseHandles
-		 * gives them at creation).
-		 */
+		/** @brief Only these get handles, matching what UseHandles does at creation. */
 		bool Owned(const std::unique_ptr<EngineTexture>& a_texture)
 		{
 			return a_texture && (a_texture->Graph() || a_texture->Unbacked());
 		}
 
-		/** @brief Calls f on every target record's graph textures. */
 		template <class F>
 		void ForEachTexture(F&& a_function)
 		{
@@ -1111,8 +1045,7 @@ namespace RenderGraph::Engine::Targets
 			colours += colour.texture && colour.texture->Graph() ? 1u : 0u;
 		for (const auto& depth : state.depths)
 			depths += depth.texture && depth.texture->Graph() ? 1u : 0u;
-		// One move for the whole set: PublishedResources publishes every replaced id again, and the anchors build again once when an
-		// image a reader held was replaced.
+		// One move for the whole set. The anchors rebuild once if a served image was replaced.
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
 		Settle("the set");
 		logger::info("[ORG] engine targets: the set was made again on the render graph ({} render targets, {} depth-stencil targets)", colours, depths);
@@ -1142,8 +1075,7 @@ namespace RenderGraph::Engine::Targets
 				++kept;
 			}
 		}
-		// Targets that view a mip of another (mipLevel, textureTarget): their views are made again on the owner's new texture by
-		// the engine's own function, as its next Create would.
+		// Mip-view targets get their views remade on the owner's new texture by the engine's own function.
 		for (std::uint32_t i = 0; i < kColourSlots; ++i) {
 			auto& record = state.colours[i];
 			const auto source = record.props.textureTarget;
@@ -1203,7 +1135,7 @@ namespace RenderGraph::Engine::Targets
 			count(WrapView(data.RTV, data.texture, name + " RTV", graph));
 			count(WrapView(data.SRV, data.texture, name + " SRV", graph));
 			count(WrapView(data.UAV, data.texture, name + " UAV", graph));
-			// The UAV is tracked by its field value: the engine's release leaves it, and MakeColour releases it.
+			// Tracked by field value because the engine's release leaves the UAV and MakeColour releases it.
 			record.uav = data.UAV;
 			if (Owned(record.copy)) {
 				count(WrapTexture(data.textureCopy, record.copy->Name(), record.copy->External()));
@@ -1280,7 +1212,7 @@ namespace RenderGraph::Engine::Targets
 		auto& record = Targets().colours[a_target];
 		ColourShape shape{ a_desc.Width, a_desc.Height, a_desc.Format, (a_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0,
 			(a_desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0, (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0, false };
-		// A planned target already has this shape: nothing to make, and no new version for the graphs to follow.
+		// A planned target already has this shape, so there is no new version for graphs to follow.
 		if (record.shape.SameTexture(shape) && (a_keepCopy || !Owned(record.copy))) {
 			logger::info("[ORG] {}: already made as {} wants it ({}x{}, format {})", record.texture->Name(), a_name ? a_name : "?", a_desc.Width, a_desc.Height,
 				static_cast<int>(a_desc.Format));
@@ -1301,7 +1233,6 @@ namespace RenderGraph::Engine::Targets
 		auto& record = Targets().colours[a_target];
 		auto shape = PlannedShape(a_target, record.props);
 		shape.copy = false;
-		// Already in that shape (a planned target never left it): nothing to make.
 		if (record.shape.SameTexture(shape))
 			return true;
 		if (!MakeColour(a_target, record, shape, Fields::KeepCopy))
@@ -1355,7 +1286,7 @@ namespace RenderGraph::Engine::Targets
 
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 
-// Built without OpenRenderGraph: the engine makes every target with D3D11.
+// Without OpenRenderGraph the engine makes every target with D3D11.
 namespace RenderGraph::Engine::Targets
 {
 	bool Enabled() { return false; }

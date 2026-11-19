@@ -53,19 +53,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr const char* kPixelShader = "Scaleform/FillPS.hlsl";
 		constexpr const char* kFilterVertexShader = "Scaleform/FilterVS.hlsl";
 		constexpr const char* kFilterPixelShader = "Scaleform/FilterPS.hlsl";
-		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
+		// GpuTextures' diagnostic source tag for Scaleform's views.
 		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
-		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
+		// One run gate entry per command. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
-		// The UI stage's fixed instances (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"), each with its own gate
-		// entries and run slots: its Interface step before a menu's scene makes instances 8 to 15 (the k-th Interface run of the frame is
-		// instance 8 + k), its step after the scene 0 to 7. All are declared every frame; the ones the
-		// engine does not use stay closed. More runs at one step in one frame are a mismatch (an instance not declared). The anchor's own
-		// epoch (guest mode) uses instance 0.
+		// The UI stage's fixed instances. Interface runs before a menu's scene use 8 to 15 and runs after it use 0 to 7.
+		// All are declared every frame and unused ones stay closed. More runs at one step than that is a mismatch.
 		constexpr std::uint32_t kInstances = 16;
-		// The scratch images GFx's render targets are drawn into on the graph (PushRenderTarget: a filter's source, its passes): a
-		// blur's source and its two intermediates, and one more for a nested target.
+		// Scratch images for GFx render targets. A blur needs its source and two intermediates, plus one for a nested target.
 		constexpr std::uint32_t kScratchTargets = 4;
 		constexpr rhi::Format kScratchFormat = rhi::Format::R8G8B8A8_UNorm;
 
@@ -83,7 +79,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		static_assert(sizeof(FillBlock) == 48);
 		constexpr std::uint32_t kConstantWords = ShaderBindings::Words<FillBlock>();
 
-		// Must match the push block in Scaleform/Filter.hlsli; padded to the fill block's size, so every program has one layout.
+		// Must match the push block in Scaleform/Filter.hlsli. Padded to the fill block's size so every program has one layout.
 		struct FilterBlock
 		{
 			std::uint32_t geometry;
@@ -98,7 +94,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		};
 		static_assert(sizeof(FilterBlock) == sizeof(FillBlock));
 
-		/** @brief A pipeline: the draw's state and the formats of the pass it draws in (depth Unknown for a pass without masks). */
+		/** @brief A pipeline's draw state and pass formats. Depth is Unknown for a pass without masks. */
 		struct ProgramKey
 		{
 			DrawState state;
@@ -108,35 +104,32 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto operator<=>(const ProgramKey&) const = default;
 		};
 
-		/** @brief One command as the pass records it. */
 		struct FrameCommand
 		{
 			Command::Kind kind = Command::Kind::Draw;
 			const RasterProgram* program = nullptr;
 			std::uint32_t stencilRef = 0;
-			bool lines = false;   // a line strip
+			bool lines = false;
 			bool filter = false;  // the block is a FilterBlock
-			// Per texture stage: the declared read (FrameAnchors::Texture::Key) whose view the pass binds in place of the block's raw
-			// index, or null (an exempt texture, read untracked).
+			// Per stage, the declared read whose view replaces the block's raw index. Null for an exempt texture read untracked.
 			std::array<const void*, 2> reads{};
 			FillBlock block{};
 		};
 
-		/** @brief Native mode: a tracked texture the displays read, which the passes declare (PathState::reads). */
+		/** @brief A tracked texture the displays read, which the passes declare. Native mode only. */
 		struct Read
 		{
-			winrt::com_ptr<ID3D11ShaderResourceView> view;  // the display's view: its identity, kept while it is declared
+			winrt::com_ptr<ID3D11ShaderResourceView> view;  // keeps the view's identity while it is declared
 			FrameAnchors::Texture texture;
 			std::uint64_t lastCommit = 0;
 		};
 
-		/** @brief The tracked textures one build's passes declare. */
 		using Reads = std::vector<FrameAnchors::Texture>;
 
-		// A declared read no commit used for this many commits is dropped the next time the client registers.
+		// A declared read unused for this many commits is dropped at the next registration.
 		constexpr std::uint64_t kReadIdleCommits = 600;
 
-		/** @brief What one run of a surface's pass records: immutable once the commit stored it. */
+		/** @brief What one run of a surface's pass records. Immutable once stored. */
 		struct Frame
 		{
 			std::shared_ptr<org::LatchBlock> staging;
@@ -144,26 +137,24 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			rhi::Viewport viewport{};
 			rhi::ScissorRect scissor{};
 			std::uint32_t width = 0, height = 0;
-			// The run starts by clearing the target to zero (a render target GFx pushed: PushRenderTarget clears it whole).
+			// Cleared to zero first, since PushRenderTarget clears a pushed target whole.
 			bool clear = false;
 			rhi::Format format = rhi::Format::Unknown;
-			std::vector<std::shared_ptr<const void>> owners;  // programs, samplers, texture descriptors and views
+			std::vector<std::shared_ptr<const void>> owners;
 		};
 
 		using Slots = RunSlots<Frame>;
 
 		/**
-		 * @brief The targets UI::DrawInterface binds for the displays: the only ones the graph draws onto. The main menu and the
-		 * loading menu draw their movies into kMAIN (the 2026-11-12 latch census: most of the Scaleform draws left in load windows
-		 * and at the main menu), so kMAIN is a surface from setup too.
+		 * @brief The targets UI::DrawInterface binds for the displays, the only ones the graph draws onto.
+		 * The main and loading menus draw into kMAIN, so it is a surface from setup too.
 		 */
 		enum class Role : std::uint8_t
 		{
-			Framebuffer,  // the back buffer (kFRAMEBUFFER's RTV, or HDR's saved one)
-			HdrUi,        // HDR's UI texture, while HDR redirects the interface into it
-			Main,         // kMAIN: the main menu's and the loading menu's movies
-			// kBOOK_TEXT_0 to 3: the book menu's pages, rendered into a texture of GFx's (kViewportRenderTexture) that is one of these
-			// engine targets, with kBOOK_TEXT's depth-stencil for masks.
+			Framebuffer,  // kFRAMEBUFFER's RTV, or HDR's saved one
+			HdrUi,        // while HDR redirects the interface into it
+			Main,         // the main menu's and loading menu's movies
+			// The book menu's pages, drawn into a GFx render texture that is one of these engine targets.
 			Book0,
 			Book1,
 			Book2,
@@ -174,31 +165,30 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		bool IsBook(Role a_role) { return a_role >= Role::Book0 && a_role <= Role::Book3; }
 
 		/**
-		 * @brief A target the displays draw onto, with kMAIN's depth-stencil for masks. It has two passes: one with the target alone,
-		 * for displays without masks, and one with the depth-stencil too, for displays with masks (when the depth can be imported).
-		 * One surface per role, made at setup; made again only when the role's texture was made again (a resize, HDR's textures).
+		 * @brief A target the displays draw onto. It has a pass without depth and, when depth can be imported, one with kMAIN's
+		 * depth-stencil for masks. Remade only when the role's texture is remade.
 		 */
 		struct Surface
 		{
 			Role role = Role::Framebuffer;
-			// A scratch image's index (a graph texture of this client's that GFx's pushed render targets are drawn into), or -1 for a role.
+			// A scratch image's index, or -1 for a role.
 			std::int32_t scratch = -1;
-			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // DXVK's: the surface's identity
+			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // the surface's identity
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
-			FrameAnchors::Texture colour;  // an engine target's slot, or this client's own import
+			FrameAnchors::Texture colour;
 			FrameAnchors::Texture depth;
-			std::string ownId;  // set when this client registers colour itself (HDR's twin; imports are the anchors')
+			std::string ownId;  // set when this client registers colour itself, as for HDR's twin
 			rhi::Format colourFormat = rhi::Format::Unknown;
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			std::uint32_t width = 0, height = 0;
-			// One per instance (kInstances): empty for a surface the graph cannot draw onto (no passes).
+			// One per instance. Empty when the graph cannot draw onto the surface.
 			std::vector<std::shared_ptr<const Slots>> colourSlots;
 			std::vector<std::shared_ptr<const Slots>> depthSlots;  // empty without an importable depth-stencil
 
 			bool Drawable() const { return !colourSlots.empty(); }
 			bool Masks() const { return !depthSlots.empty(); }
 
-			/** @brief Every slot emptied: a pass of an older build that still has this surface draws nothing more. */
+			/** @brief Empties every slot, so an older build's pass on this surface draws nothing more. */
 			void Clear() const
 			{
 				for (const auto& slots : colourSlots)
@@ -208,7 +198,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 		};
 
-		/** @brief A surface pass's slots, one per instance. */
 		std::vector<std::shared_ptr<const Slots>> MakeSlots()
 		{
 			std::vector<std::shared_ptr<const Slots>> slots;
@@ -222,36 +211,33 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool reserved = false;
 			bool failed = false;
 			bool setUp = false;
-			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
+			std::array<org::OwnedDescriptorBinding, 4> samplers;  // by wrap * 2 + sample
 			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture, then the scratch images
-			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // every scratch image's size (the largest role surface's)
-			std::shared_ptr<const void> scratchPlacement;        // the scratch images' bytes in the frame arena (null: memory of their own)
-			// Native mode: the tracked textures the displays read (graph-owned, or exempt ones the context wrote since). The passes
-			// declare each, and a draw binds its declared view. A new one registers the client again after the run (readsChanged).
+			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // the largest role surface's size
+			std::shared_ptr<const void> scratchPlacement;        // null when they have memory of their own
+			// Tracked textures the displays read. A new one makes the client register again after the run.
 			std::vector<Read> reads;
 			bool readsChanged = false;
 			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
-			// The registration that made the surfaces as they are now, and the latest one a built graph is known to hold. A registration
-			// for new reads alone keeps the surfaces: the graph built before it still draws them (a new read keeps its raw index there).
+			// A registration for new reads alone keeps the surfaces, since the graph built before it still draws them.
 			std::uint32_t surfacesRegistration = 0;
 			std::uint32_t builtRegistration = 0;
 			std::uint32_t largestSegment = 0;
-			// Counts the times the surfaces were made (ClientDesc::generation): the stage's schedule draws a display only once it holds a
-			// registration with the surfaces as they are.
+			// The schedule draws a display only once it holds a registration with the current surfaces.
 			std::uint64_t surfacesGeneration = 0;
-			std::uint32_t peakTaps = 0;  // the most Interface runs one world frame had so far (logged at each new peak)
+			std::uint32_t peakTaps = 0;  // logged at each new peak
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
-			std::set<ProgramKey> failedPrograms;  // each logged once (NoteFailedProgram)
+			std::set<ProgramKey> failedPrograms;
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<FrameStaging> staging;
-			// The run in progress (Submit to the end of its anchor run): the display, and the commands of it this run draws.
+			// The run in progress, from Submit to the end of its anchor run.
 			Display* pending = nullptr;
 			std::uint32_t pendingFirst = 0;
 			std::uint32_t pendingCount = 0;
 			Surface* pendingSurface = nullptr;
-			bool pendingDepth = false;                                          // the pass with the depth-stencil draws it
-			std::vector<std::shared_ptr<const RasterProgram>> pendingPrograms;  // per command; null for a clear
+			bool pendingDepth = false;
+			std::vector<std::shared_ptr<const RasterProgram>> pendingPrograms;  // null for a clear
 			bool committed = false;
 			bool executed = false;
 			const char* commitReason = nullptr;
@@ -264,8 +250,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief The renderer's blend state: CreateShaders' first array (indices 1 to 7), or the filters' array (9 to 15: the same with
-		 * source colour factor One where the first has SrcAlpha, for premultiplied filter output; read from SE 0x1417c2588).
+		 * @brief The renderer's blend states. Indices 9 to 15 repeat 1 to 7 with source factor One for premultiplied filter output,
+		 * read from SE 0x1417c2588.
 		 */
 		rhi::BlendAttachment BlendOf(std::uint8_t a_index)
 		{
@@ -308,14 +294,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				blend.enable = false;
 				blend.writeMask = static_cast<rhi::ColorWriteEnable>(0);
 				break;
-			default:  // 1: normal
+			default:  // normal
 				set(F::SrcAlpha, F::InvSrcAlpha, O::Add, F::One, F::InvSrcAlpha, O::Add);
 				break;
 			}
 			return blend;
 		}
 
-		/** @brief The renderer's depth-stencil state: depth never tested, the stencil as the mask needs it. */
+		/** @brief The renderer's depth-stencil state. Depth is never tested. */
 		rhi::DepthStencilState DepthOf(Stencil a_stencil)
 		{
 			rhi::DepthStencilState depth{ .depthEnable = false, .depthWrite = false, .depthFunc = rhi::CompareOp::Always };
@@ -338,7 +324,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				face.passOp = rhi::StencilOp::Decr;
 				face.func = rhi::CompareOp::Equal;
 				break;
-			default:  // Test
+			default:  // test
 				face.passOp = rhi::StencilOp::Keep;
 				face.func = rhi::CompareOp::Equal;
 				break;
@@ -348,7 +334,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth;
 		}
 
-		/** @brief What a pipeline is built from (ProgramCache's describe, on the render thread). */
+		/** @brief What a pipeline is built from. Render thread. */
 		RasterProgram::Desc DescOf(const ProgramKey& a_key)
 		{
 			RasterProgram::Desc desc{};
@@ -360,7 +346,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			} else {
 				desc.vertexSource = kVertexShader;
 				desc.pixelSource = kPixelShader;
-				// The renderer's vertex shader index: 1 to 5, and 7 to 11 for the same kinds in 3D (a world matrix set).
+				// Vertex shader indices 7 to 11 are the 3D kinds of 1 to 5.
 				const bool threeD = a_key.state.vertexKind > 6;
 				desc.defines = { { L"VS_KIND", std::to_wstring(threeD ? a_key.state.vertexKind - 6 : a_key.state.vertexKind) },
 					{ L"PS_KIND", std::to_wstring(a_key.state.pixelKind) } };
@@ -377,17 +363,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief Every draw state the capture can make (Renderer.cpp: the background, ApplyFill, DrawIndexedTriList's vertex kinds,
-		 * DrawBitmaps, the colour matrix filter), for the pass with the depth-stencil or the one without. The set is finite:
-		 * - vertex and pixel kinds: 1 with 1-3 (solid, bitmap), 2 with 4-6 (bitmaps), 3 with 12-14 and 16-18 (XY16iC32 gouraud),
-		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 1 to 24; line strips
-		 *   of kind 1 with 1 (the line style's colour);
-		 * - blends: the Multiply and Darken kinds (3, 6, 15-18, filter 24) only with the multiply and darken states (4, 6), the other
-		 *   kinds with 1, 2, 3, 5, the solid and glyph kinds (1, 4) with any, the filters from the filters' array (8 + the index);
-		 *   every kind with 7 (a mask being drawn, the Alpha and Erase modes, a bitmap fill without a texture);
-		 * - 3D draws (a world matrix set: vertex kinds 7-11) are not enumerated: they are built at their first draw (logged).
-		 * - stencils: off in the pass without masks; off and test with any blend, clear, increment and decrement only with 7 (inside
-		 *   BeginSubmitMask) in the pass with them.
+		 * @brief Every draw state the capture can make, so pipelines are built ahead. The set must stay in step with what Renderer.cpp
+		 * emits. 3D draws are not enumerated and are built at their first draw.
 		 */
 		std::vector<DrawState> DrawStates(bool a_withDepth)
 		{
@@ -420,7 +397,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			};
 			for (const auto& kinds : fills)
 				for (const auto pixel : kinds.pixels) {
-					// A solid fill in Multiply or Darken keeps kind 1 (its colour is moved towards white instead).
+					// A solid fill in Multiply or Darken keeps kind 1, since its colour is moved towards white instead.
 					const std::vector<std::uint8_t> blends = pixel == 4 || pixel == 1 ? std::vector<std::uint8_t>{ 1, 2, 3, 4, 5, 6, 7 } :
 					                                         multiply(pixel) ? std::vector<std::uint8_t>{ 4, 6, 7 } :
 					                                                           std::vector<std::uint8_t>{ 1, 2, 3, 5, 7 };
@@ -429,8 +406,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			add({ .vertexKind = 1, .pixelKind = 1, .lines = 1 }, { 1, 2, 3, 4, 5, 6, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 23 }, { 9, 10, 11, 13, 15, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 24 }, { 12, 14, 7 });
-			// The blur family (DrawBlurRect): its last pass blends with the filters' array for the mode (the Multiply and Darken shaders
-			// with those modes' states), its passes before with the normal one (9, among those listed).
+			// The blur's last pass uses the filters' blend for the mode. Earlier passes use the normal one.
 			for (std::uint8_t filter = 1; filter <= 22; ++filter) {
 				const bool multiplies = filter == 4 || filter == 5 || filter == 6 || (filter >= 11 && filter <= 14) || filter == 17 || filter == 18 || filter == 20 ||
 				                        filter == 22;
@@ -444,23 +420,19 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			org::DeclaredViewToken colour;
 			org::DeclaredViewToken depth;
 			bool hasDepth = false;
-			std::vector<std::pair<const void*, org::DeclaredViewToken>> reads;  // by FrameAnchors::Texture::Key
+			std::vector<std::pair<const void*, org::DeclaredViewToken>> reads;
 		};
 
 		struct PassFrame
 		{
 			std::shared_ptr<const Slots> slots;
 			std::shared_ptr<const RunGate> gate;
-			std::uint32_t gateBase = 0;  // the instance's first gate entry
+			std::uint32_t gateBase = 0;
 		};
 
 		/**
-		 * @brief One pass of a surface: the display a commit stored for this run, as one render pass.
-		 *
-		 * Each draw reads its vertex count from its command's entry of the client's run gate, which the anchors close at the start of
-		 * every run and only this client's commit opens: a run without that commit (a frame left in a slot by a run that failed, a run
-		 * kept by another client) draws nothing. Its Revision is FrameAnchors::CommitReadRevision: it is recorded at every
-		 * run from the frame of that run, which names the display's pipelines, and its push blocks are that run's.
+		 * @brief One pass of a surface, drawing the display a commit stored for this run. Each draw takes its vertex count from the
+		 * run gate, which only this client's commit opens. So a run without that commit draws nothing.
 		 */
 		class DisplayPass final : public org::TypedRenderGraphPass<DisplayPass, PassFrame, PassBindings>
 		{
@@ -477,8 +449,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					bindings.depth = a_builder.DepthReadWrite(surface->depth).View();
 					bindings.hasDepth = true;
 				}
-				// The tracked textures the displays read: declared, so the graph orders the reads after the context's writes and moves
-				// the images into the shader-read layout. The pass's own targets are left out.
+				// Declared so the graph orders the reads after the context's writes and moves them to shader-read.
 				if (reads)
 					for (const auto& read : *reads)
 						if (read && read.Key() != surface->colour.Key() && (!withDepth || read.Key() != surface->depth.Key()))
@@ -490,8 +461,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate, gateBase }; }
 
-			// Recorded at execution: a surface no display of this instance drew on this run skips it, and its barriers fold into the next
-			// pass that runs.
+			// A surface no display drew on this run skips, and its barriers fold into the next pass.
 			static bool SkipsAtExecution(const PassBindings&, const PassFrame& a_pass, const org::PassRecordContext& a_recording)
 			{
 				if (!a_pass.slots || !a_pass.gate)
@@ -542,7 +512,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 				commands.SetViewports({ &frame->viewport, 1 });
 				commands.SetScissors({ &frame->scissor, 1 });
-				// The run's gate region: its arena chunk and its offset there.
 				const auto region = a_pass.gate->Latch().At(run);
 				const auto latchBuffer = region.buffer->GetAPIResource().GetHandle();
 				const std::uint64_t latchOffset = region.offset;
@@ -552,7 +521,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				for (std::uint32_t i = 0; i < frame->commands.size(); ++i) {
 					const auto& command = frame->commands[i];
 					if (command.kind == Command::Kind::ClearStencil) {
-						// Inside the pass this is vkCmdClearAttachments over the render area: the whole target, as D3D11 clears it.
+						// This clears the whole target, as D3D11 does.
 						if (a_bindings.hasDepth)
 							commands.ClearDepthStencilView(depth.dsv, false, true, 0.0f, 0);
 						continue;
@@ -572,11 +541,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						commands.SetStencilRef(command.stencilRef);
 						reference = command.stencilRef;
 					}
-					// A tracked texture's index comes from its declared view. A read this build does not declare yet (new since its build)
-					// keeps the raw index until the build with it is attached.
+					// A read this build does not declare yet keeps its raw index until the build with it is attached.
 					std::uint32_t words[sizeof(FillBlock) / 4];
 					std::memcpy(words, &command.block, sizeof(words));
-					// The stages' texture words: FillBlock::textures, or FilterBlock::source and second.
 					const std::size_t first = (command.filter ? offsetof(FilterBlock, source) : offsetof(FillBlock, textures)) / 4;
 					for (std::uint32_t stage = 0; stage < 2; ++stage) {
 						if (!command.reads[stage])
@@ -586,7 +553,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 							words[first + stage] = a_recording.Index(declared->second);
 					}
 					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, kConstantWords, words);
-					// The vertex count is the gate entry's: zero unless this run's commit opened it.
+					// The vertex count is zero unless this run's commit opened the gate entry.
 					commands.ExecuteIndirect(command.program->drawSignature->GetHandle(), latchBuffer, latchOffset + a_pass.gate->Offset(a_pass.gateBase + i), {}, 0, 1);
 				}
 				commands.EndPass();
@@ -598,15 +565,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::shared_ptr<const RunGate> gate;
 			bool withDepth = false;
 			std::shared_ptr<const Reads> reads;
-			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
+			bool atExecution = false;
 			std::uint32_t gateBase = 0;
 		};
 
 		/**
-		 * @brief Native mode: the declared read of the display texture a_view, or null for one read untracked (exempt, or not native's).
-		 * A tracked texture seen for the first time is added to the reads (the promoted exempt texture's own resource, or for any other
-		 * tracked texture, graph-owned or host-made, its image's one graph resource through FrameAnchors::ShareImage), and the client
-		 * registers again after the run, so the next build declares it. a_new says whether it was added now.
+		 * @brief The declared read for a display texture, or null when it is read untracked. A new tracked texture is added and the
+		 * client registers again after the run, so the next build declares it.
 		 */
 		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view, bool& a_new)
 		{
@@ -649,7 +614,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return texture.Key();
 		}
 
-		/** @brief The scratch image a_scratch's surface, or null. */
 		const Surface* ScratchSurface(const PathState& a_state, std::int32_t a_scratch)
 		{
 			if (a_scratch < 0)
@@ -660,10 +624,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return nullptr;
 		}
 
-		/**
-		 * @brief Inside the epoch: the pending display's frame, stored for this run in the slots of the pass that draws it, with its
-		 * draws' gate entries opened. Every other pass's entry for this run is emptied first, so nothing older is left there.
-		 */
+		/** @brief Stores the pending display's frame for this run and opens its gate entries. Other passes' entries are emptied first. */
 		void Commit()
 		{
 			auto& state = Path();
@@ -671,7 +632,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!host)
 				return;
 			const org::RunRef run = host->CurrentRun();
-			// The tap's instance: the step's first instance plus its earlier runs this frame (0 on the anchor's own epoch).
 			const std::uint32_t instance = FrameAnchors::TapInstance();
 			if (instance >= kInstances) {
 				state.commitReason = "an Interface run past the UI stage's instances";
@@ -700,9 +660,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				auto* view = display.textures[i];
 				bool added = false;
 				reads[i] = DeclaredRead(state, view, added);
-				// The raw index: what an exempt texture is read through, and a tracked one until a build declares it. A read declared
-				// before this commit binds its declared view in the pass, so its raw index is only the fallback until that build is
-				// attached: the undeclared-access validator counts it as declared (interim).
+				// Until a build declares the read, the raw index is the fallback, and the validator counts it as declared.
 				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
 				if (reads[i] && !added)
 					declared.emplace();
@@ -714,7 +672,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 				textures[i] = binding.index;
 				frame->owners.push_back(std::move(binding.owner));
-				// The view itself too, until the recording's GPU work retires: EndDisplay's queued releases may drop GFx's.
+				// Keep the view too until the GPU work retires, since EndDisplay's queued releases may drop GFx's.
 				view->AddRef();
 				frame->owners.push_back(std::shared_ptr<const void>(view, [](const void* a_view) {
 					static_cast<ID3D11ShaderResourceView*>(const_cast<void*>(a_view))->Release();
@@ -746,7 +704,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				};
 				for (std::uint32_t stage = 0; stage < 2; ++stage) {
 					const std::int32_t texture = command.textures[stage];
-					// A scratch image is read through the view every pass declares (its index replaces the block's word in Record).
+					// A scratch image is read through the view every pass declares.
 					const auto* scratch = ScratchSurface(state, ScratchOf(texture));
 					out.reads[stage] = texture >= 0 ? reads[static_cast<std::size_t>(texture)] : (scratch ? scratch->colour.Key() : nullptr);
 				}
@@ -783,7 +741,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			frame->clear = display.clearTarget && state.pendingFirst == 0;
 			frame->format = surface.colourFormat;
 			frame->viewport = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3], 0.0f, 1.0f };
-			// D3D11 clips to the viewport (the renderer's rasterizer state has no scissor).
+			// D3D11 clips to the viewport, since the renderer's rasterizer state has no scissor.
 			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(surface.width));
 			const float top = std::clamp(display.viewport[1], 0.0f, static_cast<float>(surface.height));
 			const float right = std::clamp(display.viewport[0] + display.viewport[2], left, static_cast<float>(surface.width));
@@ -792,7 +750,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
 			slots->Store(run, std::move(frame));
-			// The run's commands use the instance's gate entries from its first, in order.
 			for (std::size_t i = first; i < last; ++i)
 				if (display.commands[i].kind == Command::Kind::Draw && state.pendingPrograms[i])
 					state.gate->OpenDraw(instance * kGateEntries + static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);
@@ -809,11 +766,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto declared = std::make_shared<Reads>();
 			for (const auto& read : a_state.reads)
 				declared->push_back(read.texture);
-			// The scratch images are read only by a later display segment of the display that drew into them: a pass of any instance but the
-			// one the UI stage's graph makes first declares them (DisplayPass::Declare leaves its own target out). No earlier tap of the frame
-			// wrote anything that first instance could read, so each scratch image's first use in the frame is a draw into it, which clears it:
-			// its bytes may hold another stage's transients before (the frame arena). The anchor's own epoch (without the stages) runs one instance a
-			// run, and a scratch image there keeps what an earlier run drew: every pass declares them.
+			// Scratch images are declared by every instance but the first. Nothing earlier in the frame wrote them, and a draw into one
+			// clears it first, since the frame arena may hold other transients there. The anchor's own epoch declares them in every pass.
 			auto withScratch = std::make_shared<Reads>(*declared);
 			for (const auto& surface : a_state.surfaces)
 				if (surface->scratch >= 0 && surface->Drawable())
@@ -830,31 +784,28 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						.anchor = Anchor::Interface,
 						.order = a_order,
 						.kind = FrameAnchors::PassKind::Render,
-						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
+						// Recorded at execution from the slot the commit stores, without preparing a ticket again.
 						.atExecution = true };
-					// One pass per instance (the k-th display segment of the frame), each reading its own slots and gate entries.
+					// One pass per instance, each with its own slots and gate entries.
 					pass.makeInstance = [surface, a_slots, gate, a_withDepth, reads, firstReads, firstInstance](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
 						if (a_instance >= a_slots.size())
 							return nullptr;
-						// Recorded at execution in native mode (an anchor's own epoch) and in the UI stage's late batch alike.
 						return std::make_shared<DisplayPass>(surface, a_slots[a_instance], gate, a_withDepth, firstInstance == a_instance ? firstReads : reads,
 							FrameAnchors::RecordsAtExecution(Anchor::Interface), a_instance);
 					};
 					client.passes.push_back(std::move(pass));
 				};
-				// Within an instance the scratch images' passes come first, as GFx draws a render target or a filter pass before the segment
-				// that reads it. One instance draws onto one surface, so this order only keeps the declarations in GFx's order.
+				// Scratch passes come first in an instance, as GFx draws a render target before the segment that reads it.
 				const std::int32_t order = surface->scratch >= 0 ? 2 * surface->scratch : 100 + 2 * static_cast<std::int32_t>(i);
 				add(surface->colourSlots, false, "", order);
 				if (surface->Masks())
 					add(surface->depthSlots, true, ".masks", order + 1);
 			}
-			// Fixed instances in the UI stage, all declared: how many displays the engine draws is its late decision. Made instance by
-			// instance, so a later display's passes follow an earlier one's on every surface.
+			// All instances are declared because how many displays the engine draws is decided late.
 			client.maxInstances = kInstances;
 			client.instances = [] { return kInstances; };
 			client.instanceMajor = true;
-			// A registration for new reads keeps the surfaces, slots and gate: the schedule's older registration draws the displays.
+			// A registration for new reads keeps the surfaces, slots and gate, so the older registration still draws the displays.
 			client.matchesById = true;
 			client.generation = a_state.surfacesGeneration;
 			client.registerResources = [](org::RenderGraph& a_graph) {
@@ -865,7 +816,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			client.commit = [](const FrameAnchors::Point&) { Commit(); };
 			client.active = [] { return Path().pending != nullptr; };
 			client.gates = { a_state.gate };
-			// New reads register again once the display's last run is done (Submit), never between its runs.
+			// New reads register only once the display's last run is done, never between its runs.
 			client.executed = [](const FrameAnchors::Point&) {
 				auto& state = Path();
 				if (state.pending)
@@ -874,11 +825,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return client;
 		}
 
-		/**
-		 * @brief Registers the client with a pass pair for every surface. At setup, the setup's build point (Engine::PostSetup) builds
-		 * the Interface graph with it before the first display; after a role's surface was made again, the next build point between
-		 * frames does. False, and the path failed, when it is refused.
-		 */
+		/** @brief Registers the client with a pass pair for every surface. False, failing the path, when refused. */
 		bool RegisterClient(PathState& a_state)
 		{
 			if (!FrameAnchors::Register(MakeClient(a_state))) {
@@ -893,9 +840,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief Native mode: registers the client again with the reads as they are now, after a run that found a new tracked texture.
-		 * Reads no commit used for kReadIdleCommits are dropped first. The Interface graph is built again off the render thread; until
-		 * it is attached, the graph built before draws the displays, the new reads through their raw indices.
+		 * @brief Registers again with the current reads after a run found a new tracked texture. The graph rebuilds off the render
+		 * thread, and until then the old graph draws new reads through their raw indices.
 		 */
 		void RegisterReads(PathState& a_state)
 		{
@@ -905,7 +851,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			RegisterClient(a_state);
 		}
 
-		/** @brief The engine render target whose texture is a_texture (DXVK's), or -1. */
 		std::int32_t EngineTargetOf(ID3D11Texture2D* a_texture)
 		{
 			auto* renderer = globals::game::renderer;
@@ -918,7 +863,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return -1;
 		}
 
-		/** @brief The refusal for a display onto another target, naming the engine target when it is one (counted per name). */
+		/** @brief The refusal reason for a display onto another target, naming the engine target when it is one. */
 		const char* OtherTargetReason(ID3D11Texture2D* a_texture)
 		{
 			static const std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> s_engine = [] {
@@ -932,7 +877,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			                     "a render target that is not a surface (not an engine target)";
 		}
 
-		/** @brief The engine depth-stencil target whose texture is a_texture (DXVK's), or -1. */
 		std::int32_t EngineDepthOf(ID3D11Texture2D* a_texture)
 		{
 			auto* renderer = globals::game::renderer;
@@ -945,7 +889,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return -1;
 		}
 
-		/** @brief The engine's framebuffer RTV (the back buffer's): HDR's saved one while HDR points kFRAMEBUFFER at its UI texture. */
+		/** @brief The back buffer's RTV, which is HDR's saved one while HDR points kFRAMEBUFFER at its UI texture. */
 		ID3D11RenderTargetView* FramebufferRtv()
 		{
 			auto* renderer = globals::game::renderer;
@@ -958,7 +902,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return rtv;
 		}
 
-		/** @brief a_rtv's texture (DXVK's, referenced) and view format; null for a view that is not of a 2D texture. */
 		winrt::com_ptr<ID3D11Texture2D> TextureOf(ID3D11RenderTargetView* a_rtv, DXGI_FORMAT& a_format)
 		{
 			a_format = DXGI_FORMAT_UNKNOWN;
@@ -976,7 +919,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return texture;
 		}
 
-		/** @brief The role's texture now (DXVK's, referenced) and its view format; null when the role has none (HDR off). */
+		/** @brief The role's texture now and its view format. Null when the role has none. */
 		winrt::com_ptr<ID3D11Texture2D> RoleTexture(Role a_role, DXGI_FORMAT& a_format)
 		{
 			if (a_role == Role::Framebuffer)
@@ -1013,7 +956,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 		}
 
-		/** @brief kMAIN's depth-stencil texture (DXVK's), the one UI::DrawInterface binds; null without one. */
 		ID3D11Texture2D* MainDepth()
 		{
 			auto* renderer = globals::game::renderer;
@@ -1023,7 +965,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
-		/** @brief The depth-stencil a role's displays mask with (DXVK's): kBOOK_TEXT's for the book's pages, kMAIN's for the rest. */
+		/** @brief The depth-stencil a role masks with. kBOOK_TEXT's for the book's pages, kMAIN's for the rest. */
 		ID3D11Texture2D* RoleDepth(Role a_role)
 		{
 			if (!IsBook(a_role))
@@ -1035,11 +977,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
-		/**
-		 * @brief a_texture (DXVK's), not an engine target, as a graph texture through the anchors' imports, so the image is one graph
-		 * resource whoever else imports it. HDR's UI texture by the name and views Bink imports it with ("hdr.ui"), any other as a render
-		 * target in a_format under a_id.
-		 */
+		/** @brief Imports a non-engine target through the anchors, so it is one graph resource whoever imports it. */
 		FrameAnchors::Texture ImportTarget(ID3D11Texture2D* a_texture, DXGI_FORMAT a_format, const std::string& a_id)
 		{
 			const auto& hdr = globals::features::hdrDisplay;
@@ -1056,25 +994,20 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return FrameAnchors::ImportTexture(a_id, a_texture, desc);
 		}
 
-		/**
-		 * @brief The graph texture of the role's target a_colour (DXVK's): an engine target's slot, HDR's twin (a_ownId set to the id this
-		 * client registers it under), or this client's import, one id per role (a texture made again for the role is that import's next
-		 * version, or a new slot, never one more id).
-		 */
+		/** @brief The graph texture of a role's target. A remade texture becomes that import's next version, never a new id. */
 		FrameAnchors::Texture ColourOf(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, std::string& a_ownId)
 		{
 			a_ownId.clear();
 			if (const auto target = EngineTargetOf(a_colour); target >= 0)
 				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
 			if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
-				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
+				// The graph-owned HDR UI twin, which the composite reads.
 				a_ownId = "cs.scaleform.hdr-ui";
 				return owned;
 			}
 			return ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
 		}
 
-		/** @brief The graph texture of a depth-stencil a_depth (DXVK's): an engine depth target's slot, or none. */
 		FrameAnchors::Texture DepthTextureOf(ID3D11Texture2D* a_depth)
 		{
 			if (!a_depth)
@@ -1083,7 +1016,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth)) : FrameAnchors::Texture{};
 		}
 
-		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
+		/** @brief Makes the role's surface. It has no passes when the target cannot be imported. */
 		std::shared_ptr<Surface> MakeSurface(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
 			auto surface = std::make_shared<Surface>();
@@ -1118,9 +1051,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief Every pipeline the surface's passes can draw with (DrawStates), queued on the program build thread: they build while
-		 * the game loads, from shaders the build compiles into the shader store. A key a display needs before its build finished is
-		 * built on the render thread (ProgramCache::Require, logged).
+		 * @brief Queues every pipeline the surface may need on the build thread, so they build while the game loads.
+		 * One needed before its build finished is built on the render thread and logged.
 		 */
 		void QueuePrograms(PathState& a_state, const Surface& a_surface)
 		{
@@ -1140,7 +1072,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			logger::info("[ORG] Scaleform: {} pipelines queued for the {} surface", queued, RoleName(a_surface.role));
 		}
 
-		/** @brief The surface whose colour is a_colour (DXVK's), or null. */
 		Surface* Find(const PathState& a_state, ID3D11Texture2D* a_colour)
 		{
 			for (const auto& surface : a_state.surfaces)
@@ -1149,10 +1080,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return nullptr;
 		}
 
-		/**
-		 * @brief The role's surface made from its texture now (with kMAIN's depth-stencil), its pipelines queued, replacing the role's
-		 * old one; false when the role has no texture (HDR off).
-		 */
+		/** @brief Replaces the role's surface with one made from its current texture. False when the role has none. */
 		bool DeclareSurface(PathState& a_state, Role a_role)
 		{
 			DXGI_FORMAT format{};
@@ -1164,7 +1092,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
 				if (a_old->scratch >= 0 || a_old->role != a_role)
 					return false;
-				// A pass of an older build that still holds it draws nothing more; its textures go once D3D11 and the graph are done.
+				// An older build's pass that still holds it draws nothing more.
 				a_old->Clear();
 				RenderGraphRuntime::Get().ReleaseAfterD3D11(a_old);
 				return true;
@@ -1174,10 +1102,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief The role's surface kept for its texture made again (a resize, HDR's textures made again) when the texture is the same
-		 * graph texture as before: the slot of an engine target or of this client's import takes the new texture as its next version, so
-		 * the passes stay and nothing is built. Its D3D11 identity and size follow the new texture. Null when the graph texture changed
-		 * (another slot, another format, another depth-stencil): the caller makes the surface again.
+		 * @brief Keeps a role's surface when its remade texture is the same graph texture, so nothing is rebuilt.
+		 * Null when the graph texture changed, and the caller remakes the surface.
 		 */
 		Surface* RefreshSurface(PathState& a_state, Role a_role, const Display& a_display)
 		{
@@ -1213,15 +1139,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief The surface a_display draws onto. Only the framebuffer's and HDR's UI texture's, declared at setup, are drawn on the
-		 * graph. When one of those roles' textures was made again (a resize, HDR's textures made again), its surface is made again
-		 * and the client registered again: the Interface graph is built with it at the next build point, between frames (a rebuild
-		 * trigger, logged). Null, with a_reason, otherwise.
+		 * @brief The surface a_display draws onto. A role whose texture was remade gets a new surface and a re-registration,
+		 * and the graph rebuilds at the next build point. Null with a_reason otherwise.
 		 */
 		Surface* SurfaceFor(PathState& a_state, const Display& a_display, bool a_needsDepth, const char*& a_reason)
 		{
 			if (a_display.scratch != -1) {
-				// A render target GFx pushed: drawn into its scratch image.
 				auto* scratch = const_cast<Surface*>(ScratchSurface(a_state, a_display.scratch));
 				if (!scratch || !scratch->Drawable())
 					a_reason = "a render target of GFx's that no scratch image could take (larger than the screen, or all in use)";
@@ -1262,7 +1185,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return nullptr;
 		}
 
-		/** @brief Logs each new power of two of the largest segment (more than kGateEntries commands take more than one run). */
+		/** @brief Logs each new power of two of the largest segment. */
 		void NoteSegment(PathState& a_state, std::uint32_t a_commands)
 		{
 			if (a_commands <= a_state.largestSegment)
@@ -1273,10 +1196,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (drawn in runs of at most {})", a_commands, kGateEntries);
 		}
 
-		/**
-		 * @brief A draw whose pipeline could not be built: the ProgramCache logged the build's error once; this names the key, once.
-		 * The draw is left out and the rest of its segment draws.
-		 */
+		/** @brief Names a draw's failed pipeline key once. The draw is left out and the rest of its segment draws. */
 		void NoteFailedProgram(PathState& a_state, const ProgramKey& a_key)
 		{
 			if (!a_state.failedPrograms.insert(a_key).second)
@@ -1288,7 +1208,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				a_key.state.lines ? "line strip" : "triangle list", static_cast<int>(a_key.colour), static_cast<int>(a_key.depth));
 		}
 
-		/** @brief A run that did not draw: an error of the graph path, logged once per reason. Not a readiness state. */
+		/** @brief Logs a graph path error once per reason. Not a readiness state. */
 		void Failure(const char* a_reason)
 		{
 			static std::vector<const char*> logged;
@@ -1298,7 +1218,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			logger::error("[ORG] Scaleform: a segment did not draw on the graph ({}); it is left out", a_reason);
 		}
 
-		/** @brief Submit's reason for a run that did not submit. */
 		const char* ReasonOf(FrameAnchors::RunStatus a_status)
 		{
 			switch (a_status) {
@@ -1314,11 +1233,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 	namespace
 	{
-		/**
-		 * @brief The scratch images: kScratchTargets graph textures of this client's, the largest role surface's size, registered with
-		 * the Interface graph and declared by every pass. GFx's pushed render targets are drawn into them (a filter's source and its
-		 * passes); the draws that read GFx's texture read its scratch image. Each has a pass that draws into it. Their pipelines queued.
-		 */
+		/** @brief Makes the scratch images that GFx's pushed render targets draw into, at the largest role surface's size. */
 		void MakeScratch(PathState& a_state)
 		{
 			for (const auto& surface : a_state.surfaces)
@@ -1328,8 +1243,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 			if (!a_state.scratchWidth || !a_state.scratchHeight)
 				return;
-			// Frame transients of the UI stage (Frame/Transients.h, group ScaleformScratch): their bytes are shared with other stages'
-			// transients. A draw into one clears it first, and no pass reads one before that draw in the frame (MakeClient).
+			// The scratch images share bytes with other stages' transients. A draw into one clears it, and nothing reads one before that.
 			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
 				org::TextureDescription desc{};
@@ -1348,8 +1262,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				texture->SetName(fmt::format("cs.scaleform.scratch.{}", i));
 				textures.push_back(std::move(texture));
 			}
-			// Frame transients: ORG derives their span from the graphs that use them (the UI stage's). Guest mode, or the arena off
-			// (CS_ORG_FRAME_ARENA=0): memory of their own.
+			// In guest mode or with the arena off they get memory of their own.
 			try {
 				a_state.scratchPlacement = RenderGraph::Frame::Transients::Place("Scaleform's scratch images", textures);
 			} catch (const std::exception& e) {
@@ -1411,7 +1324,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return;
 		}
 		for (std::uint32_t i = 0; i < state.samplers.size(); ++i) {
-			// CreateShaders' samplers: point or linear (sample mode), wrap or clamp (wrap mode), LOD bias -0.5, the top mip only.
+			// CreateShaders' samplers use LOD bias -0.5 and the top mip only.
 			D3D11_SAMPLER_DESC desc{};
 			desc.Filter = (i & 1) ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
 			desc.AddressU = desc.AddressV = desc.AddressW = (i & 2) ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
@@ -1427,11 +1340,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return;
 			}
 		}
-		// kGateEntries per instance (the UI stage's taps of one frame each have their own).
+		// Each instance has its own kGateEntries.
 		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries * kInstances);
 		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
 			.minimumBytes = kMinimumStaging,
-			// About the Interface anchor's runs a frame: a display, and one more per render target or filter pass in it.
 			.runsPerFrame = kInstances });
 		if (!state.gate || !state.staging) {
 			state.failed = true;
@@ -1469,11 +1381,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return false;
 		}
 		if (a_display.commands.empty() && !a_display.clearTarget)
-			return true;  // nothing drawn, as the D3D11 renderer would draw nothing
+			return true;  // the D3D11 renderer would draw nothing too
 		const auto commandCount = static_cast<std::uint32_t>(a_display.commands.size());
 		NoteSegment(state, commandCount);
-		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it. The scratch images have
-		// none: masks inside a render target GFx pushed are not drawn (its stencil surface is not a scratch image yet).
+		// Masks inside a pushed render target are not drawn, since scratch images have no stencil surface yet.
 		const bool needsDepth = a_display.scratch == -1 && a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
 			return a_command.kind == Command::Kind::ClearStencil || a_command.state.stencil != Stencil::Off;
 		});
@@ -1481,8 +1392,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		if (!surface)
 			return false;
 
-		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11. A key that
-		// failed to build leaves its draw out (logged once); the rest of the segment draws.
+		// A pipeline still building is built here, never left to D3D11. A key that failed leaves its draw out.
 		state.pendingPrograms.assign(a_display.commands.size(), nullptr);
 		for (std::size_t i = 0; i < a_display.commands.size(); ++i) {
 			const Command& command = a_display.commands[i];
@@ -1495,9 +1405,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!state.pendingPrograms[i])
 				NoteFailedProgram(state, key);
 		}
-		// The UI stage takes the run (a world frame): its schedule must hold a registration with the surfaces as they are. Until the stage's
-		// build with new surfaces switches in, the display lags (a schedule change takes effect at a frame boundary). A registration for new
-		// reads alone keeps the surfaces: the schedule's older registration draws it (the new reads through their raw indices until then).
+		// The UI stage's schedule must hold a registration with the current surfaces. Until a rebuild switches in at a frame
+		// boundary the display lags.
 		const auto hold = FrameAnchors::HeldNow(kClientId, Anchor::Interface);
 		if (hold.held) {
 			if (!hold.scheduled || hold.generation != state.surfacesGeneration) {
@@ -1507,7 +1416,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return false;
 			}
 		} else if (FrameAnchors::Scheduled(kClientId, Anchor::Interface)) {
-			// The anchor's own epoch: the latest registration is in its built graph, or an older one with the same surfaces is.
 			state.builtRegistration = state.registrations;
 		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
 			state.pendingPrograms.clear();
@@ -1518,7 +1426,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return false;
 		}
 
-		// One run per kGateEntries commands, in order: the target and the depth-stencil carry what each run drew into the next.
+		// One run per kGateEntries commands. The target and depth carry each run's result into the next.
 		state.pending = &a_display;
 		state.pendingSurface = surface;
 		state.pendingDepth = needsDepth;

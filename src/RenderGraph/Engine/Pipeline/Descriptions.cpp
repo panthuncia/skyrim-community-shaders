@@ -42,7 +42,6 @@ namespace RenderGraph::Engine::Pipeline
 		constexpr std::uint32_t kDepthModes = 6;
 		constexpr std::uint32_t kStencilModes = 40;
 
-		// The private-data key of the token that ties a description to its object.
 		constexpr GUID kTokenGuid = { 0x5c1f3e2a, 0x7b4d, 0x4e61, { 0x9a, 0x52, 0x0d, 0x3f, 0x6e, 0x81, 0x24, 0xb7 } };
 
 		enum class EntryKind : std::uint8_t
@@ -66,18 +65,18 @@ namespace RenderGraph::Engine::Pipeline
 		{
 			std::shared_mutex lock;
 			std::unordered_map<const void*, Entry> entries;
-			// BSGraphics::Renderer::CreateInputLayout's layouts by key. The engine never releases them.
+			// The engine never releases these layouts.
 			std::unordered_map<std::uint64_t, std::shared_ptr<const InputLayoutDescription>> layoutsByKey;
 		};
 
-		// Never destroyed: tokens are released when their objects go, which can be after static destruction.
+		// Never destroyed, since tokens are released when their objects go, which can be after static destruction.
 		Registry& GetRegistry()
 		{
 			static auto* registry = new Registry;
 			return *registry;
 		}
 
-		/** @brief Kept in an object's private data. Its last release (the object's destruction) removes the object's entry. */
+		/** @brief Its last release, at the object's destruction, removes the object's entry. */
 		class Token final : public IUnknown
 		{
 		public:
@@ -104,7 +103,7 @@ namespace RenderGraph::Engine::Pipeline
 					auto& registry = GetRegistry();
 					{
 						std::unique_lock lock(registry.lock);
-						// A later description of the same object replaced this one: leave it.
+						// A later description of the same object replaced this one, so leave it.
 						if (const auto found = registry.entries.find(key); found != registry.entries.end() && found->second.description.get() == description)
 							registry.entries.erase(found);
 					}
@@ -119,7 +118,7 @@ namespace RenderGraph::Engine::Pipeline
 			const void* description;
 		};
 
-		// The object a lookup keys on: a guest handle's wrapped object, else the object itself (a native handle included).
+		// A guest handle's wrapped object, else the object itself, native handles included.
 		template <class T>
 		T* RealOf(T* a_object)
 		{
@@ -129,7 +128,7 @@ namespace RenderGraph::Engine::Pipeline
 			return wrapped ? static_cast<T*>(wrapped) : a_object;
 		}
 
-		// a_key is the pointer lookups pass (the interface the object was created as); a_object the same object as a device child.
+		// a_key is the interface pointer lookups pass. a_object is the same object as a device child.
 		void Insert(const void* a_key, ID3D11DeviceChild* a_object, EntryKind a_kind, std::shared_ptr<const void> a_description)
 		{
 			const void* key = a_key;
@@ -161,14 +160,12 @@ namespace RenderGraph::Engine::Pipeline
 			return std::static_pointer_cast<const D>(found->second.description);
 		}
 
-		// A state object's description, made from GetDesc on first sight. It needs no recording (CS_ORG_ENGINE_SHADERS): the engine
-		// draw families build their pipelines from these with the switch off too.
+		// Described from GetDesc on first sight, even without CS_ORG_ENGINE_SHADERS, because the engine draw families need it.
 		template <class D, class Object, class Make>
 		std::shared_ptr<const D> FindOrDescribe(Object* a_object, EntryKind a_kind, Make&& a_make)
 		{
 			if (!a_object)
 				return nullptr;
-			// The wrapped object, or the object itself; a native handle answers GetDesc too.
 			auto* real = RealOf(a_object);
 			if (auto found = Lookup<D>(real, a_kind))
 				return found;
@@ -198,7 +195,7 @@ namespace RenderGraph::Engine::Pipeline
 			return org::services::HashShaderBytes(std::as_bytes(a_bytes));
 		}
 
-		/** @brief FNV-1a over the values a pipeline key covers, field by field (D3D11 descriptions have padding). */
+		/** @brief FNV-1a field by field, since D3D11 descriptions have padding. */
 		class KeyHasher
 		{
 		public:
@@ -270,7 +267,7 @@ namespace RenderGraph::Engine::Pipeline
 			AddFace(a_hasher, a_desc.BackFace);
 		}
 
-		// The scissor flag is left out: it is not pipeline state.
+		// The scissor flag is not pipeline state.
 		void AddRaster(KeyHasher& a_hasher, const D3D11_RASTERIZER_DESC& a_desc)
 		{
 			a_hasher.Add(static_cast<std::uint32_t>(a_desc.FillMode));
@@ -490,7 +487,7 @@ namespace RenderGraph::Engine::Pipeline
 		const auto* state = globals::state;
 		out.vertexShader = state && state->customVertexShader ? state->customVertexShader : shadow.currentVertexShader;
 		out.pixelShader = state && state->customPixelShader ? state->customPixelShader : shadow.currentPixelShader;
-		// The engine keys its layouts on its own current vertex shader (SetDirtyStates), even while CS's replacement is bound.
+		// The engine keys layouts on its own current vertex shader, even while CS's replacement is bound.
 		out.inputLayoutKey = shadow.currentVertexShader ? (shadow.currentVertexShader->vertexDesc & shadow.vertexDesc) : 0;
 		out.depthMode = static_cast<std::uint32_t>(shadow.depthStencilDepthMode);
 		out.stencilMode = shadow.depthStencilStencilMode;
@@ -604,7 +601,7 @@ namespace RenderGraph::Engine::Pipeline
 		for (auto& attribute : a_layout.attributes) {
 			std::uint32_t location = 0;
 			for (const auto& input : a_vertexShader.inputs) {
-				// System values (SV_VertexID, SV_InstanceID) take no vertex input location.
+				// System values take no vertex input location.
 				if (input.semantic.size() >= 3 && equal(std::string_view(input.semantic).substr(0, 3), "SV_"))
 					continue;
 				if (input.index == attribute.semanticIndex && equal(input.semantic, attribute.semanticName)) {

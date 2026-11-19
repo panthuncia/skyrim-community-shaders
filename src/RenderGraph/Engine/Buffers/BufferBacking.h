@@ -1,6 +1,6 @@
 #pragma once
 
-// Shared by the static buffers and the dynamic ring (EngineBuffers.h). Only built with the render graph.
+// Shared by the static buffers and the dynamic ring. Only built with the render graph.
 
 #include <d3d11.h>
 
@@ -18,7 +18,7 @@ namespace org
 
 namespace RenderGraph::Engine::Buffers::detail
 {
-	/** @brief An ORG buffer in GPUUpload memory, persistently mapped, and the guest DXVK buffer made from it. */
+	/** @brief A persistently mapped ORG buffer in GPUUpload memory, and the DXVK buffer made from it. */
 	struct Backing
 	{
 		// Declared first, so it is released after the guest buffer that reads it.
@@ -27,22 +27,15 @@ namespace RenderGraph::Engine::Buffers::detail
 		std::uint8_t* data = nullptr;
 	};
 
-	/**
-	 * @brief A new backing of a_desc.ByteWidth bytes, its guest buffer bound as a_desc.BindFlags (DEFAULT usage, no CPU access).
-	 * Nullopt, the first failure of each kind logged, when the render graph is not active, the memory cannot be had or mapped, or
-	 * DXVK refuses the wrap. Any thread.
-	 */
+	/** @brief Nullopt when the graph is inactive, the memory cannot be had or mapped, or DXVK refuses the wrap. Logged once per kind. Any thread. */
 	std::optional<Backing> MakeBacking(const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/**
-	 * @brief What the engine's field holds for a backing: a tripwire handle wrapping the guest buffer while P4.1's wrapping context is
-	 * the engine's (Tripwire::GuestContextInstalled), else the guest buffer with the ORG buffer attached (Tripwire::AttachGraphResource).
-	 * Either way the ORG buffer is retired through Tripwire::ServiceRetired once the last reference goes. Null when the ORG buffer
-	 * could not be tied to it (the caller then drops the backing). Any thread.
-	 */
+	* @brief A tripwire handle while the guest context is installed, else the guest buffer with the ORG buffer attached.
+	* Either way the ORG buffer retires after the last reference. Null on failure, and the caller drops the backing. Any thread.
+	*/
 	winrt::com_ptr<ID3D11Buffer> EngineView(const D3D11_BUFFER_DESC& a_desc, const Backing& a_backing, const char* a_name);
 
-	/** @brief The counters behind Buffers::GetStats. */
 	struct Counters
 	{
 		std::atomic<std::uint64_t> created{ 0 }, createdBytes{ 0 }, fallbacks{ 0 };
@@ -51,18 +44,14 @@ namespace RenderGraph::Engine::Buffers::detail
 	};
 	Counters& GetCounters();
 
-	/** @brief InstallGameHooks' part for the ring: the map (75484) and the three unmaps. */
+	/** @brief The map (75484) and the three unmaps. */
 	void InstallRingHooks();
 
-	/**
-	 * @brief The ring's late-bound buffer: its readers declare it, and each chunk is published as its version when it becomes the
-	 * current one. Made at the first call. Null when it could not be made (logged once). Any thread.
-	 */
+	/** @brief Made at the first call. Null, logged once, when it could not be made. Any thread. */
 	const std::shared_ptr<org::VersionedBuffer>& RingVersions();
 
-	/** @brief Whether a_buffer is one of the ring's chunks. Any thread. */
+	/** @brief Any thread. */
 	bool IsRingChunk(const org::Buffer* a_buffer);
 
-	/** @brief EndFrame's part for the ring: the full chunks of ended frames go back behind the work submitted so far. */
 	void ReleaseEndedFrames();
 }

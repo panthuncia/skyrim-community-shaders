@@ -6,19 +6,15 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 
-// The render owner's claim point and the loading screen's log (docs/development/p5/loading-screen.md). SE 1.5.97 and AE 1.6.1170
-// are the same functions.
+// The render owner's claim point and the loading screen's log. SE 1.5.97 and AE 1.6.1170 are the same functions.
 namespace RenderGraph::Engine::LoadingScreen
 {
 	namespace
 	{
 		/**
-		 * @brief Renderer::Begin (SE 75460 / 0x140d6a0c0, AE 77245): the start of every engine frame, inside Renderer::Lock, on the thread
-		 * that renders it. Its callers (Ghidra, SE) are the main frame (0x1405b1020), the loading loop (ServingThread::RunLoadingScreen,
-		 * 38085) and BSMoviePlayer::Tick when no frame is open (the startup logo, on the MoviePlayer thread). That thread owns rendering
-		 * from here until another thread begins a frame (CS_ORG_LOADING_THREAD=1). The frame driver describes the frame here too
-		 * (RenderGraph/Frame/FrameDriver.h), after the claim, so the description is the new owner's.
-		 */
+		* @brief Renderer::Begin (SE 75460, AE 77245), on whichever thread renders the frame, inside Renderer::Lock.
+		* With CS_ORG_LOADING_THREAD=1 that thread owns rendering until another one begins a frame. The frame driver describes the frame after the claim.
+		*/
 		struct RendererBegin
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags)
@@ -35,17 +31,15 @@ namespace RenderGraph::Engine::LoadingScreen
 		};
 
 		/**
-		 * @brief ServingThread::SetLoadingScreenActive (SE 34552, AE 35407), called by the load coordinator (SE 13214, AE 13363) on
-		 * the main thread. true starts the loading loop on the serving thread (mode 2) and returns. false stops it and returns only
-		 * once the loop's last iteration ended. Logged only: the loop's frames claim rendering at their Begin, and the main thread's
-		 * next frame claims it back the same way.
-		 */
+		* @brief ServingThread::SetLoadingScreenActive (SE 34552, AE 35407), on the main thread. False returns only after the loop's last iteration.
+		* Logged only, since the frames claim rendering at their own Begin.
+		*/
 		struct SetLoadingScreenActive
 		{
 			static void thunk(bool a_active)
 			{
 				const std::uint64_t before = FrameAnchors::RenderOwnerChanges();
-				// The frame driver: the loop's frames are a loading screen's from before the loop starts until after it ended.
+				// The loop's frames count as a loading screen from before the loop starts until after it ends.
 				if (a_active)
 					Frame::Driver::OnLoadingScreen(true);
 				func(a_active);
@@ -76,8 +70,7 @@ namespace RenderGraph::Engine::LoadingScreen
 
 	void Install()
 	{
-		// Renderer::Begin and SetLoadingScreenActive are hooked for the frame driver in every mode; the render-owner rule acts only when
-		// requested.
+		// Hooked for the frame driver in every mode. The render-owner rule acts only when requested.
 		if (Requested())
 			logger::info("[ORG] render ownership: the CS_ORG_LOADING_THREAD rule is on; Renderer::Begin claims rendering for its thread");
 		stl::detour_thunk<RendererBegin>(REL::RelocationID(75460, 77245));

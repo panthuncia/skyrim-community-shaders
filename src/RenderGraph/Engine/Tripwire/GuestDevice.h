@@ -3,41 +3,24 @@
 #include <d3d11.h>
 
 /**
- * @brief The guest device and context (org-full-port.md P4.1, CS_ORG_TRIPWIRE_GUEST=1): wrapping tripwire handles in the
- * engine's device and immediate-context pointers, so the engine can pass tripwire handles to D3D11 while DXVK is the host.
+ * @brief The guest device and context, behind CS_ORG_TRIPWIRE_GUEST=1. Wrapping tripwire handles go in the engine's device and
+ * context pointers, so the engine can pass tripwire handles to D3D11 while DXVK is the host.
  *
- * DXVK casts every object it is given to its own class, so a handle that reaches DXVK's context directly crashes there. With the
- * guest device and context installed, every engine call goes through a handle that unwraps handle arguments before it forwards
- * the call to DXVK, and logs each call site that passes one (a reader not ported yet). The pointers replaced are the device global
- * (SE 524729 / AE 411348), the context global (SE 524771 / AE 411391) and RendererData's device and context (+0x38 / +0x40, the
- * same fields Scaleform reads through GetScaleformRendererParameters, 75576 / 77378). Scaleform's renderer is made after the
- * install, so it gets the handles too.
- *
- * globals::d3d::device and globals::d3d::context stay DXVK's own objects (ReInit unwraps them): CS's D3D11 hooks sit on DXVK's
- * vtables, DXVK's private exports take DXVK's objects, and CS's own calls skip the forwarding. CS code that passes an engine
- * field to them goes through Tripwire::Unwrap.
- *
- * With the switch off nothing changes. Ports install handles in engine fields only when GuestContextInstalled() is true.
+ * DXVK casts every object it gets to its own class, so a handle reaching DXVK directly crashes. The guest handles unwrap
+ * handle arguments before forwarding. The replaced pointers are the device global (SE 524729 / AE 411348), the context global
+ * (SE 524771 / AE 411391) and RendererData's device and context at +0x38 / +0x40.
+ * globals::d3d::device and context stay DXVK's own objects, since CS's hooks and DXVK's exports need them. Use Tripwire::Unwrap.
  */
 namespace RenderGraph::Engine::Tripwire
 {
-	/** @brief Whether CS_ORG_TRIPWIRE_GUEST=1 asks for the guest device and context. */
 	bool GuestRequested();
 
-	/**
-	 * @brief Startup, right after the engine created its device and context (the InitD3D hook in Hooks.cpp), on the main thread
-	 * before any other thread renders: puts the guest handles in the engine's pointers when GuestRequested(). Does nothing
-	 * otherwise, or a second time. Logs what it did.
-	 */
+	/** @brief Puts the guest handles in the engine's pointers, right after InitD3D and before any other thread renders. Once. */
 	void InstallGuestDevice();
 
-	/**
-	 * @brief Native mode: the engine's device and context are native handles (the native device creation returned them, so the
-	 * engine stored them itself). From then on GuestContextInstalled is true, and the ports install their handles as with the
-	 * guest. Once.
-	 */
+	/** @brief Marks the native handles the engine already stored as installed, so ports install handles as with the guest. Once. */
 	void InstallNativeDevice(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
 
-	/** @brief Whether the engine's device and context pointers hold the guest handles (or native mode's). Ports gate their handle installs on it. */
+	/** @brief Whether the engine's device and context pointers hold guest or native handles. Ports gate their installs on it. */
 	bool GuestContextInstalled();
 }

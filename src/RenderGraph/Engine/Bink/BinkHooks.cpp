@@ -22,25 +22,23 @@
 #include <unordered_map>
 #include <vector>
 
-// The movie player's hooks (docs/development/p5/bink.md has the RE, SE 1.5.97 and AE 1.6.1170). Every hook calls the engine's
-// function unless this tick of the player decodes and draws on the render graph (BinkGraph.h).
+// The movie player's hooks. The RE is in docs/development/p5/bink.md. Every hook calls the engine's function unless this tick
+// decodes and draws on the render graph.
 namespace RenderGraph::Engine::Bink
 {
 	namespace
 	{
-		// InstallHooks detoured BSMoviePlayer::Tick (TickHooked).
 		bool tickHooked = false;
 
-		// BSMoviePlayer (0x30 bytes): the BINK handle, the tile set, the decoded frame count, the scale and offsets, the mode.
+		// BSMoviePlayer is 0x30 bytes.
 		constexpr std::size_t kPlayerTiles = 0x08;
 		constexpr std::size_t kPlayerFrames = 0x10;
 		constexpr std::size_t kPlayerMode = 0x24;
-		// Mode 1: the blocking play loop (BSMoviePlayer::PlayBlocking), whose ticks present themselves. Mode 2 is ticked only by
-		// MoviePlayer::TickInFrame (SE 87920, AE 90293), which nothing calls in SE 1.5.97 or AE 1.6.1170 (only its unwind data
-		// refers to it): every tick is a mode-1 tick.
+		// Mode 1 is the blocking play loop, whose ticks present themselves. Mode 2 is ticked only by MoviePlayer::TickInFrame
+		// (SE 87920, AE 90293), which nothing calls in SE 1.5.97 or AE 1.6.1170, so every tick is mode 1.
 		constexpr std::uint32_t kModeBlocking = 1;
 
-		// The tile set BSMovie::CreateTileTextures returns (0x70 bytes, then the texture pointers).
+		// The tile set BSMovie::CreateTileTextures returns is 0x70 bytes, followed by the texture pointers.
 		constexpr std::size_t kSetTileCount = 0x18;
 		constexpr std::size_t kSetColumns = 0x1C;
 		constexpr std::size_t kSetRows = 0x20;
@@ -55,10 +53,7 @@ namespace RenderGraph::Engine::Bink
 			return *reinterpret_cast<const T*>(reinterpret_cast<const std::byte*>(a_base) + a_offset);
 		}
 
-		/**
-		 * @brief Whether this thread holds Renderer::Lock: the renderer's CRITICAL_SECTION (Renderer +0x2790 SE, +0x27F0 AE; bink.md,
-		 * "Threads") is owned by it. The startup logo's PlaySequence holds it for the whole sequence.
-		 */
+		/** @brief Whether this thread owns Renderer::Lock, at Renderer +0x2790 SE or +0x27F0 AE. The startup logo holds it for the whole sequence. */
 		bool HoldsRendererLock()
 		{
 			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -69,11 +64,8 @@ namespace RenderGraph::Engine::Bink
 		}
 
 		/**
-		 * @brief A blocking movie's tick on a thread that does not own rendering yet: the startup logo's first tick, on the MoviePlayer
-		 * thread. With CS_ORG_LOADING_THREAD=1 that thread takes rendering at the tick's Renderer::Begin, after Eligible would have
-		 * found it not the render owner, so the logo's first frame was the engine's. The thread holds Renderer::Lock for the whole
-		 * sequence, so no other thread renders until it ends: the claim Begin makes is made at the tick's start instead. The client
-		 * is in the Present graph since setup's build point, so nothing is built here. Once per ownership change.
+		 * @brief Claims rendering at the start of the logo's first tick, since its thread only takes rendering at Renderer::Begin, after
+		 * Eligible ran. The thread holds Renderer::Lock for the whole sequence, so no other thread renders meanwhile. Once per ownership change.
 		 */
 		void ClaimForBlockingTick(std::uintptr_t a_player)
 		{
@@ -86,7 +78,7 @@ namespace RenderGraph::Engine::Bink
 				FrameAnchors::IsRenderOwner() ? "" : " (the claim did not take: the engine draws this tick)");
 		}
 
-		/** @brief A tile set the engine made: its layout, its tile textures (to know the locks), and its graph side once made. */
+		/** @brief A tile set the engine made, with its layout, its tile textures and its graph side once made. */
 		struct Record
 		{
 			Layout layout;
@@ -100,7 +92,7 @@ namespace RenderGraph::Engine::Bink
 
 		struct Records
 		{
-			std::mutex mutex;  // tile sets are made and freed on the thread that plays them (the logo's is not the main thread)
+			std::mutex mutex;  // tile sets are made and freed on the thread that plays them, which for the logo is not the main thread
 			std::unordered_map<const void*, Record> sets;
 		};
 
@@ -110,12 +102,12 @@ namespace RenderGraph::Engine::Bink
 			return s_records;
 		}
 
-		/** @brief One tick of the player on this thread: whether it decodes and draws on the graph, and the tiles it locks. */
+		/** @brief One tick of the player on this thread. */
 		struct Tick
 		{
 			std::uintptr_t player = 0;
 			const void* set = nullptr;
-			std::shared_ptr<Graph::Movie> movie;  // null: the engine's path this tick
+			std::shared_ptr<Graph::Movie> movie;  // null means the engine's path this tick
 			std::vector<const void*> blocks;
 			bool locked = false;
 
@@ -128,7 +120,7 @@ namespace RenderGraph::Engine::Bink
 
 		thread_local Tick* t_tick = nullptr;
 
-		/** @brief CS_ORG_BINK_SHOT=<n>[,<n>...] (a diagnostic): decoded frames whose Present is saved as dclf-shots/bink-<n>.png. */
+		/** @brief Diagnostic. Decoded frames whose Present is saved as dclf-shots/bink-<n>.png. */
 		const std::set<std::uint32_t>& ShotFrames()
 		{
 			static const std::set<std::uint32_t> frames = [] {
@@ -159,17 +151,13 @@ namespace RenderGraph::Engine::Bink
 			globals::features::screenshotFeature.RequestCapture(dir / fmt::format("bink-{}.png", frame));
 		}
 
-		/** @brief Logs, once per reason, why a tick stays the engine's. */
 		void EngineKeeps(std::string_view a_reason)
 		{
 			static Util::ReasonLog s_log("[ORG] Bink: the engine draws this movie");
 			s_log.Report(a_reason);
 		}
 
-		/**
-		 * @brief Whether the engine has a frame open (BGSMoviePlayer vfunc +0x58, the flag Renderer::Begin sets): a blocking tick that
-		 * finds none begins its own, so it starts between two frames.
-		 */
+		/** @brief Whether the engine has a frame open, via BGSMoviePlayer vfunc +0x58. A blocking tick without one starts between two frames. */
 		bool InFrame()
 		{
 			static REL::Relocation<void**> player{ REL::RelocationID(525733, 412214) };
@@ -181,7 +169,7 @@ namespace RenderGraph::Engine::Bink
 			return reinterpret_cast<InFrameFn>(vtable[0x58 / sizeof(void*)])(object);
 		}
 
-		/** @brief Whether this tick may draw on the graph, before Graph::Begin: the engine's path in every case the port does not cover. */
+		/** @brief Whether this tick may draw on the graph. Every case the port does not cover keeps the engine's path. */
 		bool Eligible(std::uintptr_t a_player, const void* a_set)
 		{
 			if (!Requested() || !a_player || !a_set)
@@ -200,7 +188,7 @@ namespace RenderGraph::Engine::Bink
 			return true;
 		}
 
-		/** @brief The graph side of a tile set, made the first time a tick of it draws on the graph. Render thread. */
+		/** @brief Makes a tile set's graph side the first time a tick of it draws on the graph. Render thread. */
 		bool StartGraphTick(Tick& a_tick)
 		{
 			auto& records = GetRecords();
@@ -224,7 +212,7 @@ namespace RenderGraph::Engine::Bink
 			return true;
 		}
 
-		/** @brief After the engine drew a tick: the graph's textures are older than the engine's now, and the count. */
+		/** @brief Marks the graph's textures older than the engine's after the engine drew a tick. */
 		void EngineDrew(const void* a_set)
 		{
 			auto& records = GetRecords();
@@ -245,21 +233,16 @@ namespace RenderGraph::Engine::Bink
 				++found->second.graphFrames;
 		}
 
-		/**
-		 * @brief BSMoviePlayer::Tick (SE 87890, AE 90259): waits for the next frame, decodes it into the tiles (SE: DecodeFrameToTiles
-		 * 87911; inlined on AE), clears kFRAMEBUFFER, draws the tiles (DrawTiles) and presents (Renderer::End) unless in mode 2.
-		 */
+		/** @brief BSMoviePlayer::Tick (SE 87890, AE 90259). Decodes, clears kFRAMEBUFFER, draws the tiles and presents unless in mode 2. */
 		struct PlayerTick
 		{
 			static std::uint64_t thunk(std::uintptr_t a_player, std::uintptr_t a_arg2, std::uintptr_t a_arg3, std::uintptr_t a_arg4)
 			{
-				// A frame this tick begins is a Bink movie's (the frame driver's kind).
 				const Frame::Driver::MovieTickScope frameKind;
 				Tick tick;
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
 				ClaimForBlockingTick(a_player);
-				// A blocking tick without a frame open is between two frames.
 				if (Eligible(a_player, tick.set) && Graph::Begin(!InFrame()))
 					StartGraphTick(tick);
 				auto* const outer = std::exchange(t_tick, &tick);
@@ -272,10 +255,7 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief BSGraphics::Renderer::LockTexture (SE 75514, AE 77306): Map of the block's texture on the immediate context. For a
-		 * tile of a graph tick, the tile's place in the tick's staging buffer instead.
-		 */
+		/** @brief Renderer::LockTexture (SE 75514, AE 77306). A graph tick's tile gets its place in the staging buffer instead. */
 		struct LockTexture
 		{
 			static bool thunk(void* a_renderer, const void* a_block, std::uint32_t a_mapType, D3D11_MAPPED_SUBRESOURCE* a_mapped)
@@ -290,8 +270,7 @@ namespace RenderGraph::Engine::Bink
 							tick->locked = true;
 							return true;
 						}
-						// No staging buffer could be made (the first lock of the tick takes it; the pool has no cap, so only an
-						// allocation failure): the engine decodes and draws this tick.
+						// Only an allocation failure leaves no staging buffer, and then the engine decodes and draws this tick.
 						if (!tick->locked) {
 							Graph::MarkStale(*tick->movie);
 							tick->movie.reset();
@@ -303,7 +282,7 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief BSGraphics::Renderer::UnlockTexture (SE 75515, AE 77307): Unmap; nothing for a tile a graph tick locked. */
+		/** @brief Renderer::UnlockTexture (SE 75515, AE 77307). Nothing for a tile a graph tick locked. */
 		struct UnlockTexture
 		{
 			static void thunk(void* a_renderer, const void* a_block)
@@ -315,10 +294,7 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief BSMovie::DrawTiles (SE 87907, AE 90279): the copy shaders, then per tile its texture at PS t0 (clamp, linear) and
-		 * its quad (DrawTriShape), with blending and depth off. Withheld on a graph tick: the frame is queued for the Present anchor.
-		 */
+		/** @brief BSMovie::DrawTiles (SE 87907, AE 90279). Withheld on a graph tick, whose frame goes to the Present anchor. */
 		struct DrawTiles
 		{
 			static void thunk(const void* a_set)
@@ -326,9 +302,8 @@ namespace RenderGraph::Engine::Bink
 				auto* tick = t_tick;
 				bool graph = false;
 				if (tick && tick->movie && a_set == tick->set) {
-					// HDR output: HDR Display's own preparation (the scene cleared, kFRAMEBUFFER pointed at its UI texture), which its detour
-					// of this function makes, is made here too, because a graph tick does not call through. The tiles then go into the UI
-					// texture, which the composite reads.
+					// A graph tick does not call through HDR Display's detour of this function, so its preparation is done here.
+					// The tiles then go into the UI texture, which the composite reads.
 					auto& hdr = globals::features::hdrDisplay;
 					bool intoUi = false;
 					if (hdr.loaded) {
@@ -344,17 +319,13 @@ namespace RenderGraph::Engine::Bink
 					return;
 				}
 				EngineDrew(a_set);
-				// A tick the graph does not take: the engine's draw, which the flush latch skips when it is on. Every such case is logged
-				// once with its reason ("[ORG] Bink: the engine draws ...").
+				// The engine's draw, which the flush latch skips when it is on. Every such case is logged once with its reason.
 				func(a_set);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief BSMovie::CreateTileTextures (SE 87904, AE 90275): the tile set, its DYNAMIC R8G8B8A8 textures and quads, for a movie
-		 * of a_width x a_height in tiles of a_tileSize, scaled by a_scale and placed at a_x, a_y (pixels).
-		 */
+		/** @brief BSMovie::CreateTileTextures (SE 87904, AE 90275), which makes the tile set's DYNAMIC textures and quads. */
 		struct CreateTileTextures
 		{
 			static void* thunk(std::uint32_t a_width, std::uint32_t a_height, std::int32_t a_bytesPerPixel, std::uint64_t a_tileSize, float a_scale, float a_x, float a_y)
@@ -383,7 +354,7 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief A tile set is about to be freed: its record goes, and the client leaves the Present anchor after a graph movie. */
+		/** @brief Drops a tile set's record before it is freed. */
 		void Forget(const void* a_set)
 		{
 			if (!a_set)
@@ -402,15 +373,12 @@ namespace RenderGraph::Engine::Bink
 						record.layout.videoHeight, record.graphFrames, record.engineFrames);
 				records.sets.erase(found);
 			}
-			// The frames in flight keep the graph's textures until their GPU work retires.
+			// Frames in flight keep the graph's textures until their GPU work retires.
 			if (graphMovie && FrameAnchors::IsRenderOwner())
 				Graph::MovieEnded();
 		}
 
-		/**
-		 * @brief BSMovie::FreeTiles (SE 87905, AE 90276): releases the tile textures and quads and frees the set. SE's play loop
-		 * calls it directly; on AE only Close frees tiles, with this inlined.
-		 */
+		/** @brief BSMovie::FreeTiles (SE 87905, AE 90276). SE's play loop calls it directly, while on AE only Close frees tiles, with this inlined. */
 		struct FreeTiles
 		{
 			static void thunk(void* a_set)
@@ -421,7 +389,7 @@ namespace RenderGraph::Engine::Bink
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief BSMoviePlayer::Close (SE 87891, AE 90260): BinkClose, then the player's tiles freed (FreeTiles, inlined on AE). */
+		/** @brief BSMoviePlayer::Close (SE 87891, AE 90260), which frees tiles with FreeTiles inlined on AE. */
 		struct ClosePlayer
 		{
 			static void thunk(std::uintptr_t a_player)
@@ -449,7 +417,7 @@ namespace RenderGraph::Engine::Bink
 			return s_pending;
 		}
 
-		/** @brief MoviePlayer::PlayMovie (SE 87918, AE 90291) as Console::PlayBink calls it, with its defaults. */
+		/** @brief MoviePlayer::PlayMovie (SE 87918, AE 90291) with Console::PlayBink's defaults. */
 		void Play(const std::string& a_file)
 		{
 			using PlayMovie = bool(void* a_player, const char* a_file, bool, bool, bool, bool, bool, bool, bool, bool);
@@ -464,7 +432,7 @@ namespace RenderGraph::Engine::Bink
 			logger::info("[ORG] Bink: {} {}", a_file, played ? "played" : "did not play to its end");
 		}
 
-		/** @brief The main-thread tick (MainTick, after the frame-job wait): plays the files the test harness asked for. */
+		/** @brief Plays the files the test harness asked for. Main thread. */
 		void PlayRequested()
 		{
 			auto& pending = Pending();
@@ -480,14 +448,12 @@ namespace RenderGraph::Engine::Bink
 				Play(file);
 		}
 
-		/** @brief Whether the test harness runs (CS_DCLF_TEST_COMMANDS): RequestPlay is its command, and is installed only then. */
 		bool HarnessRuns()
 		{
 			static const bool runs = Switches::IsSet("CS_DCLF_TEST_COMMANDS");
 			return runs;
 		}
 
-		// Set at plugin load once PlayRequested is on the main-thread tick.
 		std::atomic<bool> s_playTick{ false };
 	}
 
@@ -524,7 +490,6 @@ namespace RenderGraph::Engine::Bink
 	{
 		if (REL::Module::IsVR())
 			return;
-		// The test harness's dclf:bink plays through the main-thread tick, added at plugin load when the harness runs.
 		if (HarnessRuns())
 			s_playTick.store(MainTick::Add("Bink::RequestPlay", &PlayRequested), std::memory_order_release);
 		const bool shots = !ShotFrames().empty();

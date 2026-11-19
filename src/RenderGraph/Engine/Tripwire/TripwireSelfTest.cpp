@@ -32,7 +32,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			return std::memcmp(&a_left, &a_right, sizeof(T)) == 0;
 		}
 
-		// One forbidden call: a_call makes it and says whether it failed and zeroed its outputs; it must be counted once.
+		// A forbidden call must fail, zero its outputs, and be counted once.
 		template <class F>
 		void CheckTrip(Checks& a_check, Kind a_kind, const char* a_method, F&& a_call)
 		{
@@ -42,7 +42,6 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			a_check(Detail::Calls(a_kind, a_method) == before + 1, label + " is recorded");
 		}
 
-		// What every handle answers: identity, refcount, QueryInterface, the debug name.
 		template <class I>
 		void CheckCommon(Checks& a_check, I* a_object, Kind a_kind, std::string_view a_name)
 		{
@@ -139,7 +138,6 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			CheckGetDevice(a_check, buffer.get(), Kind::Buffer);
 			CheckFinalRelease(a_check, buffer, Kind::Buffer);
 
-			// Views answer GetResource with the resource they were made with.
 			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 			srvDesc.Format = desc2.Format;
 			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -165,7 +163,6 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			rtv->GetDesc(&readRtv);
 			a_check(SameBytes(readRtv, rtvDesc), "ID3D11RenderTargetView GetDesc returns its description");
 
-			// A view made without its resource trips on GetResource.
 			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 			dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 			dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
@@ -190,7 +187,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			uav->GetDesc(&readUav);
 			a_check(SameBytes(readUav, uavDesc), "ID3D11UnorderedAccessView GetDesc returns its description");
 
-			// The views hold their resources: the textures outlive the caller's references.
+			// The views hold their resources, so the textures outlive the caller's references.
 			CheckFinalRelease(a_check, srv, Kind::ShaderResourceView);
 			CheckFinalRelease(a_check, rtv, Kind::RenderTargetView);
 			a_check(texture2.detach()->Release() == 0, "ID3D11Texture2D is freed after its views");
@@ -337,8 +334,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			CheckFinalRelease(a_check, device, Kind::Device);
 		}
 
-		// Guest handles, wrapping native handles (no device exists this early): calls forward, watched ones are recorded on the way,
-		// and handle arguments reach the wrapped object unwrapped.
+		// Guest handles wrap native ones here, since no device exists this early.
 		void Guest(Checks& a_check)
 		{
 			const D3D11_TEXTURE2D_DESC desc{ 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
@@ -383,7 +379,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 
 			auto innerContext = CreateDeviceContext({ .name = "SelfTest::InnerContext" });
 			auto outerContext = CreateDeviceContext({ .name = "SelfTest::OuterContext" }, innerContext.get());
-			// Two calls counted: the outer context's site records the handle it passed on, and the native inner context fails.
+			// Two calls are counted. The outer site records the handle it passed on, and the native inner context fails.
 			const auto bindBefore = Detail::Calls(Kind::DeviceContext, "PSSetShaderResources");
 			outerContext->PSSetShaderResources(0, 2, views);
 			a_check(Detail::Calls(Kind::DeviceContext, "PSSetShaderResources") == bindBefore + 2,
@@ -393,14 +389,12 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			a_check(outerContext->Map(outer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped) == E_FAIL, "a guest context returns the wrapped context's result");
 
-			// Another D3D11 object interface is refused quietly, as D3D11 refuses it.
 			void* out = reinterpret_cast<void*>(1);
 			const auto queryBefore = Detail::Calls(Kind::Texture2D, "QueryInterface");
 			a_check(inner->QueryInterface(__uuidof(ID3D11Texture3D), &out) == E_NOINTERFACE && out == nullptr, "another texture interface is refused");
 			a_check(Detail::Calls(Kind::Texture2D, "QueryInterface") == queryBefore, "refusing another D3D11 object interface is no tripwire");
 		}
 
-		// A paired device and context answer each other, with balanced counts, and the context outlives the device safely.
 		void Paired(Checks& a_check)
 		{
 			auto device = CreateDevice({ .name = "SelfTest::PairedDevice" });
@@ -426,7 +420,7 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			CheckFinalRelease(a_check, context, Kind::DeviceContext);
 		}
 
-		/** @brief The least of a D3D11 object that keeps private data interfaces, standing in for a DXVK object. */
+		/** @brief A minimal D3D11 object with private data interfaces, standing in for a DXVK object. */
 		class FakeChild final : public ID3D11DeviceChild
 		{
 		public:
@@ -475,7 +469,6 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			winrt::com_ptr<IUnknown> stored;
 		};
 
-		// AttachGraphResource on a plain object: the owner lives as long as the object, then goes to the retired queue.
 		void Attached(Checks& a_check)
 		{
 			(void)TakeRetired();
@@ -493,7 +486,6 @@ namespace RenderGraph::Engine::Tripwire::SelfTest
 			a_check(GraphResourceOf(nullptr) == nullptr, "GraphResourceOf takes null");
 		}
 
-		// Release from several threads at once: the count stays exact and the owner is retired once, after the last one.
 		void Threads(Checks& a_check)
 		{
 			auto owner = std::make_shared<int>(1);

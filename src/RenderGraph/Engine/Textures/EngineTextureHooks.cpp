@@ -6,14 +6,13 @@
 #include <format>
 #include <string>
 
-// The engine's texture creators, hooked for CS_ORG_ENGINE_TEXTURES (docs/development/p4/textures.md has the RE). Each makes the
-// 0x28-byte block the engine keeps (BSGraphics::Texture: texture +0x00, view +0x10, refcount +0x20) the way the engine's own
-// function does, around Create's objects, or calls the engine's function when Create declines.
+// The engine's texture creators. Each builds the 0x28-byte BSGraphics::Texture block the engine's way (texture +0x00,
+// view +0x10, refcount +0x20) around Create's objects, or calls the engine's function when Create declines.
 namespace RenderGraph::Engine::Textures
 {
 	namespace
 	{
-		// The file the calling thread's DDS load reads, for the texture's name. Set by the DDS loader's hook around the load.
+		// Set by the DDS loader's hook around the load, for the texture's name.
 		thread_local const std::string* t_loading = nullptr;
 
 		std::string StreamName(RE::NiBinaryStream* a_stream)
@@ -27,7 +26,7 @@ namespace RenderGraph::Engine::Textures
 			return name.c_str();
 		}
 
-		/** @brief A zeroed block from the engine's heap, which its release (SE 75527, AE 77322) frees. */
+		/** @brief From the engine's heap, which its release (SE 75527, AE 77322) frees. */
 		RE::BSGraphics::Texture* NewBlock()
 		{
 			auto* block = static_cast<RE::BSGraphics::Texture*>(RE::malloc(0x28));
@@ -36,10 +35,7 @@ namespace RenderGraph::Engine::Textures
 			return block;
 		}
 
-		/**
-		 * @brief The DDS loader (SE 75721, AE 77533): parses the header and calls CreateD3DResources. Hooked only to name the texture
-		 * after its file. Texture streaming hooks the same function, and a shell it makes never reaches CreateD3DResources.
-		 */
+		/** @brief The DDS loader (SE 75721, AE 77533), hooked only to name the texture. Texture streaming shells never reach CreateD3DResources. */
 		struct LoadDDS
 		{
 			static HRESULT thunk(ID3D11Device* a_device, RE::NiBinaryStream* a_stream, RE::BSGraphics::Texture** a_out, void* a_header, std::uint32_t a_arg5,
@@ -54,10 +50,7 @@ namespace RenderGraph::Engine::Textures
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief CreateD3DResources (SE 75724, AE 77538): CreateTexture1D/2D/3D (by a_dimension) with the file's subresources, then
-		 * the SRV, into a new block. Loader threads, no lock. 1D textures stay the engine's.
-		 */
+		/** @brief CreateD3DResources (SE 75724, AE 77538). Loader threads, no lock. 1D textures stay the engine's. */
 		struct CreateD3DResources
 		{
 			static HRESULT thunk(ID3D11Device* a_device, std::uint32_t a_dimension, std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_depth,
@@ -79,7 +72,7 @@ namespace RenderGraph::Engine::Textures
 						info.srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
 						info.srv.Texture3D = { 0, a_mips };
 					} else {
-						// The engine's views: a cube below 7 slices, a cube array above; a plain 2D texture below 2, an array above.
+						// The engine's views: a cube below 7 slices and a cube array above, a 2D texture below 2 and an array above.
 						const auto slices = static_cast<UINT>(a_arraySize);
 						info.depthOrArraySize = slices;
 						if (a_cube) {
@@ -115,10 +108,7 @@ namespace RenderGraph::Engine::Textures
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief Renderer::CreateTexture2D (SE 75511, AE 77303): one mip, a_data's rows packed, a_usage DEFAULT/DYNAMIC/STAGING, a
-		 * UAV bind when a_uav. DEFAULT ones come here; DYNAMIC (Bink's planes, mapped every frame) and STAGING stay the engine's.
-		 */
+		/** @brief Renderer::CreateTexture2D (SE 75511, AE 77303). DYNAMIC (Bink, mapped every frame) and STAGING stay the engine's. */
 		struct CreateTexture2D
 		{
 			static RE::BSGraphics::Texture* thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_width, std::uint32_t a_height, const void* a_data,

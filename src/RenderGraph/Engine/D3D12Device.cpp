@@ -20,9 +20,8 @@ namespace RenderGraph::Engine
 #	if defined(CS_ORG_HAS_D3D12)
 	namespace
 	{
-		// The resource heap the client indexes. BasicRHI adds the buffer view refs' region past it (rhi_shader_abi.h), and D3D12
-		// refuses a shader-visible heap above 1,000,000 descriptors: with a full million the heap with the region was refused, and
-		// every buffer view ref read zero (no world drawn on NVIDIA). The Vulkan device also reports the region's slots fewer.
+		// D3D12 refuses a shader-visible heap above 1,000,000 descriptors, and BasicRHI adds the buffer view refs' region past this.
+		// With a full million the heap was refused and every buffer view ref read zero, so NVIDIA drew no world.
 		constexpr std::uint32_t kResourceDescriptors = 1'000'000 - rhi::BUFFER_VIEW_REF_SLOTS;
 		constexpr std::uint32_t kSamplerDescriptors = 2048;
 
@@ -30,10 +29,7 @@ namespace RenderGraph::Engine
 		constexpr GUID kClsidSdkConfiguration = { 0x7cda6aca, 0xa03e, 0x49c8, { 0x94, 0x58, 0x03, 0x34, 0xd2, 0x0e, 0x07, 0xce } };
 		constexpr GUID kIidDeviceFactory = { 0x61f307d3, 0xd34e, 0x4e7c, { 0x83, 0x74, 0x3b, 0xa4, 0xde, 0x23, 0xcc, 0xcb } };
 
-		/**
-		 * @brief The Agility SDK's device factory when CS_ORG_D3D12_SDK names a version, else null (the system runtime).
-		 * a_reason is set when the SDK was asked for and could not be loaded. That is an error, not a fallback.
-		 */
+		/** @brief Null means the system runtime. a_reason is set when the SDK was asked for and failed, which is an error, not a fallback. */
 		winrt::com_ptr<::IUnknown> AgilityFactory(std::string& a_reason)
 		{
 			if (!Switches::IsSet("CS_ORG_D3D12_SDK"))
@@ -66,7 +62,7 @@ namespace RenderGraph::Engine
 					static_cast<std::uint32_t>(hr));
 				return nullptr;
 			}
-			// The path ends in a separator, as D3D12SDKPath does.
+			// D3D12SDKPath expects a trailing separator.
 			const std::string path = directory.string() + "\\";
 			winrt::com_ptr<::IUnknown> factory;
 			hr = configuration->CreateDeviceFactory(version, path.c_str(), kIidDeviceFactory, factory.put_void());
@@ -109,7 +105,7 @@ namespace RenderGraph::Engine
 			}
 		}
 
-		/** @brief What the device lacks that CS needs; empty when it has everything. */
+		/** @brief Empty when it has everything. */
 		std::string MissingFeatures(rhi::Device& a_device)
 		{
 			::AdapterFeatureInfo adapter{};
@@ -176,7 +172,7 @@ namespace RenderGraph::Engine
 			ci.requireAdapterLuid = true;
 		}
 
-		// With a_options.streamlineHost: the device through Streamline's manual hooking, on CS's own slInit (Features/Upscaling/Streamline).
+		// With a Streamline host the device goes through Streamline's manual hooking, on CS's own slInit.
 		a_device = std::make_shared<rhi::DevicePtr>();
 		if (rhi::CreateD3D12Device(ci, *a_device, false) != rhi::Result::Ok || !*a_device)
 			return fail(factory ? "rhi::CreateD3D12Device failed with the Agility SDK device factory (see BasicRHI's log lines above)" :

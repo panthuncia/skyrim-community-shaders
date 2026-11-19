@@ -73,20 +73,20 @@ namespace RenderGraph::Engine::Pipeline
 
 		bool BlendOpOf(D3D11_BLEND_OP a_op, rhi::BlendOp& a_out)
 		{
-			// D3D11_BLEND_OP_ADD is 1; rhi::BlendOp::Add is 0, in the same order.
+			// D3D11 starts at 1 and rhi at 0, in the same order.
 			if (a_op < D3D11_BLEND_OP_ADD || a_op > D3D11_BLEND_OP_MAX)
 				return false;
 			a_out = static_cast<rhi::BlendOp>(a_op - D3D11_BLEND_OP_ADD);
 			return true;
 		}
 
-		// D3D11_COMPARISON_NEVER is 1; rhi::CompareOp::Never is 0, in the same order.
+		// D3D11 starts at 1 and rhi at 0, in the same order.
 		rhi::CompareOp CompareOf(D3D11_COMPARISON_FUNC a_func)
 		{
 			return static_cast<rhi::CompareOp>(std::clamp<int>(a_func, D3D11_COMPARISON_NEVER, D3D11_COMPARISON_ALWAYS) - D3D11_COMPARISON_NEVER);
 		}
 
-		// D3D11_STENCIL_OP_KEEP is 1; rhi::StencilOp::Keep is 0, in the same order.
+		// D3D11 starts at 1 and rhi at 0, in the same order.
 		rhi::StencilOp StencilOpOf(D3D11_STENCIL_OP a_op)
 		{
 			return static_cast<rhi::StencilOp>(std::clamp<int>(a_op, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_DECR) - D3D11_STENCIL_OP_KEEP);
@@ -130,7 +130,7 @@ namespace RenderGraph::Engine::Pipeline
 			if (!BlendFactorOf(source.SrcBlend, target.srcColor) || !BlendFactorOf(source.DestBlend, target.dstColor) ||
 				!BlendOpOf(source.BlendOp, target.colorOp) || !BlendFactorOf(source.SrcBlendAlpha, target.srcAlpha) ||
 				!BlendFactorOf(source.DestBlendAlpha, target.dstAlpha) || !BlendOpOf(source.BlendOpAlpha, target.alphaOp)) {
-				// A disabled target's factors are not read, but D3D11 still validates them, so a bad value is a real error.
+				// D3D11 validates a disabled target's factors too, so a bad value is a real error.
 				a_error = std::format("target {} has a blend factor or op that is not a D3D11 value", i);
 				return false;
 			}

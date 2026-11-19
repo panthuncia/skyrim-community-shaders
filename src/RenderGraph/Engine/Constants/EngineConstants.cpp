@@ -1,4 +1,4 @@
-// The per-use capture of the engine's constant buffers (EngineConstants.h, docs/development/p5/constants.md).
+// The per-use capture of the engine's constant buffers. See EngineConstants.h.
 
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -44,26 +44,23 @@ namespace RenderGraph::Engine::Constants
 {
 	namespace
 	{
-		// One ring chunk. A slot addresses at most 64 KiB (kMaxConstantBytes), so every window fits.
+		// A slot addresses at most 64 KiB, so every window fits.
 		constexpr std::uint32_t kChunkBytes = 1u << 20;
-		// What one slot can address: D3D11's 4096 constants.
+		// D3D11's 4096 constants.
 		constexpr std::uint32_t kMaxConstantBytes = 4096 * 16;
-		// A slot's bytes start on a float4: a shader loads them with Load4.
+		// Shaders load them with Load4.
 		constexpr std::uint32_t kAlignment = 16;
-		// The buffer index: open addressing, a power of two. The engine has 146 constant buffers; CS and other plugins a few dozen.
+		// Open addressing, a power of two. The engine has 146 constant buffers, CS and other plugins a few dozen.
 		constexpr std::uint32_t kIndexSize = 1u << 14;
-		// A frame that never ends (the main thread stopped presenting) stops capturing here rather than growing without bound.
+		// A frame that never ends stops capturing here instead of growing without bound.
 		constexpr std::uint32_t kMaxUsesPerFrame = 1u << 20;
-		// The custom buffers are 0xf00 bytes; the mapper's size argument bounds a use (MapCustomConstantBuffer).
 		constexpr std::uint32_t kCustomBytes = 0xf00;
-		// A buffer not bound, mapped or updated for this many frames is let go (its reference released, its entry retired).
 		constexpr std::uint64_t kUnseenFrames = 1800;
 
 		/**
-		 * @brief The engine's constant-buffer globals, as CreateConstantBufferPools (SE 75592 `0x140d720d0`, AE 77400 `0x140e4d000`)
-		 * lays them out: one block of 146 pointers from SE 524753 `0x143027a08` / AE 411369 `0x143288308`. Slot 0 of each pool is
-		 * never created (a size class of zero).
-		 */
+		* @brief The engine's 146 constant-buffer pointers as CreateConstantBufferPools lays them out, from SE 524753 / AE 411369.
+		* Slot 0 of each pool is never created.
+		*/
 		struct EngineSpan
 		{
 			std::uint32_t first, count;
@@ -91,22 +88,20 @@ namespace RenderGraph::Engine::Constants
 		}
 
 		/**
-		 * @brief One constant buffer the capture has seen. The entry holds a reference, so the buffer's address cannot come back as
-		 * another resource while the entry lives: a found entry needs no D3D11 call to check it. Entries never move; one unseen for
-		 * kUnseenFrames lets its buffer go and is retired (buffer null, never found again).
-		 */
+		* @brief The entry holds a reference, so the buffer's address cannot be reused while it lives and lookups need no D3D11 check.
+		* Entries never move. One unseen for kUnseenFrames is retired.
+		*/
 		struct Entry
 		{
-			ID3D11Buffer* buffer = nullptr;  // its identity; null once retired
+			ID3D11Buffer* buffer = nullptr;  // null once retired
 			winrt::com_ptr<ID3D11Buffer> held;
-			std::uint64_t seenFrame = 0;  // the last capture frame it was bound, mapped or updated
+			std::uint64_t seenFrame = 0;
 			std::uint32_t byteWidth = 0;
-			std::uint32_t written = 0;  // what the last Map wrote: the custom mapper's bound, else byteWidth
+			std::uint32_t written = 0;  // the custom mapper's bound, else byteWidth
 			Group group = Group::Other;
 			std::uint8_t poolIndex = 0;
 			BufferContents contents;
 
-			// The last copy into the ring.
 			std::uint64_t copiedFrame = UINT64_MAX;
 			std::uint32_t copiedVersion = 0;
 			std::uint32_t copiedBegin = 0;
@@ -115,7 +110,7 @@ namespace RenderGraph::Engine::Constants
 			std::uint32_t copiedOffset = 0;
 		};
 
-		/** @brief A bound slot: its buffer and, for SetConstantBuffers1, its window (size 0: the whole buffer). */
+		/** @brief Window size 0 means the whole buffer. */
 		struct Binding
 		{
 			Entry* entry = nullptr;
@@ -129,7 +124,6 @@ namespace RenderGraph::Engine::Constants
 			std::uint32_t count = 0;
 		};
 
-		/** @brief Counters over the log window. */
 		struct Window
 		{
 			std::uint64_t frames = 0, uses = 0, slots = 0, copies = 0, bytes = 0, unwritten = 0, dropped = 0;
@@ -139,19 +133,16 @@ namespace RenderGraph::Engine::Constants
 			std::uint64_t checks = 0, mismatches = 0;
 		};
 
-		// The custom mapper's size bound for the Map it is about to make on this thread (0: none).
+		// The custom mapper's size bound for its upcoming Map on this thread. 0 for none.
 		thread_local std::uint32_t customBound = 0;
 
-		/**
-		 * @brief The capture. The hooks run on the thread that drives the immediate context, which Renderer::Lock serializes; uses and
-		 * the frame's end only on the main thread. A retired chunk comes back from ReleaseAfterD3D11's service through its own lock.
-		 */
+		/** @brief Retired chunks come back from ReleaseAfterD3D11's service under their own lock. */
 		class Tracker
 		{
 		public:
 			static Tracker& Get()
 			{
-				// Never destroyed: retired chunks may come back during shutdown.
+				// Never destroyed, because retired chunks may come back during shutdown.
 				static Tracker* tracker = new Tracker;
 				return *tracker;
 			}
@@ -162,7 +153,6 @@ namespace RenderGraph::Engine::Constants
 
 			void Enable() { enabled = true; }
 
-			// The writes.
 
 			void OnMap(ID3D11Resource* a_resource, D3D11_MAP a_mapType, void* a_data)
 			{
@@ -190,7 +180,6 @@ namespace RenderGraph::Engine::Constants
 				}
 			}
 
-			// The binds.
 
 			void Bind(Stage a_stage, UINT a_start, UINT a_count, ID3D11Buffer* const* a_buffers, const UINT* a_first, const UINT* a_constants)
 			{
@@ -219,7 +208,6 @@ namespace RenderGraph::Engine::Constants
 				bound = {};
 			}
 
-			// The uses.
 
 			UseId Capture(std::uint32_t a_stageMask)
 			{
@@ -267,7 +255,7 @@ namespace RenderGraph::Engine::Constants
 			{
 				if (a_slot.chunk >= frameChunks.size())
 					return {};
-				// The CPU copy: the chunk itself is GPU-visible upload memory, slow to read back.
+				// The chunk is GPU-visible upload memory, slow to read back, so read the CPU copy.
 				return { mirrors[a_slot.chunk].get() + a_slot.offset, a_slot.size };
 			}
 
@@ -315,7 +303,6 @@ namespace RenderGraph::Engine::Constants
 		private:
 			Tracker() = default;
 
-			// The buffer index.
 
 			static std::uint32_t Hash(const void* a_pointer)
 			{
@@ -335,11 +322,7 @@ namespace RenderGraph::Engine::Constants
 				return nullptr;
 			}
 
-			/**
-			 * @brief The entry of a constant buffer, made the first time it is seen; null for any other resource. A known buffer costs a
-			 * lookup: its entry's reference keeps its address from being reused, so it is not checked again. An unknown resource is
-			 * checked once (its type and description) and, when it is a constant buffer, entered.
-			 */
+			/** @brief Null for anything that is not a constant buffer. An unknown resource is checked once. */
 			Entry* Track(ID3D11Resource* a_resource)
 			{
 				if (!a_resource)
@@ -362,7 +345,6 @@ namespace RenderGraph::Engine::Constants
 				return entry;
 			}
 
-			/** @brief Buffers unseen for kUnseenFrames: their references go, and their entries are never found again. */
 			void LetGoUnseen()
 			{
 				for (auto& entry : entries) {
@@ -397,7 +379,7 @@ namespace RenderGraph::Engine::Constants
 				return &entry;
 			}
 
-			/** @brief Tags an engine global with its group (the block is filled before the engine's first Map). */
+			/** @brief The engine fills the block before its first Map. */
 			static void Classify(Entry& a_entry)
 			{
 				ID3D11Buffer* const* block = EngineBlock();
@@ -414,9 +396,8 @@ namespace RenderGraph::Engine::Constants
 				}
 			}
 
-			// The ring.
 
-			/** @brief Copies one bound slot's window into the ring, once per version and window; nullopt when nothing was written. */
+			/** @brief Once per version and window. Nullopt when nothing was written. */
 			std::optional<SlotConstants> CaptureSlot(Entry& a_entry, const Binding& a_binding, Stage a_stage, std::uint32_t a_slot)
 			{
 				const std::byte* data = a_entry.contents.Data();
@@ -461,7 +442,7 @@ namespace RenderGraph::Engine::Constants
 				return slot;
 			}
 
-			/** @brief a_size bytes into the frame's current chunk, or a new one: (chunk, offset). Nullopt, and the capture stops, on failure. */
+			/** @brief Nullopt on failure, which stops the capture. */
 			std::optional<std::pair<std::uint16_t, std::uint32_t>> Copy(const std::byte* a_data, std::uint32_t a_size)
 			{
 				std::uint32_t at = (offset + kAlignment - 1) & ~(kAlignment - 1);
@@ -470,8 +451,7 @@ namespace RenderGraph::Engine::Constants
 						return std::nullopt;
 					at = 0;
 				}
-				// Into the chunk's CPU copy first, then from there into the chunk: the source is read once (it may be the engine's
-				// mapping, upload memory too), and Bytes reads the copy.
+				// Copy into the CPU mirror first so the source, possibly upload memory, is read only once.
 				std::byte* mirror = mirrors[frameChunks.size() - 1].get() + at;
 				std::memcpy(mirror, a_data, a_size);
 				std::memcpy(frameChunks.back()->Bytes().data() + at, mirror, a_size);
@@ -510,7 +490,6 @@ namespace RenderGraph::Engine::Constants
 				return true;
 			}
 
-			/** @brief The frame's chunks go back to the free list once the GPU is past every D3D11 command issued so far. */
 			void Retire()
 			{
 				auto& runtime = RenderGraphRuntime::Get();
@@ -533,12 +512,9 @@ namespace RenderGraph::Engine::Constants
 				return false;
 			}
 
-			// The debug check (CS_ORG_ENGINE_CONSTANTS_CHECK=1).
+			// Debug check (CS_ORG_ENGINE_CONSTANTS_CHECK=1).
 
-			/**
-			 * @brief About once a second, compares one captured slot with what the GPU sees in the D3D11 buffer at this point: a staging
-			 * copy read back at once. It stalls, so it is a debug switch.
-			 */
+			/** @brief About once a second, reads back the D3D11 buffer and compares. It stalls, so it is debug only. */
 			void MaybeCheck(const Entry& a_entry, const SlotConstants& a_slot)
 			{
 				if (frame < nextCheckFrame)
@@ -576,7 +552,6 @@ namespace RenderGraph::Engine::Constants
 				}
 			}
 
-			// The log.
 
 			static const char* StageName(Stage a_stage)
 			{
@@ -614,22 +589,18 @@ namespace RenderGraph::Engine::Constants
 			bool checkRequested = false;
 			std::uint64_t logFrames = 600;
 
-			// Buffers.
 			std::deque<Entry> entries;  // stable addresses
 			std::array<Entry*, kIndexSize> index{};
 
-			// The bound slots per stage.
 			std::array<std::array<Binding, kSlots>, kStages> bindings{};
 			std::array<std::uint32_t, kStages> bound{};
 
-			// This frame's uses.
 			std::uint64_t frame = 0;
 			std::vector<UseRecord> uses;
 			std::vector<SlotConstants> slots;
 
-			// The ring.
 			std::vector<std::shared_ptr<org::LatchBlock>> frameChunks;
-			// Each frame chunk's CPU copy, by its index in the frame: what Bytes answers. Kept for the session (the frame's peak count).
+			// Kept for the session at the frame's peak count.
 			std::vector<std::unique_ptr<std::byte[]>> mirrors;
 			std::uint32_t offset = 0;
 			std::mutex freeMutex;
@@ -638,7 +609,6 @@ namespace RenderGraph::Engine::Constants
 			std::uint32_t peakChunksThisFrame = 0;
 			std::uint64_t bytesThisFrame = 0;
 
-			// The check.
 			std::uint64_t nextCheckFrame = 0;
 			std::uint32_t mismatchesLogged = 0;
 			std::unordered_map<std::uint32_t, winrt::com_ptr<ID3D11Buffer>> stagingBySize;
@@ -647,9 +617,8 @@ namespace RenderGraph::Engine::Constants
 			Window window;
 		};
 
-		// The hooks.
 
-		/** @brief VS/PS/CS SetConstantBuffers (context vtable 7, 16, 71). */
+		/** @brief Context vtable 7, 16, 71. */
 		template <Stage S>
 		struct SetConstantBuffers
 		{
@@ -661,7 +630,7 @@ namespace RenderGraph::Engine::Constants
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief VS/PS/CS SetConstantBuffers1 (ID3D11DeviceContext1 vtable 119, 123, 124): CS's windowed binds (GrassOptimizations). */
+		/** @brief ID3D11DeviceContext1 vtable 119, 123, 124. GrassOptimizations uses windowed binds. */
 		template <Stage S>
 		struct SetConstantBuffers1
 		{
@@ -673,7 +642,7 @@ namespace RenderGraph::Engine::Constants
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief ClearState (vtable 110): Renderer::Begin calls it every frame. */
+		/** @brief Vtable 110. Renderer::Begin calls it every frame. */
 		struct ClearState
 		{
 			static void thunk(ID3D11DeviceContext* a_this)
@@ -685,12 +654,9 @@ namespace RenderGraph::Engine::Constants
 		};
 
 		/**
-		 * @brief BSGraphics::Renderer::MapCustomConstantBuffer (SE 75561 `0x140d6ffd0`, AE 77362 `0x140e4acc0`; Ghidra called it
-		 * GetID3D11Resource): `ID3D11Buffer** (Renderer*, uint size, void** outData, int type)`. Type 7 maps the 16-byte instance-group
-		 * buffer; any other type the next of the 4 rotating 0xf00-byte buffers. The caller writes, unmaps and binds the returned slot to
-		 * VS and/or PS b<type>. The engine ignores the size; its callers pass float4s (bones, grass) or floats (ImageSpace), so size * 16
-		 * bytes always covers what they write.
-		 */
+		* @brief MapCustomConstantBuffer (SE 75561, AE 77362). Type 7 maps the 16-byte instance-group buffer, others the next 0xf00-byte buffer.
+		* The engine ignores the size, but size * 16 bytes always covers what its callers write.
+		*/
 		struct MapCustomConstantBuffer
 		{
 			static void* thunk(void* a_renderer, std::uint64_t a_size, void** a_outData, std::uint64_t a_type)
@@ -726,7 +692,7 @@ namespace RenderGraph::Engine::Constants
 
 	ID3D11Buffer* EngineComputeBuffer()
 	{
-		// The Compute span's one slot (kEngineSpans).
+		// The Compute span's one slot.
 		constexpr std::uint32_t kComputeSlot = 143;
 		return EngineBlock()[kComputeSlot];
 	}

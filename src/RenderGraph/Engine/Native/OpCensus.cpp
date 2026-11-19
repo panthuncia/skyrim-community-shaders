@@ -25,7 +25,7 @@ namespace RenderGraph::Engine::Native::OpCensus
 			"CopySubresourceRegion from", "ClearRenderTargetView", "ClearDepthStencilView", "ClearUnorderedAccessViewUint", "ClearUnorderedAccessViewFloat",
 			"GenerateMips" };
 
-		/** @brief Where an operation fell in its frame: before the first epoch, or after an epoch's nth run in the frame. */
+		/** @brief Where an operation fell in its frame. */
 		struct Position
 		{
 			std::string label;          // "frame start", or "after <epoch> #n"
@@ -38,7 +38,7 @@ namespace RenderGraph::Engine::Native::OpCensus
 			std::uint32_t bindFlags = 0, usage = 0, dimension = 0;
 			bool initialData = false;
 			std::uint64_t count = 0;
-			std::map<std::string, std::uint64_t> positions;  // by label; the first kMaxPositions seen
+			std::map<std::string, std::uint64_t> positions;  // only the first kMaxPositions labels
 		};
 		constexpr std::size_t kMaxPositions = 6;
 
@@ -49,17 +49,16 @@ namespace RenderGraph::Engine::Native::OpCensus
 			std::uint64_t count = 0;
 		};
 
-		/** @brief One window's operations. */
 		struct OpWindow
 		{
 			std::array<std::uint64_t, kOpCount> byKind{};
-			std::map<std::pair<std::uint8_t, std::uint64_t>, TargetStats> targets;  // by (kind, resource)
+			std::map<std::pair<std::uint8_t, std::uint64_t>, TargetStats> targets;
 			std::unordered_map<std::string, PositionStats> positions;
-			// Operations that went to a static graph pass or to ORG's external client instead (RecordRouted).
+			// Operations that went to a static graph pass or to ORG's external client instead.
 			std::array<std::uint64_t, kOpCount> graphPasses{}, externalWork{};
 		};
 
-		/** @brief A resource the write census caught: made SRV-only or VB/IB-only, written after creation. */
+		/** @brief A resource made SRV-only or VB/IB-only and written after creation. */
 		struct WrittenStats
 		{
 			std::string name;
@@ -71,7 +70,7 @@ namespace RenderGraph::Engine::Native::OpCensus
 
 		struct WriteWindow
 		{
-			std::map<std::uint64_t, WrittenStats> resources;  // by resource
+			std::map<std::uint64_t, WrittenStats> resources;
 		};
 
 		struct Census
@@ -79,10 +78,8 @@ namespace RenderGraph::Engine::Native::OpCensus
 			std::mutex lock;
 			CensusWindow::PerWindow<OpWindow> ops;
 			CensusWindow::PerWindow<WriteWindow> writes;
-			// The frame so far: the last epoch's position and each epoch label's runs.
 			Position position{ "frame start", 0 };
 			std::unordered_map<std::string, std::uint32_t> runs;
-			// Every resource the write census caught this session.
 			std::unordered_set<std::uint64_t> writtenEver;
 		};
 
@@ -136,14 +133,13 @@ namespace RenderGraph::Engine::Native::OpCensus
 			return names.empty() ? std::string("none") : names;
 		}
 
-		/** @brief "Texture2D, bind SRV, usage DEFAULT, with initial data". */
 		std::string Describe(std::uint32_t a_dimension, std::uint32_t a_bindFlags, std::uint32_t a_usage, bool a_initialData)
 		{
 			return fmt::format("{}, bind {}, usage {}, {}", DimensionName(a_dimension), BindNames(a_bindFlags), UsageName(a_usage),
 				a_initialData ? "with initial data" : "no initial data");
 		}
 
-		/** @brief Whether the write census watches a resource: a texture made SRV-only, or a buffer made VB-, IB- or VB|IB-only. */
+		/** @brief Whether the write census watches a resource, a texture made SRV-only or a buffer made VB/IB-only. */
 		bool LooksImmutable(const Target& a_target)
 		{
 			if (a_target.dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
@@ -177,7 +173,6 @@ namespace RenderGraph::Engine::Native::OpCensus
 			if (!total)
 				return;
 			const std::size_t top = CensusWindow::ReportTop();
-			// The targets, most operations first.
 			std::vector<const std::pair<const std::pair<std::uint8_t, std::uint64_t>, TargetStats>*> targets;
 			for (const auto& entry : a_data.targets)
 				targets.push_back(&entry);
@@ -192,7 +187,7 @@ namespace RenderGraph::Engine::Native::OpCensus
 			}
 			if (targets.size() > top)
 				logger::info("[ORG native] op census ({}): {} more (kind, target) pairs", window, targets.size() - top);
-			// The positions in frame order (their mean ordinal): the order one frame graph must keep.
+			// Order positions by mean ordinal, which is the order one frame graph must keep.
 			std::vector<std::pair<double, const std::pair<const std::string, PositionStats>*>> order;
 			for (const auto& entry : a_data.positions)
 				order.emplace_back(static_cast<double>(entry.second.ordinalSum) / static_cast<double>((std::max<std::uint64_t>)(entry.second.count, 1)), &entry);
@@ -266,7 +261,7 @@ namespace RenderGraph::Engine::Native::OpCensus
 		case Op::GenerateMips:
 			return true;
 		default:
-			// A DYNAMIC texture's Unmap follows its Map for writing, which was counted.
+			// A DYNAMIC texture's Unmap follows its Map for writing, which was already counted.
 			return false;
 		}
 	}

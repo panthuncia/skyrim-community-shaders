@@ -16,7 +16,7 @@ namespace RenderGraph::Engine::MainTick
 
 		struct Ticks
 		{
-			// Recursive: a callback may run nested frames (a blocking movie) that reach the wait again.
+			// Recursive, since a callback may run nested frames that reach the wait again.
 			std::recursive_mutex mutex;
 			std::vector<Callback> callbacks;
 			bool installed = false;
@@ -29,7 +29,7 @@ namespace RenderGraph::Engine::MainTick
 			return s_ticks;
 		}
 
-		/** @brief JobListManager's frame-job wait (SE 34554, AE 35409), called only by Main::Update, on the main thread. */
+		/** @brief Called only by Main::Update, on the main thread. */
 		struct WaitForFrameJobs
 		{
 			static void thunk()

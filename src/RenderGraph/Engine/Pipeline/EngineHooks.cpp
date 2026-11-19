@@ -8,7 +8,6 @@
 #include <algorithm>
 
 #if defined(CS_HAS_RENDER_GRAPH)
-// P4.1's guest context. A branch without it never installs handles.
 #	if __has_include("RenderGraph/Engine/Tripwire/GuestDevice.h")
 #		include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #		define CS_ORG_ENGINE_HANDLES_GUEST_CONTEXT 1
@@ -31,7 +30,7 @@ namespace RenderGraph::Engine::Pipeline
 			{
 				if (!a_desc)
 					return func(a_this, a_desc, a_out);
-				// A copy: the caller's description is immutable.
+				// The caller's description is immutable, so copy it.
 				const auto capped = CapSamplerAnisotropy(*a_desc);
 				return func(a_this, &capped, a_out);
 			}
@@ -93,7 +92,7 @@ namespace RenderGraph::Engine::Pipeline
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// Whether handles go into engine fields now: only through P4.1's guest context, which unwraps them for DXVK.
+		// Only through the guest context, which unwraps handles for DXVK.
 		bool HandlesWanted()
 		{
 #	if defined(CS_ORG_ENGINE_HANDLES_GUEST_CONTEXT)
@@ -103,10 +102,7 @@ namespace RenderGraph::Engine::Pipeline
 #	endif
 		}
 
-		/**
-		 * @brief Puts a handle wrapping *a_field into a_field. The handle takes over the field's reference: the engine's later Release
-		 * of the field frees the handle, which releases the object.
-		 */
+		/** @brief The handle takes over the field's reference, so the engine's later Release frees the handle and then the object. */
 		template <class Interface, class Make>
 		void WrapField(Interface*& a_field, Make&& a_make)
 		{
@@ -167,7 +163,7 @@ namespace RenderGraph::Engine::Pipeline
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// Bink's tile shaders (BSMovie::CreateTileTextures).
+		// Bink's tile shaders.
 		struct CreateVertexShader
 		{
 			static RE::BSGraphics::VertexShader* thunk(void* a_renderer, const void* a_bytecode, std::uint64_t a_size, void* a_unused, std::uint64_t a_vertexDesc)
@@ -216,7 +212,6 @@ namespace RenderGraph::Engine::Pipeline
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// The layout SetDirtyStates caches for a VertexDesc key.
 		struct EngineCreateInputLayout
 		{
 			static ID3D11InputLayout* thunk(std::uint64_t a_key)
@@ -237,10 +232,7 @@ namespace RenderGraph::Engine::Pipeline
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief Wraps every entry of a table of state objects or queries. DXVK hands out one object per description, so entries
-		 * repeat: each distinct object gets one handle, and each entry's reference moves to it.
-		 */
+		/** @brief DXVK hands out one object per description, so entries repeat. Each distinct object gets one handle. */
 		template <class Interface, class Make>
 		std::size_t WrapTable(Interface** a_table, std::size_t a_count, std::size_t a_stride, Make&& a_make)
 		{
@@ -270,7 +262,7 @@ namespace RenderGraph::Engine::Pipeline
 			return REL::Relocation<Interface**>{ a_id }.get();
 		}
 
-		/** @brief Wraps the state tables and query pools. False, with nothing changed, when the guest context is missing. */
+		/** @brief False, with nothing changed, when the guest context is missing. */
 		bool InstallEngineHandles()
 		{
 			if (!HandlesWanted()) {
@@ -305,7 +297,7 @@ namespace RenderGraph::Engine::Pipeline
 					return Tripwire::CreateQuery(description->d3d, OptionsFor(std::format("Engine::{} {}", a_pool, a_index), description), a_real);
 				};
 			};
-			// 64 occlusion queries, then the 6 profiling frames' disjoint queries, 0x50 bytes apart.
+			// 64 occlusion queries, then 6 profiling frames' disjoint queries, 0x50 bytes apart.
 			const auto occlusion = WrapTable(Table<ID3D11Query>(RELOCATION_ID(524740, 411344)), 64, sizeof(void*), makeQuery("OcclusionQuery"));
 			const auto disjoint = WrapTable(Table<ID3D11Query>(RELOCATION_ID(524952, 411440)), 6, 0x50, makeQuery("DisjointQuery"));
 			logger::info("[ORG] engine pipeline descriptions: handles for {} depth-stencil, {} rasterizer, {} blend, {} sampler states and {} queries",
@@ -325,8 +317,8 @@ namespace RenderGraph::Engine::Pipeline
 
 	void InstallDeviceHooks(ID3D11Device* a_device)
 	{
-		// DXVK's device, not a guest handle around it: CS's own creations call DXVK directly, and a handle's methods are shared code.
-		// Native mode has nothing under its handle: the detours go on the native device handle's methods.
+		// Hook DXVK's device, not a guest handle, since a handle's methods are shared code.
+		// Native mode has nothing under its handle, so the detours go on the native handle's methods.
 		if (!Native::Requested())
 			a_device = Tripwire::Unwrap(a_device);
 		if (!a_device)
@@ -346,7 +338,7 @@ namespace RenderGraph::Engine::Pipeline
 	void InstallEngineHandlesOnce()
 	{
 #if defined(CS_HAS_RENDER_GRAPH)
-		// Done only once it worked: a call without the guest context leaves the tables as they are.
+		// Set only once it worked, so a call without the guest context changes nothing.
 		static bool installed = false;
 		if (!Enabled() || installed)
 			return;

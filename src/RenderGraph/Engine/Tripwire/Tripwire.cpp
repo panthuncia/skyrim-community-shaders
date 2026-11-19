@@ -33,8 +33,7 @@ namespace RenderGraph::Engine::Tripwire
 			return requested;
 		}
 
-		// CS_ORG_TRIPWIRE_WATCH_ALL=1: guest resources, views, shaders, states and queries log the first use of every method per
-		// call site, whatever their WatchSet says. The device, the context and the swap chain keep theirs: their calls are the hot path.
+		// Watch every method of guest resources, views, shaders, states and queries. Device, context and swap chain are the hot path and keep theirs.
 		bool WatchAllRequested()
 		{
 			static const bool requested = Switches::On("CS_ORG_TRIPWIRE_WATCH_ALL");
@@ -73,7 +72,6 @@ namespace RenderGraph::Engine::Tripwire
 			return range;
 		}
 
-		/** @brief The address range of the game executable's image. */
 		const ImageRange& GameImage()
 		{
 			static const ImageRange range = [] {
@@ -102,8 +100,7 @@ namespace RenderGraph::Engine::Tripwire
 			return stl::utf16_to_utf8(file).value_or("?");
 		}
 
-		// The Address Library ID of the function holding a game offset, as DCLF's HookSites names one: the nearest ID at or before it,
-		// within the longest function the engine has.
+		// The nearest Address Library ID at or before the offset, within the engine's longest function.
 		bool GameId(std::uint64_t a_offset, std::uint64_t& a_id, std::uint64_t& a_within)
 		{
 			constexpr std::uint64_t kLongestFunction = 0x4000;
@@ -172,7 +169,7 @@ namespace RenderGraph::Engine::Tripwire
 			std::mutex lock;
 			std::vector<std::shared_ptr<const void>> owners;
 		};
-		// Never destroyed: a guest object's tag can die after static destruction began (DXVK releasing what it still holds).
+		// Never destroyed, since a guest object's tag can die after static destruction began.
 		Retired& GetRetired()
 		{
 			static auto* retired = new Retired;
@@ -191,10 +188,10 @@ namespace RenderGraph::Engine::Tripwire
 				retired.owners.push_back(std::move(a_owner));
 		}
 
-		// {6B4C2A7E-3D51-4F0B-9E27-8A1C5D0F3B64}: the private-data slot, and the IID, of the tag AttachGraphResource puts on an object.
+		// Private-data slot and IID of the tag AttachGraphResource puts on an object.
 		constexpr GUID kGraphTagGuid = { 0x6b4c2a7e, 0x3d51, 0x4f0b, { 0x9e, 0x27, 0x8a, 0x1c, 0x5d, 0x0f, 0x3b, 0x64 } };
 
-		/** @brief Holds an ORG resource and its owner for as long as the D3D11 object that keeps it in private data lives. */
+		/** @brief Holds an ORG resource and its owner for as long as the D3D11 object that keeps it lives. */
 		class GraphTag final : public IUnknown
 		{
 		public:
@@ -202,7 +199,7 @@ namespace RenderGraph::Engine::Tripwire
 				graph(std::move(a_graph)), owner(std::move(a_owner)) {}
 			GraphTag(const GraphTag&) = delete;
 			GraphTag& operator=(const GraphTag&) = delete;
-			// The object that held the tag is gone, on whichever thread dropped it. The GPU free waits for ServiceRetired.
+			// Can run on any thread. The GPU free waits for ServiceRetired.
 			~GraphTag() { Retire(std::move(graph), std::move(owner)); }
 
 			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
@@ -234,7 +231,6 @@ namespace RenderGraph::Engine::Tripwire
 			std::shared_ptr<const void> owner;
 		};
 
-		/** @brief a_object's ID3D11DeviceChild interface (a reference added), or null when it has none. a_object is a COM object. */
 		winrt::com_ptr<ID3D11DeviceChild> AsDeviceChild(const void* a_object)
 		{
 			winrt::com_ptr<ID3D11DeviceChild> child;
@@ -243,7 +239,7 @@ namespace RenderGraph::Engine::Tripwire
 			return child;
 		}
 
-		/** @brief D3D11 object interfaces outside a handle's chain: the real object refuses them too, so a refusal is no tripwire. */
+		/** @brief Interfaces the real object refuses too, so refusing them is no tripwire. */
 		bool IsOtherObjectIid(REFIID a_riid)
 		{
 			static const IID kIids[] = { __uuidof(ID3D11Resource), __uuidof(ID3D11View), __uuidof(ID3D11Asynchronous), __uuidof(ID3D11Texture1D),
@@ -262,8 +258,7 @@ namespace RenderGraph::Engine::Tripwire
 				a_iid.Data4[1], a_iid.Data4[2], a_iid.Data4[3], a_iid.Data4[4], a_iid.Data4[5], a_iid.Data4[6], a_iid.Data4[7]);
 		}
 
-		// a_full lists every site (at exit). Otherwise only the sites that are new or were called again since the last report are
-		// listed, so a long tour's periodic reports stay short.
+		// Periodic reports list only new or recalled sites so long tours stay short. The exit report lists all.
 		void ReportLocked(Sites& a_sites, std::string_view a_reason, bool a_full)
 		{
 			struct Totals
@@ -304,7 +299,6 @@ namespace RenderGraph::Engine::Tripwire
 			a_sites.reportedCalls = a_sites.calls;
 		}
 
-		/** @brief The periodic report's thread, stopped and joined by Stop. */
 		struct Reporter
 		{
 			std::mutex lock;
@@ -455,11 +449,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		/**
-		 * @brief Later versions of the device, context and swap chain interfaces. A native handle implements only the first version,
-		 * and every caller CS has checks for a refusal (GrassOptimizations, EngineConstants, HDRDisplay), so native mode refuses them
-		 * without a tripwire line.
-		 */
+		/** @brief Later versions of the device, context and swap chain interfaces. Every CS caller handles a refusal, so it is not logged. */
 		bool IsNativeUpgradeIid(REFIID a_riid)
 		{
 			static const IID kIids[] = { __uuidof(ID3D11Device1), __uuidof(ID3D11Device2), __uuidof(ID3D11Device3), __uuidof(ID3D11Device4),
@@ -489,14 +479,14 @@ namespace RenderGraph::Engine::Tripwire
 
 	void SetGuestMapHooks(const GuestMapHooks& a_hooks)
 	{
-		// Kept for the process: the guest context reads it without a lock.
+		// Kept for the process, since the guest context reads it without a lock.
 		static const GuestMapHooks hooks = a_hooks;
 		Detail::guestMapHooks.store(&hooks, std::memory_order_release);
 	}
 
 	void SetNativeServices(const NativeServices& a_services)
 	{
-		// Kept for the process: handles read it from any thread without a lock.
+		// Kept for the process, since handles read it from any thread without a lock.
 		static NativeServices s_services;
 		if (Detail::nativeServices.load(std::memory_order_acquire))
 			return;
@@ -570,8 +560,7 @@ namespace RenderGraph::Engine::Tripwire
 		const bool hotPath = kind == Kind::Device || kind == Kind::DeviceContext || kind == Kind::SwapChain;
 		if (WatchAllRequested() && !hotPath)
 			watch = WatchSet::All();
-		// The wrapped DXVK object carries the ORG resource too. It can outlive the handle (bound in DXVK's context, or handed out by
-		// a forwarded getter), and GraphResourceOf finds the resource from it.
+		// The wrapped object carries the ORG resource too, since it can outlive the handle in DXVK's bindings or a getter's result.
 		if ((graph || owner) && !hotPath && !Detail::CoreOf(wrapped))
 			(void)AttachGraphResource(wrapped, graph, owner);
 	}
@@ -590,7 +579,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		// Counts a call at its site. The first one is logged with the text a_detail() makes, which is made only then.
+		// The detail text is only built for the first call at a site.
 		template <class D>
 		void RecordSite(const HandleCore& a_core, std::uint16_t a_slot, const char* a_method, void* a_caller, bool a_forwarded, D&& a_detail)
 		{
@@ -612,8 +601,7 @@ namespace RenderGraph::Engine::Tripwire
 				logger::info("{}", message);
 			else
 				logger::warn("{}", message);
-			// Native mode (P6.3): another plugin's D3D11 call has nothing behind it. Named as an error, with the module, once per call
-			// site. CS's own calls and the game's are the census's business; the warning above names them.
+			// In native mode another plugin's D3D11 call has nothing behind it, so name it as an error once per site.
 			if (!a_forwarded && !sites.selfTest && NativeServicesInstalled() && !IsOwnCode(a_caller) && !IsGameCode(a_caller)) {
 				const HMODULE module = ModuleAt(a_caller);
 				logger::error("[ORG native] {} calls {}::{} ({}): native mode (CS_ORG_NATIVE=1) has no D3D11, so the call failed and this "
@@ -663,7 +651,7 @@ namespace RenderGraph::Engine::Tripwire
 			const void* vtable = *static_cast<const void* const*>(a_object);
 			if (!vtable)
 				return nullptr;  // a kind with no handle yet has a null entry
-			// Every handle's vtable is in CS's image. DXVK's objects and the engine's have theirs elsewhere.
+			// Every handle's vtable is in CS's image, unlike DXVK's or the engine's objects.
 			const auto& image = OwnImage();
 			const auto address = reinterpret_cast<std::uintptr_t>(vtable);
 			if (address < image.begin || address >= image.end)
@@ -697,13 +685,12 @@ namespace RenderGraph::Engine::Tripwire
 				*a_out = a_self;
 				return S_OK;
 			}
-			// Another D3D11 object interface: the real object refuses it too, so this is no tripwire. (The engine's texture save
-			// helper asks GetType first, then for the matching texture interface.)
+			// The real object refuses these too, so this is no tripwire. The engine's texture save helper probes this way.
 			if (IsOtherObjectIid(a_riid) || (!a_core.wrapped && NativeServicesInstalled() && IsNativeUpgradeIid(a_riid))) {
 				*a_out = nullptr;
 				return E_NOINTERFACE;
 			}
-			// Another interface escapes the handle: always logged, forwarded in guest mode.
+			// Another interface escapes the handle. Always logged, and forwarded in guest mode.
 			a_core.Record(0, "QueryInterface", a_caller, a_core.wrapped != nullptr, IidText(a_riid));
 			if (a_core.wrapped)
 				return a_core.wrapped->QueryInterface(a_riid, a_out);
@@ -711,7 +698,6 @@ namespace RenderGraph::Engine::Tripwire
 			return E_NOINTERFACE;
 		}
 
-		// a_call on the wrapped object as the interface that declares the private-data methods for its kind.
 		template <class F>
 		HRESULT OnWrapped(const HandleCore& a_core, F&& a_call)
 		{
@@ -734,8 +720,7 @@ namespace RenderGraph::Engine::Tripwire
 					OnWrapped(a_core, forward);
 				return S_OK;
 			}
-			// A native handle keeps the bytes, as D3D11 does (the icon loader's and Landscape Seams Fix's tags): replaced by a later set
-			// of the GUID, removed by a set of no data.
+			// A native handle keeps the bytes as D3D11 does, since the icon loader and Landscape Seams Fix use tags.
 			if (!a_core.wrapped && NativeServicesInstalled()) {
 				std::lock_guard guard(a_core.privateLock);
 				auto& entries = a_core.privateData;
@@ -756,7 +741,7 @@ namespace RenderGraph::Engine::Tripwire
 					return OnWrapped(a_core, [&](auto* a_object) { return a_object->SetPrivateDataInterface(a_guid, a_data); });
 				return E_FAIL;
 			}
-			// A native handle keeps it, as D3D11 does: replaced by a later set of the GUID, released with the handle.
+			// A native handle keeps it as D3D11 does, released with the handle.
 			winrt::com_ptr<IUnknown> held;
 			held.copy_from(const_cast<IUnknown*>(a_data));
 			std::lock_guard guard(a_core.privateLock);
@@ -776,7 +761,6 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT GetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT* a_size, void* a_data, void* a_caller)
 		{
 			if (!a_core.wrapped && a_size && NativeServicesInstalled()) {
-				// A native handle's private-data interface: the pointer, with a reference for the caller.
 				std::lock_guard guard(a_core.privateLock);
 				const auto& entries = a_core.privateInterfaces;
 				const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; });
@@ -793,7 +777,6 @@ namespace RenderGraph::Engine::Tripwire
 					*a_size = sizeof(IUnknown*);
 					return S_OK;
 				}
-				// Bytes SetPrivateData kept.
 				const auto& data = a_core.privateData;
 				if (const auto bytes = std::find_if(data.begin(), data.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; }); bytes != data.end()) {
 					const auto size = static_cast<UINT>(bytes->second.size());
@@ -809,7 +792,7 @@ namespace RenderGraph::Engine::Tripwire
 					*a_size = size;
 					return S_OK;
 				}
-				// Not set: in native mode an answer, not a tripwire (GraphResourceOf and the descriptions ask every object).
+				// In native mode a missing entry is an answer, not a tripwire, since many lookups ask every object.
 				if (!IsDebugName(a_guid)) {
 					*a_size = 0;
 					return DXGI_ERROR_NOT_FOUND;
@@ -894,7 +877,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		/** @brief The native services for a native handle (nothing wrapped), null for a guest handle or before native mode set them. */
+		/** @brief The native services for a native handle. Null for a guest handle or before native mode set them. */
 		const NativeServices* NativeOf(const HandleCore& a_core)
 		{
 			return a_core.wrapped ? nullptr : Detail::nativeServices.load(std::memory_order_acquire);
@@ -909,7 +892,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	DeviceHandle::~DeviceHandle()
 	{
-		// The context may outlive this device: it must not answer GetDevice with it any more.
+		// The context may outlive this device, so it must stop answering GetDevice with it.
 		if (immediate)
 			static_cast<DeviceContextHandle*>(immediate.get())->device.store(nullptr, std::memory_order_release);
 	}
@@ -930,7 +913,6 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		/** @brief The calling thread's ScopedCreateTexture2DHook, if any. */
 		thread_local CreateTexture2DHook t_createTexture2D = nullptr;
 	}
 
@@ -946,7 +928,7 @@ namespace RenderGraph::Engine::Tripwire
 	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture2D(const D3D11_TEXTURE2D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out)
 	{
 		if (const auto hook = t_createTexture2D; hook && a_desc && a_out) {
-			// The hook runs with no scope set, so a texture it makes through a device handle is a plain one.
+			// The hook runs with no scope set, so a texture it makes through a device handle is plain.
 			const ScopedCreateTexture2DHook none(nullptr);
 			if (hook(*a_desc, a_data, a_out))
 				return S_OK;
@@ -961,7 +943,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		/** @brief What a null view description defaults from: the texture's dimension, format, mips, array size and depth. */
+		/** @brief What a null view description defaults from. */
 		struct ViewSource
 		{
 			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
@@ -970,7 +952,6 @@ namespace RenderGraph::Engine::Tripwire
 			bool cube = false;
 		};
 
-		/** @brief The texture behind a_resource as a ViewSource, false for a buffer or an unknown resource. */
 		bool ViewSourceOf(ID3D11Resource* a_resource, ViewSource& a_out)
 		{
 			a_resource->GetType(&a_out.dimension);
@@ -980,7 +961,7 @@ namespace RenderGraph::Engine::Tripwire
 					D3D11_TEXTURE1D_DESC desc{};
 					static_cast<ID3D11Texture1D*>(a_resource)->GetDesc(&desc);
 					a_out.format = desc.Format;
-					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain, -1 views all of it
 					a_out.arraySize = desc.ArraySize;
 					return true;
 				}
@@ -989,7 +970,7 @@ namespace RenderGraph::Engine::Tripwire
 					D3D11_TEXTURE2D_DESC desc{};
 					static_cast<ID3D11Texture2D*>(a_resource)->GetDesc(&desc);
 					a_out.format = desc.Format;
-					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain, -1 views all of it
 					a_out.arraySize = desc.ArraySize;
 					a_out.samples = desc.SampleDesc.Count;
 					a_out.cube = (desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
@@ -1000,7 +981,7 @@ namespace RenderGraph::Engine::Tripwire
 					D3D11_TEXTURE3D_DESC desc{};
 					static_cast<ID3D11Texture3D*>(a_resource)->GetDesc(&desc);
 					a_out.format = desc.Format;
-					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain, -1 views all of it
 					a_out.depth = desc.Depth;
 					return true;
 				}
@@ -1009,7 +990,7 @@ namespace RenderGraph::Engine::Tripwire
 			}
 		}
 
-		/** @name A view of a_resource with a null description: the whole texture in its own format, as D3D11 makes it. */
+		/** @name A view with a null description covers the whole texture in its own format, as D3D11 makes it. */
 		/** @{ */
 		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_SHADER_RESOURCE_VIEW_DESC& a_out)
 		{
@@ -1150,7 +1131,7 @@ namespace RenderGraph::Engine::Tripwire
 		}
 		/** @} */
 
-		/** @brief What a native view is made with: its resource's ORG resource and owner, so lookups through the view find them. */
+		/** @brief A native view carries its resource's ORG resource and owner, so lookups through the view find them. */
 		Options NativeViewOptions(const char* a_kind, ID3D11Resource* a_resource)
 		{
 			Options options;
@@ -1161,10 +1142,7 @@ namespace RenderGraph::Engine::Tripwire
 			return options;
 		}
 
-		/**
-		 * @brief A native view: a_make with the description given, or D3D11's default for the resource. E_INVALIDARG for a null
-		 * resource, or a null description on a resource that has no default here (a buffer, a 1D or 3D texture).
-		 */
+		/** @brief A native view. A null description works only on resources with a default here, else E_INVALIDARG. */
 		template <class ViewDesc, class View, class Make>
 		HRESULT MakeNativeView(ID3D11Resource* a_resource, const ViewDesc* a_desc, View** a_out, const char* a_kind, Make&& a_make)
 		{
@@ -1180,7 +1158,7 @@ namespace RenderGraph::Engine::Tripwire
 			return S_OK;
 		}
 
-		/** @brief The options of a native object other than a view: a name, which the engine's debug name replaces later. */
+		/** @brief Options for a native non-view object. The engine's debug name replaces the name later. */
 		Options NativeOptions(const char* a_kind)
 		{
 			Options options;
@@ -1189,9 +1167,8 @@ namespace RenderGraph::Engine::Tripwire
 		}
 
 		/**
-		 * @name State descriptions as D3D11 (and DXVK) store them. GetDesc then answers what a D3D11 device would: the readers
-		 * (the pipeline descriptions, DCLF's program builds) convert every target and face, so the parts D3D11 ignores must hold
-		 * the defaults, not the zeros the engine leaves there.
+		 * @name State descriptions stored as D3D11 stores them. Readers convert every target and face, so ignored parts must hold
+		 * defaults rather than the zeros the engine leaves.
 		 */
 		/** @{ */
 		D3D11_BLEND_DESC NormalizedBlend(D3D11_BLEND_DESC a_desc)
@@ -1253,9 +1230,8 @@ namespace RenderGraph::Engine::Tripwire
 		}
 	}
 
-	// The device's creation methods in both modes. TW_DEVICE_SITE starts one: the caller, the call site a guest handle unwraps its
-	// arguments at, and the native services (null for a guest handle). TW_FORWARD_OR_FAIL ends one: a guest handle forwards the
-	// call, and a native handle without a service records it at its caller and fails it, as every tripwire does.
+	// TW_DEVICE_SITE starts a device creation method and TW_FORWARD_OR_FAIL ends it. A guest handle forwards, and a native handle
+	// without a service fails like every tripwire.
 #define TW_DEVICE_SITE(Name)                                                                                                     \
 	void* const twCaller = _ReturnAddress();                                                                                     \
 	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
@@ -1441,7 +1417,6 @@ namespace RenderGraph::Engine::Tripwire
 	D3D_FEATURE_LEVEL STDMETHODCALLTYPE DeviceHandle::GetFeatureLevel()
 	{
 		TW_DEVICE_SITE(GetFeatureLevel);
-		// The level native mode's device creation reported.
 		if (twNative)
 			return D3D_FEATURE_LEVEL_11_1;
 		if (core.Enter(static_cast<std::uint16_t>(Slot::GetFeatureLevel), "GetFeatureLevel", twCaller))
@@ -1472,7 +1447,7 @@ namespace RenderGraph::Engine::Tripwire
 
 #undef TW_DEVICE_SITE
 
-	// The swap chain: native mode's services, else a tripwire (the forwarding branch serves a wrapping swap chain handle).
+	// The forwarding branch serves a wrapping swap chain handle.
 #define TW_SWAP_CHAIN_SITE(Name)                       \
 	void* const twCaller = _ReturnAddress();           \
 	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
@@ -1524,7 +1499,7 @@ namespace RenderGraph::Engine::Tripwire
 	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetFullscreenState(BOOL* a_fullscreen, IDXGIOutput** a_target)
 	{
 		TW_SWAP_CHAIN_SITE(GetFullscreenState);
-		// Native mode presents to a borderless window only. Never exclusive fullscreen, so the engine does not try to enter it.
+		// Native mode presents to a borderless window only, so the engine never tries exclusive fullscreen.
 		if (twNative) {
 			if (a_fullscreen)
 				*a_fullscreen = FALSE;
@@ -1557,7 +1532,7 @@ namespace RenderGraph::Engine::Tripwire
 	HRESULT STDMETHODCALLTYPE SwapChainHandle::ResizeTarget(const DXGI_MODE_DESC* a_parameters)
 	{
 		TW_SWAP_CHAIN_SITE(ResizeTarget);
-		// The window keeps its size. The engine's next resize follows the window (WM_WINDOWPOSCHANGED), as with fake fullscreen.
+		// The window keeps its size. The engine's next resize follows it via WM_WINDOWPOSCHANGED, as with fake fullscreen.
 		if (twNative)
 			return S_OK;
 		if (core.Enter(twSlot, "ResizeTarget", twCaller))
@@ -1600,8 +1575,7 @@ namespace RenderGraph::Engine::Tripwire
 		return E_FAIL;
 	}
 
-	// The context's resource methods in both modes. TW_CONTEXT_SITE starts one like TW_DEVICE_SITE. A guest handle forwards
-	// through Enter, so its filter sees the real caller as with every generated method.
+	// A guest handle forwards through Enter so its filter sees the real caller.
 #define TW_CONTEXT_SITE(Name)                                                                                                    \
 	void* const twCaller = _ReturnAddress();                                                                                     \
 	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
@@ -1715,7 +1689,7 @@ namespace RenderGraph::Engine::Tripwire
 	void STDMETHODCALLTYPE DeviceContextHandle::Begin(ID3D11Asynchronous* a_query)
 	{
 		TW_CONTEXT_SITE(Begin);
-		// Native mode: a query's interval is not measured, so Begin has nothing to record.
+		// Native mode does not measure intervals, so Begin records nothing.
 		if (twNative && twNative->end)
 			return;
 		TW_CONTEXT_FORWARD(Begin, Detail::UnwrapAt(a_query, twSite));
@@ -1936,7 +1910,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(VSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -1970,7 +1944,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(PSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -2004,7 +1978,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(CSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -2038,7 +2012,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(GSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -2072,7 +2046,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(HSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -2106,7 +2080,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		TW_CONTEXT_SITE(DSGetShader);
 		if (twNative) {
-			// Native mode has no class linkage: no instances.
+			// Native mode has no class linkage.
 			if (a_instances && a_instanceCount)
 				Detail::ZeroN(a_instances, *a_instanceCount);
 			Detail::Zero(a_instanceCount);
@@ -2571,7 +2545,7 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		if (!a_object)
 			return {};
-		// A native handle without its own resource may carry one AttachGraphResource tied to it (its private data, below).
+		// A native handle without its own resource may carry one from AttachGraphResource.
 		if (const auto* core = Detail::CoreOf(a_object); core && (core->graph || core->wrapped || !NativeServicesInstalled()))
 			return core->graph;
 		const auto child = AsDeviceChild(a_object);
@@ -2598,8 +2572,7 @@ namespace RenderGraph::Engine::Tripwire
 		}
 		winrt::com_ptr<IUnknown> tag;
 		tag.attach(new GraphTag(std::move(a_graph), std::move(a_owner)));
-		// The object takes a reference to the tag and drops it when it is destroyed. If it refuses, the tag dies here and what it
-		// holds still goes through ServiceRetired.
+		// If the object refuses the tag, it dies here and what it holds still goes through ServiceRetired.
 		if (FAILED(child->SetPrivateDataInterface(kGraphTagGuid, tag.get()))) {
 			logger::warn("[ORG] tripwire: AttachGraphResource: the object refused private data");
 			return false;
@@ -2640,10 +2613,10 @@ namespace RenderGraph::Engine::Tripwire
 		if (!core)
 			return a_object;
 		if (!core->wrapped) {
-			// Native mode has no D3D11 below the handles: the handle is the object every caller talks to.
+			// Native mode has no D3D11 below the handles, so the handle is the object.
 			if (Native::Active())
 				return a_object;
-			// A native handle handed to D3D11: D3D11 gets null rather than an object it would cast to its own class.
+			// D3D11 gets null rather than a native handle it would cast to its own class.
 			static std::array<std::atomic<bool>, kKinds> warned{};
 			if (!warned[static_cast<std::size_t>(core->kind)].exchange(true))
 				logger::warn("[ORG] tripwire: a native {} (\"{}\") was passed to D3D11, which gets null instead", InterfaceName(core->kind), core->Name());

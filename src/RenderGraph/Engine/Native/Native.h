@@ -35,144 +35,85 @@ namespace org
 }
 
 /**
- * @brief Native mode (org-full-port.md Phase 6, CS_ORG_NATIVE=1): no DXVK. CS creates a BasicRHI Vulkan device itself, the engine's
- * device, immediate context and swap chain are tripwire handles over it, the render graph runs natively (its epochs submit to the
- * device's queues, no DXVK stream), and ORG presents. A development option: the DXVK build stays the default.
+ * @brief Native mode (CS_ORG_NATIVE=1) renders without DXVK. CS makes a BasicRHI device itself, and the engine's device,
+ * context and swap chain are tripwire handles over it. The render graph submits straight to the device's queues and ORG presents.
+ * It is a development option. The DXVK build stays the default.
  *
- * Startup, in order (each stage logs one "[ORG native] stage" line, so a failed bring-up shows how far it got):
- * 1. switches (SKSEPlugin_Load, after CommunityShaders.env): the port switches native mode needs are turned on. One set to 0, or
- *    a switch that conflicts (CS_NATIVE_D3D11, CS_ORG=0), is a startup error that names it.
- * 2. checks (Hooks::InstallEarlyHooks): DXVK is not loaded; a feature that still needs DXVK is a startup error that names it.
- * 3. device, 4. swap chain, 5. handles (the game's D3D11CreateDeviceAndSwapChain, SE 75589 / AE 77396): BasicRHI's device, ORG's
- *    swap chain on the game's window with the back buffer, and the device, context and swap chain handles the engine stores
- *    (RendererData +0x38/+0x40, window 0's swap chain, and the device and context globals SE 524729/524771, AE 411348/411391).
- * 6. engine init (the InitD3D hook): the engine's fields are checked to hold the handles.
- * 7. render graph (State::Setup, RenderGraphRuntime::Initialize): the graph host runs natively on BasicRHI's device.
- * 8. first present: the back buffer is copied into the swap chain image and presented.
- *
- * What still needs DXVK fails at its first use with a message that names it, never by falling back to DXVK.
+ * Startup runs in numbered stages, and each logs one "[ORG native] stage" line so a failed start shows how far it got.
+ * Anything that still needs DXVK fails at first use with a message naming it. Native mode never falls back to DXVK.
  */
 namespace RenderGraph::Engine::Native
 {
 	/** @brief Whether CS_ORG_NATIVE=1 asks for native mode. Any thread. */
 	bool Requested();
 
-	/** @brief Whether native mode made its device (stage 3 passed). Any thread. */
+	/** @brief Whether native mode made its device. Any thread. */
 	bool Active();
 
-	/** @brief Logs a startup stage: "[ORG native] stage <a_stage>: <a_detail>". */
+	/** @brief Logs one startup stage line. */
 	void Stage(std::string_view a_stage, std::string_view a_detail = {});
 
-	/**
-	 * @brief A startup error: logs it and ends the process with a message box that names what still needs DXVK (a_dependency) and
-	 * why. Native mode never falls back to DXVK.
-	 */
+	/** @brief Logs a startup error naming what still needs DXVK, then ends the process with a message box. */
 	[[noreturn]] void Fail(std::string_view a_dependency, std::string_view a_why);
 
-	/**
-	 * @brief Stage 1, right after CommunityShaders.env is applied and before any other switch is read: fails on a switch that
-	 * conflicts with native mode, and sets the D3D12 Drawcall Limit Fix switches.
-	 */
+	/** @brief Stage 1. Fails on a switch that conflicts with native mode. Must run before any other switch is read. */
 	void ApplySwitches();
 
-	/**
-	 * @brief Whether the frame runs on the render graph: native mode, or guest mode (DXVK with the graph on). Every engine and CS
-	 * port runs then, and none with CS_ORG=0, CS_ORG=features or CS_NATIVE_D3D11=1. Any thread.
-	 */
+	/** @brief Whether the frame runs on the render graph, in native or guest mode. Any thread. */
 	bool GraphMode();
 
-	/**
-	 * @brief On D3D12 (CS_ORG_NATIVE_BACKEND=d3d12), the Drawcall Limit Fix switches ApplySwitches set for what has no D3D12 port yet, as
-	 * "NAME=value (why)" items for DCLF's log line; those the environment set already are named as kept. Empty otherwise.
-	 */
+	/** @brief On D3D12, the DCLF switches ApplySwitches turned off for lack of a D3D12 port, for DCLF's log line. */
 	std::string D3D12DclfOff();
 
-	/** @brief Stage 2, in Hooks::InstallEarlyHooks after the features' boot state is known: fails on what still needs DXVK. */
+	/** @brief Stage 2. Fails on anything that still needs DXVK. Needs the features' boot state. */
 	void CheckStartup();
 
-	/** @brief The directory of CS's runtime DLLs (dxcompiler.dll, dxil.dll): the plugin's CommunityShaders/bin. */
+	/** @brief CS's runtime DLL directory, CommunityShaders/bin. */
 	std::filesystem::path RuntimeDirectory();
 
-	/**
-	 * @brief Stage 3, in place of D3D11CreateDeviceAndSwapChain: makes BasicRHI's device and ORG's swap chain, and returns tripwire
-	 * handles for the device, the immediate context and the swap chain. Any failure is a startup error (Fail).
-	 */
+	/** @brief Stage 3, in place of D3D11CreateDeviceAndSwapChain. Returns tripwire handles over BasicRHI's device and ORG's swap chain. */
 	HRESULT CreateDeviceAndSwapChain(IDXGIAdapter* a_adapter, DXGI_SWAP_CHAIN_DESC* a_desc, IDXGISwapChain** a_swapChain, ID3D11Device** a_device,
 		D3D_FEATURE_LEVEL* a_featureLevel, ID3D11DeviceContext** a_context);
 
-	/** @brief Stage 4, in the InitD3D hook after the engine's own: checks that the engine's fields hold the handles, and logs them. */
+	/** @brief Checks that the engine's fields hold the native handles after its own InitD3D. */
 	void AfterInitD3D();
 
-	/** @brief BasicRHI's device once stage 3 made it, else null. RenderGraphRuntime::Initialize runs the graph on it. */
+	/** @brief BasicRHI's device once stage 3 made it, else null. */
 	std::shared_ptr<rhi::DevicePtr> Device();
 
-	/**
-	 * @brief RenderGraphRuntime::Initialize, once the render graph is up on the native device and before any import: the back buffer
-	 * becomes a graph-owned slot with one version per present slot, and the present
-	 * copies it through ORG's external client (org-native-frame-graph.md, "Phase 4 item 5 lane").
-	 */
+	/** @brief Makes the back buffer a graph-owned slot with one version per present slot. Must run before any import. */
 	void OnGraphReady();
 
-	/**
-	 * @brief RenderGraphRuntime::Initialize, once the runtime shader compiler exists (after OnGraphReady): loads GenerateMips' compute
-	 * programs. Called before the compiler was made, they loaded nothing and engine GenerateMips calls made no mips.
-	 */
+	/** @brief Loads GenerateMips' compute programs. Must run after the shader compiler exists, or engine mip builds do nothing. */
 	void OnShaderCompilerReady();
 
-	/**
-	 * @brief What DXVK's dxvkGetInteropResourceInfo answers for its objects, for the textures native mode made (the back buffer, and
-	 * textures the native device made): the Vulkan image and the layout it rests in between graph epochs. False for anything else.
-	 */
+	/** @brief The native equivalent of dxvkGetInteropResourceInfo, for textures native mode made. */
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info);
 
 	/**
-	 * @name Graph-owned textures (org-native-frame-graph.md, Phase 2). The native device
-	 * sorts each texture it makes:
-	 * - exempt: only a shader resource, made with its contents, not DYNAMIC. Its contents go in through a transfer on the graphics
-	 *   queue that ends in the shader-read state, where it rests; graphs read it untracked (GraphOwnership::
-	 *   ExternalImmutableShaderResource). The context's first write promotes it to tracked, through the build manager.
-	 * - tracked: everything else. Once the render graph is up it is a persistent ORG texture (org::PixelBuffer, never aliased),
-	 *   resting in Common between executions while external home states are on. Textures made before the graph, and ones ORG
-	 *   cannot make as D3D11 asked, stay host-made BasicRHI images that the graph imports (logged once per reason).
+	 * @name Graph-owned textures. Shader-only textures made with contents are "exempt" and rest in the shader-read state untracked,
+	 * until a context write promotes them. Every other texture is tracked as a persistent ORG texture once the graph is up.
 	 */
 	/** @{ */
 	/** @brief Whether native mode is active and sorts its textures as above. Any thread. */
 	bool OwnedResources();
 
-	/**
-	 * @brief The one lookup the imports use in native mode: the graph-owned ORG texture behind a_object (a texture or view handle,
-	 * a port's handle around one, or a streamed texture's shell, which answers its window). Null for anything else: an exempt or
-	 * host-made texture, or one native mode did not make; the caller imports it as before then. Any thread.
-	 */
+	/** @brief The graph-owned ORG texture behind a texture, view, port handle or stream shell. Null otherwise. Any thread. */
 	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown* a_object);
 
-	/** @brief GraphTextureOf for the image a description named (DxvkOrgInteropImageInfo::image), for Drawcall Limit Fix's imports. */
+	/** @brief GraphTextureOf for a VkImage handle, for DCLF's imports. */
 	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t a_image);
 
-	/**
-	 * @brief An exempt texture as a graph resource (the FrameAnchors::ImmutableTexture seam): one per texture, made on the first call
-	 * once its transfer is done (waited for here), with its shader resource views in a_srvFormat (UNKNOWN: the texture's own). Passes
-	 * may only read it. Null when the texture is not exempt; the caller imports it as before then. Any thread.
-	 */
+	/** @brief An exempt texture as a read-only graph resource, made on first call. Null when the texture is not exempt. Any thread. */
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat);
 
-	/**
-	 * @brief The graph resource of an exempt texture the context wrote after creation (promoted to tracked), which passes that read
-	 * it must declare: ImmutableTextureOf's, made here when nothing asked for it before. a_object may be a view. Null for any other
-	 * texture. Any thread.
-	 */
+	/** @brief The graph resource of an exempt texture the context wrote after creation. Null for any other texture. Any thread. */
 	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown* a_object);
 
-	/**
-	 * @brief Whether a_object (a texture or view handle, or a streamed texture's shell) is a texture native mode made that graphs must
-	 * track when they read it: graph-owned (GraphTextureOf), or host-made (made before the graph was up, kept host-made, or a wrapped
-	 * image). False for an exempt texture, promoted or not (PromotedTextureOf answers those), and for anything native mode did not
-	 * make. Any thread.
-	 */
+	/** @brief Whether a native texture must be tracked when graphs read it. False for exempt textures, promoted or not. Any thread. */
 	bool IsTrackedTexture(const IUnknown* a_object);
 	/** @} */
 
-	/** @brief What native mode knows of a resource it made, from its D3D11 description (DescribeForCensus). */
 	struct ResourceFacts
 	{
 		std::uint64_t serial = 0;     // unique for the session
@@ -180,67 +121,42 @@ namespace RenderGraph::Engine::Native
 		std::uint32_t usage = 0;      // D3D11_USAGE
 		std::uint32_t dimension = 0;  // D3D11_RESOURCE_DIMENSION
 		bool initialData = false;     // made with initial data
-		bool written = false;         // the immediate context wrote it since (only marked while a census or the validator is on)
+		bool written = false;         // only marked while a census or the validator is on
 	};
 
-	/**
-	 * @brief The facts of the native resource behind a_object (a resource or view handle, or a port's handle around one). False when
-	 * native mode did not make it. For the undeclared-access validator's exemptions. Any thread.
-	 */
+	/** @brief The facts of the native resource behind a_object. False when native mode did not make it. Any thread. */
 	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out);
 
-	/**
-	 * @brief Stage 6 and every frame after: the engine's Present on the swap chain handle. Copies the back buffer into the acquired
-	 * swap chain image on the graphics queue, after the frame's graph work, and presents it.
-	 */
+	/** @brief The engine's Present. Copies the back buffer into the swap chain image after the frame's graph work. */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
 
 	/**
-	 * @brief HDR Display's colour space change (UpdateSwapChainColorSpace) in native mode: HDR10 (ST.2084 PQ, Rec. 2020) or SDR on
-	 * BasicRHI's swap chain, through Engine::ConfigureSwapchain, under the present lock once the queued presents are done. The swap
-	 * chain handle answers no IDXGISwapChain3/4, so HDR Display calls this instead of SetColorSpace1. Logs the colour space it ends in.
-	 * @return Whether the swap chain now presents in the colour space asked for (false before stage 4, or when the display path
-	 * refuses HDR10).
+	 * @brief Switches the swap chain between HDR10 and SDR. HDR Display calls this because the native handle has no IDXGISwapChain3.
+	 * @return Whether the swap chain now presents in the asked colour space.
 	 */
 	bool SetSwapChainColorSpace(bool a_hdr);
 
-	/**
-	 * @brief Statistics, any thread: the queued presents (CS_ORG_QUEUE_PRESENT) whose render thread waited for the present before
-	 * them, and the time those waited, in microseconds, since the last call.
-	 */
+	/** @brief Queued-present waits and their total time in microseconds since the last call. Any thread. */
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);
 
 	/**
-	 * @brief A frame whose present is held (Drawcall Limit Fix's load hold) ends here instead: the CPU waits until the GPU has
-	 * finished the frame the frame latency back, as a present would. Without it nothing paces such frames, the CPU runs ahead
-	 * of the GPU by as many frames as the graph has slots, and work that keeps resources for a fixed number of frames (the
-	 * upscaler's views) frees them while the GPU still reads them. Render thread, after the frame's work is submitted.
+	 * @brief Ends a frame whose present is held. Waits for the GPU as a present would, so the CPU cannot run ahead and
+	 * free per-frame resources such as the upscaler's views while the GPU still reads them. Render thread.
 	 */
 	void PaceHeldPresent();
 
-	/** @brief The native graphics queue's progress now (its timeline and the value its last submission signals); empty off native. */
+	/** @brief The native graphics queue's progress. Empty off native mode. */
 	rhi::QueueProgress GraphicsProgress();
 
-	/**
-	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's
-	 * dxvkGetInteropDeviceInfo and dxvkEnqueueQueueCallback give them in guest mode.
-	 */
+	/** @name What DXVK's interop device exports give the profilers in guest mode. */
 	/** @{ */
-	/**
-	 * @brief The native Vulkan device as DXVK describes its own: instance, physical device, device, graphics queue and family, and
-	 * the loader's vkGetInstanceProcAddr. No extension or feature list (BasicRHI keeps none). False on D3D12 or before stage 3.
-	 */
+	/** @brief The native Vulkan device as DXVK describes its own, without extension or feature lists. False on D3D12. */
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info);
 
-	/** @brief The LUID of the adapter the native device was made on (LowPart and HighPart as one 64-bit pattern), or 0. */
+	/** @brief The adapter LUID as one 64-bit pattern, or 0. */
 	std::uint64_t AdapterLuid();
 
-	/**
-	 * @brief What a vendor SDK's commands (Streamline's evaluates) get for each image, in their order. native: the VkImage or the
-	 * ID3D12Resource*. view: on Vulkan a VkImageView of every mip and layer (a depth image's depth aspect), made for these commands and
-	 * destroyed after them; 0 on D3D12. state: the layout the image is in for the commands (VkImageLayout, or the D3D12 legacy resource
-	 * state Streamline's tags take). format: VkFormat or DXGI_FORMAT.
-	 */
+	/** @brief What vendor SDK commands such as Streamline's evaluate need for one image. On Vulkan, view is destroyed after the commands. */
 	struct ExternalImageInfo
 	{
 		void* native = nullptr;
@@ -252,57 +168,37 @@ namespace RenderGraph::Engine::Native
 	};
 
 	/**
-	 * @brief In a pass's Record: the native command list of a_list (a VkCommandBuffer, or the ID3D12GraphicsCommandList Streamline's
-	 * proxy device made) and, for each image, what its commands need (a_infos, in a_images' order). The pass declares each image as a
-	 * legacy interop use, so each is in the common state: GENERAL on Vulkan, COMMON on D3D12. a_views holds the Vulkan views made for
-	 * the commands: the pass retains it (RecordingContext::Retain) so they live until the GPU is past them. False with a_why set when
-	 * the list or an image has no native object.
+	 * @brief The native command list and per-image info for vendor SDK commands in a pass's Record. Images are in the common state.
+	 * The pass must retain a_views until the GPU is past them.
 	 */
 	bool DescribeForCommands(rhi::CommandList& a_list, std::span<const rhi::Resource> a_images, void*& a_nativeList, std::vector<ExternalImageInfo>& a_infos,
 		std::shared_ptr<const void>& a_views, std::string& a_why);
 
-	/**
-	 * @brief Runs a_callback now with the native graphics queue, holding the lock every queue access takes, so it lands between the
-	 * submissions made before and after the call. The signature of DXVK's dxvkEnqueueQueueCallback (a_device is ignored). E_FAIL on
-	 * D3D12 or before stage 3.
-	 */
+	/** @brief Runs a_callback now on the graphics queue under the queue lock. Matches dxvkEnqueueQueueCallback. */
 	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device* a_device, void (*a_callback)(void*, VkQueue_T*), void* a_user);
 	/** @} */
 
-	/**
-	 * @brief RenderGraphRuntime::WrapTexture in native mode: a native texture handle over an image a port made with BasicRHI, so its
-	 * D3D11 readers (the engine's fields, the context's copies and clears) and the graph's import reach the same image. The image is
-	 * moved into GENERAL, its contents uploaded (a_data) or zeroed, as DXVK's wrap does. a_info answers as dxvkCreateTextureFromVkImage
-	 * would. Null on failure (logged).
-	 */
+	/** @brief A native texture handle over a port's BasicRHI image, so D3D11 users and graph imports reach the same image. */
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
 		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data);
 
-	/** @brief RenderGraphRuntime::WrapBuffer in native mode: a native buffer handle over a port's BasicRHI buffer. Null on failure. */
+	/** @brief A native buffer handle over a port's BasicRHI buffer. Null on failure. */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/**
-	 * @name Unbacked engine targets (Frame/EngineTargetUse.h): a texture handle with no image and no memory, for an engine target
-	 * nothing in native mode draws, reads or copies. The engine keeps the pointer and reads its description, and views are made on
-	 * it as on any native texture. GPU work that reaches it (a context clear, copy, map or mip build, or an import) is a recipe
-	 * mismatch, TapError::Unbacked: fatal in development builds; in release the operation is skipped and the first one logged.
-	 * a_dropClears: the engine's own clears of it are declared dropped, not mismatches (nothing reads what they write). Null off
-	 * native mode.
+	 * @name Unbacked engine targets. A texture handle with no memory, for an engine target native mode never uses.
+	 * GPU work that reaches one is a recipe mismatch. It is fatal in development builds and skipped in release.
 	 */
 	/** @{ */
 	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_dropClears);
 	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name);
-	/** @brief Whether a_object (a texture or view handle, or a port's handle around one) is an unbacked engine target. Any thread. */
+	/** @brief Whether a_object is an unbacked engine target. Any thread. */
 	bool IsUnbacked(const void* a_object);
 	/** @} */
 
 	/**
-	 * @brief While one lives on a thread, the tracked textures the native device makes on that thread are frame transients
-	 * (Frame/Transients.h), placed together: each is made without memory, and when the scope ends they are placed in the arena and
-	 * each texture is finished. Their span is derived by ORG from the graphs that use them. Until the scope ends a texture has no
-	 * image, so GPU work that reaches it is a recipe mismatch (as for an unbacked target); making its views is fine. Textures with
-	 * initial data or another usage than DEFAULT are made as before. Off native mode or with the arena off, nothing changes.
-	 * a_label: what made them, for the log (a resize's textures under the same label start where the last ones' span reached).
+	 * @brief While alive, tracked textures made on this thread become frame transients placed in the arena when the scope ends.
+	 * Until then they have no image, so GPU work that reaches them is a recipe mismatch.
 	 */
 	class FrameTransientScope
 	{
@@ -316,20 +212,13 @@ namespace RenderGraph::Engine::Native
 		void* m_group = nullptr;
 	};
 
-	/**
-	 * @brief RenderGraphRuntime::EmitCommands in native mode, on Vulkan and D3D12: a_record (BasicRHI commands, nothing bound at the
-	 * start) into a command list of its own on the graphics queue, submitted now with a_waits and a_signals (the device's
-	 * timelines), between full memory barriers. a_record runs exactly once when this returns true, never when it returns false.
-	 */
+	/** @brief Records and submits a_record now in its own command list on the graphics queue. a_record runs exactly once on success. */
 	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
 		const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, const char* a_label);
 
 	/**
-	 * @name Texture streaming's shells (TextureStreaming/Streamer.cpp), what DXVK's dxvkStream* exports do. A shell is a texture
-	 * handle without storage and its SRV. The streamer sets a window (an SRV of a texture with the resident mips) on it, and
-	 * DescribeResource answers the window's image for the shell. Engine draws do not read shells in native mode, so no bind
-	 * counts and no missing-window callback: the streamer's scheduler (DCLF) decides every window. The gone callback runs when
-	 * the shell's SRV is destroyed, as DXVK runs it in the view's destructor.
+	 * @name Texture streaming shells, as DXVK's dxvkStream* exports. A shell is a storage-less texture whose window the streamer sets.
+	 * Engine draws do not read shells in native mode, so the streamer decides every window.
 	 */
 	/** @{ */
 	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC& a_desc, ID3D11Texture2D** a_texture, ID3D11ShaderResourceView** a_view);
@@ -340,6 +229,6 @@ namespace RenderGraph::Engine::Native
 	std::uint64_t __stdcall StreamGetBinds(ID3D11ShaderResourceView* a_shell);
 	/** @} */
 
-	/** @brief Teardown, at the game window's close: waits for the last present and destroys the swap chain and the back buffer. */
+	/** @brief Waits for the last present and destroys the swap chain and back buffer. Runs at window close. */
 	void Shutdown();
 }

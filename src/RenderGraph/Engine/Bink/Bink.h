@@ -3,48 +3,30 @@
 #include <string>
 
 /**
- * @brief Bink video drawn by the render graph (org-full-port.md P5.11), behind CS_ORG_BINK=1. The RE and the design are in
- * docs/development/p5/bink.md.
+ * @brief Bink video drawn by the render graph, behind CS_ORG_BINK=1. The RE and design are in docs/development/p5/bink.md.
  *
- * Bink has no YUV path in Skyrim: BinkCopyToBufferRect converts each decoded frame on the CPU into BGRA bytes, one 256x256 tile
- * (smaller power-of-two tiles at the right and bottom edges) at a time, through the renderer's texture lock and unlock, and the
- * engine draws one textured quad per tile into kFRAMEBUFFER before the Present that shows the frame.
- *
- * With the switch on, a tick of the player that runs on the render thread (FrameAnchors::IsRenderOwner) and presents itself (the blocking play loop: console and
- * Papyrus PlayBink, the main menu's intro movie) decodes into a host-visible staging buffer (RenderGraph::FrameStaging) instead
- * of the engine's dynamic textures, and its tile draw is withheld when the Present anchor can run it (FrameAnchors::Scheduled). The
- * Present anchor's epoch then copies the staging buffer into one graph texture holding the whole video and draws the tiles from
- * it with the same shaders built for ORG (package/Shaders/Bink/BinkCopy.hlsl), into the framebuffer the Present shows. One client,
- * registered at Setup, serves every movie of the session: a movie never rebuilds the graph.
- *
- * Everything else keeps the engine's path: a tick on another thread (without CS_ORG_LOADING_THREAD=1, the startup logo, which
- * plays on the MoviePlayer sequence thread under Renderer::Lock, where no anchor runs then), and every tick after the graph path
- * was turned off for the session (a setup part missing or the render graph failed; one error line names it). Movies of any size draw on the graph (in chunks of the movie texture). Mode 2 (a movie inside another frame,
- * MoviePlayer::TickInFrame) has no caller in SE or AE. With HDR output on, the tiles go into HDR Display's UI texture, as the
- * engine's draw does.
+ * Skyrim's Bink converts each frame on the CPU into BGRA 256x256 tiles, and the engine draws one quad per tile.
+ * With the switch on, a render-thread tick decodes into a staging buffer instead, and the Present anchor's epoch copies it into
+ * one graph texture and draws the tiles. One client registered at Setup serves every movie, so a movie never rebuilds the graph.
+ * Ticks on other threads, and every tick after the path failed for the session, keep the engine's path.
  */
 namespace RenderGraph::Engine::Bink
 {
-	/** @brief Whether CS_ORG_BINK=1 asked for Bink on the render graph (not on VR, whose player was not checked). */
+	/** @brief Whether CS_ORG_BINK=1 asked for Bink on the render graph. Not on VR, whose player was not checked. */
 	bool Requested();
 
-	/**
-	 * @brief Main thread, at plugin load (Hooks::Install), before the render graph initializes: hooks the movie player when
-	 * requested or when the CS_ORG_BINK_SHOT diagnostic is set, and reserves the Present anchor when requested.
-	 */
+	/** @brief Hooks the movie player and reserves the Present anchor. Must run at plugin load, before the render graph initializes. */
 	void InstallHooks();
 
-	/** @brief Whether InstallHooks detoured BSMoviePlayer::Tick (CS_ORG_BINK or CS_ORG_BINK_SHOT). Any thread, after it. */
+	/** @brief Whether InstallHooks detoured BSMoviePlayer::Tick. Any thread, after it. */
 	bool TickHooked();
 
-	/** @brief State::Setup, once the graph is up: the Present anchor's client, registered once for the session (CS_ORG_BINK only). */
+	/** @brief Registers the Present anchor's client once for the session. */
 	void Setup();
 
 	/**
-	 * @brief Any thread: plays a_file (from Data\Video) on the engine's main thread at its next frame-job wait (SE 34554, AE
-	 * 35409, in Main::Update; RenderGraph::Engine::MainTick), through MoviePlayer::PlayMovie with the console's PlayBink defaults.
-	 * The test harness's dclf:bink: the console's PlayBink does nothing as a compiled script, and SKSE tasks run on job threads
-	 * here. Installed only while the harness runs (CS_DCLF_TEST_COMMANDS is set); otherwise logged and ignored.
+	 * @brief Plays a_file on the main thread at its next frame-job wait (SE 34554, AE 35409), for the test harness.
+	 * The console's PlayBink does nothing as a compiled script and SKSE tasks run on job threads. Only with CS_DCLF_TEST_COMMANDS.
 	 */
 	void RequestPlay(std::string a_file);
 }

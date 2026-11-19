@@ -41,22 +41,22 @@ namespace RenderGraph::Engine::Flush
 
 	namespace
 	{
-		// More than ID3D11DeviceContext's 115 vtable slots (Tripwire::WatchSet::kMaxSlots).
+		// More than ID3D11DeviceContext's 115 vtable slots.
 		constexpr std::size_t kSlots = 128;
 
 		enum class SlotClass : std::uint8_t
 		{
-			Other,     // forwarded always (Map, Unmap, clears, queries, getters, copies)
-			Setter,    // IASet*, VSSet*, PSSet*, GSSet*, HSSet*, DSSet*, CSSet*, OMSet*, RSSet*, SOSet*: dropped inside a latch scope
-			Draw,      // Draw*, counted and possibly skipped
-			Dispatch,  // Dispatch*, the same
+			Other,     // always forwarded
+			Setter,    // dropped inside a latch scope
+			Draw,      // counted and possibly skipped
+			Dispatch,  // counted and possibly skipped
 		};
 
 		struct Config
 		{
 			bool census = false;
 			bool latch = false;
-			bool unbind = false;  // CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1
+			bool unbind = false;
 			bool installed = false;
 			std::uint64_t frames = 600;
 			std::size_t top = 25;
@@ -70,7 +70,7 @@ namespace RenderGraph::Engine::Flush
 			return s_config;
 		}
 
-		/** @brief An engine function that flushes the shadow state and then draws or dispatches (engine-d3d11-surface.md R1). */
+		/** @brief An engine function that flushes the shadow state and then draws or dispatches. */
 		struct DrawFunction
 		{
 			std::uint64_t se;
@@ -78,8 +78,8 @@ namespace RenderGraph::Engine::Flush
 			const char* name;
 		};
 
-		// Every BSGraphics draw function, and the one dispatch. Each calls SetDirtyStates before its draw, so with the latch on its
-		// draw has no state bound. SE 75488 only calls 75489; AE 77275 inlines that call and draws itself.
+		// Each calls SetDirtyStates before drawing, so with the latch on its draw has no state bound.
+		// SE 75488 only calls 75489, while AE 77275 inlines that call and draws itself.
 		constexpr std::array<DrawFunction, 11> kDrawFunctions{ {
 			{ 75477, 77263, "DrawTriShape" },
 			{ 75478, 77264, "DrawTriShape (alternate index buffer)" },
@@ -103,7 +103,7 @@ namespace RenderGraph::Engine::Flush
 			return nullptr;
 		}
 
-		/** @brief Whether a_caller is inside one of kDrawFunctions. The last answer per thread is kept: draws repeat their site. */
+		/** @brief Whether a_caller is inside one of kDrawFunctions. The last answer per thread is cached, since draws repeat their site. */
 		bool InDrawFunction(void* a_caller)
 		{
 			thread_local void* lastCaller = nullptr;
@@ -117,21 +117,18 @@ namespace RenderGraph::Engine::Flush
 			return result;
 		}
 
-		/** @brief DispatchCSShader's address: its Dispatch is a tail jump, so the D3D11 call's return address is its caller's. */
+		/** @brief DispatchCSShader's address. Its Dispatch is a tail jump, so the D3D11 call's return address is its caller's. */
 		void* DispatchFunction()
 		{
 			static void* const address = reinterpret_cast<void*>(REL::RelocationID(75532, 77329).address());
 			return address;
 		}
 
-		// Inside one of the four functions with the latch on: the guest context drops their binds.
 		thread_local int t_latchScope = 0;
-		// Inside DispatchCSShader: its Dispatch is attributed to it.
 		thread_local int t_dispatchScope = 0;
-		// Inside an EngineDraws scope: the reason's id, else -1. The engine draws here on purpose.
+		// The innermost EngineDraws reason, or -1.
 		thread_local int t_engineReason = -1;
 
-		/** @brief The reason the engine draws now: the innermost scope's, -1 for none. */
 		int CurrentReason() { return t_engineReason; }
 
 		bool InEngineDraws() { return CurrentReason() >= 0; }
@@ -152,8 +149,7 @@ namespace RenderGraph::Engine::Flush
 			DispatchScope& operator=(const DispatchScope&) = delete;
 		};
 
-		// RSS +0x00 stateUpdateFlags, +0x04 PS resources, +0x08 PS samplers, +0x0C CS resources, +0x10 CS samplers, +0x14 CS UAVs
-		// (SE 0x143027eb0, AE 0x14202ab70; engine-d3d11-surface.md R2). SetDirtyStates clears each word it applies.
+		// RSS dirty words at +0x00 to +0x14 (SE 0x143027eb0, AE 0x14202ab70). SetDirtyStates clears each word it applies.
 		constexpr std::size_t kWords = 6;
 		constexpr std::uint32_t kVertexDescBit = 0x400;
 
@@ -162,7 +158,7 @@ namespace RenderGraph::Engine::Flush
 			return reinterpret_cast<std::uint32_t*>(globals::game::shadowState);
 		}
 
-		/** @brief Whether a flush would apply anything (isCompute keeps the input layout pending, so its bit does not count). */
+		/** @brief Whether a flush would apply anything. isCompute keeps the input layout pending, so its bit does not count. */
 		bool NonEmpty(const std::uint32_t* a_words, bool a_isCompute)
 		{
 			std::uint32_t any = a_isCompute ? (a_words[0] & ~kVertexDescBit) : a_words[0];
@@ -172,8 +168,8 @@ namespace RenderGraph::Engine::Flush
 		}
 
 		/**
-		 * @brief What latched calls did not bind: the dirty bits their flushes consumed and the shaders they would have bound. Only
-		 * the render owner flushes (one thread at a time, under Renderer::Lock when it is the loading screen), so no lock.
+		 * @brief The dirty bits and shaders latched calls did not bind. Only the render owner flushes, one thread at a time,
+		 * so there is no lock.
 		 */
 		struct Owed
 		{
@@ -198,7 +194,7 @@ namespace RenderGraph::Engine::Flush
 			std::atomic<std::uint64_t> latchedBinds{ 0 };
 			std::atomic<std::uint64_t> dropped{ 0 };
 			std::atomic<std::uint64_t> skipped{ 0 };
-			std::atomic<std::uint64_t> unbinds{ 0 };  // CS_ORG_ENGINE_FLUSH_LATCH_UNBIND's target unbinds
+			std::atomic<std::uint64_t> unbinds{ 0 };
 			std::uint64_t frames = 0;
 		};
 
@@ -208,7 +204,6 @@ namespace RenderGraph::Engine::Flush
 			return s_latch;
 		}
 
-		/** @brief The allowed-draw reasons (Reason): their names, and per reason the draws let through and the passes vouched for. */
 		constexpr std::size_t kReasons = 32;
 
 		struct Reasons
@@ -242,16 +237,14 @@ namespace RenderGraph::Engine::Flush
 		}
 
 		/**
-		 * @brief The vouched passes (VouchPass), one entry per pass object. The engine's passes are 0x48-byte slots of one arena (65535
-		 * of them), so the slot index modulo the table size keeps them apart; a pass from elsewhere can collide, and the pass and
-		 * geometry checks then read it as not vouched for (skipped and logged, never let through by mistake). Writers store the pass
-		 * last; the batch walk reads it on the render thread after the registration jobs.
+		 * @brief Vouched passes by arena slot. Engine passes are 0x48-byte slots of one arena, so slot index modulo the table keeps them
+		 * apart. A collision fails the pass and geometry checks and is skipped, never let through by mistake. Writers store the pass last.
 		 */
 		struct Mark
 		{
 			std::atomic<const void*> pass{ nullptr };
 			std::atomic<const void*> geometry{ nullptr };
-			std::atomic<std::uint32_t> stamp{ 0 };  // the frame (Tick's count, 24 bits) << 8 | the reason
+			std::atomic<std::uint32_t> stamp{ 0 };  // frame count in 24 bits, shifted left 8, ORed with the reason
 		};
 		constexpr std::size_t kMarks = 1u << 17;
 		constexpr std::size_t kPassBytes = 0x48;  // sizeof(RE::BSRenderPass)
@@ -262,7 +255,7 @@ namespace RenderGraph::Engine::Flush
 			return s_marks;
 		}
 
-		// Tick's frame count, for the marks' age: a mark stands for the frame it was made in and the next.
+		// A mark covers the frame it was made in and the next.
 		std::atomic<std::uint32_t> s_markFrame{ 0 };
 
 		Mark& MarkOf(const void* a_pass, Mark* a_marks)
@@ -270,7 +263,6 @@ namespace RenderGraph::Engine::Flush
 			return a_marks[(reinterpret_cast<std::uintptr_t>(a_pass) / kPassBytes) & (kMarks - 1)];
 		}
 
-		/** @brief The reason a_pass was vouched for, or -1. */
 		int VouchedReason(const RE::BSRenderPass* a_pass)
 		{
 			Mark* marks = GetMarks().get();
@@ -284,10 +276,7 @@ namespace RenderGraph::Engine::Flush
 			return age <= 1 ? static_cast<int>(stamp & 0xFFu) : -1;
 		}
 
-		/**
-		 * @brief A flush CS asked for, or one inside an EngineDraws scope: the owed bits back in the shadow state and the owed shaders
-		 * bound, so it applies everything.
-		 */
+		/** @brief Restores owed bits and binds owed shaders, so a CS-requested or vouched flush applies everything. */
 		void PayOwed(std::uint32_t* a_words)
 		{
 			auto& owed = GetOwed();
@@ -308,21 +297,20 @@ namespace RenderGraph::Engine::Flush
 
 		// ---- The census -----------------------------------------------------------------------------------------------------
 
-		/** @brief One class of engine draw: where it was issued from, the technique and the view. */
 		struct DrawKey
 		{
-			void* site = nullptr;          // the return address in the draw function (DispatchCSShader for a dispatch)
-			std::array<void*, 3> up{};     // the next game frames above it
-			void* viaCs = nullptr;         // the first CS frame between them, when CS called the draw function (DCLF's native draws)
-			const char* shader = nullptr;  // the last technique's file name, or the ImageSpace shader's name
+			void* site = nullptr;          // the return address in the draw function
+			std::array<void*, 3> up{};
+			void* viaCs = nullptr;         // set when CS called the draw function
+			const char* shader = nullptr;  // the technique's file name, or the ImageSpace shader's name
 			std::int32_t shaderType = -1;  // the last technique's BSShader::Type
 			std::uint32_t vertex = 0;      // RSS.currentVertexShader->id
 			std::uint32_t pixel = 0;       // RSS.currentPixelShader->id
 			std::int32_t target = -1;      // RSS renderTargets[0]
 			std::int32_t depth = -1;       // RSS depthStencil
 			std::int32_t cube = -1;        // RSS cubeMapRenderTarget
-			std::uint16_t slot = 0;        // the context method
-			bool skipped = false;          // skipped by the latch
+			std::uint16_t slot = 0;
+			bool skipped = false;
 			bool operator==(const DrawKey&) const = default;
 		};
 
@@ -387,7 +375,6 @@ namespace RenderGraph::Engine::Flush
 			return s_census;
 		}
 
-		/** @brief Per thread: the last non-empty flush and the last binds no draw has followed yet. */
 		struct Pending
 		{
 			void* flush = nullptr;
@@ -396,7 +383,7 @@ namespace RenderGraph::Engine::Flush
 		};
 		thread_local Pending t_pending;
 
-		/** @brief The game frames above the draw's site (and the first CS frame among them), from the stack. */
+		/** @brief Fills the game frames above the draw's site, and the first CS frame among them. */
 		void Walk(void* a_site, DrawKey& a_key)
 		{
 			std::array<void*, 32> frames{};
@@ -407,7 +394,7 @@ namespace RenderGraph::Engine::Flush
 			if (i < count) {
 				++i;
 			} else {
-				// A tail jump into the context (DispatchCSShader): walk from the first frame outside CS.
+				// DispatchCSShader tail-jumps into the context, so walk from the first frame outside CS.
 				i = 0;
 				while (i < count && Tripwire::IsOwnCode(frames[i]))
 					++i;
@@ -422,7 +409,6 @@ namespace RenderGraph::Engine::Flush
 			}
 		}
 
-		/** @brief The last technique and the bound shaders' descriptors. */
 		void Technique(DrawKey& a_key)
 		{
 			if (const auto* state = globals::state; state && state->currentShader) {
@@ -437,7 +423,7 @@ namespace RenderGraph::Engine::Flush
 				a_key.pixel = (*globals::game::currentPixelShader)->id;
 		}
 
-		/** @brief The view from the shadow state: render target 0 (+0x18), the depth stencil (+0x38), the cube target (+0x40). */
+		/** @brief The view from the shadow state at +0x18, +0x38 and +0x40. */
 		void View(DrawKey& a_key)
 		{
 			const auto* rss = reinterpret_cast<const std::uint8_t*>(globals::game::shadowState);
@@ -550,7 +536,7 @@ namespace RenderGraph::Engine::Flush
 			return out;
 		}
 
-		/** @brief "a 12.0, b 3.5": a_counts by key, the biggest first, at most a_limit. */
+		/** @brief Formats the biggest counts first, at most a_limit. */
 		std::string Breakdown(const std::map<std::string, std::uint64_t>& a_counts, double a_frames, std::size_t a_limit)
 		{
 			std::vector<std::pair<std::string, std::uint64_t>> sorted(a_counts.begin(), a_counts.end());
@@ -628,7 +614,7 @@ namespace RenderGraph::Engine::Flush
 			ReportSites("pixel shader bind", a_window.pixelBinds, frames, config.top);
 		}
 
-		/** @brief Main thread, after each frame's jobs: closes the frame, and every CS_ORG_RESIDUE_CENSUS_FRAMES frames reports. */
+		/** @brief Closes the frame and reports every CS_ORG_RESIDUE_CENSUS_FRAMES frames. Main thread. */
 		void Tick()
 		{
 			const auto& config = GetConfig();
@@ -692,10 +678,7 @@ namespace RenderGraph::Engine::Flush
 
 		// ---- The latch ------------------------------------------------------------------------------------------------------
 
-		/**
-		 * @brief A draw or dispatch the latch skipped: counted, and logged once per site and caller chain (DrawTriShape alone serves
-		 * the batch walk, the cloud pass list, ImageSpace and Bink's tiles).
-		 */
+		/** @brief Counts a skipped draw, logged once per site and caller chain since DrawTriShape serves many callers. */
 		void NoteSkipped(std::uint16_t a_slot, void* a_caller)
 		{
 			GetLatch().skipped.fetch_add(1, std::memory_order_relaxed);
@@ -715,7 +698,6 @@ namespace RenderGraph::Engine::Flush
 					chain += fmt::format(" <- {}", Tripwire::DescribeCaller(frame));
 			if (key.viaCs)
 				chain += fmt::format(" (via CS {})", Tripwire::DescribeCaller(key.viaCs));
-			// The game frames further up, and what the draw would have drawn (its technique and target), for the diagnosis.
 			{
 				std::array<void*, 48> frames{};
 				const USHORT count = RtlCaptureStackBackTrace(0, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
@@ -738,7 +720,6 @@ namespace RenderGraph::Engine::Flush
 				a_slot < kSlots && config.names[a_slot] ? config.names[a_slot] : "?", FunctionName(site), Tripwire::DescribeCaller(site), chain);
 		}
 
-		/** @brief The guest context's filter: the census's draw count, and the latch's dropped binds and skipped draws. */
 		bool ContextFilter(std::uint16_t a_slot, void* a_caller)
 		{
 			const auto& config = GetConfig();
@@ -751,8 +732,7 @@ namespace RenderGraph::Engine::Flush
 				GetLatch().dropped.fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}
-			// A draw or a dispatch. Inside a latch scope (DispatchCSShader's dispatch) or from a draw function, its state was latched, unless
-			// it is inside an EngineDraws scope: then its flush was real and the draw is the engine's on purpose.
+			// A draw from a latch scope or a draw function had its state latched, unless an EngineDraws scope made its flush real.
 			const bool engine = config.latch && (t_latchScope > 0 || (type == SlotClass::Dispatch && t_dispatchScope > 0) || InDrawFunction(a_caller));
 			const bool skip = engine && !InEngineDraws();
 			if (engine && !skip)
@@ -783,9 +763,8 @@ namespace RenderGraph::Engine::Flush
 		// ---- The detours ----------------------------------------------------------------------------------------------------
 
 		/**
-		 * @brief BSGraphics::SetDirtyStates (75580 / 77386), outside Hooks.cpp's detour (installed after it), so _ReturnAddress is the
-		 * real caller. Latched, the engine's code runs as before inside a latch scope; the words it cleared are owed. A flush CS calls
-		 * itself is real and pays what is owed first.
+		 * @brief SetDirtyStates (75580 / 77386), installed after Hooks.cpp's detour so _ReturnAddress is the real caller.
+		 * Latched, the cleared words are owed. A flush CS calls itself pays what is owed first.
 		 */
 		struct SetDirtyStates
 		{
@@ -819,8 +798,7 @@ namespace RenderGraph::Engine::Flush
 				for (std::size_t i = 0; i < kWords; ++i)
 					owed.words[i] |= before[i] & ~words[i];
 				GetLatch().latchedFlushes.fetch_add(1, std::memory_order_relaxed);
-				// The engine moved to other targets (or CS's code after the flush bound its own and asked the engine to rebind): DXVK would
-				// keep the old ones, and drop CS's binds of their views. Nothing is drawn here before the next real flush binds the owed ones.
+				// DXVK would keep the old targets and drop CS's binds of their views. Nothing draws before the next real flush binds the owed ones.
 				if (GetConfig().unbind && !a_isCompute && ((before[0] | words[0]) & RE::BSGraphics::DIRTY_RENDERTARGET)) {
 					if (auto* context = globals::d3d::context) {
 						context->OMSetRenderTargets(0, nullptr, nullptr);
@@ -831,7 +809,7 @@ namespace RenderGraph::Engine::Flush
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief Renderer::SetShader (75550 / 77351): `RSS.flags |= 0x400; RSS.currentVertexShader = vs; VSSetShader(vs->shader)`. */
+		/** @brief Renderer::SetShader (75550 / 77351). */
 		struct SetShader
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, RE::BSGraphics::VertexShader* a_shader)
@@ -856,7 +834,7 @@ namespace RenderGraph::Engine::Flush
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief Renderer::SetPixelShader (75555 / 77356): `RSS.currentPixelShader = ps; PSSetShader(ps ? ps->shader : null)`. */
+		/** @brief Renderer::SetPixelShader (75555 / 77356). */
 		struct SetPixelShader
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, RE::BSGraphics::PixelShader* a_shader)
@@ -881,10 +859,7 @@ namespace RenderGraph::Engine::Flush
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief Renderer::DispatchCSShader (75532 / 77329): `SetDirtyStates(true); CSSetShader(cs+0x60); CSSetConstantBuffers(0, 1,
-		 * &computeCB); Dispatch` (the dispatch a tail jump). Installed before the other detours, so it wraps the engine's code only.
-		 */
+		/** @brief Renderer::DispatchCSShader (75532 / 77329). Installed before the other detours, so it wraps the engine's code only. */
 		struct DispatchCSShader
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, RE::BSGraphics::ComputeShader* a_shader, std::uint32_t a_x, std::uint32_t a_y,
@@ -901,11 +876,7 @@ namespace RenderGraph::Engine::Flush
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief BSBatchRenderer::RenderPassImmediately (100854 / 107644), the batch walk's draw of one pass (the geometry-type dispatcher
-		 * and the skin path are inside it): a pass vouched for at registration (VouchPass) draws in an EngineDraws scope of its reason.
-		 * Installed with the latch only.
-		 */
+		/** @brief BSBatchRenderer::RenderPassImmediately (100854 / 107644). A vouched pass draws in an EngineDraws scope. Latch only. */
 		struct RenderPassImmediately
 		{
 			static void thunk(RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_alphaTest, std::uint32_t a_renderFlags)
@@ -939,14 +910,8 @@ namespace RenderGraph::Engine::Flush
 	namespace StageWindow
 	{
 		/**
-		 * @brief Guest mode, with the census: every DXVK immediate-context call that does work (draws, dispatches, maps, queries, copies,
-		 * updates, clears, resolves, mips, flushes) made while a CS stage holds staged values (FrameAnchors::StagesHoldValues). Such a call
-		 * reaches DXVK's stream before the stage's block, so it runs ahead of the stage's work on the GPU. Engine and CS calls alike: both
-		 * end at DXVK's context. Counted by method and caller, reported with the census window.
-		 */
-		/**
-		 * @brief A counted call: its method, its caller, the two frames above that (the engine's call site behind the guest context's
-		 * forwarder, and its caller), and the stages whose windows were open (a bit per stage).
+		 * @brief Counts DXVK immediate-context work made while a CS stage holds staged values. Such a call runs ahead of the stage's work
+		 * on the GPU. Key is method, caller, two frames above it, and the open stages as bits.
 		 */
 		using CallKey = std::tuple<const char*, const void*, const void*, const void*, std::uint32_t>;
 
@@ -955,7 +920,7 @@ namespace RenderGraph::Engine::Flush
 			std::mutex lock;
 			std::map<CallKey, std::uint64_t> calls;
 			std::uint64_t total = 0, sessionTotal = 0;
-			std::atomic<std::uint64_t> seen{ 0 };  // every hooked call, inside a window or not: the hooks are live
+			std::atomic<std::uint64_t> seen{ 0 };  // every hooked call, inside a window or not
 		};
 
 		Counts& GetCounts()
@@ -971,7 +936,7 @@ namespace RenderGraph::Engine::Flush
 			const auto stages = FrameAnchors::StagesHoldingValues();
 			if (!stages)
 				return;
-			// The frames above the caller: who called the guest context's forwarder, or CS's helper (ConstantBuffer::Update), and its caller.
+			// The frames above the caller, to see past the guest context's forwarder or CS's helper.
 			void* frames[10]{};
 			const USHORT count = RtlCaptureStackBackTrace(0, 10, frames, nullptr);
 			const void* above = nullptr;
@@ -1024,7 +989,7 @@ namespace RenderGraph::Engine::Flush
 		CS_STAGE_WINDOW_HOOK(Flush, void, (C * a_this), (a_this))
 #	undef CS_STAGE_WINDOW_HOOK
 
-		/** @brief Hooks DXVK's immediate context once (main thread, the first census tick with the context). Guest mode only. */
+		/** @brief Hooks DXVK's immediate context once. Guest mode only. */
 		void Install()
 		{
 			static bool tried = false;
@@ -1032,7 +997,6 @@ namespace RenderGraph::Engine::Flush
 				return;
 			tried = true;
 			auto* context = globals::d3d::context;
-			// ID3D11DeviceContext's vtable slots.
 			stl::detour_vfunc<12, DrawIndexedHook>(context);
 			stl::detour_vfunc<13, DrawHook>(context);
 			stl::detour_vfunc<14, MapHook>(context);
@@ -1089,10 +1053,7 @@ namespace RenderGraph::Engine::Flush
 
 	namespace KeptWrites
 	{
-		/**
-		 * @brief An engine constant buffer written inside a CS stage's window: its bytes as the engine wrote them (CS memory), whether the
-		 * engine has it mapped, and whether DXVK's buffer still lacks them.
-		 */
+		/** @brief An engine constant buffer written inside a CS stage's window, held in CS memory until DXVK can take it. */
 		struct Buffer
 		{
 			winrt::com_ptr<ID3D11Resource> resource;
@@ -1104,19 +1065,19 @@ namespace RenderGraph::Engine::Flush
 		struct Buffers
 		{
 			std::unordered_map<const ID3D11Resource*, Buffer> buffers;
-			std::uint64_t taken = 0;    // maps answered from CS memory, since the last report
-			std::uint64_t applied = 0;  // buffers written into DXVK after a window closed, since the last report
-			bool installed = false;     // guest mode with the latch: the guest context's hooks and the windows' hook are installed
+			std::uint64_t taken = 0;    // since the last report
+			std::uint64_t applied = 0;  // since the last report
+			bool installed = false;
 		};
 
-		/** @brief Render owner only (the guest context's calls and the stages' commits run there). */
+		/** @brief Render owner only. */
 		Buffers& Get()
 		{
 			static Buffers s_buffers;
 			return s_buffers;
 		}
 
-		/** @brief Writes a buffer's bytes into DXVK's buffer (a discard map of CS's context, outside every window). */
+		/** @brief Writes a buffer's bytes into DXVK's buffer, outside every window. */
 		void ApplyOne(Buffer& a_buffer)
 		{
 			auto* context = globals::d3d::context;
@@ -1130,10 +1091,8 @@ namespace RenderGraph::Engine::Flush
 		}
 
 		/**
-		 * @brief The guest context's Map, with the latch on: inside a CS stage's window, a discard map of an engine dynamic constant buffer
-		 * (outside an EngineDraws scope) is answered from CS memory. Nothing in the window reads DXVK's buffer (no engine draw reaches DXVK
-		 * there), and DXVK's stream must take no work inside a window (the residue census): the bytes reach DXVK when the window closes
-		 * (Apply). The capture and Drawcall Limit Fix's mirror see the write as before (globals::OnContextMap).
+		 * @brief Answers a discard map of an engine constant buffer from CS memory inside a CS stage's window, since DXVK's stream
+		 * must take no work there. Nothing in the window reads DXVK's buffer, and Apply writes the bytes when it closes.
 		 */
 		bool Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT, D3D11_MAPPED_SUBRESOURCE* a_out)
 		{
@@ -1169,7 +1128,6 @@ namespace RenderGraph::Engine::Flush
 			return true;
 		}
 
-		/** @brief The guest context's Unmap of a buffer Map answered: nothing reaches DXVK while a window is open. */
 		bool Unmap(ID3D11Resource* a_resource, UINT a_subresource)
 		{
 			if (!a_resource || a_subresource != 0)
@@ -1180,13 +1138,13 @@ namespace RenderGraph::Engine::Flush
 				return false;
 			globals::OnContextUnmap(a_resource);
 			found->second.mapped = false;
-			// The window closed while the engine had it mapped: written now.
+			// The window closed while the engine had it mapped, so write it now.
 			if (!FrameAnchors::StagesHoldValues())
 				ApplyOne(found->second);
 			return true;
 		}
 
-		/** @brief The last stage window closed (FrameAnchors::SetWindowsClosedHook): every buffer written inside it reaches DXVK now. */
+		/** @brief Writes every buffer held during the window, once the last stage window closes. */
 		void Apply()
 		{
 			for (auto& [resource, buffer] : Get().buffers)
@@ -1194,7 +1152,6 @@ namespace RenderGraph::Engine::Flush
 					ApplyOne(buffer);
 		}
 
-		/** @brief The report's line, with the census. */
 		void Report()
 		{
 			auto& buffers = Get();
@@ -1240,7 +1197,7 @@ namespace RenderGraph::Engine::Flush
 		config.latch = LatchRequested();
 		if (!config.census && !config.latch)
 			return;
-		// Native mode sees the engine's calls on the native context, whose calls the filter gets too.
+		// Native mode routes engine calls through the native context, which the filter also sees.
 		if (!Tripwire::GuestRequested() && !Native::Requested()) {
 			logger::error(
 				"[ORG] engine flush: CS_ORG_RESIDUE_CENSUS and CS_ORG_ENGINE_FLUSH_LATCH need CS_ORG_TRIPWIRE_GUEST=1 (the guest context sees "
@@ -1256,8 +1213,7 @@ namespace RenderGraph::Engine::Flush
 			config.names[i] = names[i];
 			config.slots[i] = ClassOf(names[i]);
 		}
-		// CS_ORG_ENGINE_FLUSH_LATCH_KEEP=PSSetShaderResources,OMSetRenderTargets: binds that still reach D3D11 inside the latched
-		// functions, for CS readers that still ask D3D11 what the engine bound (flush.md "Readers of the D3D11 state").
+		// Binds that still reach D3D11 inside the latched functions, for bisecting CS readers that ask D3D11 what the engine bound.
 		std::string kept;
 		for (const auto& name : Switches::List("CS_ORG_ENGINE_FLUSH_LATCH_KEEP")) {
 			bool found = false;
@@ -1278,13 +1234,13 @@ namespace RenderGraph::Engine::Flush
 		if (config.unbind)
 			logger::info("[ORG] engine flush: a latched flush that changes the targets unbinds DXVK's (CS_ORG_ENGINE_FLUSH_LATCH_UNBIND)");
 
-		// SetDirtyStates after Hooks.cpp's detour (outside it); DispatchCSShader before ImageSpace's and Hooks.cpp's (inside them).
+		// SetDirtyStates goes after Hooks.cpp's detour, and DispatchCSShader before ImageSpace's and Hooks.cpp's.
 		stl::detour_thunk<SetDirtyStates>(REL::RelocationID(75580, 77386));
 		stl::detour_thunk<SetShader>(REL::RelocationID(75550, 77351));
 		stl::detour_thunk<SetPixelShader>(REL::RelocationID(75555, 77356));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		if (config.latch) {
-			// Outside Hooks.cpp's prefetch detour. The vouched passes' table exists only with the latch.
+			// Outside Hooks.cpp's prefetch detour.
 			GetMarks() = std::make_unique<Mark[]>(kMarks);
 			stl::detour_thunk<RenderPassImmediately>(REL::RelocationID(100854, 107644));
 		}

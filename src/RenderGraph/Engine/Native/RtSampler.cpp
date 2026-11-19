@@ -58,10 +58,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return s_seconds;
 		}
 
-		/**
-		 * @brief The suspended thread's stack, unwound from a_context. No allocation and no lock of ours: the thread may hold the heap's.
-		 * A fault while reading its stack ends the walk.
-		 */
+		/** @brief Unwinds the suspended thread's stack. No allocation and no lock, since the thread may hold the heap's. */
 		int Unwind(CONTEXT a_context, std::uintptr_t a_base, std::uintptr_t a_limit, void** a_out)
 		{
 			int n = 0;
@@ -76,7 +73,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 						RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, a_context.Rip, const_cast<PRUNTIME_FUNCTION>(entry), &a_context, &handler, &frame,
 							nullptr);
 					} else {
-						// A leaf function: the return address is at the stack pointer.
+						// A leaf function has its return address at the stack pointer.
 						if (a_context.Rsp < a_limit || a_context.Rsp + 8 > a_base)
 							break;
 						a_context.Rip = *reinterpret_cast<DWORD64*>(a_context.Rsp);
@@ -108,7 +105,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return slash ? slash + 1 : path;
 		}
 
-		/** @brief The function holding a_address: the game's by Address Library ID, others by DbgHelp, else module+offset. */
+		/** @brief Names the function holding a_address, by Address Library ID for the game, else DbgHelp, else module+offset. */
 		std::string Name(void* a_address, std::unordered_map<void*, std::string>& a_cache)
 		{
 			if (const auto it = a_cache.find(a_address); it != a_cache.end())
@@ -143,7 +140,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return a_text;
 		}
 
-		/** @brief What kind of work a leaf function does: heap, lock or wait, memory copies, hashing, and so on; else "code". */
+		/** @brief Classes a leaf function's work, such as heap, lock, copy or hashing. */
 		const char* Kind(const std::string& a_leaf)
 		{
 			static const char* const kHeap[] = { "RtlAllocateHeap", "RtlFreeHeap", "RtlpAlloc", "RtlpFree", "RtlpLowFrag", "!malloc", "!free",
@@ -171,7 +168,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return "code";
 		}
 
-		/** @brief Whether a leaf is a blocking wait in the kernel: the thread was going off the CPU, not using it. */
+		/** @brief Whether a leaf is a blocking kernel wait, meaning the thread was going off the CPU. */
 		bool IsWait(const std::string& a_leaf)
 		{
 			static const char* const kWaits[] = { "ZwWaitForAlertByThreadId", "NtWaitForSingleObject", "NtWaitForMultipleObjects", "ZwWaitForSingleObject",
@@ -184,9 +181,8 @@ namespace RenderGraph::Engine::Native::RtSampler
 		}
 
 		/**
-		 * @brief Who owns a sample's CPU time, and what kind of work its leaf does. A driver or API module met before the first CS frame
-		 * (walking from the leaf up) owns the sample: the driver's own heap and locks are the driver's time. Else the first CS frame
-		 * decides, by its namespace: BasicRHI (rhi::), ORG (org::), telemetry, CS.
+		 * @brief Who owns a sample's CPU time. A driver or API module below the first CS frame owns it, since its heap and locks are its time.
+		 * Else the first CS frame's namespace decides.
 		 */
 		std::string Category(const Sample& a_sample, std::unordered_map<void*, std::string>& a_cache)
 		{
@@ -230,8 +226,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 				if (!sample.count)
 					continue;
 				const auto leaf = Name(sample.frames[0], a_cache);
-				// A sample in a kernel wait: the thread ran a little in the tick and then blocked. Counted apart, by its first own caller,
-				// and left out of the shares: the thread's CPU time is spread over the samples that were running.
+				// A kernel wait sample is counted apart and left out of the shares, since the thread's CPU time belongs to running samples.
 				if (IsWait(leaf)) {
 					std::string caller = "?";
 					for (int i = 1; i < sample.count; ++i)
@@ -290,7 +285,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			print("leaf outside CS and the game, with the first CS or game frame", ownLeaf, 60);
 		}
 
-		/** @brief A tracked thread's allocation sites: the first frame outside the allocator and the standard library, and its caller. */
+		/** @brief Reports a tracked thread's allocation sites by the first frames outside the allocator and the standard library. */
 		void ReportSites(const std::string& a_thread, std::uint32_t a_ring, std::uint64_t a_frames, std::unordered_map<void*, std::string>& a_cache)
 		{
 			const std::uint32_t count = AllocCounter::SiteCount(a_ring);
@@ -306,7 +301,6 @@ namespace RenderGraph::Engine::Native::RtSampler
 			};
 			for (std::uint32_t i = 0; i < count; ++i) {
 				const auto& site = AllocCounter::SiteAt(a_ring, i);
-				// The first three frames outside the allocator and the standard library.
 				std::string chain;
 				int found = 0;
 				for (std::uint32_t k = 0; k < site.count && found < 3; ++k) {
@@ -323,7 +317,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			}
 			std::vector<std::pair<std::string, std::pair<std::uint64_t, std::uint64_t>>> sorted(sites.begin(), sites.end());
 			std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
-			// Past the ring's size the oldest sites were overwritten: the kept ones stand for all that were taken.
+			// Past the ring's size the oldest sites were overwritten, so the kept ones stand for all.
 			const double kept = static_cast<double>(AllocCounter::SiteWritten(a_ring)) / static_cast<double>(count);
 			const double scale = kept * static_cast<double>(AllocCounter::kSiteEvery) / static_cast<double>(std::max<std::uint64_t>(a_frames, 1));
 			logger::info("[ORG native] {} thread allocation sites (every {}th allocation, {} kept; a frame = count x {} / frames):", a_thread,
@@ -338,7 +332,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			std::string name;
 			HANDLE handle = nullptr;
 			DWORD id = 0;
-			// The render thread's stack bounds come from its thread block; the others' from each sample's stack pointer.
+			// The render thread's stack bounds come from its thread block, the others' from each sample's stack pointer.
 			bool tibBounds = false;
 			std::vector<Sample> samples;
 			std::uint64_t offCpu = 0;
@@ -362,7 +356,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return out;
 		}
 
-		/** @brief Where a thread started (its Win32 start address), named: tells unnamed threads apart (a driver's, the game's). */
+		/** @brief A thread's named Win32 start address, to tell unnamed threads apart. */
 		std::string StartOf(HANDLE a_thread, std::unordered_map<void*, std::string>& a_cache)
 		{
 			using Query = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
@@ -374,7 +368,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 			return Name(start, a_cache);
 		}
 
-		/** @brief Every thread of this process, with an open handle (query rights) and its cycle time now. */
+		/** @brief Every thread of this process with an open handle and its cycle time now. */
 		struct ThreadCycles
 		{
 			DWORD id = 0;
@@ -434,7 +428,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 					logger::info("[ORG native] sampler: no {} thread to sample", name);
 				}
 			}
-			// Every thread's CPU over the window (a table at the end), and DXVK's command stream thread sampled too in guest mode.
+			// Also sample DXVK's command stream thread in guest mode.
 			std::vector<ThreadCycles> threadsAtStart = ProcessThreads();
 			for (const auto& thread : threadsAtStart) {
 				const std::string description = ThreadDescription(thread.id);
@@ -523,7 +517,6 @@ namespace RenderGraph::Engine::Native::RtSampler
 				if (!target.tibBounds)
 					CloseHandle(target.handle);
 			}
-			// Every thread's CPU in the window, most first.
 			{
 				std::vector<std::pair<double, std::string>> rows;
 				for (const auto& thread : threadsAtStart) {
@@ -547,7 +540,6 @@ namespace RenderGraph::Engine::Native::RtSampler
 				for (std::size_t i = 0; i < rows.size() && i < 32; ++i)
 					logger::info("[ORG native]   {:7.3f}  {}", rows[i].first, rows[i].second);
 			}
-			// Every thread's allocations in the window, most first.
 			std::vector<std::pair<std::uint32_t, AllocCounter::Totals>> threads;
 			AllocCounter::ForEach([&](std::uint32_t a_id, const AllocCounter::Totals& a_totals) {
 				const auto found = allocsBefore.find(a_id);
@@ -577,7 +569,7 @@ namespace RenderGraph::Engine::Native::RtSampler
 		if (!Seconds())
 			return;
 		auto& s = S();
-		// The thread that ends frames now: the first frames can end on another (the loading screen's).
+		// The first frames can end on another thread, such as the loading screen's.
 		if ((!s.thread.load() || GetCurrentThreadId() != s.threadId) && !s.started.load()) {
 			if (const HANDLE old = s.thread.exchange(nullptr))
 				CloseHandle(old);
@@ -587,7 +579,6 @@ namespace RenderGraph::Engine::Native::RtSampler
 				logger::warn("[ORG native] render thread sampler: the thread handle does not work (error {}); no samples", GetLastError());
 				return;
 			}
-			// The stack's top from the thread block, its reserved bottom from the allocation that holds it.
 			const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
 			MEMORY_BASIC_INFORMATION info{};
 			VirtualQuery(&info, &info, sizeof(info));

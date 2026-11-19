@@ -1,4 +1,4 @@
-// The engine's dynamic ring (75484 MapDynamicBuffer) as an ORG upload ring (EngineBuffers.h, docs/development/p4/p4.5-buffers.md).
+// The engine's dynamic ring (75484 MapDynamicBuffer) as an ORG upload ring. See EngineBuffers.h.
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
@@ -25,12 +25,11 @@ namespace RenderGraph::Engine::Buffers::detail
 {
 	namespace
 	{
-		// The engine's chunk size: no map is ever larger.
+		// The engine's chunk size. No map is ever larger.
 		constexpr std::uint32_t kChunkBytes = 0x400000;
-		// The engine's ring has three slots; the users bind ring[cur].
+		// The engine's ring has three slots, and users bind ring[cur].
 		constexpr std::uint32_t kEngineSlots = 3;
 
-		/** @brief The engine's ring globals (R1). */
 		ID3D11Buffer** EngineRing()
 		{
 			static REL::Relocation<ID3D11Buffer**> ring{ REL::RelocationID(524731, 411350) };
@@ -47,7 +46,7 @@ namespace RenderGraph::Engine::Buffers::detail
 			return *offset;
 		}
 
-		/** @brief Every chunk's ORG buffer, for IsRingChunk. Chunks are kept for the process, so an entry never goes stale. */
+		/** @brief Chunks are kept for the process, so an entry never goes stale. */
 		struct ChunkSet
 		{
 			std::shared_mutex lock;
@@ -59,7 +58,6 @@ namespace RenderGraph::Engine::Buffers::detail
 			return *set;
 		}
 
-		/** @brief One piece of the ring: an upload backing and what the engine's slot holds for it. */
 		struct Chunk
 		{
 			Backing backing;
@@ -68,23 +66,22 @@ namespace RenderGraph::Engine::Buffers::detail
 		};
 
 		/**
-		 * @brief The ring. Map runs on the thread that drives the immediate context under Renderer::Lock (the render thread, or the
-		 * loading screen's), so the engine's globals are only touched there. A retired chunk comes back from ReleaseAfterD3D11's
-		 * service, also on that thread; the free list has its own lock because the service can run inside Map.
-		 */
+		* @brief Map runs on the immediate context's thread under Renderer::Lock, so the engine's globals are only touched there.
+		* The free list has its own lock because the release service can run inside Map.
+		*/
 		class Ring
 		{
 		public:
 			static Ring& Get()
 			{
-				// Never destroyed: chunks may still be bound by DXVK, and retirements may come back during shutdown.
+				// Never destroyed, since DXVK may still bind chunks and retirements may come back during shutdown.
 				static Ring* ring = new Ring;
 				return *ring;
 			}
 
 			bool Active() const { return active.load(std::memory_order_acquire); }
 
-			/** @brief The engine's map: a pointer to a_size bytes and their offset in ring[cur]; null when the engine's own map runs. */
+			/** @brief Null when the engine's own map runs. */
 			void* Map(std::uint32_t a_size, std::uint32_t* a_outOffset)
 			{
 				std::scoped_lock lock(mutex);
@@ -106,7 +103,7 @@ namespace RenderGraph::Engine::Buffers::detail
 		private:
 			Ring() = default;
 
-			/** @brief The first map with the render graph active: the engine's three buffers are put aside, a chunk takes every slot. */
+			/** @brief On the first map with the graph active, puts the engine's three buffers aside. */
 			bool Activate()
 			{
 				if (!RenderGraphRuntime::Get().IsActive())
@@ -131,10 +128,7 @@ namespace RenderGraph::Engine::Buffers::detail
 				return true;
 			}
 
-			/**
-			 * @brief The current chunk is full: it is retired behind the D3D11 work issued so far, and a free chunk (or a new one) takes
-			 * the engine's next slot. Nothing waits for the GPU.
-			 */
+			/** @brief Retires the full chunk behind the D3D11 work issued so far and puts another in the next slot. Nothing waits for the GPU. */
 			bool Advance(std::uint32_t a_size)
 			{
 				if (current)
@@ -152,17 +146,14 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 
 			/**
-			 * @brief A full chunk. The graph reads it: draws latched from it run in executions submitted later in the same frame (in guest
-			 * mode a stage's block reaches DXVK's stream only at the stage's commit, after the chunk filled). So it is parked until the frame
-			 * ends (ReleaseParked), and then waits for the work submitted up to that point: the graph's submissions in native mode, D3D11's
-			 * stream with the frame's blocks in it in guest mode.
-			 */
+			* @brief Graph executions later in the same frame still read a full chunk. In guest mode a stage's block reaches DXVK only at
+			* its commit. So the chunk is parked until the frame ends, then waits for the work submitted by then.
+			*/
 			void Retire(Chunk& a_chunk)
 			{
 				parked.push_back({ &a_chunk, RenderGraph::RefFrame() });
 			}
 
-			/** @brief Hands a_chunk back to the free list once the GPU is past the work submitted until now (ReleaseAfterD3D11). */
 			void ReleaseAfterWork(Chunk& a_chunk)
 			{
 				std::shared_ptr<const void> token(static_cast<const void*>(&a_chunk), [this](const void* a_retired) {
@@ -174,11 +165,9 @@ namespace RenderGraph::Engine::Buffers::detail
 
 		public:
 			/**
-			 * @brief After the present: the parked chunks of frames that have ended. A frame ends at its present (SealPresented advances
-			 * RefFrame), after every graph execution of that frame was submitted. So the release, which waits for the work submitted until
-			 * now, covers every execution that may read the chunk. Here, not when the next chunk fills: that is inside a stage's window, and
-			 * in guest mode the release's D3D11 query would reach DXVK's stream there.
-			 */
+			* @brief After Present, releases the parked chunks of ended frames, since every execution of that frame has been submitted.
+			* Not done when the next chunk fills, because that is inside a stage's window and in guest mode the release's query would reach DXVK's stream there.
+			*/
 			void ReleaseEndedFrames()
 			{
 				std::scoped_lock lock(mutex);
@@ -199,17 +188,14 @@ namespace RenderGraph::Engine::Buffers::detail
 				});
 			}
 
-			/**
-			 * @brief a_chunk becomes the ring's current version. Its readers declare the ring, so the graph knows them; the chunk's
-			 * lifetime is the ring's (Retire), so the version needs no owner.
-			 */
+			/** @brief Readers declare the ring and the chunk lives as long as the ring, so the version needs no owner. */
 			void PublishVersion(Chunk& a_chunk)
 			{
 				if (const auto& versions = RingVersions())
 					versions->PublishLate(a_chunk.backing.buffer);
 			}
 
-			/** @brief A free chunk of at least a_size bytes, or a new one; null when none can be made. */
+			/** @brief Null when none can be made. */
 			Chunk* Take(std::uint32_t a_size)
 			{
 				{
@@ -248,7 +234,7 @@ namespace RenderGraph::Engine::Buffers::detail
 				return chunks.back().get();
 			}
 
-			/** @brief Puts a_chunk in the engine's slot, with a reference of the slot's own, and drops the slot's old one. */
+			/** @brief The slot takes its own reference and drops the old one. */
 			void Publish(std::uint32_t a_slot, Chunk& a_chunk)
 			{
 				auto* ring = EngineRing();
@@ -258,9 +244,9 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 
 			/**
-			 * @brief No chunk could be made: the engine's own buffers go back in its slots and its map runs from now on. The offset is
-			 * set to the end, so the engine's next map fences its current buffer and moves on, as it does on a wrap.
-			 */
+			* @brief No chunk could be made, so the engine's buffers go back and its map runs from now on.
+			* The offset is set to the end so its next map fences and moves on, as on a wrap.
+			*/
 			void FallBack()
 			{
 				auto* ring = EngineRing();
@@ -276,26 +262,26 @@ namespace RenderGraph::Engine::Buffers::detail
 				logger::error("[ORG] engine buffers: a dynamic ring chunk could not be made; the engine's own ring is back");
 			}
 
-			/** @brief A full chunk waiting for the end of the frame it filled in (native mode), with that frame (RefFrame). */
+			/** @brief Native mode: a full chunk waiting for the end of the frame it filled in. */
 			struct Parked
 			{
 				Chunk* chunk;
 				std::uint64_t frame;
 			};
 
-			std::mutex mutex;  // Map's (the engine's globals, the current chunk and the parked ones)
+			std::mutex mutex;  // guards the engine's globals, the current chunk and the parked ones
 			std::mutex freeMutex;
-			std::vector<std::unique_ptr<Chunk>> chunks;  // every chunk made, kept for the process
+			std::vector<std::unique_ptr<Chunk>> chunks;  // kept for the process
 			std::vector<Chunk*> freeChunks;
 			std::vector<Parked> parked;
 			Chunk* current = nullptr;
 			std::uint32_t offset = 0;
 			std::atomic<bool> active{ false };
 			bool abandoned = false;
-			winrt::com_ptr<ID3D11Buffer> originals[kEngineSlots];  // the engine's buffers while the ORG ring runs
+			winrt::com_ptr<ID3D11Buffer> originals[kEngineSlots];  // set aside while the ORG ring runs
 		};
 
-		/** @brief MapDynamicBuffer (75484): the ORG ring's map once it is active. */
+		/** @brief MapDynamicBuffer (75484). */
 		struct MapDynamicBuffer
 		{
 			static void* thunk(void* a_renderer, std::uint32_t a_size, std::uint32_t* a_outOffset)
@@ -307,7 +293,7 @@ namespace RenderGraph::Engine::Buffers::detail
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The ring's unmaps (75485, 75487, 75498): nothing to unmap while the ORG ring runs (its chunks stay mapped). */
+		/** @brief The ring's unmaps (75485, 75487, 75498). The ORG ring's chunks stay mapped, so there is nothing to do. */
 		template <int Unmapper>
 		struct UnmapDynamicBuffer
 		{
@@ -323,11 +309,11 @@ namespace RenderGraph::Engine::Buffers::detail
 	const std::shared_ptr<org::VersionedBuffer>& RingVersions()
 	{
 		static std::once_flag once;
-		// Never destroyed, as the ring: its versions are the chunks, which may still be read during shutdown.
+		// Never destroyed, as chunks may still be read during shutdown.
 		static auto* versions = new std::shared_ptr<org::VersionedBuffer>;
 		std::call_once(once, [] {
 			try {
-				// A small stand-in, which the readers' declarations resolve to; it never changes, so a new chunk costs no graph edit.
+				// Readers' declarations resolve to this fixed stand-in, so a new chunk costs no graph edit.
 				auto standIn = org::Buffer::CreateUnmaterializedStructuredBuffer(1, 4, false);
 				standIn->SetName("Engine::DynamicRing.stand-in");
 				standIn->Materialize();
@@ -354,9 +340,9 @@ namespace RenderGraph::Engine::Buffers::detail
 	void InstallRingHooks()
 	{
 		stl::detour_thunk<MapDynamicBuffer>(REL::RelocationID(75484, 77271));
-		stl::detour_thunk<UnmapDynamicBuffer<0>>(REL::RelocationID(75485, 77272));  // UnmapDynamicBuffer
-		stl::detour_thunk<UnmapDynamicBuffer<1>>(REL::RelocationID(75487, 77274));  // UnmapDynamicTriShapeDynamicData
-		stl::detour_thunk<UnmapDynamicBuffer<2>>(REL::RelocationID(75498, 77288));  // UnmapDynamicLineShapeDynamicData
+		stl::detour_thunk<UnmapDynamicBuffer<0>>(REL::RelocationID(75485, 77272));
+		stl::detour_thunk<UnmapDynamicBuffer<1>>(REL::RelocationID(75487, 77274));
+		stl::detour_thunk<UnmapDynamicBuffer<2>>(REL::RelocationID(75498, 77288));
 	}
 }
 

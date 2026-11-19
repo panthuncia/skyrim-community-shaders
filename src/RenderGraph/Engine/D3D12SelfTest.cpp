@@ -38,7 +38,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			return false;
 		}
 
-		/** @brief Step 1: a self-test shader (a_source under Data/Shaders) as DXIL, from the DXC CS ships beside the DXVK DLLs. Empty on failure. */
+		/** @brief Step 1. Compiles with the DXC CS ships beside the DXVK DLLs. Empty on failure. */
 		std::vector<std::byte> CompileDxil(std::string& a_failure, const char* a_source = kSource)
 		{
 			const std::filesystem::path path = std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / a_source;
@@ -77,7 +77,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			return artifact.binary;
 		}
 
-		/** @brief Step 2: one dispatch writes the buffer through the heap and root constants; the readback must match. */
+		/** @brief Step 2. One dispatch writes through the heap and root constants, and the readback must match. */
 		bool Dispatch(rhi::DevicePtr& a_device, const std::vector<std::byte>& a_dxil, std::string& a_failure)
 		{
 			rhi::Device device = a_device.Get();
@@ -184,11 +184,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			return true;
 		}
 
-		/**
-		 * @brief Step 3: buffer view refs (BasicRHI's Device::GetBufferViewRef, Common/DeviceRef.hlsli). A dispatch reads each word of a
-		 * source buffer through its ref and writes word * 7 + 1 through the destination's; the readback must match. The heap has the
-		 * device's full capacity, so it holds the refs' region.
-		 */
+		/** @brief Step 3. A dispatch copies words through buffer view refs as word * 7 + 1, and the readback must match. */
 		bool DeviceRefs(rhi::DevicePtr& a_device, const std::vector<std::byte>& a_dxil, std::string& a_failure)
 		{
 			constexpr std::uint32_t kWords = 256;
@@ -232,8 +228,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				static_cast<std::uint32_t*>(mapped)[i] = 0x1000u + i * 3u;
 			source->Unmap(0, kBytes);
 
-			// The device's full capacity (rhi_shader_abi.h): only such a heap holds the refs' region. Made first: a pair made before
-			// it is copied in when it is made, so either order works.
+			// Only a heap at the device's full capacity holds the refs' region.
 			::ShaderFeatureInfo shaderFeatures{};
 			if (!Ok(device.QueryFeatureInfo(&shaderFeatures.header), "QueryFeatureInfo", a_failure))
 				return false;
@@ -244,7 +239,6 @@ namespace RenderGraph::Engine::D3D12SelfTest
 					"CreateDescriptorHeap (full capacity)", a_failure))
 				return false;
 
-			// Each buffer gets its raw view pair here.
 			const rhi::BufferViewRef from = device.GetBufferViewRef({ source->GetHandle(), 0 });
 			const rhi::BufferViewRef to = device.GetBufferViewRef({ destination->GetHandle(), 0 });
 			if (!from || !to) {
@@ -321,7 +315,7 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			std::uint64_t done = 0;
 		};
 
-		/** @brief Step 3: a swap chain on a small window, configured by ConfigureSwapchain, presents cleared frames. */
+		/** @brief Step 4. A swap chain on a small window presents cleared frames. */
 		bool Present(rhi::DevicePtr& a_device, std::string& a_failure)
 		{
 			rhi::Device device = a_device.Get();
@@ -372,7 +366,6 @@ namespace RenderGraph::Engine::D3D12SelfTest
 					Frame& frame = frames[frameNumber % kFramesInFlight];
 					if (frame.done && !Ok(timeline->HostWait(frame.done, 5000), "Timeline::HostWait", a_failure))
 						break;
-					// The waitable object: the frame latency the swap chain was given.
 					const auto latency = swapchain->WaitForFrameLatency(1'000'000'000ull);
 					if (latency != rhi::Result::Ok && latency != rhi::Result::Unsupported && !Ok(latency, "WaitForFrameLatency", a_failure))
 						break;

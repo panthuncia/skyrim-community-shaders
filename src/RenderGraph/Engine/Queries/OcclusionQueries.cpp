@@ -1,5 +1,4 @@
-// The engine's occlusion queries answered by the render graph: the ring slots' state, the BeginQuery, EndQuery and GetQueryData
-// detours, and the ORG query rings (OcclusionQueries.h).
+// The engine's occlusion queries answered by the render graph. See OcclusionQueries.h.
 
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -28,10 +27,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 {
 	namespace
 	{
-		// GetQueryData's not-ready answer, as the engine returns it.
 		constexpr std::uint32_t kNotReady = 0xFFFFFFFF;
 		static_assert(kRingSlots <= 64, "Harvest keeps one bit per ring slot");
-		// The first answers logged one by one, then one summary per ring slot every kSummaryReads answers.
+		// The first answers are logged one by one, then a summary per ring slot every kSummaryReads answers.
 		constexpr std::uint32_t kLoggedAnswers = 12;
 		constexpr std::uint32_t kSummaryReads = 100;
 
@@ -42,24 +40,20 @@ namespace RenderGraph::Engine::OcclusionQueries
 		{};
 #endif
 
-		/** @brief One entry of the engine's ring. */
 		struct Slot
 		{
-			bool graph = false;  // its last BeginQuery was inside a Bracket: the graph answers it
-			bool begun = false;  // between that BeginQuery and its EndQuery
-			bool ready = false;  // value answers GetQueryData
+			bool graph = false;  // its last BeginQuery was inside a Bracket
+			bool begun = false;
+			bool ready = false;
 			std::uint32_t value = 0;
-			std::uint32_t last = 0;  // the last count it answered or was given
-			// What a skip answers instead of last: its bracket's skip answer (Bracket(a_skipAnswer)), set at its BeginQuery.
+			std::uint32_t last = 0;
+			// Set at BeginQuery from the bracket.
 			bool hasSkipAnswer = false;
 			std::uint32_t skipAnswer = 0;
-			// The run that counts it, once committed: the ring, its range (the run's lease index) and that commit's generation, and
-			// the query index.
 			std::shared_ptr<Ring> ring;
 			std::uint32_t range = 0;
 			std::uint64_t generation = 0;
 			std::uint32_t query = 0;
-			// The log's summary since its last line.
 			std::uint32_t reads = 0, notReady = 0, minimum = kNotReady, maximum = 0;
 			std::uint64_t sum = 0;
 		};
@@ -92,7 +86,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			return log;
 		}
 
-		/** @brief The ring slot of an engine query entry (a pointer into the ring), or kNoSlot. */
+		/** @brief The ring slot of a pointer into the engine's ring, or kNoSlot. */
 		std::int32_t SlotOf(ID3D11Query** a_entry)
 		{
 			static REL::Relocation<ID3D11Query**> ring{ REL::RelocationID(524740, 411344) };
@@ -102,13 +96,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 			return index >= 0 && index < static_cast<std::ptrdiff_t>(kRingSlots) ? static_cast<std::int32_t>(index) : kNoSlot;
 		}
 
-		/** @brief A count for GetQueryData: its low 32 bits, never the not-ready value. */
+		/** @brief Low 32 bits, never the not-ready value. */
 		std::uint32_t Answer(std::uint64_t a_count)
 		{
 			return static_cast<std::uint32_t>((std::min)(a_count, std::uint64_t{ kNotReady - 1 }));
 		}
 
-		/** @brief Gives a slot its count (mutex held). */
+		/** @brief Mutex held. */
 		void Deliver(Slot& a_slot, std::uint32_t a_value)
 		{
 			a_slot.value = a_value;
@@ -117,7 +111,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			a_slot.ring.reset();
 		}
 
-		/** @brief Logs what the engine read (mutex held): the first answers one by one, then a summary per slot. */
+		/** @brief Mutex held. */
 		void NoteRead(Globals& a_globals, std::int32_t a_index, Slot& a_slot, std::uint32_t a_value, bool a_graph)
 		{
 			if (a_value == kNotReady) {
@@ -143,7 +137,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 		}
 
-		/** @brief Skips a graph slot (mutex held): it answers its last count, or its bracket's skip answer. */
+		/** @brief Mutex held. */
 		void SkipSlot(Globals& a_globals, Slot& a_slot, std::string_view a_why)
 		{
 			Deliver(a_slot, a_slot.hasSkipAnswer ? a_slot.skipAnswer : a_slot.last);
@@ -152,32 +146,25 @@ namespace RenderGraph::Engine::OcclusionQueries
 		}
 
 #if defined(CS_HAS_RENDER_GRAPH)
-		/**
-		 * @brief Reads the counts of a_ring's range (a lease index) into the slots its run still counts, once its work is done (mutex
-		 * held): a_retired at the next commit of the lease index (its last run retired), else when the run's GPU point is reached. False
-		 * when not yet.
-		 */
+		/** @brief Mutex held. Reads a range's counts once its work is done, either at the lease's next commit or when its GPU point is reached. */
 		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_range, bool a_retired);
 #endif
 	}
 
 #if defined(CS_HAS_RENDER_GRAPH)
-	/** @brief A QueryRing's pool, readback and runs. */
 	struct QueryRing::State
 	{
-		/** @brief A range's last run. */
 		struct Run
 		{
-			org::RunRef ref;                  // the run that committed it (a CS stage's staging run until the stage's commit moves it)
-			std::vector<std::int32_t> slots;  // the engine slot each query counts, kNoSlot for none
+			org::RunRef ref;                  // a stage's staging run until the stage's commit moves it
+			std::vector<std::int32_t> slots;  // kNoSlot for none
 			std::uint64_t generation = 0;
 			bool committed = false, submitted = false, harvested = false;
-			bool unresolved = false;         // its recording's pass did not declare its readback yet: nothing was resolved into it
-			org::GraphHost::GpuPoint point;  // every queue past the run's submission
-			std::uint64_t seals = 0;          // GraphHost::Seals at its submission
+			bool unresolved = false;         // its pass had not declared the readback, so nothing was resolved into it
+			org::GraphHost::GpuPoint point;
+			std::uint64_t seals = 0;
 		};
 
-		/** @brief The ranges of kRunsPerChunk lease indices: a query pool and its readback (a graph resource the pass declares). */
 		struct Chunk
 		{
 			rhi::QueryPoolPtr pool;
@@ -188,15 +175,15 @@ namespace RenderGraph::Engine::OcclusionQueries
 		mutable rhi::Device device;  // ChunkOf makes pools from a const ring
 		std::uint32_t perRun = 0;
 		std::uint64_t stride = 8;
-		// Grown by the commit (render thread) and read at record time (any thread): guarded by chunkMutex. A chunk never moves.
+		// Grown at commit on the render thread and read at record time on any thread. A chunk never moves.
 		mutable std::mutex chunkMutex;
 		mutable std::vector<std::unique_ptr<Chunk>> chunks;
 		mutable bool chunkFailed = false;
-		std::vector<Run> runs;  // by range (lease index), grown at commit; guarded by the globals' mutex
+		std::vector<Run> runs;  // by lease index, guarded by the globals' mutex
 		std::uint32_t lastCommitted = ~0u;
 		std::uint64_t generations = 0;
 
-		/** @brief A CS stage's commit moves what its taps committed into the frame slot's staging run onto the run that submits it. */
+		/** @brief Moves a stage's staging-run commits onto the run that submits it. */
 		struct Mover final : ::RenderGraph::RunSlotsRegistry::Entry
 		{
 			State* state = nullptr;
@@ -213,13 +200,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 		State(const State&) = delete;
 		State& operator=(const State&) = delete;
 
-		/** @brief The chunk index of a range. */
 		static std::uint32_t ChunkIndex(std::uint32_t a_range) { return a_range / QueryRing::kRunsPerChunk; }
 
-		/**
-		 * @brief The chunk of a range; with a_make (the commit, the render thread) made when it is new, a_made then set. Null when it
-		 * was not made, or (logged once) when its pool or readback cannot be made.
-		 */
+		/** @brief With a_make, on the render thread at commit, makes a new chunk. Null if not made or on failure, logged once. */
 		Chunk* ChunkOf(std::uint32_t a_range, bool a_make = false, bool* a_made = nullptr) const
 		{
 			const std::uint32_t index = ChunkIndex(a_range);
@@ -252,7 +235,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 				*a_made = true;
 			return chunk.get();
 		}
-		/** @brief A range's first query in its chunk's pool. */
 		std::uint32_t First(std::uint32_t a_range) const { return (a_range % QueryRing::kRunsPerChunk) * perRun; }
 	};
 
@@ -271,20 +253,18 @@ namespace RenderGraph::Engine::OcclusionQueries
 				auto& slot = a_globals.slots[a_index];
 				return slot.ring.get() == &a_ring && slot.range == a_range && slot.generation == run.generation ? &slot : nullptr;
 			};
-			// Committed into a CS stage's run that is not submitted yet: not ready, until the stage submits it or its lease comes round again.
+			// A stage run not yet submitted is not ready until the stage submits it or its lease comes round.
 			if (!run.submitted && !run.unresolved && !a_retired)
 				return false;
 			if (!run.submitted || run.unresolved) {
-				// Committed but never submitted (the run failed after its commit), or recorded by a pass built before its readback
-				// existed: nothing counted it into the readback.
+				// A run that failed after its commit, or a pass built before its readback existed, counted nothing.
 				for (const auto index : run.slots)
 					if (auto* slot = bound(index))
 						SkipSlot(a_globals, *slot, run.unresolved ? "its readback was not declared yet" : "its run was committed but not submitted");
 				run.harvested = true;
 				return true;
 			}
-			// At the next commit of the run's lease index the lease has retired, which holds the run: its point may also name later
-			// work on other queues, so it is not asked then.
+			// At the lease's next commit the run has retired. Its point may name later work on other queues, so do not ask it then.
 			if (!a_retired && !run.point.Reached())
 				return false;
 			auto* chunk = a_ring.ChunkOf(a_range);
@@ -292,7 +272,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (chunk)
 				chunk->readback->GetAPIResource().Map(&mapped);
 			const auto* counts = static_cast<const std::uint64_t*>(mapped);
-			// A slot several queries count (the decal test's draws) answers their sum.
+			// A slot several queries count answers their sum.
 			std::array<std::uint64_t, kRingSlots> sums{};
 			std::uint64_t named = 0;
 			for (std::uint32_t i = 0; i < run.slots.size(); ++i) {
@@ -328,7 +308,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		state->name = std::string(a_name);
 		state->device = host->Device();
 		state->perRun = a_perRun;
-		// The first chunk now: a pool that cannot be made at all fails the client's setup, as before.
+		// A pool that cannot be made at all fails the client's setup.
 		{
 			rhi::QueryPoolDesc desc{};
 			desc.type = rhi::QueryType::Occlusion;
@@ -340,9 +320,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 			state->stride = (std::max)(probe->GetQueryResultInfo().elementSize, 8u);
 		}
-		// Every chunk the host's runs in flight reach in play, made now: the client's first build declares their readbacks, so no
-		// commit makes one and refreshes the client during play (a rebuild, and the client's runs refused until it is attached). Early
-		// in a session the lease indices passed 64 and the sun's queries answered their last count until that rebuild.
+		// Make every chunk play reaches now, so the first build declares their readbacks and no commit forces a rebuild mid-play.
 		for (std::uint32_t chunk = 0; chunk < kSetupChunks; ++chunk)
 			if (!state->ChunkOf(chunk * kRunsPerChunk, true))
 				return nullptr;
@@ -357,7 +335,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 	{
 		const std::scoped_lock lock(state->chunkMutex);
 		std::vector<std::shared_ptr<org::Resource>> readbacks;
-		// Chunks are made in order of their lease indices, so the made ones are a prefix.
+		// Chunks are made in lease order, so the made ones are a prefix.
 		for (const auto& chunk : state->chunks) {
 			if (!chunk)
 				break;
@@ -396,7 +374,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		if (!chunk)
 			return;
 		if (State::ChunkIndex(a_run.lease) >= a_declared) {
-			// The pass was built before the chunk was made: its readback is not declared, so nothing is written into it.
+			// The pass was built before the chunk existed, so its readback is not declared.
 			auto& globals = Get();
 			const std::scoped_lock lock(globals.mutex);
 			if (a_run.lease < state->runs.size())
@@ -417,8 +395,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 	bool QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots, std::uint32_t a_first)
 	{
 		const std::uint32_t range = a_run.lease;
-		// The range's chunk, and any before it, before the recording needs it: record time never makes one, so every readback a
-		// pass writes is one it declared, and the made chunks stay a prefix (Readbacks).
+		// Make the chunk here, never at record time, so every readback a pass writes is one it declared.
 		bool made = false;
 		for (std::uint32_t chunk = 0; chunk <= State::ChunkIndex(range); ++chunk)
 			state->ChunkOf(chunk * kRunsPerChunk, true, &made);
@@ -427,10 +404,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 		if (state->runs.size() <= range)
 			state->runs.resize(static_cast<std::size_t>(range) + 1);
 		auto& run = state->runs[range];
-		// Another tap of the same run (an instance of a client in one CS stage run) adds its queries to it.
+		// Another tap of the same run adds its queries.
 		const bool same = run.committed && !run.submitted && run.ref == a_run;
 		if (!same) {
-			// The lease index's last run retired before the index was opened again: its counts are there.
+			// The lease's last run retired before reopening, so its counts are there.
 			Harvest(globals, *state, range, true);
 			run = {};
 			run.generation = ++state->generations;
@@ -468,7 +445,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (a_from.lease >= ring.runs.size() || !ring.runs[a_from.lease].committed || !(ring.runs[a_from.lease].ref == a_from))
 				return;
 		}
-		// The submitting run's range and its chunk, made before any recording needs it (record time never makes one).
+		// Record time never makes a chunk, so make it now.
 		for (std::uint32_t chunk = 0; chunk <= State::ChunkIndex(a_to.lease); ++chunk)
 			ring.ChunkOf(chunk * QueryRing::kRunsPerChunk, true);
 		const std::scoped_lock lock(globals.mutex);
@@ -510,7 +487,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 		return Get().active;
 	}
 
-	/** @brief The three detours. */
 	struct Hooks
 	{
 		struct BeginQuery
@@ -523,7 +499,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 					const std::scoped_lock lock(globals.mutex);
 					auto& slot = globals.slots[index];
 					if (current && current->slot == kNoSlot) {
-						// The bracket's query: the graph counts its draw.
 						current->slot = index;
 						slot.graph = true;
 						slot.begun = true;
@@ -594,13 +569,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 
-			/** @brief A graph slot's count (mutex held through a_lock): ready, read from its run's readback, or not ready. */
+			/** @brief Mutex held through a_lock. Ready, read from the run's readback, or not ready. */
 			static std::uint32_t Read([[maybe_unused]] Globals& a_globals, [[maybe_unused]] std::unique_lock<std::mutex>& a_lock, Slot& a_slot,
 				[[maybe_unused]] bool a_wait)
 			{
 				if (a_slot.ready)
 					return a_slot.value;
-				// Still between BeginQuery and EndQuery, or begun and not yet committed: D3D11 would not have the count either.
+				// D3D11 would not have the count yet either.
 				if (a_slot.begun || !a_slot.ring)
 					return kNotReady;
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -610,8 +585,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 					return a_slot.ready ? a_slot.value : kNotReady;
 				if (!a_wait)
 					return kNotReady;
-				// The blocking form: wait for the run's GPU work, but only once the host sealed it (it is on the device then). Before that it
-				// may still sit in DXVK's stream behind this very frame, and a wait here would never end.
+				// Only wait once the host sealed the run. Before that it may sit in DXVK's stream behind this very frame, and the wait would never end.
 				auto* host = RenderGraphRuntime::Get().Host();
 				const auto& run = ring->runs[range];
 				if (!host || host->Seals() <= run.seals) {
@@ -636,7 +610,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 	void Install()
 	{
-		// CS_ORG_OCCLUSION_QUERY_LOG=1 alone: only GetQueryData, to log D3D11's answers for a comparison with the graph's.
+		// With only CS_ORG_OCCLUSION_QUERY_LOG=1, log D3D11's answers for comparison.
 		if (!Requested()) {
 			if (REL::Module::IsVR() || !Switches::On("CS_ORG_OCCLUSION_QUERY_LOG"))
 				return;
@@ -679,11 +653,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 		auto& entry = globals.slots[slot];
 		if (!entry.graph || entry.ready)
 			return;
-		// Begun and not counted by any run: neither committed, nor committed by a run that was then submitted.
 		bool submitted = false;
 #if defined(CS_HAS_RENDER_GRAPH)
-		// A run committed into a CS stage is submitted at the stage's commit, after the bracket: its count comes then, or its slot is
-		// skipped when its lease comes round without it.
+		// A stage run is submitted at the stage's commit, after the bracket. Its count comes then, or the slot skips when the lease comes round.
 		if (entry.ring) {
 			const auto& run = entry.ring->runs[entry.range];
 			submitted = run.generation == entry.generation && run.committed;
@@ -711,7 +683,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		auto& globals = Get();
 		const std::scoped_lock lock(globals.mutex);
 		auto& entry = globals.slots[slot];
-		// Never the not-ready value (the member hides the file's Answer helper).
+		// The member hides the file's Answer helper.
 		if (entry.graph && !entry.ready)
 			Deliver(entry, (std::min)(a_count, kNotReady - 1));
 	}

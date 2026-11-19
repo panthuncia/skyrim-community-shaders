@@ -1,35 +1,24 @@
 #pragma once
 
 /**
- * @brief The one entry from CS's startup into the engine-on-graph subsystems (RenderGraph/Engine/*). Hooks.cpp and State.cpp call these
- * instead of each subsystem's own function, so a new subsystem is added here and nowhere else. Each subsystem still decides by its
- * own switch whether it does anything.
- *
- * Device-time hooks (Tripwire, Pipeline and Buffers device hooks, engine handles) stay where the device is made (Hooks.cpp), and
- * per-call seams (Targets::BeginSet, the Constants Map/Unmap seams, the Tonemap anchor) stay at their call sites.
- */
+* @brief The one entry from CS's startup into the engine-on-graph subsystems. Hooks.cpp and State.cpp call these, so a new
+* subsystem is added here and nowhere else. Each subsystem still decides by its own switch whether it does anything.
+* Device-time hooks stay where the device is made, and per-call seams stay at their call sites.
+*/
 namespace RenderGraph::Engine
 {
-	/**
-	 * @brief Main thread, Hooks::Install: every subsystem's game hooks, in this order: Flush, Textures, Buffers, Constants, Bink,
-	 * LoadingScreen, Pipeline, Targets, Skeleton, ImageSpace, Scaleform.
-	 */
+	/** @brief Main thread, from Hooks::Install. The install order matters for nested detours. */
 	void InstallGameHooks();
 
-	/** @brief State::Setup, before RenderGraphRuntime::Initialize: the subsystems' anchor reservations (Skeleton, ImageSpace). */
+	/** @brief State::Setup, before RenderGraphRuntime::Initialize. */
 	void Reserve();
 
-	/**
-	 * @brief State::Setup, after RenderGraphRuntime::Initialize and before the features' SetupResources: the engine's targets move to
-	 * ORG (Targets::TakeOver), then the subsystems that need them set up (Skeleton, ImageSpace).
-	 */
+	/** @brief State::Setup, after RenderGraphRuntime::Initialize and before the features' SetupResources. */
 	void Setup();
 
 	/**
-	 * @brief State::Setup, after the features' SetupResources and PostSetupResources (HDR's UI texture exists then): Scaleform's and Bink's clients
-	 * with their targets and pipelines, then the graphs every client registered so far waits to join are built
-	 * (FrameAnchors::BuildPending), so the primary-path clients (Skeleton, Bink, Scaleform) are in their anchors' graphs before the
-	 * first frame. Render thread, between frames.
-	 */
+	* @brief State::Setup, after the features' SetupResources, so HDR's UI texture exists. Builds every pending graph so the
+	* primary-path clients are in place before the first frame. Render thread, between frames.
+	*/
 	void PostSetup();
 }

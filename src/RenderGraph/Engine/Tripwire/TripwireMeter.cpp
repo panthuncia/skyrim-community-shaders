@@ -10,14 +10,13 @@
 #include <string_view>
 #include <vector>
 
-// The render thread's handle calls, metered (CS_ORG_D3D11_METER=1). See MeterFrame in Tripwire.h.
+// Meters the render thread's handle calls when CS_ORG_D3D11_METER=1.
 namespace RenderGraph::Engine::Tripwire
 {
 	namespace
 	{
 		constexpr std::size_t kMeterKinds = static_cast<std::size_t>(Kind::Count);
 
-		/** @brief The families MeterFrame sums handle methods into. */
 		enum class Family : std::uint8_t
 		{
 			StateSet,
@@ -65,7 +64,7 @@ namespace RenderGraph::Engine::Tripwire
 				return Family::ClearCopy;
 			if (a_method == "Begin" || a_method == "End" || a_method == "GetData" || a_method.ends_with("Predication"))
 				return Family::Query;
-			// IASetInputLayout, PSGetShaderResources, OMSetRenderTargets: the stage's two letters, then Set or Get.
+			// The stage's two letters come first, then Set or Get.
 			if (a_method.size() > 5 && a_method.substr(2, 3) == "Get")
 				return Family::StateGet;
 			if ((a_method.size() > 5 && a_method.substr(2, 3) == "Set") || a_method == "ClearState")
@@ -94,7 +93,7 @@ namespace RenderGraph::Engine::Tripwire
 			return;
 		static MeterState s_state;
 		auto& st = s_state;
-		// The first frame, or frames that end on another thread now (the loading screen's thread, then the main thread).
+		// Frames can end on another thread, such as the loading screen's.
 		if (Detail::g_meterThread.load(std::memory_order_relaxed) != Detail::t_threadId) {
 			Detail::g_meterThread.store(Detail::t_threadId, std::memory_order_relaxed);
 			std::memcpy(st.last, Detail::g_meter, sizeof(st.last));
@@ -113,7 +112,7 @@ namespace RenderGraph::Engine::Tripwire
 				Detail::t_threadId);
 			return;
 		}
-		// The TSC's rate, from the performance counter, once a second has passed.
+		// Calibrate the TSC rate against the performance counter once a second has passed.
 		LARGE_INTEGER qpc{}, freq{};
 		QueryPerformanceCounter(&qpc);
 		QueryPerformanceFrequency(&freq);
@@ -148,7 +147,6 @@ namespace RenderGraph::Engine::Tripwire
 		}
 		if (++st.frames < 600)
 			return;
-		// The window's report: per family, then the 20 largest methods by time.
 		const double frames = st.frames;
 		const auto ms = [&](std::uint64_t a_cycles) { return static_cast<double>(a_cycles) / st.cyclesPerUs / 1000.0 / frames; };
 		std::uint64_t sumCalls[kFamilies]{}, sumCycles[kFamilies]{};
@@ -178,7 +176,6 @@ namespace RenderGraph::Engine::Tripwire
 		line.clear();
 		for (std::size_t e = 0; e < entries.size() && e < 20; ++e) {
 			const auto names = SlotNames(static_cast<Kind>(entries[e].kind));
-			// "ID3D11DeviceContext" printed as "DeviceContext".
 			std::string_view iface = InterfaceName(static_cast<Kind>(entries[e].kind));
 			if (iface.starts_with("ID3D11"))
 				iface.remove_prefix(6);

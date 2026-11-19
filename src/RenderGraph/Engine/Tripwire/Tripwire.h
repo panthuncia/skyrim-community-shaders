@@ -20,39 +20,13 @@ namespace org
 }
 
 /**
- * @brief Tripwire handles (org-full-port.md P4.1): COM objects that stand in the engine's ID3D11* and IDXGISwapChain fields once
- * ORG owns the resource behind them.
+ * @brief Tripwire handles are COM objects that stand in the engine's ID3D11* and IDXGISwapChain fields once ORG owns the resource.
  *
- * A handle implements the whole vtable of its interface. IUnknown works (the refcount is atomic, Release from any thread),
- * QueryInterface answers only the handle's own interface chain, and GetDesc returns the description the handle was created with.
- * Debug names (SetPrivateData with WKPDID_D3DDebugObjectName) are kept. Every other method is a tripwire: it logs its caller once
- * per call site (module+offset, with the Address Library ID when the caller is the game), counts the calls, and fails (E_FAIL,
- * null or zeroed outputs, zero) without touching anything.
- *
- * Two modes, chosen per handle at creation:
- * - Native (nothing wrapped): every tripwire method fails as above.
- * - Guest (a D3D11 object wrapped, while DXVK is loaded): every method is forwarded to the wrapped object, so readers not ported
- *   yet keep working. Only the methods in the handle's WatchSet are logged (with CS_ORG_TRIPWIRE_WATCH_ALL=1, every method,
- *   except on the device, context and swap chain). Arguments that are tripwire handles are replaced by the objects they wrap
- *   before forwarding, so a handle can be passed to a wrapped device or context. Each call site that passes one is logged once,
- *   as a reader not ported yet ("<Interface> handle "<name>" passed on"). Objects a forwarded method returns (GetResource
- *   without a resource handle, the Get* methods of a context) are the wrapped D3D11 objects, not handles. GraphResourceOf still
- *   finds the ORG resource from them.
- *
- * A handle passed straight to DXVK's own device or context (not through a wrapping handle) crashes in DXVK, which casts it to its
- * own class. CS_ORG_TRIPWIRE_GUEST=1 puts wrapping handles in the engine's device and context pointers (GuestDevice.h). A port
- * installs handles in engine fields only when GuestContextInstalled() is true (or in native mode). CS code that passes an engine
- * field to globals::d3d::context, which stays raw DXVK, goes through Unwrap.
- *
- * Releases: the last Release frees the handle on the calling thread and releases the wrapped object (D3D11 objects are free
- * threaded). The ORG resource and the owner it keeps go to a queue that the render thread drains with ServiceRetired, so their
- * GPU memory outlives the frames that used them. A guest handle's wrapped object holds them too (AttachGraphResource). They are
- * queued again when DXVK drops its last reference, and freed only after that.
- *
- * Diagnostics: CS_ORG_TRIPWIRE_LOG=1 logs a report of every call site with its count, every CS_ORG_TRIPWIRE_LOG_INTERVAL seconds
- * (default 60, 0 = only at exit) when something changed, and at exit. A periodic report lists only the sites that are new or were
- * called again since the last one. The exit report lists them all. CS_ORG_TRIPWIRE_SELFTEST=1 runs a self-test at startup
- * (TripwireSelfTest.cpp) that logs PASS or FAIL.
+ * IUnknown, GetDesc and debug names work. Every other method is a tripwire that logs its call site once and fails harmlessly.
+ * A guest handle wraps a D3D11 object and forwards every call to it, logging only watched methods.
+ * Never pass a handle straight to DXVK's own device or context, since DXVK casts it to its own class and crashes. Use Unwrap.
+ * The last Release frees the handle on any thread, but its ORG resource is queued for ServiceRetired so GPU memory outlives use.
+ * CS_ORG_TRIPWIRE_LOG=1 logs call site reports, and CS_ORG_TRIPWIRE_SELFTEST=1 runs a self-test at startup.
  */
 namespace RenderGraph::Engine::Tripwire
 {
@@ -82,55 +56,45 @@ namespace RenderGraph::Engine::Tripwire
 		Count
 	};
 
-	/** @brief The interface's name ("ID3D11Texture2D"). */
 	const char* InterfaceName(Kind a_kind);
 
-	/** @brief The interface's method names in vtable order (QueryInterface, AddRef, Release first): a slot's index is its vtable slot. */
+	/** @brief The interface's method names in vtable order, so a name's index is its vtable slot. */
 	std::span<const char* const> SlotNames(Kind a_kind);
 
-	/** @brief The methods a guest handle logs while it forwards them (the calls that should not happen any more). */
+	/** @brief The methods a guest handle logs while it forwards them, being calls that should not happen any more. */
 	class WatchSet
 	{
 	public:
-		/** @brief More than the largest vtable (ID3D11DeviceContext, 115 slots). */
+		/** @brief More than the largest vtable, ID3D11DeviceContext's 115 slots. */
 		static constexpr std::size_t kMaxSlots = 128;
 
-		/** @brief Nothing watched. */
 		WatchSet() = default;
 
-		/** @brief Every method of every interface. */
 		static WatchSet All();
 
-		/**
-		 * @brief The named methods of a_kind's interface ("Map", "GetDevice"). A name the interface does not have is logged and
-		 * ignored. Resolve a set once and reuse it: the lookup is by string.
-		 */
+		/** @brief The named methods of a_kind's interface. Unknown names are logged and ignored. The lookup is by string, so reuse the set. */
 		static WatchSet Of(Kind a_kind, std::initializer_list<std::string_view> a_methods);
 
-		/** @brief Whether the method at vtable slot a_slot is watched. */
 		bool Test(std::uint16_t a_slot) const { return a_slot < kMaxSlots && bits.test(a_slot); }
 
 	private:
 		std::bitset<kMaxSlots> bits;
 	};
 
-	/** @brief What every factory takes beside the description. */
 	struct Options
 	{
-		/** @brief The debug name ("Engine::kMAIN"), shown in the log; SetPrivateData can change it later. */
+		/** @brief The debug name shown in the log. SetPrivateData can change it later. */
 		std::string name;
-		/** @brief The ORG resource the handle stands for, if any. Released through ServiceRetired after the last Release. */
+		/** @brief The ORG resource the handle stands for. Released through ServiceRetired after the last Release. */
 		std::shared_ptr<org::Resource> graph;
-		/** @brief Anything else the handle keeps alive (an allocation, a record), released with the graph resource. */
+		/** @brief Anything else the handle keeps alive, released with the graph resource. */
 		std::shared_ptr<const void> owner;
-		/** @brief Guest mode: the methods logged while forwarded. Ignored in native mode, where every tripwire method logs. */
+		/** @brief The methods logged while forwarded. Guest mode only. */
 		WatchSet watch;
 	};
 
 	/** @name Factories
-	 * Each makes a handle with one reference, from the description the engine would have passed to the device. a_wrap is the D3D11
-	 * object for guest mode (the handle takes its own reference), or null for native mode. They never fail. Views take the
-	 * resource they view (a handle or a D3D11 object, or null) and answer GetResource with it.
+	 * Each makes a handle with one reference. a_wrap is the D3D11 object for guest mode, or null for native mode. They never fail.
 	 * @{ */
 	winrt::com_ptr<ID3D11Texture1D> CreateTexture1D(const D3D11_TEXTURE1D_DESC& a_desc, Options a_options = {}, ID3D11Texture1D* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11Texture2D> CreateTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, Options a_options = {}, ID3D11Texture2D* a_wrap = nullptr);
@@ -144,11 +108,11 @@ namespace RenderGraph::Engine::Tripwire
 		Options a_options = {}, ID3D11DepthStencilView* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11UnorderedAccessView> CreateUnorderedAccessView(ID3D11Resource* a_resource, const D3D11_UNORDERED_ACCESS_VIEW_DESC& a_desc,
 		Options a_options = {}, ID3D11UnorderedAccessView* a_wrap = nullptr);
-	/** @brief Shaders keep a copy of their bytecode (ShaderBytecode), for the pipeline that replaces them. */
+	/** @brief Shaders keep a copy of their bytecode for the pipeline that replaces them. */
 	winrt::com_ptr<ID3D11VertexShader> CreateVertexShader(std::span<const std::uint8_t> a_bytecode, Options a_options = {}, ID3D11VertexShader* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11PixelShader> CreatePixelShader(std::span<const std::uint8_t> a_bytecode, Options a_options = {}, ID3D11PixelShader* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11ComputeShader> CreateComputeShader(std::span<const std::uint8_t> a_bytecode, Options a_options = {}, ID3D11ComputeShader* a_wrap = nullptr);
-	/** @brief Keeps a copy of the elements (semantic names included) and of the vertex shader signature it was made against. */
+	/** @brief Keeps copies of the elements and of the vertex shader signature it was made against. */
 	winrt::com_ptr<ID3D11InputLayout> CreateInputLayout(std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements, std::span<const std::uint8_t> a_vsBytecode,
 		Options a_options = {}, ID3D11InputLayout* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11BlendState> CreateBlendState(const D3D11_BLEND_DESC& a_desc, Options a_options = {}, ID3D11BlendState* a_wrap = nullptr);
@@ -156,67 +120,54 @@ namespace RenderGraph::Engine::Tripwire
 	winrt::com_ptr<ID3D11RasterizerState> CreateRasterizerState(const D3D11_RASTERIZER_DESC& a_desc, Options a_options = {}, ID3D11RasterizerState* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11SamplerState> CreateSamplerState(const D3D11_SAMPLER_DESC& a_desc, Options a_options = {}, ID3D11SamplerState* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11Query> CreateQuery(const D3D11_QUERY_DESC& a_desc, Options a_options = {}, ID3D11Query* a_wrap = nullptr);
-	/** @brief The immediate context, the device and the swap chain (P6.1): everything but IUnknown is a tripwire (the swap chain answers GetDesc). */
+	/** @brief The immediate context, the device and the swap chain. Everything but IUnknown is a tripwire. */
 	winrt::com_ptr<ID3D11DeviceContext> CreateDeviceContext(Options a_options = {}, ID3D11DeviceContext* a_wrap = nullptr);
 	winrt::com_ptr<ID3D11Device> CreateDevice(Options a_options = {}, ID3D11Device* a_wrap = nullptr);
 	winrt::com_ptr<IDXGISwapChain> CreateSwapChain(const DXGI_SWAP_CHAIN_DESC& a_desc, Options a_options = {}, IDXGISwapChain* a_wrap = nullptr);
 	/** @} */
 
-	/**
-	 * @brief Pairs a device handle with a context handle: the device's GetImmediateContext then answers the context, and the
-	 * context's GetDevice answers the device (a reference added, as D3D11 does), in both modes. The device holds the context.
-	 * Call it once, before either is handed out. False when a_device is not a device handle or a_context not a context handle.
-	 */
+	/** @brief Pairs a device handle with a context handle so each answers the other. Call once, before either is handed out. */
 	bool PairDeviceAndContext(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
 
-	/** @brief What a handle holds, for the code that replaces its readers. */
 	struct Info
 	{
 		Kind kind = Kind::Count;
 		std::string name;
 		std::shared_ptr<org::Resource> graph;
-		/** @brief The wrapped D3D11 object (no reference added), null in native mode. */
+		/** @brief The wrapped D3D11 object without a reference added. Null in native mode. */
 		IUnknown* wrapped = nullptr;
 	};
 
-	/** @brief Whether a_object is a tripwire handle (any interface pointer of one). Safe on any COM object. */
+	/** @brief Whether a_object is a tripwire handle. Safe on any COM object. */
 	bool IsHandle(const void* a_object);
 
-	/** @brief a_object's handle data, or an Info with kind Count when it is not a handle. */
+	/** @brief a_object's handle data. kind is Count when it is not a handle. */
 	Info Describe(const void* a_object);
 
-	/** @brief A handle's wrapped D3D11 object (Info::wrapped), without building the rest of Describe; null when there is none. */
+	/** @brief A handle's wrapped D3D11 object, cheaper than Describe. Null when there is none. */
 	IUnknown* WrappedOf(const void* a_object);
 
-	/** @brief A handle's kind (Info::kind), without building the rest of Describe; Count when a_object is not a handle. */
+	/** @brief A handle's kind, cheaper than Describe. Count when a_object is not a handle. */
 	Kind KindOf(const void* a_object);
 
-	/**
-	 * @brief The ORG resource behind a_object, from an engine field that may or may not hold a handle. That is a handle's
-	 * Options::graph, or the resource AttachGraphResource tied to a D3D11 object (a guest handle's wrapped object carries its
-	 * handle's). Null when there is none. a_object is null or a COM object (any interface pointer, CommonLib's REX::W32 types
-	 * included) that stays alive during the call. Any thread.
-	 */
+	/** @brief The ORG resource behind an engine field, whether it holds a handle or a plain object with AttachGraphResource. Any thread. */
 	std::shared_ptr<org::Resource> GraphResourceOf(const void* a_object);
 
 	/**
-	 * @brief For an engine field that keeps a plain DXVK object made from an ORG resource (no handle): ties a_graph and a_owner to
-	 * the object through private data, so GraphResourceOf finds them. When the object is destroyed (its last reference, DXVK's own
-	 * bindings included, on any thread), both go through ServiceRetired like a released handle's. Call it once, at creation, before
-	 * the object is shared. False when a_object is not a D3D11 device child or refuses private data.
+	 * @brief Ties an ORG resource to a plain DXVK object through private data, so GraphResourceOf finds it. Released through
+	 * ServiceRetired when the object dies. Call once at creation, before the object is shared.
 	 */
 	bool AttachGraphResource(void* a_object, std::shared_ptr<org::Resource> a_graph, std::shared_ptr<const void> a_owner = {});
 
-	/** @brief A shader handle's bytecode (empty when a_object is not a shader handle). Lives as long as the handle. */
+	/** @brief A shader handle's bytecode, which lives as long as the handle. Empty when not a shader handle. */
 	std::span<const std::uint8_t> ShaderBytecode(const void* a_object);
 
-	/** @brief An input layout handle's elements, their semantic names owned by the handle (empty when not one). */
+	/** @brief An input layout handle's elements, with semantic names owned by the handle. */
 	std::span<const D3D11_INPUT_ELEMENT_DESC> InputElements(const void* a_object);
 
-	/** @brief The object a handle wraps (no reference added): a_object itself when it is not a handle, null for a native handle. */
+	/** @brief The object a handle wraps without a reference. a_object itself when not a handle, null for a native handle. */
 	IUnknown* UnwrapObject(IUnknown* a_object);
 
-	/** @brief Typed UnwrapObject, for passing a handle to D3D11. */
 	template <class T>
 	T* Unwrap(T* a_object)
 	{
@@ -225,17 +176,12 @@ namespace RenderGraph::Engine::Tripwire
 		return static_cast<T*>(UnwrapObject(const_cast<IUnknown*>(static_cast<const IUnknown*>(a_object))));
 	}
 
-	/**
-	 * @brief Makes a texture in place of a device handle's CreateTexture2D: true when it did (*a_out holds one reference to it),
-	 * false to let the call go on to the wrapped device.
-	 */
+	/** @brief Makes a texture in place of a device handle's CreateTexture2D. False lets the call go on to the wrapped device. */
 	using CreateTexture2DHook = bool (*)(const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out);
 
 	/**
-	 * @brief While one lives, a device handle's CreateTexture2D called on this thread asks a_hook first (Scaleform's textures:
-	 * GfxTextures.cpp). It is the interception point for engine texture creation: no vtable is patched, and a device that is not
-	 * a handle (the guest off) never calls it. Scopes nest; the hook itself runs with none set, so the textures it makes are
-	 * plain ones.
+	 * @brief While alive, a device handle's CreateTexture2D on this thread asks a_hook first. No vtable is patched.
+	 * Scopes nest, and the hook runs with none set so the textures it makes are plain.
 	 */
 	class ScopedCreateTexture2DHook
 	{
@@ -249,75 +195,52 @@ namespace RenderGraph::Engine::Tripwire
 		CreateTexture2DHook previous;
 	};
 
-	/**
-	 * @brief Render thread, each frame (P4.2 installs the call): hands the ORG resources and owners of handles released since the
-	 * last call to RenderGraphRuntime::ReleaseAfterD3D11, which keeps them until the GPU is past the D3D11 work issued so far. Without
-	 * the render graph they are dropped.
-	 */
+	/** @brief Hands resources of released handles to the runtime, which keeps them until the GPU is past the D3D11 work. Render thread. */
 	void ServiceRetired();
 
-	/** @brief Takes the released handles' resources and owners instead of ServiceRetired (the self-test, a native frame's own retire). */
+	/** @brief Takes the released handles' resources instead of ServiceRetired. */
 	std::vector<std::shared_ptr<const void>> TakeRetired();
 
-	/**
-	 * @brief Startup (kPostPostLoad): runs the self-test when CS_ORG_TRIPWIRE_SELFTEST=1 and starts the periodic report when
-	 * CS_ORG_TRIPWIRE_LOG=1. Installs nothing in the engine.
-	 */
+	/** @brief Runs the self-test and starts the periodic report when their switches are on. Installs nothing in the engine. */
 	void Start();
 
-	/** @brief CS_ORG_TRIPWIRE_LOG=1: logs every call site with its count now (at exit: a_reason "exit"). Otherwise does nothing. */
+	/** @brief Logs every call site with its count when CS_ORG_TRIPWIRE_LOG=1. */
 	void Report(std::string_view a_reason);
 
-	/** @brief At the game window's close: stops the periodic report's thread, joins it, and logs the exit report. */
+	/** @brief Stops the periodic report's thread and logs the exit report. */
 	void Stop();
 
-	/**
-	 * @brief CS_ORG_D3D11_METER=1, render thread, once a frame: meters the handle methods called on this thread. Each family's calls and
-	 * exclusive time go to Tracy plots (CS.D3D11.<family>.calls and .us) every frame, and to the log every 600 frames with the 20
-	 * largest methods and the thread's CPU time. Nothing when the switch is off. TripwireMeter.cpp.
-	 */
+	/** @brief Meters the handle methods called on this thread for Tracy and the log, when CS_ORG_D3D11_METER=1. Render thread. */
 	void MeterFrame();
 
-	/**
-	 * @brief How a code address is named in tripwire logs: "SkyrimSE.exe+0xd6a8f2 (ID 75467+0x82)" for the game (the Address Library
-	 * ID of the function that contains it), "Module.dll+0x1234" for any other module, the bare address when no module holds it.
-	 */
+	/** @brief Names a code address for logs, with the Address Library ID and offset for game code. */
 	std::string DescribeCaller(const void* a_address);
 
-	/** @brief Whether a_address lies in CS's own image (CS code, not the game's or another plugin's). One range compare. */
+	/** @brief Whether a_address lies in CS's own image. */
 	bool IsOwnCode(const void* a_address);
 
-	/** @brief Whether a_address lies in the game executable's image. One range compare. */
 	bool IsGameCode(const void* a_address);
 
-	/**
-	 * @brief The Address Library ID of the game function holding a_address and the offset within it, as DescribeCaller names it.
-	 * False when a_address is not in the game executable or no ID is near enough. Any thread.
-	 */
+	/** @brief The Address Library ID of the game function holding a_address and the offset in it. Any thread. */
 	bool GameFunction(const void* a_address, std::uint64_t& a_id, std::uint64_t& a_within);
 
-	/** @brief The owner a handle keeps (Options::owner), or null when a_object is not a handle or has none. Any thread. */
+	/** @brief The owner a handle keeps, or null. Any thread. */
 	std::shared_ptr<const void> OwnerOf(const void* a_object);
 
 	/**
-	 * @brief Native mode (CS_ORG_NATIVE=1, RenderGraph/Engine/Native): what native device and swap chain handles answer instead of
-	 * failing. Without DXVK there is nothing to forward to, so these make the objects the engine asks for. A null entry leaves its
-	 * method a tripwire.
-	 *
-	 * Once services are installed, a native device handle also makes views, shaders, input layouts, state objects and queries
-	 * itself: each is a native handle that keeps its description (and its resource, for a view), which is all the ports read.
-	 * Wrapping (guest) handles never use the services.
+	 * @brief What native device and swap chain handles answer instead of failing, since there is no DXVK to forward to.
+	 * A null entry leaves its method a tripwire. Guest handles never use these.
 	 */
 	struct NativeServices
 	{
-		/** @name Resources: each returns S_OK with one reference in the last argument, or a failure with it null. */
+		/** @name Resources. Each returns S_OK with one reference in the last argument, or a failure with it null. */
 		/** @{ */
 		HRESULT (*createTexture1D)(const D3D11_TEXTURE1D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture1D** a_out) = nullptr;
 		HRESULT (*createTexture2D)(const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out) = nullptr;
 		HRESULT (*createTexture3D)(const D3D11_TEXTURE3D_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture3D** a_out) = nullptr;
 		HRESULT (*createBuffer)(const D3D11_BUFFER_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out) = nullptr;
 		/** @} */
-		/** @brief The device's QueryInterface for IDXGIDevice and IDXGIDevice1 (the engine sets its frame latency through it). */
+		/** @brief The device's QueryInterface for IDXGIDevice1, which the engine sets frame latency through. */
 		HRESULT (*queryDxgiDevice)(REFIID a_riid, void** a_out) = nullptr;
 		/** @name The swap chain. */
 		/** @{ */
@@ -333,9 +256,8 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT (*checkFormatSupport)(DXGI_FORMAT a_format, UINT* a_support) = nullptr;
 		/** @} */
 		/**
-		 * @name The immediate context: the work D3D11 code does on resources outside draws. Each runs as its own command work on the
-		 * graphics queue, in the order the calls are made, between the graph's epochs. A resource the native device did not make is
-		 * logged and left alone.
+		 * @name The immediate context's work outside draws. Each runs as its own command work on the graphics queue, in call order,
+		 * between the graph's epochs.
 		 */
 		/** @{ */
 		HRESULT (*map)(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) = nullptr;
@@ -350,37 +272,30 @@ namespace RenderGraph::Engine::Tripwire
 		void (*clearUnorderedAccessViewUint)(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) = nullptr;
 		void (*clearUnorderedAccessViewFloat)(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) = nullptr;
 		void (*clearDepthStencilView)(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) = nullptr;
-		/** @brief Queries: End marks the context's work so far; GetData answers once it is done. Begin needs nothing. */
+		/** @brief End marks the context's work so far, and GetData answers once it is done. */
 		void (*end)(ID3D11Asynchronous* a_query) = nullptr;
 		HRESULT (*getData)(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) = nullptr;
-		/** @brief The context's QueryInterface for ID3DUserDefinedAnnotation. */
 		HRESULT (*queryContext)(REFIID a_riid, void** a_out) = nullptr;
 		/** @} */
 	};
 
-	/** @brief Installs the native services (copied), once, before the native handles are handed to the engine. */
+	/** @brief Installs the native services once, before the native handles reach the engine. */
 	void SetNativeServices(const NativeServices& a_services);
 
-	/** @brief Whether native services are installed (native mode). Any thread. */
 	bool NativeServicesInstalled();
 
 	/**
-	 * @brief Asked before the guest context forwards any call: a_slot is the method's vtable slot (SlotNames(Kind::DeviceContext)),
-	 * a_caller the code that called it. True forwards the call as usual; false drops it, as a native handle fails it (outputs zeroed,
-	 * nothing recorded). Must be cheap and must not call the guest context. Any thread.
+	 * @brief Asked before the guest context forwards any call. False drops it as a native handle would.
+	 * Must be cheap and must not call the guest context. Any thread.
 	 */
 	using ContextFilter = bool (*)(std::uint16_t a_slot, void* a_caller);
 
-	/**
-	 * @brief Installs the guest context's filter (null removes it): the residue census and the flush latch (Flush.h). One filter at a
-	 * time; only the guest context's calls reach it, not other handles' and not CS's own calls on globals::d3d::context.
-	 */
+	/** @brief Installs the guest context's single filter, used by the residue census and the flush latch. Null removes it. */
 	void SetContextFilter(ContextFilter a_filter);
 
 	/**
-	 * @brief Asked by the guest context before it forwards a Map or an Unmap, with the resource as DXVK sees it. True: the hook took the
-	 * call (a Map's output filled) and nothing reaches DXVK. The flush latch's write-behind of the engine's constant buffers inside a CS
-	 * stage's window (Flush.h). Must not call the guest context. Render owner.
+	 * @brief Lets the flush latch take a guest Map or Unmap so nothing reaches DXVK, for engine constant buffers in a CS stage's
+	 * window. Must not call the guest context. Render owner.
 	 */
 	struct GuestMapHooks
 	{
@@ -388,16 +303,10 @@ namespace RenderGraph::Engine::Tripwire
 		bool (*unmap)(ID3D11Resource* a_resource, UINT a_subresource) = nullptr;
 	};
 
-	/** @brief Installs the guest context's Map and Unmap hooks (copied), once. */
 	void SetGuestMapHooks(const GuestMapHooks& a_hooks);
 
-	/**
-	 * @brief Asked by the guest context before it forwards a CopyResource, with the resources as the caller passed them. True: the hook
-	 * made the copy (the engine skeleton's kMAIN copy on the graph) and nothing reaches DXVK. Must not call the guest context. Any thread
-	 * (the hook checks its own thread).
-	 */
+	/** @brief Lets the skeleton's kMAIN copy run on the graph instead of DXVK. Must not call the guest context. Any thread. */
 	using GuestCopyHook = bool (*)(ID3D11Resource* a_destination, ID3D11Resource* a_source);
 
-	/** @brief Installs the guest context's CopyResource hook. */
 	void SetGuestCopyHook(GuestCopyHook a_hook);
 }

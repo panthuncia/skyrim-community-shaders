@@ -47,35 +47,31 @@ namespace RenderGraph::Engine::Textures
 	{
 		std::atomic<std::uint64_t> g_created{ 0 }, g_live{ 0 }, g_handles{ 0 }, g_left{ 0 }, g_failed{ 0 };
 
-		// Graph textures to their records, for Find. Held weakly: the engine's references decide the lifetime.
+		// Held weakly, so the engine's references decide the lifetime.
 		std::shared_mutex g_registryMutex;
 		std::unordered_map<const org::Resource*, std::weak_ptr<const Texture>> g_registry;
 
-		/** @brief A texture's record: the image ORG owns, and what Texture says about it. */
 		struct Record final : Texture
 		{
 			rhi::ResourcePtr image;
 
 			~Record() override
 			{
-				// Its graph texture stays unique until here, so no other record has the key.
+				// The graph texture stays unique until here, so no other record has the key.
 				if (graph) {
 					std::unique_lock lock(g_registryMutex);
 					g_registry.erase(graph.get());
 				}
-				// The import does not own the image, which goes below: no import may find it after this.
+				// The import does not own the image, so no import may find it after this.
 				RenderGraph::ForgetMadeImage(graph.get());
-				// The graph's import of the image first, then the image.
+				// Release the graph's import before the image.
 				graph.reset();
 				image = {};
 				g_live.fetch_sub(1, std::memory_order_relaxed);
 			}
 		};
 
-		/**
-		 * @brief A record whose D3D11 texture DXVK's stream may already name, with nothing to tie it to: the wrap failed after
-		 * DXVK began it. Kept for the session (it is rare, and logged), since nothing says when DXVK is done with it.
-		 */
+		/** @brief The wrap failed after DXVK began it, so its stream may name the image. Kept for the session, since nothing says when DXVK is done. Rare and logged. */
 		void Abandon(std::shared_ptr<Record> a_record)
 		{
 			static std::mutex mutex;
@@ -84,17 +80,13 @@ namespace RenderGraph::Engine::Textures
 			abandoned.push_back(std::move(a_record));
 		}
 
-		/**
-		 * @brief Drops a record that a D3D11 texture was made on: freed once DXVK destroys the texture and the GPU is past it. If the
-		 * texture refuses the tag, the record still goes through Tripwire::ServiceRetired, which is after this release too.
-		 */
+		/** @brief Freed once DXVK destroys the texture and the GPU is past it. Also safe if the texture refuses the tag. */
 		void DropWithTexture(winrt::com_ptr<ID3D11Resource>& a_texture, std::shared_ptr<Record> a_record)
 		{
 			Tripwire::AttachGraphResource(a_texture.get(), a_record->graph, std::move(a_record));
 			a_texture = nullptr;
 		}
 
-		/** @brief Logs a reason once: the first texture it applies to names it, the counters count the rest. */
 		void LogOnce(std::atomic<bool>& a_logged, std::string_view a_name, std::string_view a_why)
 		{
 			if (!a_logged.exchange(true, std::memory_order_relaxed))
@@ -103,7 +95,7 @@ namespace RenderGraph::Engine::Textures
 
 		bool Is3D(const CreateInfo& a_info) { return a_info.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D; }
 
-		/** @brief The graph's description of an external texture: one image entry per mip. */
+		/** @brief One image entry per mip. */
 		org::TextureDescription Describe(const CreateInfo& a_info, rhi::Format a_format)
 		{
 			const bool cube = (a_info.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
@@ -120,14 +112,14 @@ namespace RenderGraph::Engine::Textures
 			desc.srvFormat = a_format;
 			desc.hasUAV = (a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			desc.uavFormat = a_format;
-			// A CPU-side UAV too, as the twins and the anchors' imports have: an importer that clears it finds this resource enough.
+			// Importers that clear it need a CPU-side UAV, as the twins and the anchors' imports have.
 			desc.hasNonShaderVisibleUAV = desc.hasUAV;
 			for (UINT mip = 0; mip < a_info.mipLevels; ++mip)
 				desc.imageDimensions.push_back({ (std::max)(a_info.width >> mip, 1u), (std::max)(a_info.height >> mip, 1u), 0, 0 });
 			return desc;
 		}
 
-		/** @brief Why a description cannot be made here, or null when it can. */
+		/** @brief Null when it can. */
 		const char* Unsupported(const CreateInfo& a_info)
 		{
 			if (a_info.dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D && !Is3D(a_info))
@@ -160,7 +152,7 @@ namespace RenderGraph::Engine::Textures
 		auto& runtime = RenderGraphRuntime::Get();
 		auto* host = runtime.Host();
 		if (!Active() || !host) {
-			// Textures made before the render graph started, or with a DXVK build without the export.
+			// Made before the render graph started, or with a DXVK build lacking the export.
 			g_left.fetch_add(1, std::memory_order_relaxed);
 			LogOnce(g_loggedInactive, a_info.name, "the render graph cannot wrap images with their contents yet");
 			return false;
@@ -177,8 +169,8 @@ namespace RenderGraph::Engine::Textures
 			return false;
 		};
 
-		// The image, which ORG owns. BasicRHI stores a format the device lacks as DXVK does (A8 as R8), so DXVK's texture on it
-		// agrees; what neither can sample (or store to, for a UAV) stays the engine's.
+		// BasicRHI stores formats the device lacks the way DXVK does, such as A8 as R8, so both agree.
+		// What neither can sample, or store to for a UAV, stays the engine's.
 		const auto format = rhi::helpers::ToRHI(a_info.format);
 		rhi::FormatSupport support{};
 		const std::uint32_t needed = rhi::FU_ShaderResource | ((a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? rhi::FU_UnorderedAccess : rhi::FU_None);
@@ -208,7 +200,7 @@ namespace RenderGraph::Engine::Textures
 		if (host->Device().CreateCommittedResource(desc, record->image) != rhi::Result::Ok || !record->image)
 			return fail(g_loggedImage, "BasicRHI could not create the image");
 
-		// The D3D11 texture on it, with its contents uploaded in DXVK's stream.
+		// DXVK uploads the contents in its own stream.
 		DxvkOrgInteropTextureWrap wrap{};
 		wrap.dimension = static_cast<std::uint32_t>(a_info.dimension);
 		wrap.width = a_info.width;
@@ -227,14 +219,13 @@ namespace RenderGraph::Engine::Textures
 			return fail(g_loggedWrap, "DXVK could not wrap the image");
 		}
 
-		// The graph's view of it, in the layout DXVK rests it in.
 		const auto graphDesc = Describe(a_info, format);
 		record->graph = RenderGraph::ImportDxvkTexture(host->Device(), info.image, graphDesc, a_info.name.c_str());
 		if (!record->graph) {
 			DropWithTexture(texture, std::move(record));
 			return fail(g_loggedLayout, "the graph cannot import the layout DXVK rests it in");
 		}
-		// The image's one graph resource: an import of the texture (FrameAnchors) returns this one rather than importing it again.
+		// An import of this texture returns this resource instead of importing it again.
 		RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(info.image.image), record->graph, graphDesc, a_info.name);
 		record->name = a_info.name;
 		record->dimension = a_info.dimension;
@@ -259,9 +250,7 @@ namespace RenderGraph::Engine::Textures
 		}
 		Util::SetResourceName(view.get(), "%s SRV", a_info.name.c_str());
 
-		// The D3D11 objects hold the record: it is freed once DXVK destroyed both and the GPU is past them (Tripwire::ServiceRetired),
-		// and GraphResourceOf finds the graph texture from either. Before anything else holds them; handles made from them below tie
-		// the same record to them again.
+		// Attach before anything else holds the objects. The record is freed once DXVK destroyed both and the GPU is past them.
 		if (!Tripwire::AttachGraphResource(view.get(), record->graph, record)) {
 			view = nullptr;
 			DropWithTexture(texture, std::move(record));
@@ -274,7 +263,7 @@ namespace RenderGraph::Engine::Textures
 			return fail(g_loggedView, "the D3D11 texture did not take private data");
 		}
 
-		// Tripwire handles in the engine's fields, once every engine bind goes through the guest context.
+		// Handles only once every engine bind goes through the guest context.
 		winrt::com_ptr<ID3D11Resource> textureHandle;
 		winrt::com_ptr<ID3D11ShaderResourceView> viewHandle;
 		if (Tripwire::GuestContextInstalled()) {
@@ -298,8 +287,7 @@ namespace RenderGraph::Engine::Textures
 			std::unique_lock lock(g_registryMutex);
 			g_registry[record->graph.get()] = record;
 		}
-		// Made with its contents and bound SRV-only: immutable from here (the undeclared-access validator's exempt class). A texture
-		// made zeroed is filled later by someone, so it is not.
+		// Made with contents and SRV-only, so immutable from here. A zeroed texture gets filled later, so it is not.
 		if (RenderGraph::UndeclaredAccess::On() && a_info.initialData && a_info.initialData->pSysMem && a_info.bindFlags == D3D11_BIND_SHADER_RESOURCE)
 			RenderGraph::UndeclaredAccess::NoteImmutable(record->graph);
 		g_created.fetch_add(1, std::memory_order_relaxed);
@@ -317,10 +305,9 @@ namespace RenderGraph::Engine::Textures
 	{
 		if (!a_view || !Requested())
 			return nullptr;
-		// The handle's, or the one AttachGraphResource tied to the D3D11 view.
 		auto graph = Tripwire::GraphResourceOf(a_view);
 		if (!graph) {
-			// A view made later on the texture (Scaleform makes its own view of every texture it is given): its texture's.
+			// Scaleform makes its own view of every texture it is given, so fall back to the view's texture.
 			winrt::com_ptr<ID3D11Resource> resource;
 			const_cast<ID3D11ShaderResourceView*>(a_view)->GetResource(resource.put());
 			graph = Tripwire::GraphResourceOf(resource.get());

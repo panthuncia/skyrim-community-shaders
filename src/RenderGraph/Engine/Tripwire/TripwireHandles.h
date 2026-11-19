@@ -1,6 +1,6 @@
 #pragma once
 
-// The tripwire handle classes (Tripwire.h). Only the tripwire's own sources include this; ports use Tripwire.h.
+// The tripwire handle classes. Only the tripwire's own sources include this. Ports use Tripwire.h.
 
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Engine/Tripwire/TripwireInterfaces.inl"
@@ -19,20 +19,15 @@ namespace RenderGraph::Engine::Tripwire
 {
 	namespace Detail
 	{
-		/** @brief The guest context's filter (SetContextFilter), null when none. */
 		extern std::atomic<ContextFilter> contextFilter;
 
-		/** @brief The native services (SetNativeServices), null before they are installed. */
 		extern std::atomic<const NativeServices*> nativeServices;
 
-		/** @brief The guest context's Map and Unmap hooks (SetGuestMapHooks), null when none. */
 		extern std::atomic<const GuestMapHooks*> guestMapHooks;
 
-		/** @brief The guest context's CopyResource hook (SetGuestCopyHook), null when none. */
 		extern std::atomic<GuestCopyHook> guestCopyHook;
 	}
 
-	/** @brief The state every handle has, whatever its interface. */
 	class HandleCore
 	{
 	public:
@@ -42,19 +37,14 @@ namespace RenderGraph::Engine::Tripwire
 		/** @brief Releases the wrapped object and queues the ORG resource and owner for ServiceRetired. */
 		~HandleCore();
 
-		/** @brief Set once by the factory, before the handle is handed out. a_wrap gets a reference of its own. */
+		/** @brief Set once by the factory, before the handle is handed out. */
 		void Init(Kind a_kind, Options&& a_options, IUnknown* a_wrap);
 
-		/**
-		 * @brief The start of every tripwire method: records the call when it is watched (every call in native mode) and says whether
-		 * it is forwarded (a wrapped object exists). A guest context asks its filter first (SetContextFilter): a dropped call is
-		 * neither recorded nor forwarded.
-		 */
+		/** @brief Starts every tripwire method. Records the call when watched, and returns whether to forward it. A filter may drop it. */
 		bool Enter(std::uint16_t a_slot, const char* a_method, void* a_caller)
 		{
 			if (kind == Kind::DeviceContext) {
-				// The guest context's calls, and in native mode the native context's: there the filter decides which calls are the
-				// latch's to drop (silently) and which the census counts.
+				// In native mode the filter decides which calls the latch drops silently and which the census counts.
 				if (const auto filter = Detail::contextFilter.load(std::memory_order_relaxed);
 					filter && (wrapped || Detail::nativeServices.load(std::memory_order_relaxed)) && !filter(a_slot, a_caller))
 					return false;
@@ -65,13 +55,10 @@ namespace RenderGraph::Engine::Tripwire
 			return forward;
 		}
 
-		/** @brief Counts a call at a_caller; the first one from there is logged. a_detail goes into that first line (an IID). */
+		/** @brief Counts a call at a_caller. The first one from there is logged with a_detail. */
 		void Record(std::uint16_t a_slot, const char* a_method, void* a_caller, bool a_forwarded, std::string_view a_detail) const;
 
-		/**
-		 * @brief A forwarded call at a_caller passed the handle a_argument, unwrapped for the wrapped object: a reader that still goes
-		 * through D3D11. Counted at the call's site like Record; the first one names the argument.
-		 */
+		/** @brief Counts a forwarded call that passed a handle as an argument, a reader that still goes through D3D11. */
 		void RecordArgument(std::uint16_t a_slot, const char* a_method, void* a_caller, const HandleCore& a_argument) const;
 
 		std::string Name() const;
@@ -84,12 +71,8 @@ namespace RenderGraph::Engine::Tripwire
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<const void> owner;
 
-		/**
-		 * @brief A native handle's private-data interfaces (SetPrivateDataInterface): each held until the handle goes or the GUID is
-		 * set again, as D3D11 holds them. AttachGraphResource's tag and the pipeline descriptions' tokens live here in native mode.
-		 */
+		/** @brief A native handle's private-data interfaces, held as D3D11 holds them until the handle goes or the GUID is set again. */
 		std::vector<std::pair<GUID, winrt::com_ptr<IUnknown>>> privateInterfaces;
-		/** @brief A native handle's private data bytes (SetPrivateData of any GUID but the debug name). */
 		std::vector<std::pair<GUID, std::vector<std::uint8_t>>> privateData;
 		std::mutex privateLock;
 
@@ -100,7 +83,6 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace Detail
 	{
-		/** @brief A tripwire method's result when it fails: E_FAIL, nothing, or a zero value. */
 		template <class R>
 		R Failure()
 		{
@@ -140,7 +122,6 @@ namespace RenderGraph::Engine::Tripwire
 				std::memset(a_out, 0, a_size);
 		}
 
-		/** @brief Where a forwarded call came from: the handle forwarding it, its method and its caller. */
 		struct CallSite
 		{
 			const HandleCore* core = nullptr;
@@ -149,10 +130,9 @@ namespace RenderGraph::Engine::Tripwire
 			void* caller = nullptr;
 		};
 
-		/** @brief A forwarded call passes the handle a_handle to the wrapped object: recorded at a_site (RecordArgument). */
 		void NoteHandleArgument(const CallSite& a_site, const void* a_handle);
 
-		/** @brief Unwrap for one argument of a forwarded call: a handle is recorded at a_site, then replaced by what it wraps. */
+		/** @brief Unwraps one argument of a forwarded call, recording a handle at a_site first. */
 		template <class T>
 		T* UnwrapAt(T* a_object, const CallSite& a_site)
 		{
@@ -162,10 +142,7 @@ namespace RenderGraph::Engine::Tripwire
 			return Unwrap(a_object);
 		}
 
-		/**
-		 * @brief An interface array with its handles replaced by the objects they wrap; the source itself when it holds none. With
-		 * a_site, the first handle found is recorded there.
-		 */
+		/** @brief An interface array with handles replaced by what they wrap. The source itself when it holds none. */
 		template <class T>
 		class UnwrappedArray
 		{
@@ -209,35 +186,26 @@ namespace RenderGraph::Engine::Tripwire
 			return { a_source, a_count, a_site };
 		}
 
-		/** @brief Makes a handle class's objects recognisable (IsHandle): its vtable and how to reach its core. */
+		/** @brief Registers a handle class's vtable so IsHandle recognises its objects. */
 		void RegisterHandleClass(Kind a_kind, const void* a_vtable, HandleCore* (*a_core)(void*));
 
-		/** @brief The core of a handle, or null when a_object is not one. */
 		HandleCore* CoreOf(const void* a_object);
 
-		/** @brief One meter cell: a method's calls and its exclusive TSC cycles. */
 		struct MeterCell
 		{
 			std::uint64_t calls = 0;
 			std::uint64_t cycles = 0;
 		};
 
-		/**
-		 * @brief The metered thread (CS_ORG_D3D11_METER=1): the one that last ended a frame (MeterFrame). 0 when off. Every other thread
-		 * skips the meter.
-		 */
+		/** @brief The thread that last ended a frame, which is the only one metered. 0 when off. */
 		inline std::atomic<std::uint32_t> g_meterThread{ 0 };
-		/** @brief This thread's id, read once. */
 		inline thread_local const std::uint32_t t_threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
-		/** @brief The cycles of handle methods nested in the current one (they are taken out of its time). */
+		/** @brief Cycles of nested handle methods, taken out of the current one's time. */
 		inline thread_local std::uint64_t t_meterChild = 0;
-		/** @brief Calls and cycles per interface and vtable slot. Only the metered thread writes and reads them. */
+		/** @brief Only the metered thread writes and reads these. */
 		inline MeterCell g_meter[static_cast<std::size_t>(Kind::Count)][WatchSet::kMaxSlots]{};
 
-		/**
-		 * @brief Meters one handle method on the metered thread: its calls and its own time, without the handle methods it calls.
-		 * Costs one thread-local test on other threads and when the meter is off.
-		 */
+		/** @brief Meters one handle method's own time on the metered thread. Costs one thread-local test elsewhere. */
 		class MeterScope
 		{
 		public:
@@ -268,7 +236,7 @@ namespace RenderGraph::Engine::Tripwire
 			std::uint64_t start = 0;
 		};
 
-		/** @brief The self-test: the calls counted for a_kind's a_method (every site), and clearing every site afterwards. */
+		/** @brief For the self-test. The calls counted for a_kind's a_method, after which every site is cleared. */
 		std::uint64_t Calls(Kind a_kind, std::string_view a_method);
 		void ClearSites();
 		void SetSelfTestRunning(bool a_running);
@@ -286,8 +254,7 @@ namespace RenderGraph::Engine::Tripwire
 
 #define TW_SLOT_ENUM(Ret, Name, Params, Args, Fail) Name,
 #define TW_SLOT_NAME(Ret, Name, Params, Args, Fail) #Name,
-// A tripwire method: recorded as HandleCore::Enter decides, forwarded when an object is wrapped, else failed. A forwarded
-// call's handle arguments are recorded at its site (twSite) as they are unwrapped.
+// Recorded as Enter decides, forwarded when an object is wrapped, else failed.
 #define TW_TRIP(Ret, Name, Params, Args, Fail)                                                         \
 	Ret STDMETHODCALLTYPE Name Params override                                                         \
 	{                                                                                                  \
@@ -301,8 +268,7 @@ namespace RenderGraph::Engine::Tripwire
 		TW_STRIP Fail return ::RenderGraph::Engine::Tripwire::Detail::Failure<Ret>();                  \
 	}
 
-// Every method of Iface as a tripwire. The compiler checks the list against the SDK: each entry is an override, and a class
-// that misses a slot stays abstract (the factories' static_asserts). The slot count matches the generator's.
+// Each entry is an override, so a missed slot leaves the class abstract and the factories' static_asserts catch it.
 #define TW_DECLARE_TRIPS(Iface)                                                                                       \
 	class Iface##Trips : public Iface                                                                                 \
 	{                                                                                                                 \
@@ -346,7 +312,6 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace Detail
 	{
-		/** @brief WKPDID_D3DDebugObjectName (Util::WKPDID_D3DDebugObjectNameT). */
 		bool IsDebugName(REFGUID a_guid);
 
 		HRESULT QueryInterface(HandleCore& a_core, IUnknown* a_self, std::span<const IID> a_iids, REFIID a_riid, void** a_out, void* a_caller);
@@ -355,10 +320,7 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT GetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT* a_size, void* a_data, void* a_caller);
 	}
 
-	/**
-	 * @brief IUnknown and the debug name for every handle class. Self is the final class (deleted through it), Trips its interface's
-	 * tripwire base.
-	 */
+	/** @brief IUnknown and the debug name for every handle class. Self is the final class and is deleted through it. */
 	template <class Self, class Trips, Kind K>
 	class Handle : public Trips
 	{
@@ -396,10 +358,8 @@ namespace RenderGraph::Engine::Tripwire
 			return Detail::SetPrivateDataInterface(this->core, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface), a_guid, a_data, _ReturnAddress());
 		}
 
-		/** @brief For Detail::RegisterHandleClass: the core of an object of this class, from any of its interface pointers. */
 		static HandleCore* CoreOf(void* a_object) { return &static_cast<Self*>(static_cast<Interface*>(a_object))->core; }
 
-		/** @brief Makes the handle and registers its class. */
 		template <class... A>
 		static winrt::com_ptr<Interface> Make(Options&& a_options, IUnknown* a_wrap, A&&... a_args)
 		{
@@ -417,7 +377,6 @@ namespace RenderGraph::Engine::Tripwire
 		Handle() = default;
 	};
 
-	/** @brief Textures and buffers: GetDesc and GetType answered. */
 	template <class Trips, Kind K, class Desc, D3D11_RESOURCE_DIMENSION Dimension>
 	class ResourceHandle final : public Handle<ResourceHandle<Trips, K, Desc, Dimension>, Trips, K>
 	{
@@ -438,7 +397,7 @@ namespace RenderGraph::Engine::Tripwire
 		const Desc desc;
 	};
 
-	/** @brief Views: GetDesc answered, and GetResource when the view was made with its resource. */
+	/** @brief Views answer GetResource when made with their resource. */
 	template <class Trips, Kind K, class Desc>
 	class ViewHandle final : public Handle<ViewHandle<Trips, K, Desc>, Trips, K>
 	{
@@ -471,7 +430,6 @@ namespace RenderGraph::Engine::Tripwire
 		winrt::com_ptr<ID3D11Resource> resource;
 	};
 
-	/** @brief State objects and queries: GetDesc answered. */
 	template <class Trips, Kind K, class Desc>
 	class DescHandle final : public Handle<DescHandle<Trips, K, Desc>, Trips, K>
 	{
@@ -487,7 +445,6 @@ namespace RenderGraph::Engine::Tripwire
 		const Desc desc;
 	};
 
-	/** @brief Shaders: their bytecode kept for the pipeline that replaces them. */
 	template <class Trips, Kind K>
 	class ShaderHandle final : public Handle<ShaderHandle<Trips, K>, Trips, K>
 	{
@@ -498,7 +455,6 @@ namespace RenderGraph::Engine::Tripwire
 		const std::vector<std::uint8_t> bytecode;
 	};
 
-	/** @brief Input layouts: the elements (with their semantic names) and the vertex shader signature they were made against. */
 	class InputLayoutHandle final : public Handle<InputLayoutHandle, ID3D11InputLayoutTrips, Kind::InputLayout>
 	{
 	public:
@@ -509,11 +465,7 @@ namespace RenderGraph::Engine::Tripwire
 		const std::vector<std::uint8_t> vsBytecode;
 	};
 
-	/**
-	 * @brief The device: GetImmediateContext answers the context handle paired with it (PairDeviceAndContext), so a reader that
-	 * asks the device for its context gets the wrapping one. CreateTexture2D asks the calling thread's ScopedCreateTexture2DHook
-	 * first. Everything else but IUnknown and the debug name is a tripwire.
-	 */
+	/** @brief The device. GetImmediateContext answers the paired context handle, so readers get the wrapping one. */
 	class DeviceHandle final : public Handle<DeviceHandle, ID3D11DeviceTrips, Kind::Device>
 	{
 	public:
@@ -521,7 +473,7 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE GetImmediateContext(ID3D11DeviceContext** a_out) override;
 		HRESULT STDMETHODCALLTYPE CreateTexture2D(const D3D11_TEXTURE2D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out) override;
 
-		/** @name Native mode (NativeServices): answered by a native handle, forwarded by a guest one, tripwires otherwise. */
+		/** @name Answered by a native handle, forwarded by a guest one, tripwires otherwise. */
 		/** @{ */
 		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override;
 		HRESULT STDMETHODCALLTYPE CreateBuffer(const D3D11_BUFFER_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out) override;
@@ -552,20 +504,17 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT STDMETHODCALLTYPE CheckFormatSupport(DXGI_FORMAT a_format, UINT* a_support) override;
 		/** @} */
 
-		/** @brief The paired context (a reference held), set once by PairDeviceAndContext. */
+		/** @brief The paired context, set once by PairDeviceAndContext. */
 		winrt::com_ptr<ID3D11DeviceContext> immediate;
 	};
 
-	/**
-	 * @brief The context: GetDevice answers the device handle paired with it. Everything else but IUnknown and the debug name is a
-	 * tripwire.
-	 */
+	/** @brief The context. GetDevice answers the paired device handle. */
 	class DeviceContextHandle final : public Handle<DeviceContextHandle, ID3D11DeviceContextTrips, Kind::DeviceContext>
 	{
 	public:
 		void STDMETHODCALLTYPE GetDevice(ID3D11Device** a_out) override;
 
-		/** @name Native mode (NativeServices): answered by a native handle, forwarded by a guest one (through its filter), tripwires otherwise. */
+		/** @name Answered by a native handle, forwarded through the filter by a guest one, tripwires otherwise. */
 		/** @{ */
 		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override;
 		HRESULT STDMETHODCALLTYPE Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) override;
@@ -583,7 +532,7 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE Begin(ID3D11Asynchronous* a_query) override;
 		void STDMETHODCALLTYPE End(ID3D11Asynchronous* a_query) override;
 		HRESULT STDMETHODCALLTYPE GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) override;
-		/** @name Binds: in native mode a setter stores what it binds (unless the flush latch drops it) and a getter answers it. */
+		/** @name Binds. In native mode a setter stores its bind unless the flush latch drops it, and a getter answers it. */
 		/** @{ */
 		void STDMETHODCALLTYPE VSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items) override;
 		void STDMETHODCALLTYPE VSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out) override;
@@ -609,7 +558,7 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE PSGetShader(ID3D11PixelShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
 		void STDMETHODCALLTYPE CSSetShader(ID3D11ComputeShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
 		void STDMETHODCALLTYPE CSGetShader(ID3D11ComputeShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
-		// Geometry, hull and domain shaders: the engine binds none, but state backups (the menu's) save and restore them.
+		// The engine binds no geometry, hull or domain shaders, but state backups save and restore them.
 		void STDMETHODCALLTYPE GSSetShader(ID3D11GeometryShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
 		void STDMETHODCALLTYPE GSGetShader(ID3D11GeometryShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
 		void STDMETHODCALLTYPE HSSetShader(ID3D11HullShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
@@ -640,17 +589,14 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE IAGetIndexBuffer(ID3D11Buffer** a_buffer, DXGI_FORMAT* a_format, UINT* a_offset) override;
 		void STDMETHODCALLTYPE ClearState() override;
 		/** @} */
-		/** @brief Native mode: nothing to send on (every native operation is submitted when it is made), so it succeeds silently. */
+		/** @brief Succeeds silently in native mode, since every native operation is submitted when made. */
 		void STDMETHODCALLTYPE Flush() override;
 		/** @} */
 
-		/** @brief The paired device, no reference held (the device holds this context): cleared by the device's destructor. */
+		/** @brief The paired device without a reference, since the device holds this context. Cleared by the device's destructor. */
 		std::atomic<ID3D11Device*> device{ nullptr };
 
-		/**
-		 * @brief Native mode: what D3D11 code bound, for the readers that ask the context (DCLF's main-pass capture, the ports that
-		 * save and restore state). Nothing draws with it: the ports read the engine's state from the shadow state and these.
-		 */
+		/** @brief What D3D11 code bound in native mode, for readers that ask the context. Nothing draws with it. */
 		struct NativeBindings
 		{
 			struct Stage
@@ -689,13 +635,11 @@ namespace RenderGraph::Engine::Tripwire
 			DXGI_FORMAT indexFormat = DXGI_FORMAT_UNKNOWN;
 			UINT indexOffset = 0;
 
-			/** @brief ClearState: nothing bound, the default states. */
 			void Reset();
 		};
 		NativeBindings bindings;
 
 	private:
-		/** @brief A native setter's bind is kept unless the flush latch drops it (the context filter, as for the guest context). */
 		static bool NativeBindAllowed(std::uint16_t a_slot, void* a_caller)
 		{
 			const auto filter = Detail::contextFilter.load(std::memory_order_acquire);
@@ -724,10 +668,7 @@ namespace RenderGraph::Engine::Tripwire
 		}
 	};
 
-	/**
-	 * @brief The swap chain: GetDesc answered. In native mode (NativeServices) Present, GetBuffer and ResizeBuffers go to ORG's swap
-	 * chain, and the fullscreen calls succeed without changing anything (the window stays borderless, as fake fullscreen does).
-	 */
+	/** @brief The swap chain. In native mode it goes to ORG's swap chain, and fullscreen calls succeed without changing anything. */
 	class SwapChainHandle final : public Handle<SwapChainHandle, IDXGISwapChainTrips, Kind::SwapChain>
 	{
 	public:

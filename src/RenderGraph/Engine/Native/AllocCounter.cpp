@@ -5,8 +5,7 @@
 #include <malloc.h>
 #include <new>
 
-// The global operator new and delete of CommunityShaders.dll, with a per-thread count while counting is on. They allocate as
-// the CRT's do: malloc and free, _aligned_malloc and _aligned_free for the aligned forms.
+// CommunityShaders.dll's global operator new and delete, counting per thread while on. They allocate as the CRT's do.
 
 namespace RenderGraph::Engine::Native::AllocCounter
 {
@@ -33,7 +32,7 @@ namespace RenderGraph::Engine::Native::AllocCounter
 		std::atomic<bool> g_on{ false };
 		std::atomic<std::uint32_t> g_used{ 0 };
 		Slot g_slots[kSlots];
-		// No slot yet (nullptr), or no slot left (the sentinel).
+		// Null means no slot yet. The sentinel means no slot left.
 		thread_local Slot* t_slot = nullptr;
 		Slot g_none;
 
@@ -53,7 +52,7 @@ namespace RenderGraph::Engine::Native::AllocCounter
 			return slot;
 		}
 
-		// Only the owning thread writes its slot, so a load and a store are enough (no locked add).
+		// Only the owning thread writes its slot, so a load and a store are enough.
 		inline void Add(std::atomic<std::uint64_t>& a_value, std::uint64_t a_amount)
 		{
 			a_value.store(a_value.load(std::memory_order_relaxed) + a_amount, std::memory_order_relaxed);

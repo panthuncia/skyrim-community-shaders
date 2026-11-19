@@ -8,44 +8,28 @@ namespace RenderGraph::Engine::Scaleform
 }
 
 /**
- * @brief The render-graph side of Scaleform's ORG path (docs/development/p5/scaleform.md, "The ORG pass"): the Interface anchor's
- * client, its surfaces (each target and depth pair the displays draw onto, with a pass for displays without masks and one with
- * the depth-stencil), the pipelines (a ProgramCache filled at setup), and the per-display commit. Render thread throughout; the passes' Record
- * runs where the graph runs it, reads only the frame a commit stored for its run (RunSlots), and draws through the
- * client's run gate.
+ * @brief The render graph side of Scaleform's ORG path. It owns the Interface anchor's client, its surfaces and pipelines,
+ * and the per-display commit. Render thread throughout. A pass's Record reads only the frame its run's commit stored.
  */
 namespace RenderGraph::Engine::Scaleform::Passes
 {
-	/** @brief At load (CS_ORG_SCALEFORM): the Interface anchor reserved. False, logged, when it cannot be. */
+	/** @brief Reserves the Interface anchor at load. False, logged, when it cannot. */
 	bool Reserve();
 
-	/**
-	 * @brief Engine::PostSetup (State::Setup, after the features' SetupResources): the samplers, the run gate, the staging pool, the
-	 * framebuffer's and HDR's UI texture's surfaces (each with kMAIN's depth-stencil), every pipeline their passes can draw with queued
-	 * on the program build thread, and the client registered; the setup's build point then builds the Interface graph with it. Logged
-	 * and off when anything cannot be made.
-	 */
+	/** @brief Makes the samplers, run gate, surfaces and pipelines, and registers the client. Logged and off on any failure. */
 	void Setup();
 
-	/** @brief Whether displays are captured for the graph: set up, not failed, the runtime active with the Interface epoch. */
+	/** @brief Whether displays are captured for the graph. */
 	bool Ready();
 
-	/**
-	 * @brief The size of the scratch images GFx's pushed render targets are drawn into (Display::scratch). False when there are none.
-	 * A target larger than this cannot be drawn.
-	 */
+	/** @brief The size of the scratch images for GFx's pushed render targets. A larger target cannot be drawn. */
 	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height);
 
-	/** @brief How many scratch images there are (Display::scratch and ScratchTexture take 0 to this minus one). */
 	std::uint32_t ScratchCount();
 
 	/**
-	 * @brief Draws a_display on the graph here, as one Interface anchor run per run gate's worth of commands. False when it did not
-	 * (the caller leaves the segment out and counts a_reason): an inherent refusal (a render target that is not a
-	 * surface, a mask on another depth-stencil), a surface made again as another graph resource (until the next build point), or a
-	 * failure (a texture whose view cannot be resolved, a run that did not execute: logged as an error). A pipeline not built yet is
-	 * built here; a draw whose pipeline failed is left out (logged once). a_lagged: the refusal is the schedule's lag (the stage's or
-	 * the anchor's build with a surface made again has not switched in yet), not a mismatch. Render thread.
+	 * @brief Draws a_display on the graph, one Interface anchor run per run gate's worth of commands. False when it did not,
+	 * with a_reason. a_lagged means the refusal is schedule lag after a surface rebuild, not a mismatch. Render thread.
 	 */
 	bool Submit(Display& a_display, const char*& a_reason, bool& a_lagged);
 }

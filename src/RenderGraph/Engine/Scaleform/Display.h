@@ -9,13 +9,12 @@
 #include <vector>
 
 /**
- * @brief One segment of a Scaleform display (BeginDisplay to EndDisplay, or to and from the D3D11 work inside it) as the ORG path
- * draws it: built by the capture (Renderer.cpp) on the
- * render thread, then committed and recorded by Passes.cpp. Plain data, no ORG types.
+ * @brief One segment of a Scaleform display as the ORG path draws it. Renderer.cpp builds it on the render thread
+ * and Passes.cpp commits and records it. Plain data, no ORG types.
  */
 namespace RenderGraph::Engine::Scaleform
 {
-	/** @brief The renderer's depth-stencil states (CreateShaders' +0x468 to +0x488). */
+	/** @brief The renderer's depth-stencil states, CreateShaders' +0x468 to +0x488. */
 	enum class Stencil : std::uint8_t
 	{
 		Off,        // no stencil (DisableMask, BeginDisplay)
@@ -25,29 +24,26 @@ namespace RenderGraph::Engine::Scaleform
 		Test,       // EQUAL, KEEP, no writes: EndSubmitMask
 	};
 
-	/** @brief A draw's pipeline, apart from the surface's formats. */
 	struct DrawState
 	{
-		std::uint8_t vertexKind = 1;  // the renderer's vertex shader index: FillVS.hlsl's VS_KIND, plus 6 for its VS_3D twin (0 for a filter draw)
-		std::uint8_t pixelKind = 1;   // FillPS.hlsl's PS_KIND (0 for a filter draw)
-		std::uint8_t blend = 1;       // the renderer's blend state index: 1 to 7, or 9 to 15 for the filters' array (8 + index)
+		std::uint8_t vertexKind = 1;  // FillVS.hlsl's VS_KIND, plus 6 for its VS_3D twin, 0 for a filter draw
+		std::uint8_t pixelKind = 1;   // FillPS.hlsl's PS_KIND, 0 for a filter draw
+		std::uint8_t blend = 1;       // 1 to 7, or 9 to 15 for the filters' array
 		Stencil stencil = Stencil::Off;
-		std::uint8_t filter = 0;  // FilterPS.hlsl's FILTER for a filter draw (FilterVS.hlsl, a FilterRecord), 0 for a fill draw
-		std::uint8_t lines = 0;   // 1: a line strip (DrawLineStrip), 0: a triangle list
+		std::uint8_t filter = 0;  // FilterPS.hlsl's FILTER, 0 for a fill draw
+		std::uint8_t lines = 0;   // 1 for a line strip, 0 for a triangle list
 
 		auto operator<=>(const DrawState&) const = default;
 	};
 
-	/** @brief Command::textures: no texture. */
 	inline constexpr std::int32_t kNoTexture = -1;
 
-	/** @brief Command::textures for the scratch image a_scratch (a render target of GFx's drawn on the graph): -2, -3, ... */
+	/** @brief Command::textures value for scratch image a_scratch, counting down from -2. */
 	constexpr std::int32_t ScratchTexture(std::int32_t a_scratch) { return -2 - a_scratch; }
 
-	/** @brief The scratch image a Command::textures entry names, or -1 for a display texture or none. */
 	constexpr std::int32_t ScratchOf(std::int32_t a_texture) { return a_texture <= -2 ? -2 - a_texture : -1; }
 
-	/** @brief A display command: a draw, or the stencil clear BeginSubmitMask(kClear) makes. */
+	/** @brief A draw, or the stencil clear BeginSubmitMask(kClear) makes. */
 	struct Command
 	{
 		enum class Kind : std::uint8_t
@@ -58,14 +54,14 @@ namespace RenderGraph::Engine::Scaleform
 		Kind kind = Kind::Draw;
 		DrawState state;
 		std::uint32_t stencilRef = 0;
-		std::uint32_t record = 0;       // bytes into the display's staging bytes: its ScaleformFillDraw
-		std::uint32_t vertexCount = 0;  // vertices the draw makes (triangles times three)
-		std::int32_t textures[2] = { kNoTexture, kNoTexture };  // indices into Display::textures, or ScratchTexture(k); stages 0 and 1
-		std::uint8_t samplers[2] = { 0, 0 };    // the renderer's sampler index (wrap * 2 + sample), stages 0 and 1
-		bool noColour = false;  // a null pixel shader (a bitmap fill without a texture): the draw writes the stencil only
+		std::uint32_t record = 0;       // byte offset of its ScaleformFillDraw in the staging bytes
+		std::uint32_t vertexCount = 0;  // triangles times three
+		std::int32_t textures[2] = { kNoTexture, kNoTexture };  // indices into Display::textures, or ScratchTexture(k)
+		std::uint8_t samplers[2] = { 0, 0 };    // wrap * 2 + sample
+		bool noColour = false;  // a bitmap fill without a texture writes the stencil only
 	};
 
-	/** @brief ScaleformFillDraw in Scaleform/Fill.hlsli: the D3D11 constants and where the draw's vertices are. */
+	/** @brief ScaleformFillDraw in Scaleform/Fill.hlsli. */
 	struct DrawRecord
 	{
 		float mvp[4][4];
@@ -81,10 +77,7 @@ namespace RenderGraph::Engine::Scaleform
 	};
 	static_assert(sizeof(DrawRecord) == 192);
 
-	/**
-	 * @brief A filter draw's bytes (Scaleform/Filter.hlsli): its rectangle as two triangles (float4 position, float2 texture
-	 * coordinate), the vertex stage's matrix and the pixel stage's constants (the colour matrix filter's: cxadd, then the matrix).
-	 */
+	/** @brief A filter draw's bytes, as Scaleform/Filter.hlsli reads them. */
 	struct FilterRecord
 	{
 		float vertices[6][6];
@@ -97,23 +90,21 @@ namespace RenderGraph::Engine::Scaleform
 	inline constexpr std::uint32_t kFilterConstantsOffset = 208;  // offsetof(FilterRecord, cxadd)
 	static_assert(offsetof(FilterRecord, mvp) == kFilterMatrixOffset && offsetof(FilterRecord, cxadd) == kFilterConstantsOffset);
 
-	/** @brief What a display draws and onto what. */
 	struct Display
 	{
-		std::vector<std::byte> staging;  // geometry and records, in the layout the staging buffer gets
+		std::vector<std::byte> staging;  // in the layout the staging buffer gets
 		std::vector<Command> commands;
-		std::vector<ID3D11ShaderResourceView*> textures;  // DXVK's views, each with a reference this display holds
-		// The viewport BeginDisplay set and the target's rectangle it clips to (pixels).
+		std::vector<ID3D11ShaderResourceView*> textures;  // each holds a reference
+		// The viewport BeginDisplay set, in pixels.
 		float viewport[4] = {};  // x, y, width, height
-		ID3D11Texture2D* target = nullptr;      // render target 0's texture (DXVK's), referenced
+		ID3D11Texture2D* target = nullptr;      // referenced
 		DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN;  // its RTV's format
-		ID3D11Texture2D* depth = nullptr;       // the bound DSV's texture (DXVK's), referenced; null without one
+		ID3D11Texture2D* depth = nullptr;       // referenced, null without one
 		DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN;
-		// A render target of GFx's pushed inside the display (PushRenderTarget): the scratch image the segment draws onto in its place,
-		// or -1 for `target`, or kLostScratch when no scratch image could take it (the segment draws nothing).
+		// For a target GFx pushed, the scratch image drawn in its place. -1 means `target`, and kLostScratch draws nothing.
 		std::int32_t scratch = -1;
 		static constexpr std::int32_t kLostScratch = -2;
-		// The segment starts where GFx pushed its target, which PushRenderTarget clears whole to zero.
+		// The segment starts at a GFx push, which clears the target whole to zero.
 		bool clearTarget = false;
 
 		Display() = default;
@@ -121,7 +112,7 @@ namespace RenderGraph::Engine::Scaleform
 		Display& operator=(const Display&) = delete;
 		~Display() { Reset(); }
 
-		/** @brief Empty again: the references dropped. */
+		/** @brief Empties the display and drops its references. */
 		void Reset()
 		{
 			ResetCommands();
@@ -134,7 +125,7 @@ namespace RenderGraph::Engine::Scaleform
 			scratch = -1;
 		}
 
-		/** @brief The commands, their bytes and textures dropped; the target and viewport kept (the next segment of the display). */
+		/** @brief Drops the commands but keeps the target and viewport for the next segment. */
 		void ResetCommands()
 		{
 			for (auto* view : textures)
@@ -145,7 +136,7 @@ namespace RenderGraph::Engine::Scaleform
 			clearTarget = false;
 		}
 
-		/** @brief a_bytes appended at a_alignment; their offset. */
+		/** @brief Appends a_bytes at a_alignment and returns their offset. */
 		std::uint32_t Append(const void* a_bytes, std::size_t a_size, std::size_t a_alignment = 4)
 		{
 			const std::size_t offset = (staging.size() + a_alignment - 1) / a_alignment * a_alignment;

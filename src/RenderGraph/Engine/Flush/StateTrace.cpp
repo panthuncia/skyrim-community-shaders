@@ -1,8 +1,6 @@
-// The state readers' trace (P5.5.10). DXVK keeps D3D11's hazard rules: a shader resource bind of a view whose resource is bound as a
-// render target, depth stencil or UAV binds null instead, and a target bind unbinds every shader resource of the same resource. With
-// the flush latch on, the engine's target binds never reach DXVK, so DXVK keeps whatever targets the last real flush or CS pass bound.
-// A CS bind of a view of such a stale target is then dropped where it went through with the latch off. This trace sees those drops,
-// tells which reader then read the null, and checks that a flush which bound its state left DXVK matching the shadow state.
+// The state readers' trace. DXVK keeps D3D11's hazard rules, so an SRV bind of a resource bound as a target binds null, and a target
+// bind unbinds SRVs of the same resource. With the flush latch on, DXVK keeps stale targets, so CS binds of their views can be dropped.
+// This trace logs those drops and which reader then read null, and checks flushes leave DXVK matching the shadow state.
 #include "RenderGraph/Engine/Flush/StateTrace.h"
 
 #include "Globals.h"
@@ -56,10 +54,10 @@ namespace RenderGraph::Engine::Flush
 
 		struct Counters
 		{
-			std::atomic<std::uint64_t> droppedBinds{ 0 };     // a CS or engine SRV bind DXVK turned into null
+			std::atomic<std::uint64_t> droppedBinds{ 0 };     // SRV binds DXVK turned into null
 			std::atomic<std::uint64_t> unbound{ 0 };          // PS SRVs a target bind unbound
 			std::atomic<std::uint64_t> lostReads{ 0 };        // a reader read null where a bind was dropped or unbound
-			std::atomic<std::uint64_t> appliedMismatch{ 0 };  // after a flush that bound its state: a slot, target or viewport off
+			std::atomic<std::uint64_t> appliedMismatch{ 0 };  // flushes that left a slot, target or viewport off the shadow state
 			std::atomic<std::uint64_t> applied{ 0 };          // flushes checked
 		};
 
@@ -69,7 +67,7 @@ namespace RenderGraph::Engine::Flush
 			return s_counters;
 		}
 
-		/** @brief Per PS slot: why the last bind there did not hold, while it has not been bound again. Render owner only, locked anyway. */
+		/** @brief Per PS slot, why the last bind there did not hold. Render owner only, locked anyway. */
 		struct Lost
 		{
 			bool lost = false;
@@ -88,11 +86,9 @@ namespace RenderGraph::Engine::Flush
 			return s_table;
 		}
 
-		// An event's key: its kind (0-2 a dropped bind by stage, 3 a target bind's unbinding, 4 a flush off the shadow state, 5 a lost
-		// read), the slot, and two code addresses (the callers, or the flush's caller, or the reader's name).
+		// Kind is 0-2 for a dropped bind by stage, 3 for an unbind, 4 for a flush off the shadow state, 5 for a lost read.
 		using Key = std::tuple<int, std::uint32_t, const void*, const void*>;
 
-		/** @brief Whether a_key is new: each kind of event logs once per key. */
 		bool FirstTime(const Key& a_key)
 		{
 			static std::mutex s_lock;
@@ -101,10 +97,7 @@ namespace RenderGraph::Engine::Flush
 			return s_seen.insert(a_key).second;
 		}
 
-		/**
-		 * @brief The text of an event at a_key, built by a_build the first time only (naming resources and callers costs, and a site
-		 * repeats every frame). a_first says whether it was built now, so the caller logs it once.
-		 */
+		/** @brief Builds an event's text only the first time, since naming resources costs and a site repeats every frame. */
 		template <class Build>
 		std::string Described(const Key& a_key, Build&& a_build, bool& a_first)
 		{
@@ -123,12 +116,10 @@ namespace RenderGraph::Engine::Flush
 			return at->second;
 		}
 
-		/** @brief The callers above the D3D11 call: the first is its return address. */
 		struct Callers
 		{
 			std::array<void*, 4> frames{};
 
-			/** @brief a_caller (a context method's return address) and the frames above it. */
 			static Callers Capture(void* a_caller)
 			{
 				Callers callers;
@@ -163,7 +154,6 @@ namespace RenderGraph::Engine::Flush
 			return a_object ? static_cast<ID3D11Resource*>(Tripwire::Unwrap(a_object)) : nullptr;
 		}
 
-		/** @brief The engine target a_resource is, by name, or empty. */
 		std::string EngineTargetName(ID3D11Resource* a_resource)
 		{
 			auto* renderer = globals::game::renderer;
@@ -191,7 +181,6 @@ namespace RenderGraph::Engine::Flush
 			return {};
 		}
 
-		/** @brief A resource by name: the engine target it is, its debug name, or its shape. */
 		std::string ResourceName(ID3D11Resource* a_resource)
 		{
 			if (!a_resource)
@@ -233,7 +222,7 @@ namespace RenderGraph::Engine::Flush
 			return a_view ? ResourceName(ResourceOf(a_view).get()) : std::string("null");
 		}
 
-		/** @brief Whether the shadow state's current targets hold a_resource: the engine still draws into it, so it is not stale. */
+		/** @brief Whether the shadow state's current targets hold a_resource, meaning the engine still draws into it. */
 		bool ShadowHolds(ID3D11Resource* a_resource)
 		{
 			auto* renderer = globals::game::renderer;
@@ -254,7 +243,7 @@ namespace RenderGraph::Engine::Flush
 			       Raw(renderer->GetRendererData().cubemapRenderTargets[state.cubeMapRenderTarget].texture) == a_resource;
 		}
 
-		/** @brief What a_resource is bound as on DXVK now, which made it drop a shader resource bind, and whether that is stale. */
+		/** @brief What a_resource is bound as on DXVK that made it drop an SRV bind, and whether that is stale. */
 		std::string ConflictOf(ID3D11DeviceContext* a_context, Stage a_stage, ID3D11Resource* a_resource)
 		{
 			std::string out;
@@ -290,7 +279,6 @@ namespace RenderGraph::Engine::Flush
 			                                         "; the engine's shadow state has moved off it (a stale bind: the latch dropped the engine's target bind)");
 		}
 
-		/** @brief The engine's current targets as the shadow state holds them, for the logs. */
 		std::string ShadowTargets()
 		{
 			auto* shadow = globals::game::shadowState;
@@ -307,7 +295,6 @@ namespace RenderGraph::Engine::Flush
 				name(RE::RENDER_TARGET_DEPTHSTENCIL{}, state.depthStencil, kDepthTotal), name(RE::RENDER_TARGET_CUBEMAP{}, state.cubeMapRenderTarget, kCubeTotal));
 		}
 
-		/** @brief After a shader resource bind: each view DXVK did not take is a dropped bind. */
 		void AfterBind(ID3D11DeviceContext* a_context, Stage a_stage, UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_views, void* a_caller)
 		{
 			if (!a_views)
@@ -360,7 +347,7 @@ namespace RenderGraph::Engine::Flush
 			}
 		}
 
-		/** @brief After a target bind: each PS view it unbound. a_before holds a reference per view, released here. */
+		/** @brief Counts the PS views a target bind unbound. Releases a_before's references. */
 		void AfterTargets(ID3D11DeviceContext* a_context, std::array<ID3D11ShaderResourceView*, kInputSlots>& a_before, void* a_caller)
 		{
 			std::array<ID3D11ShaderResourceView*, kInputSlots> after{};
@@ -447,10 +434,9 @@ namespace RenderGraph::Engine::Flush
 			auto& counters = GetCounters();
 			counters.applied.fetch_add(1, std::memory_order_relaxed);
 			const auto& state = shadow->GetRuntimeData();
-			// a_what builds the text: only the first time, since a mismatch at one site repeats every flush.
 			const auto mismatch = [&](std::uint32_t a_key, auto&& a_what) {
 				counters.appliedMismatch.fetch_add(1, std::memory_order_relaxed);
-				// Key 4: a flush that left DXVK off the shadow state, by caller and slot (16 the viewport, 17 render target 0).
+				// Slot 16 is the viewport and 17 is render target 0.
 				if (FirstTime({ 4, a_key, a_caller, nullptr }))
 					logger::warn("[ORG] state readers: after a flush from {} (latch {}): {}", Tripwire::DescribeCaller(a_caller), Latched() ? "on" : "off", a_what());
 			};
@@ -459,7 +445,7 @@ namespace RenderGraph::Engine::Flush
 			context->PSGetShaderResources(0, kEngineSlots, bound.data());
 			for (std::uint32_t slot = 0; slot < kEngineSlots; ++slot) {
 				auto* expected = Tripwire::Unwrap(state.PSTexture[slot]);
-				// Dirty again: something rebound the slot after the flush on purpose (VanillaBinding's reflections at t4).
+				// Dirty again means something rebound the slot on purpose after the flush, such as VanillaBinding's reflections at t4.
 				const bool dirty = (state.PSResourceModifiedBits >> slot) & 1;
 				if (!dirty && bound[slot] != expected)
 					mismatch(slot, [&] { return fmt::format("PS t{} on DXVK is {}, the shadow state holds {}", slot, ViewName(bound[slot]), ViewName(expected)); });
@@ -482,7 +468,7 @@ namespace RenderGraph::Engine::Flush
 					});
 			}
 
-			// Render target 0, outside the cube mode (whose face SetDirtyStates binds alone) and while the targets are not dirty again.
+			// Skip cube mode, where SetDirtyStates binds the face alone, and targets that are dirty again.
 			const auto target = static_cast<std::uint32_t>(state.renderTargets[0]);
 			if (!(flags & RE::BSGraphics::DIRTY_RENDERTARGET) && state.cubeMapRenderTarget >= kCubeTotal && target < kTargetTotal) {
 				ID3D11RenderTargetView* rtv = nullptr;
@@ -537,7 +523,6 @@ namespace RenderGraph::Engine::Flush
 			how = table.pixel[a_register].how;
 		}
 		GetCounters().lostReads.fetch_add(1, std::memory_order_relaxed);
-		// Key 5: a reader that read a lost view, by reader and register.
 		if (FirstTime({ 5, a_register, a_reader, nullptr }))
 			logger::warn("[ORG] state readers: {} read PS t{} as null: {}; latch {}", a_reader ? a_reader : "?", a_register, how, Latched() ? "on" : "off");
 	}

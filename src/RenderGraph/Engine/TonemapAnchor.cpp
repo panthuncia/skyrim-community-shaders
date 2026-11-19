@@ -14,7 +14,7 @@ namespace RenderGraph::Engine
 {
 	namespace
 	{
-		/** @brief The engine's targets of the tonemap call (guest): graph imports, with their view formats. */
+		/** @brief Guest mode. */
 		TonemapTargets EngineTargets([[maybe_unused]] std::uint32_t a_input, [[maybe_unused]] std::uint32_t a_output)
 		{
 			TonemapTargets targets;
@@ -23,9 +23,7 @@ namespace RenderGraph::Engine
 			if (a_input >= total || a_output >= total)
 				return targets;
 			const auto& engine = globals::game::renderer->GetRuntimeData().renderTargets;
-			// Native mode: an engine target without memory (Frame/EngineTargetUse.h) is not named. The engine's tonemap outside CS's
-			// chain (the frames before the chain registers, a menu scene's tonemap) then has no CS form for that target, and its
-			// clients draw nothing there, as for a target the engine has not made.
+			// Native mode: an engine target with no memory is not named, so the tonemap outside CS's chain draws nothing there.
 			const auto unbacked = [](std::uint32_t a_target) {
 				if (!Frame::EngineTargetUse::ColourUnbacked(a_target))
 					return false;
@@ -54,13 +52,11 @@ namespace RenderGraph::Engine
 
 	bool RunTonemapAnchor(std::uint32_t a_input, std::uint32_t a_output)
 	{
-		// CS's native chain names its own targets; otherwise the engine's call does.
 		TonemapTargets targets;
 		if (!ImageSpace::ChainTonemapTargets(targets))
 			targets = EngineTargets(a_input, a_output);
-		// The ORG FX runtime (CS_ORG_FX=1) settles its passes for this frame before the anchor runs them.
+		// The FX runtime settles its passes before the anchor runs them.
 		ORGFxRuntime::Get().Prepare(targets);
-		// Post Processing's chain may run in the anchor's epoch (ORGPostProcessing).
 		if (globals::features::postProcessing.loaded)
 			globals::features::postProcessing.BeforeTonemapAnchor(targets);
 		return FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a_input), .output = static_cast<std::int32_t>(a_output) });
