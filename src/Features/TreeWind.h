@@ -44,8 +44,8 @@ public:
 		bool TreeModSupport = true;
 	};
 
-	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
-	struct alignas(16) WindCB
+	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. Not alignas(16): a member copy would pad TreeWind (C4324). */
+	struct WindCB
 	{
 		float4 Wind;    // phase, previous phase, wind speed 0-1, wind angle (radians)
 		float4 Params;  // amplitude, near distance, enabled, unused
