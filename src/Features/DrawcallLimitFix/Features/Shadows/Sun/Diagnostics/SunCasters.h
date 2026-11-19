@@ -9,9 +9,8 @@
 namespace DCLF::Features::Shadows::Sun::SunCasters
 {
 	/**
-	 * @brief CS_DCLF_PERSISTENT_PARITY, at the sun's cascade registration (SunAccumulation's hooks, render thread): on the frames the
-	 * cascades skip nothing (ExcludeSun, SunAccumulation.cpp), an unclaimed caster registered under an excluded entry is one the skip would lose
-	 * (<- SUN EXCLUSION, in the sun entry exclusion's line).
+	 * @brief CS_DCLF_PERSISTENT_PARITY: on frames the cascades skip nothing, flags an unclaimed caster registered under an excluded
+	 * entry, which the skip would lose. Render thread.
 	 */
 	void Install();
 

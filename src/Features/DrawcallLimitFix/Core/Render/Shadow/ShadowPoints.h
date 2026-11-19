@@ -1,12 +1,7 @@
 #pragma once
 
-// The shadow views' frame points, Core's half (render thread), as FrameDriver calls them while the engine selects its shadow lights
-// (NiCamera::CalculateAndDrawShadowCasterLights: Features/Shadows/Engine's hooks) and at BeforeShadowMaps: the frame's shadow views
-// begun, each light's views as the engine keeps it, the list from DCLF's selection, and the revision inputs it moves. The scene side's:
-// the capture attributes and withholds by this list. The epochs' half (the views' coverage, the shadow frame, the shadow and occlusion
-// epochs, the maps' readiness) is Features/Shadows/Engine's, which FrameDriver calls through Api/ShadowEpochs.h. FrameDriver names
-// nothing of the shadow engine behind it (Core/Render/Shadow: ShadowPoints.cpp).
-// Self-contained.
+// Frame points that build the frame's shadow view list on the render thread.
+// They run while the engine picks its shadow lights in NiCamera::CalculateAndDrawShadowCasterLights, and at BeforeShadowMaps.
 
 #include <cstdint>
 
@@ -17,15 +12,14 @@ namespace RE
 
 namespace DCLF::Draws
 {
-	/** @brief Before the engine keeps its first shadow light: the frame's view capacity, and the list begun (ShadowViews::BeginCasters). */
+	/** @brief Call before the engine keeps its first shadow light. */
 	void BeginShadowViews();
-	/** @brief The engine kept a_light in a_slots slots from a_firstSlot and accumulates it next: its views (ShadowViews::AddCaster). */
+	/** @brief The engine kept a_light in the slots from a_firstSlot and accumulates it next. */
 	void ShadowLightKept(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
-	/**
-	 * @brief The engine's selection done (CalculateAndDrawShadowCasterLights returned): the frame's shadow views, in the order the engine
-	 * renders them at the shadow draw (ShadowViews::Rebuild).
-	 */
+	/** @brief Call before (a_begin true) and after the engine's focus accumulation of a_light. Draws registered in between belong to its focus views. */
+	void ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin);
+	/** @brief Call after the engine's light selection. Lists the shadow views in the order the engine renders them. */
 	void ListShadowViews();
-	/** @brief BeforeShadowMaps: the revision inputs the listed views move (their candidates). */
+	/** @brief Call at BeforeShadowMaps. */
 	void NoteShadowRevisionInputs();
 }

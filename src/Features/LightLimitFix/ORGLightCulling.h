@@ -4,25 +4,28 @@
 #include <cstdint>
 #include <d3d11.h>
 #include <memory>
+#include <string_view>
 
 /**
- * @brief Light Limit Fix's clustered light culling as OpenRenderGraph passes.
- *
- * Runs LLF's own cluster-building and culling shaders (compiled to SPIR-V with
- * LLF_ORG_BINDLESS) on DXVK's Vulkan device through RenderGraphRuntime, and
- * produces the same lightIndexList / lightGrid layout the D3D11 path does. The
- * outputs are graph-owned buffers that D3D11 reads through wrappers, so pixel
- * shaders bind them at t36/t37 exactly as before.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Light Limit Fix's clustered light culling as OpenRenderGraph passes.
+*
+* Runs LLF's own shaders, built with LLF_ORG_BINDLESS, and produces the same light lists the D3D11 path does.
+* The buffers are Persistent twins exported to D3D11 at t35-t37 and published by id. The ids are withdrawn when the graph fails.
+* The culling runs in its own epoch through a host extension, not at an anchor, so Execute reports failure and LLF checks IsActive every frame.
+* Free of ORG/Vulkan includes.
+*/
 class ORGLightCulling
 {
 public:
-	/** @brief Per-frame inputs, copied at Execute; nothing is retained by reference. */
+	/** @brief The published ids of the lights (t35), the light index list (t36) and the light grid (t37). */
+	static constexpr std::string_view kLightsId = "LightLimitFix::Lights";
+	static constexpr std::string_view kLightIndexListId = "LightLimitFix::LightIndexList";
+	static constexpr std::string_view kLightGridId = "LightLimitFix::LightGrid";
+
+	/** @brief Copied at Execute. Nothing is retained by reference. */
 	struct FrameInputs
 	{
-		const void* lights = nullptr;  // LightLimitFix::LightData[lightCount]
+		const void* lights = nullptr;
 		uint32_t lightCount = 0;
 		uint32_t clusterSize[3]{};
 		float lightsNear = 0.0f;
@@ -33,24 +36,22 @@ public:
 
 	static ORGLightCulling& Get();
 
-	/**
-	 * @brief (Re)creates the graph resources and registers the culling passes.
-	 * @return Whether culling runs on the render graph; false keeps LLF on D3D11.
-	 */
+	/** @brief @return False keeps LLF on D3D11. */
 	bool Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint32_t a_lightStride, uint32_t a_maxLightsPerCluster);
 
-	/** @brief Uploads the lights and runs one graph epoch. False means use the D3D11 path this frame. */
 	bool Execute(const FrameInputs& a_inputs);
 
 	bool IsActive() const;
 
+	/** @brief Native mode. Applies a new cluster grid at frame start, so revisions change only between frames. Called first by Renderer::Begin. Render thread. */
+	void BeginFrame();
+
+	/** @brief Null when inactive. */
+	ID3D11ShaderResourceView* GetLightsSRV() const;
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
 
-	/**
-	 * @brief Shader-visible descriptor heap indices of the graph's lights, light index list and light grid
-	 * (Lighting's t35, t36, t37), for passes on the graph that read them directly. False when inactive.
-	 */
+	/** @brief Heap indices of t35, t36 and t37 for graph passes. False when inactive. */
 	bool GetShaderResourceIndices(uint32_t& a_lights, uint32_t& a_lightIndexList, uint32_t& a_lightGrid) const;
 
 	~ORGLightCulling();

@@ -1,9 +1,7 @@
 #pragma once
 
-// A portal corpus (.dclfportal): one frame's program encoding (PortalPrograms.h) and the queries a batch evaluated against it
-// (PortalQuery, PortalQueries.hlsli). Written by CS_DCLF_PORTAL_CAPTURE (Portals/Diagnostics/PortalCapture.cpp) and the portal bench's
-// synthetic generator, read by the bench (tests/DclfPortalBench). Engine-independent. The file is {magic, version, name, metadata,
-// word count, words, query count, queries}, little-endian, strings as {length, bytes}.
+// A portal corpus (.dclfportal): one frame's program encoding and the queries a batch evaluated against it, for tests/DclfPortalBench.
+// Layout {magic, version, name, metadata, word count, words, query count, queries}, little-endian, strings as {length, bytes}.
 
 #include <array>
 #include <cstdint>

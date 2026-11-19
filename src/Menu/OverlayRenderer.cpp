@@ -4,7 +4,6 @@
 
 #include <dxgi.h>
 #include <imgui.h>
-#include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <unordered_map>
@@ -21,6 +20,7 @@
 #include "Menu.h"
 #include "Menu/CursorLoader.h"
 #include "Menu/FontAtlasState.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -315,9 +315,6 @@ void OverlayRenderer::RenderOverlay(
 	RenderFirstTimeSetupOverlay();
 	HandleABTesting();
 	PatchOverlappingWindowBackgrounds();
-	// Drawcall Limit Fix's startup hold: the session's first frames black until it covers its views, over everything else.
-	if (globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.StartupBlackout())
-		ImGui::GetForegroundDrawList()->AddRectFilled(ImVec2(0.0f, 0.0f), io.DisplaySize, ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 1.0f)));
 	FinalizeImGuiFrame();
 }
 
@@ -343,8 +340,7 @@ bool OverlayRenderer::ShouldSkipRendering()
 			 effectFailed ||
 			 globals::features::performanceOverlay.settings.ShowInOverlay ||
 			 globals::features::performanceOverlay.settings.ShowWeatherPicker ||
-			 renderDoc->IsAvailable() ||
-			 (globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.StartupBlackout()));
+			 renderDoc->IsAvailable());
 }
 
 void OverlayRenderer::HandleFontReload(Menu& menu, float& cachedFontSize, float currentFontSize)
@@ -365,7 +361,7 @@ void OverlayRenderer::InitializeImGuiFrame(Menu& menu)
 	// Start the Dear ImGui frame
 	{
 		ZoneScopedN("CS.Present.Overlay.ImplNewFrame");
-		ImGui_ImplDX11_NewFrame();
+		ImGuiRenderer::NewFrame();
 		ImGui_ImplWin32_NewFrame();
 	}
 
@@ -528,7 +524,7 @@ void OverlayRenderer::FinalizeImGuiFrame()
 		ZoneScopedN("CS.Present.Overlay.RenderDrawData");
 		// The backend grows its vertex and index buffers, and uploads font atlas pages, here.
 		Vram::OwnerScope vramScope("CS/Menu");
-		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+		ImGuiRenderer::RenderDrawData(ImGui::GetDrawData());
 	}
 }
 

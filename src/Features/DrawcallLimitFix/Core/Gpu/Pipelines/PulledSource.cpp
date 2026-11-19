@@ -1,5 +1,4 @@
-// The pulled builds' source rewrite (DCLF_PULLED): PulledSource.h. Standard library only, so tools/shader-compare's dclf-shadertool
-// builds it as the game does.
+// The pulled builds' source rewrite. Standard library only, so tools/shader-compare builds it as the game does.
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
 
 #include <cctype>
@@ -41,14 +40,13 @@ namespace DCLF::PulledSource
 			                              "DCLFRowFloat4x4";
 		}
 
-		// PulledLightingSource's output, and the block it is in.
 		struct PulledRewrite
 		{
 			std::ostringstream out;
 			std::string blockName;
 			PulledBlock block{};
 			bool inBlock = false, opened = false;
-			std::ostringstream assignments;  // the block's DCLFPer<Block>Statics body, its #if lines with it
+			std::ostringstream assignments;  // the block's DCLFPer<Block>Statics body, with its #if lines
 			std::uint32_t textures = 0, samplers = 0, members = 0, lazy = 0;
 			const Options* options = nullptr;
 		};
@@ -58,7 +56,7 @@ namespace DCLF::PulledSource
 			return a_register < a_options.materialTexture.size() && a_options.materialTexture[a_register];
 		}
 
-		// A block member: a static, and its assignment from the row; false when it is not one the rows can hold.
+		// A block member becomes a static assigned from the row. False when the rows cannot hold it.
 		bool PulledMember(const std::smatch& a_match, PulledRewrite& a_rewrite)
 		{
 			auto& out = a_rewrite.out;
@@ -66,14 +64,14 @@ namespace DCLF::PulledSource
 			const auto& block = a_rewrite.block;
 			const std::string type = a_match[3].str(), name = a_match[4].str();
 			const bool matrix = type.find('x') != std::string::npos;
-			// A column-major matrix's registers are its columns, and an array of matrices is none the shader has.
+			// A column-major matrix's registers are its columns. Arrays of matrices are not supported.
 			if (matrix && (!a_match[2].matched || a_match[5].matched))
 				return false;
 			const std::uint32_t component = a_match[7].matched ? static_cast<std::uint32_t>(std::string("xyzw").find(a_match[7].str()[0])) : 0u;
 			const std::uint32_t offset = static_cast<std::uint32_t>(std::stoul(a_match[6].str())) * 16 + component * 4;
 			const auto source = [&](std::uint32_t a_offset) { return std::format("{}({}, {} + {})", PulledRowLoad(type), block.row, block.offset, a_offset); };
-			// A member nothing writes or names as a field: a load where it is read (CS_DCLF_LAZY_ROWS), so the stage holds no register for it
-			// between its entry and its use. Statics loaded at entry live through the whole stage; a large block (Landscape's) spills.
+			// With CS_DCLF_LAZY_ROWS a member nothing writes is loaded where it is read. Statics loaded at entry hold registers for the whole
+			// stage, and a large block like Landscape's spills.
 			if (a_rewrite.options->eager && !a_match[5].matched && !a_rewrite.options->eager->contains(name)) {
 				out << a_match[1].str() << "#define " << name << " (" << source(offset) << ")" << a_match[8].str() << "\n";
 				++a_rewrite.members;
@@ -83,7 +81,6 @@ namespace DCLF::PulledSource
 			out << a_match[1].str() << "static " << a_match[2].str() << type << " " << name << (a_match[5].matched ? "[" + a_match[5].str() + "]" : std::string{}) << ";" << a_match[8].str()
 				<< "\n";
 			if (a_match[5].matched) {
-				// An array's elements: a register each.
 				const auto count = static_cast<std::uint32_t>(std::stoul(a_match[5].str()));
 				for (std::uint32_t e = 0; e < count; ++e)
 					assignments << "\t" << name << "[" << e << "] = " << source(offset + 16 * e) << ";\n";
@@ -94,7 +91,7 @@ namespace DCLF::PulledSource
 			return true;
 		}
 
-		// A line inside a row's cbuffer; false when it is not one it knows.
+		// A line inside a row's cbuffer. False when it is not one it knows.
 		bool PulledBlockLine(const std::string& a_line, PulledRewrite& a_rewrite)
 		{
 			static const std::regex member(
@@ -107,9 +104,7 @@ namespace DCLF::PulledSource
 				a_rewrite.opened = true;
 				out << "\n";
 			} else if (trimmed.rfind("};", 0) == 0 || trimmed == "}") {  // Effect.hlsl closes a block without the semicolon
-				// The block's members as statics, assigned from the row by the pulled entry points (Lighting.hlsl,
-				// DCLFRowStatics) once the row's address is known: a member's name is one other code reuses (a struct
-				// field), so not a macro.
+				// Members become statics, not macros, because other code reuses their names as struct fields.
 				a_rewrite.inBlock = false;
 				out << "void DCLF" << a_rewrite.blockName << "Statics()\n{\n" << a_rewrite.assignments.str() << "}\n";
 			} else if (trimmed.empty() || trimmed[0] == '#' || trimmed.rfind("//", 0) == 0) {
@@ -124,7 +119,7 @@ namespace DCLF::PulledSource
 			return true;
 		}
 
-		// A material (or shadow mask) texture: a function reading it at the row's index, behind a macro of its name.
+		// A material texture becomes a function reading at the row's index, behind a macro of its name.
 		void PulledTexture(const std::smatch& a_match, PulledRewrite& a_rewrite)
 		{
 			const std::string type = a_match[2].str(), name = a_match[3].str(), slot = a_match[4].str();
@@ -134,7 +129,6 @@ namespace DCLF::PulledSource
 			++a_rewrite.textures;
 		}
 
-		// A sampler (s0-s15) likewise.
 		void PulledSampler(const std::smatch& a_match, PulledRewrite& a_rewrite)
 		{
 			const std::string type = a_match[2].str(), name = a_match[3].str(), slot = a_match[4].str();
@@ -147,9 +141,8 @@ namespace DCLF::PulledSource
 	}
 
 	/**
-	 * @brief The names a block member may not be a macro of: every identifier the shader sources name as a field (".name") or
-	 * assign or declare ("name =", "name +=", "name[i] ="), so a macro would rewrite a struct member, a local or a write.
-	 * Read from every shader file (a_files: RenderGraphRuntime::ShaderSourceFiles) with each sources generation.
+	 * @brief Names a block member may not become a macro of, because some shader names them as a field or assigns or declares them.
+	 * Read from every shader file with each sources generation.
 	 */
 	std::unordered_set<std::string> EagerRowNames(const std::vector<std::filesystem::path>& a_files)
 	{
@@ -192,17 +185,9 @@ namespace DCLF::PulledSource
 	}
 
 	/**
-	 * @brief Lighting.hlsl for a pulled build (DCLF_PULLED): its rows' inputs, which a device-generated draw's layout maps from
-	 * the rows' addresses in its push data (MainPipelines.cpp, the main layout), read from the rows its sequence names instead
-	 * (Common/DCLFObjects.hlsli, DCLFMaterialRowAddress and DCLFPipelineRowAddress). A plain draw call binds once for draws
-	 * of many pipeline slots (the Z-prepass's buckets are its depth pipelines'), so nothing it binds may be a row's:
-	 * - the material row's: the PerMaterial blocks (b1), the material textures (t0-t15 but t14, and the features' t71, t74
-	 *   and t80-t91) and their samplers (s0-s15 but s14);
-	 * - the pipeline row's: the PerTechnique blocks (b0), the PerGeometry template (b2) and the shadow mask (t14, s14); its
-	 *   permutation block (b4) is Permutation.hlsli's (DCLF_PULLED_ROWS).
-	 * A block's members become statics, which its function (DCLFPer<Block>Statics) assigns from the row; a texture or sampler
-	 * a function of its own, behind a macro of its name. Line by line, so each declaration's replacement stays in its #if
-	 * branch. An error, no source, when a block's line is not one it knows.
+	 * @brief Rewrites a shader for a pulled build, so its row inputs are read from the rows the draw's sequence names instead of bound.
+	 * A plain draw call binds once for draws of many pipeline slots, so nothing it binds may come from a row.
+	 * Works line by line so each replacement stays in its #if branch. Returns an error when a block's line is not one it knows.
 	 */
 	Result Rewrite(std::string_view a_source, const Options& a_options)
 	{

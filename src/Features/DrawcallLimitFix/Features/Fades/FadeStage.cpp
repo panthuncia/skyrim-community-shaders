@@ -1,8 +1,9 @@
-// Fades' passes at the depth epoch's cull state (fades.state, fades.events): the fade roots' states for the next frame's cull
-// (FadeStateCS), on the compute queue beside the depth epoch's raster work, then their write-back events' copy to the host.
+// Fade passes in the depth epoch. FadeStateCS computes the roots' states for the next frame's cull on the compute queue,
+// alongside the depth raster work. Then the write-back events are copied to the host.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Readback/Readbacks.h"  // MakeEventReadbackPass
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
@@ -36,15 +37,14 @@ namespace DCLF::Draws
 		FadeStateConstants constants{};
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::uint32_t groups = 0;
-		bool queries = false;  // the portal query stage (its queries' view), else its results'
-		bool events = false;   // the write-back events' views are bound
+		bool queries = false;  // true for the portal query stage, which writes queries instead of reading results
+		bool events = false;
 	};
 
-	/** @brief Fade roots' state (FadeStateCS.hlsl): each root's main-camera OnVisible, once a frame, before the depth culling. */
+	/** @brief Runs each root's main-camera OnVisible once a frame, before the depth culling. */
 	class FadeStatePass final : public org::TypedRenderGraphPass<FadeStatePass, FadeStatePrepared, FadeStateBindings>
 	{
 	public:
-		// a_segment: its epoch's (the depth epoch's: the PassContext it was made with).
 		FadeStatePass(std::shared_ptr<Resources> a_resources, RenderGraphRuntime::Segment a_segment, bool a_queries = false) :
 			resources(std::move(a_resources)), fades(Features::Fades::SharedSceneOf(*resources->scene)), segment(a_segment), queryStage(a_queries) {}
 
@@ -62,8 +62,9 @@ namespace DCLF::Draws
 			for (std::uint32_t h = 0; h < 2; ++h)
 				bindings.published[h] = a_builder.UnorderedAccess(*scene.fadeStatesOut[h]).View();
 			bindings.frame = a_builder.ShaderResource(scene.fadeFrameBuffer).View();
-			// The cull binding Programs is the depth latch's portalProgramsIndex (a per-frame publication no pass declares; 0: none,
-			// the frustum alone).
+			// The programs are a per-frame publication filled by an upload in the same execution, so the late-bound buffer must be declared.
+			if (queryStage)
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
 			bindings.rootPrograms = a_builder.ShaderResource(*scene.fadeRootPrograms).View();
 			bindings.animated = a_builder.ShaderResource(*scene.fadeAnimated).View();
 			bindings.log = a_builder.UnorderedAccess(scene.fadeLog).View();
@@ -71,11 +72,11 @@ namespace DCLF::Draws
 				bindings.events = a_builder.UnorderedAccess(*scene.fadeEvents).View();
 				bindings.reported = a_builder.UnorderedAccess(*scene.fadeReported).View();
 			}
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 			return bindings;
 		}
 
-		// The recording depends on the buffers' versions and the depth shape (the revision's: the ticket's host data); counts are in the
-		// uploaded FadeFrame row.
+		// Counts live in the uploaded FadeFrame row, so they do not need to be part of the revision.
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(queryStage); }
 
 		FadeStatePrepared Prepare(const FadeStateBindings&, const org::PassPrepareContext& a_preparation) const
@@ -83,7 +84,7 @@ namespace DCLF::Draws
 			FadeStatePrepared prepared{};
 			const auto& scene = *fades;
 			const auto frame = CurrentFrame(a_preparation, segment);
-			// The root slots every buffer the pass reads or writes by root holds (the revision's versions: one unit group).
+			// The smallest root capacity among the per-root buffers.
 			std::uint64_t roots = ~0ull;
 			for (const auto* buffer : { &scene.fadeRoots, &scene.fadeStates, &scene.fadeStatesOut[0], &scene.fadeStatesOut[1], &scene.fadeRootPrograms, &scene.fadeAnimated })
 				roots = std::min(roots, NamedUnitsOf(a_preparation, *buffer));
@@ -95,13 +96,12 @@ namespace DCLF::Draws
 			prepared.latch = frame->latch;
 			auto& constants = prepared.constants;
 			prepared.queries = queryStage;
-			// Only with a staging set that holds the whole bound list.
+			// Bind events only when a staging set can hold the whole list.
 			if (const auto events = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, scene.fadeEvents));
 				scene.fadeEvents && scene.fadeWriteBack && scene.fadeWriteBack->SetFor(events)) {
 				prepared.events = true;
 				constants.eventCapacity = events;
 			}
-			constants.latchIndex = frame->latch->SrvIndex();
 			// Full capacity; the shader stops at the count.
 			prepared.groups = static_cast<std::uint32_t>((roots + kFadeStateGroup - 1) / kFadeStateGroup);
 			return prepared;
@@ -128,8 +128,7 @@ namespace DCLF::Draws
 				constants.eventsIndex = a_recording.Index(a_bindings.events);
 				constants.reportedIndex = a_recording.Index(a_bindings.reported);
 			}
-			// The depth segment's BuildDrawsLatch in this frame slot.
-			constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
 			commands.BindPipeline(a_frame.program->Pipeline());
@@ -139,7 +138,7 @@ namespace DCLF::Draws
 
 	private:
 		std::shared_ptr<Resources> resources;
-		std::shared_ptr<const Features::Fades::FadeScene> fades;  // Fades' scene resources (the pass's setup required them)
+		std::shared_ptr<const Features::Fades::FadeScene> fades;  // never null, the setup requires it
 		RenderGraphRuntime::Segment segment;
 		bool queryStage = false;
 	};
@@ -150,7 +149,7 @@ namespace DCLF::Features::Fades
 	void RegisterPortalBatchPasses(Api::InstallContext& a_context);
 	namespace
 	{
-		// The scene's GPU setup: the fade roots' scene resources when they made the program (else out of the graph).
+		// Null keeps the pass out of the graph.
 		std::shared_ptr<const void> SetUpFadeState(const Api::PassSetup& a_setup)
 		{
 			auto fades = SharedSceneOf(a_setup.scene);
@@ -168,7 +167,6 @@ namespace DCLF::Features::Fades
 			return std::make_shared<Draws::FadeStatePass>(a_context.Main(), a_context.segment, true);
 		}
 
-		// Its write-back events' copy: only with the list and its staging sets.
 		std::shared_ptr<const void> SetUpFadeEvents(const Api::PassSetup& a_setup)
 		{
 			auto fades = SharedSceneOf(a_setup.scene);
@@ -188,7 +186,6 @@ namespace DCLF::Features::Fades
 	{
 		RegisterPortalBatchPasses(a_context);
 		a_context.RegisterPass({ .key = "fades.portal-queries", .passName = "cs.dclf.z.fade-portal-queries", .queue = Api::PassQueue::Compute, .make = &MakeFadeQueryStage, .setup = &SetUpFadeState });
-		// Fade roots' state for the next frame's culling, beside the depth epoch's raster work; then its write-back events, to the host.
 		a_context.RegisterPass({ .key = "fades.state", .passName = "cs.dclf.z.fade-state", .queue = Api::PassQueue::Compute, .make = &MakeFadeStateStage, .setup = &SetUpFadeState });
 		a_context.RegisterPass({ .key = "fades.events", .passName = "cs.dclf.z.fade-events", .kind = Api::PassKind::Copy, .make = &MakeFadeEventsStage, .setup = &SetUpFadeEvents });
 	}

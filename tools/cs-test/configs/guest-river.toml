@@ -1,0 +1,2 @@
+# DXVK guest at Riverwood's river (river.toml): the reference for the native river runs.
+extends = ["guest", "river"]

@@ -1,11 +1,10 @@
-// The Effect port's property callbacks (Api::MaterialPortContribution): its capture (what the descriptors and PropertyColor read of the
-// property and its material, into the PropertyRecord) and its shading row (PropertyColor, EmitColor). Pure but for the engine reads, made
-// where Core holds the property (the capture's read window, FrameValues' shading items).
+// The Effect port's property capture and shading row. Pure except for engine reads, made where Core holds the property.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
+#include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
 
 #include <algorithm>
 
@@ -13,9 +12,7 @@ namespace DCLF::Features::Effects
 {
 	void CaptureEffectProperty(const Api::MaterialPortCapture& a_capture)
 	{
-		// What the effect's descriptor (FUN_1414bde90) and PropertyColor read of the property and its material, taken here where the
-		// property holds the material. GetRenderPasses tests a texture path by its string's pointer (FUN_140cec900 against null), not by
-		// the texture.
+		// Read here while the property holds the material. GetRenderPasses tests a texture path by its string pointer, not the texture.
 		a_capture.emissive = static_cast<const RE::BSEffectShaderProperty&>(a_capture.property).emittanceColor;
 		if (const auto* material = a_capture.property.material) {
 			const auto* bytes = reinterpret_cast<const std::byte*>(material);
@@ -26,27 +23,28 @@ namespace DCLF::Features::Effects
 
 	const void* EffectEmissive(const RE::BSShaderProperty& a_property)
 	{
-		// An effect property's emittanceColor is its PropertyColor (the record's emissive, CaptureEffectProperty's): FUN_141480fc0
-		// re-points it as it does a Lighting property's emissiveColor.
+		// FUN_141480fc0 re-points emittanceColor as it does a Lighting property's emissiveColor.
 		return static_cast<const RE::BSEffectShaderProperty&>(a_property).emittanceColor;
 	}
 
 	void SampleEffectShading(Api::MaterialPortShading& a_shading)
 	{
-		// Effect port: PropertyColor (SetupGeometry 0x1414eab10): the emittance colour or white, and the property's alpha, which
-		// GetRenderPasses leaves as the material's (the base colour's) times the fade node's currentFade; a member's is the material's.
+		// As SetupGeometry (0x1414eab10) writes PropertyColor. Alpha is the material's base alpha times the fade node's currentFade.
 		const auto& effect = static_cast<const RE::BSEffectShaderProperty&>(a_shading.property);
 		const auto* material = static_cast<const RE::BSEffectShaderMaterial*>(effect.material);
 		auto& row = a_shading.out;
 		auto& shading = row.shading;
-		shading.materialData[0] = shading.materialData[1] = shading.materialData[3] = 0.0f;
+		shading.materialData[0] = shading.materialData[1] = 0.0f;
 		shading.materialData[2] = a_shading.member && material ? material->baseColor.alpha : effect.alpha;
+		// 1 picks the cloud light, as FUN_1414fcf80 does for a kCloudLOD property. 0 picks the sun.
+		const bool cloudLight = Ported().cloudLighting && effect.flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCloudLOD);
+		shading.materialData[3] = cloudLight ? 1.0f : 0.0f;
 		const auto* emittance = effect.emittanceColor;
 		shading.emitColor[0] = emittance ? emittance->red : 1.0f;
 		shading.emitColor[1] = emittance ? emittance->green : 1.0f;
 		shading.emitColor[2] = emittance ? emittance->blue : 1.0f;
 		shading.ssrSpecular = 0.0f;
-		row.written = 4u | 0x70u;
+		row.written = 4u | 0x70u;  // MaterialData.w is DCLF-only, with no engine write to compare
 		row.padding[0] = row.padding[1] = row.padding[2] = 0u;
 		std::fill(std::begin(row.featureBlock), std::end(row.featureBlock), 0.0f);
 	}

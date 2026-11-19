@@ -13,15 +13,25 @@
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define PREFILTER_RADIANCE_RESOURCES(X)            \
+	X(SHARED, ConstantBuffer, Shared, 0)           \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)   \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)  \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1) \
+	X(SRV, Texture2D<float3>, srcRadiance, 0)      \
+	X(UAV, RWTexture2D<float3>, outRadiance0, 0)   \
+	X(UAV, RWTexture2D<float3>, outRadiance1, 1)   \
+	X(UAV, RWTexture2D<float3>, outRadiance2, 2)   \
+	X(UAV, RWTexture2D<float3>, outRadiance3, 3)   \
+	X(UAV, RWTexture2D<float3>, outRadiance4, 4)
+ORG_PUSH_BLOCK(PREFILTER_RADIANCE_RESOURCES(ORG_HANDLE))
+
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<float3> srcRadiance : register(t0);
-
-RWTexture2D<float3> outRadiance0 : register(u0);
-RWTexture2D<float3> outRadiance1 : register(u1);
-RWTexture2D<float3> outRadiance2 : register(u2);
-RWTexture2D<float3> outRadiance3 : register(u3);
-RWTexture2D<float3> outRadiance4 : register(u4);
+PREFILTER_RADIANCE_RESOURCES(ORG_RESOURCE)
 
 float3 RadianceMIPFilter(float3 radiance0, float3 radiance1, float3 radiance2, float3 radiance3)
 {
@@ -31,12 +41,16 @@ float3 RadianceMIPFilter(float3 radiance0, float3 radiance1, float3 radiance2, f
 
 groupshared float3 g_scratchRadiance[8][8];
 [numthreads(8, 8, 1)] void main(uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	// MIP 0
 	const uint2 baseCoord = dispatchThreadID;
 	const uint2 pixCoord = baseCoord * 2;
-	const float2 uv = (pixCoord + .5) * RcpFrameDim;
+	// The dispatch is rounded up to 16 pixels, so the last groups pass the frame (at 640x360, rows 360-367). The radiance pass
+	// wrote only the frame: past it the texture holds whatever its memory held last (on the render graph, another transient's
+	// data). Clamp the 2x2 gather to the frame; the mips past it repeat the edge.
+	const uint2 readCoord = min(pixCoord, max(uint2(OUT_FRAME_DIM), 2) - 2);
+	const float2 uv = (readCoord + .5) * SsgiFrame.RcpFrameDim;
 
 	float4 rad0 = srcRadiance.GatherRed(samplerPointClamp, uv * frameScale);
 	float4 rad1 = srcRadiance.GatherGreen(samplerPointClamp, uv * frameScale);

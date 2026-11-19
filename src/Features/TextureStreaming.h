@@ -27,6 +27,9 @@ struct TextureStreamingFeature : Feature
 	/** @brief On by default, unlike other pre-release core features. */
 	virtual bool IsDisabledByDefault() const override { return false; }
 
+	/** @brief After each Present, on the render thread: graph windows' installs and releases (TextureStreaming/ORGWindows.h). */
+	virtual void Reset() override;
+
 	/** @brief Draws the settings and the current totals. */
 	virtual void DrawSettings() override;
 	virtual void LoadSettings(json& o_json) override;

@@ -6,11 +6,8 @@
 namespace DCLF::Diagnostics::PortalParity
 {
 	/**
-	 * @brief The portal views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): at each Build (PortalWalkBuilt, before the list
-	 * jobs), DCLF's programs against the engine's portal-graph entry as Main::Update's walk left it - the rooms in its map, each room's
-	 * and unbound space's BSCompoundFrustum (the structure exactly, the planes within rounding), the boxes' corners and silhouette sets,
-	 * the rooms the walk popped - with a frame whose camera moved after the engine's walk tallied apart. The line every 300 builds
-	 * (Features::Portals::PortalViewsLine).
+	 * @brief The portal views' parity: at each Build, DCLF's programs against the engine's portal-graph entry as Main::Update's walk
+	 * left it. Frames whose camera moved after the engine's walk are tallied apart. One line every 300 builds.
 	 */
 	void Install();
 
@@ -18,8 +15,7 @@ namespace DCLF::Diagnostics::PortalParity
 	{
 		std::uint64_t frames = 0, rooms = 0, roomsMissing = 0, roomsExtra = 0, programs = 0, programsDiffer = 0;
 		std::uint64_t unboundDiffer = 0, flagDiffer = 0, accumDiffer = 0;
-		// Unbound space's programs that differ only by graph plane states the engine's other occluder tests wrote before its walk: built
-		// again with the engine's states, DCLF's matches (PortalParity.cpp, CompareProgram). Not a difference.
+		// Unbound-space programs that match once rebuilt with the engine's plane states. Not a difference.
 		std::uint64_t unboundEngineStates = 0;
 		std::uint64_t ops = 0, sets = 0;  // what the compared programs held
 		float largest = 0.0f;             // the largest plane difference among the programs that matched in structure
@@ -33,6 +29,6 @@ namespace DCLF::Diagnostics::PortalParity
 		std::string occluderFirst;
 		std::string first;
 	};
-	/** @brief The tally since the last Take, reset. */
+	/** @brief Returns and resets the tally. */
 	Tally Take();
 }

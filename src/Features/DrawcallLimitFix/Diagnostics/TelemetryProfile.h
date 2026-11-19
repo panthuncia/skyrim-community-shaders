@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <string_view>
 
-// "dclf:telemetry=<label>": BasicTelemetry sessions for a test run's phases (dclf-validation.md).
+// "dclf:telemetry=<label>" runs BasicTelemetry sessions for a test run's phases.
 namespace DCLF::Diagnostics
 {
 	/**

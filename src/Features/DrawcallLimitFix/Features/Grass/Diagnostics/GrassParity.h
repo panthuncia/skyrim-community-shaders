@@ -1,27 +1,24 @@
 #pragma once
 
-// CS_DCLF_PERSISTENT_PARITY: grass's mirror against the capture's live set (GrassParity.cpp), reported with the mirror's line
-// (GrassReport.cpp). Included by the feature's sources only.
+// CS_DCLF_PERSISTENT_PARITY state for the grass mirror check.
 
 #include <cstdint>
 #include <string>
 
 namespace DCLF::Features::Grass
 {
-	/** @brief The parity's state (render thread; reported with the mirror's line). */
+	/** @brief Render thread. */
 	struct GrassParityState
 	{
 		std::uint64_t checks = 0, shapes = 0, missing = 0, stale = 0, differ = 0, late = 0;
-		std::uint64_t liveInstances = 0, mirroredInstances = 0;  // the last check's totals
-		// The last check's mirrored records placed as the cull places them (the shape row's origin plus the record's position) against
-		// the cull's eye and distance (the last draw row's): within the distance, and the nearest (-1: no draw row yet).
+		std::uint64_t liveInstances = 0, mirroredInstances = 0;
+		// Records placed as the cull places them, checked against its eye and distance. Nearest is -1 before any draw row.
 		std::uint64_t withinDistance = 0;
 		float nearest = -1.0f, maxDistance = 0.0f;
 		std::string first;
-		ankerl::unordered_dense::map<const void*, std::string> suspects;  // differed at the last check, with what
-		std::uint32_t frame = ~0u;                                       // the frame the last check ran in
+		ankerl::unordered_dense::map<const void*, std::string> suspects;  // shapes that differed at the last check, and how
+		std::uint32_t frame = ~0u;
 	};
 
-	/** @brief The parity's state (its counters zero while it does not run). */
 	GrassParityState& ParityState();
 }

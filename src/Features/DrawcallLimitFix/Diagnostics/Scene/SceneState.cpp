@@ -1,4 +1,4 @@
-// The scene area's diagnostics state, one instance (SceneState.h).
+// The scene diagnostics state, one instance.
 
 #include "SceneState.h"
 

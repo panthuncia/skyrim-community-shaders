@@ -1,5 +1,4 @@
-// SceneTracker: the NiNode child edits (SceneWriterFramework's events, on the editing thread) and the event stack they and the hooks push
-// onto.
+// The NiNode child edits and the event stack they and the hooks push onto.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
@@ -9,38 +8,80 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <vector>
 
 namespace DCLF
 {
 	namespace
 	{
-		// NiNode's child edits are SceneWriterFramework's (SWF_EVENT_CHILD_ATTACHED / SWF_EVENT_CHILD_DETACHING): NiNode's implementations,
-		// the classes overriding them (BSParticleSystemManager's world-space particle systems, BGSDecalNode's detaches and sets,
-		// BSFaceGenNiNode's attach) and the remove-all (FUN_140d1d630: Actor::DetachArrow, Actor::RemoveWeapon, BSTaskPool's queued
-		// removal). A detach before the engine's (the child still attached), an attach after.
+		// SWF reports every child edit, including subclass overrides and the remove-all (FUN_140d1d630). Detaches arrive before the engine's,
+		// attaches after. A move is pushed whole at its attach, so no scene pass takes its detach alone and erases what the attach keeps.
+		struct MoveGroup
+		{
+			const RE::NiAVObject* child = nullptr;
+			SceneTracker::Event* oldest = nullptr;
+			SceneTracker::Event* newest = nullptr;
+			std::uint32_t wakes = 0;
+		};
+		thread_local MoveGroup t_move;
+
+		// Plain detaches by child. Each waits for an attach of the same child or the frame's start.
+		struct HeldDetach
+		{
+			const RE::NiAVObject* child = nullptr;
+			SceneTracker::Event* oldest = nullptr;
+			SceneTracker::Event* newest = nullptr;
+		};
+		std::mutex heldDetachLock;
+		std::vector<HeldDetach> heldDetaches;
+		std::atomic<std::uint32_t> heldDetachCount{ 0 };
+
+		// A load's detaches are not held, since no frame starts until it ends.
+		bool LoadingMenuOpen()
+		{
+			auto* ui = RE::UI::GetSingleton();
+			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+		}
+
+		void StampWoken(SceneTracker::Event* a_event)
+		{
+			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+			a_event->stampFrame = SceneCapture::Frame();
+		}
+
 		void OnChildAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
 			auto* child = static_cast<RE::NiAVObject*>(event.child);
-			// A SetAt of the child the slot already held is no structure change for the kept lists.
+			// A SetAt of the child the slot already held is no structure change.
 			if (!event.unchanged)
 				PrimaryCull::Get().NoteListStructure(static_cast<const RE::NiNode*>(event.parent), child, true);
-			SceneTracker::Get().PushAttached(child);
+			SceneTracker::Get().PushAttached(child, static_cast<const RE::NiAVObject*>(event.parent));
 		}
 
 		void OnChildDetaching(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
 			auto* child = static_cast<RE::NiAVObject*>(event.child);
+			if (event.flags & SWF_CHILD_REPARENT) {
+				// The engine's attach of this child is in progress on this thread, so no other move can be.
+				if (t_move.child && t_move.child != child)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: a move of {} began on thread {} while the move of {} was open", static_cast<const void*>(child),
+						::GetCurrentThreadId(), static_cast<const void*>(t_move.child)));
+				t_move.child = child;
+			}
 			PrimaryCull::Get().NoteListStructure(static_cast<const RE::NiNode*>(event.parent), child, false);
-			SceneTracker::Get().PushDetached(child);
+			SceneTracker::Get().PushDetached(child, static_cast<const RE::NiAVObject*>(event.parent));
 		}
 
-		// The watched subtree's root (WatchSubtree): compared by the hooks, never dereferenced but for its descendants' parent chains.
+		// Compared by the hooks, never dereferenced except for descendants' parent chains.
 		std::atomic<const RE::NiAVObject*> watchedRoot{ nullptr };
 
-		/** @brief Whether a_object is a_root or under it (the hook's thread, the chain alive: the engine edits or stores under it). */
+		/** @brief Whether a_object is a_root or under it. Call on the hook's thread, where the chain is alive. */
 		bool Under(const RE::NiAVObject* a_object, const RE::NiAVObject* a_root)
 		{
 			for (std::uint32_t depth = 0; a_object && depth <= Engine::kMaxParentDepth; ++depth, a_object = a_object->parent)
@@ -49,19 +90,20 @@ namespace DCLF
 			return false;
 		}
 
-		// The watched category nodes (WatchCategoryNodes): an immutable sorted set the hooks read lock-free. A hook counts itself in
-		// (categoryReaders) around its read; a replaced set is freed by the render thread once it sees no reader in (RetireCategoryNodes).
+		// An immutable sorted set the hooks read lock-free, counting themselves in. The render thread frees a replaced set once no reader is in.
 		std::atomic<const std::vector<const void*>*> categoryNodes{ nullptr };
-		std::atomic<std::uint32_t> categoryReaders{ 0 };  // also counts the hidden stores' reads of subtreeMembers
-		// The watched subtree's members (WatchSubtreeMembers): an immutable sorted set, read and retired like categoryNodes.
+		std::atomic<std::uint32_t> categoryReaders{ 0 };  // every SetRead, not only category node reads
+		// Read and retired like categoryNodes.
 		std::atomic<const std::vector<const void*>*> subtreeMembers{ nullptr };
 		std::unique_ptr<const std::vector<const void*>> subtreeCurrent;
 		std::atomic<std::uint64_t> categoryEdits{ 0 };
-		std::unique_ptr<const std::vector<const void*>> categoryCurrent;               // render thread: the published set's owner
+		std::unique_ptr<const std::vector<const void*>> categoryCurrent;  // render thread
 		std::vector<std::unique_ptr<const std::vector<const void*>>> categoryRetired;  // render thread: replaced, maybe still read
 		std::atomic<std::uint32_t> renderThread{ 0 };
+		// Compared by the hooks, never dereferenced.
+		std::atomic<const RE::NiAVObject*> unheldOwner{ nullptr };
+		std::atomic<std::uint64_t> unheldEdits{ 0 };
 
-		// The window premise's counters (TakeWindowEdits).
 		std::atomic<std::uint64_t> windowEditsRender{ 0 }, windowEditsOther{ 0 };
 		std::atomic<std::uint32_t> windowEditFirst{ 0 };
 	}
@@ -76,7 +118,7 @@ namespace DCLF
 	{
 		if (installed)
 			return;
-		// DrawcallLimitFix::PostPostLoad required SWF's structure family (SceneWriter::kRequiredCaps) before any hook was written.
+		// PostPostLoad required SWF's structure capability before any hook was written.
 		if (!SceneWriter::Subscribe(SWF_EVENT_CHILD_ATTACHED, &OnChildAttached) || !SceneWriter::Subscribe(SWF_EVENT_CHILD_DETACHING, &OnChildDetaching))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the child-edit subscriptions after reporting them installed");
 		installed = true;
@@ -85,15 +127,12 @@ namespace DCLF
 
 	void SceneTracker::Push(Event* a_event)
 	{
-		// Stamped for the latency histograms (the scene pump's), then the pump woken for what moves latency (the source decided
-		// before the push: the event is the consumer's after it): an attach in the world, a detach, a hidden bit, a leaf swapped, a
-		// property's or an alpha's values (WakeScenePass holds these during the frame's render). A node's or a geometry's values
-		// (transforms, the cull's fade state, a switch's index, segments) wake nothing: the frame's next pass takes them.
+		// Only edits that should reach the frame at once wake the pump and are stamped for latency: world attaches, detaches, hidden bits,
+		// leaf swaps, property and alpha values. Per-frame node and geometry values wake nothing.
 		SceneWake source = SceneWake::Count;
 		switch (a_event->type) {
 		case EventType::Attached:
-			// In the world alone (its capture: CaptureAttached captures only what is): a loader's subtree attached out of the world wakes
-			// nothing (most such passes would change nothing); its world attach does. The event still goes to the mirror.
+			// A loader's subtree attached outside the world wakes nothing. Its world attach does.
 			if (a_event->captured)
 				source = SceneWake::Attach;
 			break;
@@ -111,22 +150,57 @@ namespace DCLF
 				source = SceneWake::AlphaUpdate;
 			break;
 		case EventType::Stacked:
-			// By its channel (Api::WakeSource::Pass: the LOD gates', whose incoming blocks are withheld from the claims and hidden from the
-			// engine until the coordinator flips the gate).
 			if (a_event->stackedWakes)
 				source = SceneWake::Channel;
 			break;
 		}
-		// Only what wakes is stamped: the latencies measure what is meant to reach the frame at once, not what the frame's own pass takes.
-		if (source != SceneWake::Count) {
-			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-			a_event->stampFrame = SceneCapture::Frame();
-		}
-		a_event->next = head.load(std::memory_order_relaxed);
-		while (!head.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
-		}
 		if (source != SceneWake::Count)
-			WakeScenePass(source);
+			StampWoken(a_event);
+		if (!t_move.child) {
+			PushChain(a_event, a_event, source != SceneWake::Count ? 1u << static_cast<std::uint32_t>(source) : 0u);
+			return;
+		}
+		// A move open on this thread holds its events until its attach pushes them all.
+		a_event->next = t_move.newest;
+		t_move.newest = a_event;
+		if (!t_move.oldest)
+			t_move.oldest = a_event;
+		if (source != SceneWake::Count)
+			t_move.wakes |= 1u << static_cast<std::uint32_t>(source);
+		if (a_event->type != EventType::Attached || a_event->node.get() != t_move.child)
+			return;
+		const MoveGroup move = std::exchange(t_move, {});
+		PushChain(move.oldest, move.newest, move.wakes);
+	}
+
+	void SceneTracker::PushChain(Event* a_oldest, Event* a_newest, std::uint32_t a_wakes)
+	{
+		a_oldest->next = head.load(std::memory_order_relaxed);
+		while (!head.compare_exchange_weak(a_oldest->next, a_newest, std::memory_order_release, std::memory_order_relaxed)) {
+		}
+		for (std::uint32_t wake = 0; wake < static_cast<std::uint32_t>(SceneWake::Count); ++wake)
+			if (a_wakes & (1u << wake))
+				WakeScenePass(static_cast<SceneWake>(wake));
+	}
+
+	void SceneTracker::PushHeldDetaches()
+	{
+		if (!heldDetachCount.load(std::memory_order_acquire))
+			return;
+		std::vector<HeldDetach> taken;
+		{
+			std::scoped_lock lock(heldDetachLock);
+			taken.swap(heldDetaches);
+			heldDetachCount.store(0, std::memory_order_release);
+		}
+		for (const auto& held : taken) {
+			if (stopped.load(std::memory_order_acquire)) {
+				held.oldest->next = nullptr;
+				FreeEvents(held.newest);
+				continue;
+			}
+			PushChain(held.oldest, held.newest, 1u << static_cast<std::uint32_t>(SceneWake::Detach));
+		}
 	}
 
 	void SceneTracker::PushCaptured(Event* a_event, bool a_fillOnly)
@@ -150,47 +224,96 @@ namespace DCLF
 
 	void SceneTracker::CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out)
 	{
-		// On the hook's thread, while the engine holds the chain (the attach or detach is in progress under it).
+		// On the hook's thread, while the engine holds the chain.
 		for (const RE::NiAVObject* parent = a_node ? a_node->parent : nullptr; parent && a_out.size() < 32; parent = parent->parent)
 			a_out.push_back(parent);
 	}
 
-	void SceneTracker::PushAttached(RE::NiAVObject* a_child)
+	void SceneTracker::PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
-		if (!a_child || stopped.load(std::memory_order_acquire))
+		if (!a_child || stopped.load(std::memory_order_acquire)) {
+			if (a_child && t_move.child == a_child) {
+				if (t_move.newest) {
+					t_move.oldest->next = nullptr;
+					FreeEvents(t_move.newest);
+				}
+				t_move = {};
+			}
 			return;
+		}
 		auto* event = new Event{};
 		event->type = EventType::Attached;
+		event->thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 		event->node.reset(a_child);
 		CollectAncestors(a_child, event->ancestors);
-		// The mirror's records, on this thread after the engine's attach: only what is in the world.
 		event->captured = SceneCapture::CaptureAttached(*a_child);
-		// After the engine's attach: the child's parent is the node it went under.
-		NoteEdit(a_child, event->captured != nullptr);
+		// The child's parent now, or for a parentless root the node whose array took it.
+		NoteEdit(a_child, a_parent ? a_parent : a_child->parent, event->captured != nullptr);
 		if (const auto* root = watchedRoot.load(std::memory_order_acquire); root && a_child != root && Under(a_child, root))
 			SubtreeEvents().Push(SubtreeEvent{ a_child, SubtreeEvent::Kind::Attached });
+		// The held detach of this child goes with its attach, so the scene pass applies them together as a move.
+		HeldDetach detach;
+		if (heldDetachCount.load(std::memory_order_acquire)) {
+			std::scoped_lock lock(heldDetachLock);
+			if (const auto held = std::ranges::find(heldDetaches, static_cast<const RE::NiAVObject*>(a_child), &HeldDetach::child); held != heldDetaches.end()) {
+				detach = *held;
+				heldDetaches.erase(held);
+				heldDetachCount.fetch_sub(1, std::memory_order_release);
+			}
+		}
+		if (detach.oldest) {
+			if (!t_move.child) {
+				std::uint32_t wakes = 1u << static_cast<std::uint32_t>(SceneWake::Detach);
+				if (event->captured) {
+					StampWoken(event);
+					wakes |= 1u << static_cast<std::uint32_t>(SceneWake::Attach);
+				}
+				event->next = detach.newest;
+				PushChain(detach.oldest, event, wakes);
+				return;
+			}
+			PushChain(detach.oldest, detach.newest, 1u << static_cast<std::uint32_t>(SceneWake::Detach));
+		}
 		Push(event);
 	}
 
-	void SceneTracker::PushDetached(RE::NiAVObject* a_child)
+	void SceneTracker::PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
 		if (!a_child || stopped.load(std::memory_order_acquire))
 			return;
-		// Before the engine's detach (which follows the hook): the child's parent is still the node it leaves.
+		// Before the engine's detach, so the child's parent is still the node it leaves.
 		const bool inWorld = SceneCapture::InWorld(a_child);
-		NoteEdit(a_child, inWorld);
-		// The watched subtree's keys it takes away, each named (pushed before the engine can free any of them).
+		const bool unheldExit = NoteEdit(a_child, a_parent ? a_parent : a_child->parent, inWorld);
+		// Name each watched key it takes away before the engine can free any of them.
 		if (const auto* root = watchedRoot.load(std::memory_order_acquire); root && a_child != root && Under(a_child, root))
 			Engine::ForEachLive(a_child, [](RE::NiAVObject& a_object, std::uint32_t) { SubtreeEvents().Push(SubtreeEvent{ &a_object, SubtreeEvent::Kind::Removed }); });
 		auto* event = new Event{};
 		event->type = EventType::Detached;
+		event->thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
+		event->unheldExit = unheldExit;
 		CollectAncestors(a_child, event->ancestors);
-		// In the world: the mirror drops every record under it.
 		CollectGeometry(a_child, event->removed, inWorld ? &event->removedNodes : nullptr);
 		if (inWorld)
 			event->detachedRoot = a_child;
 		if (event->removed.empty() && !inWorld) {
 			delete event;
+			return;
+		}
+		// The engine re-equips with a detach and attach of the same child, which no scene pass may split. So a plain detach waits for
+		// that attach or the frame's start, pinned so no new object takes its address.
+		if (!t_move.child && !LoadingMenuOpen()) {
+			event->pins.emplace_back(a_child);
+			StampWoken(event);
+			std::scoped_lock lock(heldDetachLock);
+			auto held = std::ranges::find(heldDetaches, static_cast<const RE::NiAVObject*>(a_child), &HeldDetach::child);
+			if (held == heldDetaches.end()) {
+				held = heldDetaches.insert(held, HeldDetach{ a_child });
+				heldDetachCount.fetch_add(1, std::memory_order_release);
+			}
+			event->next = held->newest;
+			held->newest = event;
+			if (!held->oldest)
+				held->oldest = event;
 			return;
 		}
 		Push(event);
@@ -206,8 +329,7 @@ namespace DCLF
 		event->stackedChannel = a_channel;
 		event->stackedWakes = a_wakes;
 		event->stackedToken = a_token;
-		// The pinned roots pinned here, while the pusher holds them (released with the batch, on the render thread: never on the scene
-		// work); the named are keys alone (the pusher holds them: a LOD gate's outgoing, until their detach at a LOD drain after the flip).
+		// Pinned roots are pinned here while the pusher holds them, and released on the render thread. Named roots are keys only.
 		event->stackedPinned.reserve(a_pinned.size());
 		event->pins.reserve(a_pinned.size());
 		for (auto* root : a_pinned)
@@ -226,16 +348,17 @@ namespace DCLF
 	{
 		if (!installed || stopped.load(std::memory_order_acquire))
 			return;
-		// A hidden store under the watched subtree: its new bit, for the subtree's bits (FrameGlobals), in order with its edits.
 		if (a_update.hiddenSite != ~0u)
 			if (watchedRoot.load(std::memory_order_acquire))
 				if (const auto* record = std::get_if<SceneCapture::NodeRecord>(&a_update.record)) {
-					// A member by lookup: the stored object may be under construction, its parent not yet written.
+					// Look the member up, because the stored object may be under construction with no parent yet.
 					const auto* node = static_cast<const RE::NiAVObject*>(record->key);
-					categoryReaders.fetch_add(1, std::memory_order_seq_cst);
-					const auto* members = subtreeMembers.load(std::memory_order_seq_cst);
-					const bool member = node && members && std::ranges::binary_search(*members, static_cast<const void*>(node));
-					categoryReaders.fetch_sub(1, std::memory_order_seq_cst);
+					bool member = false;
+					{
+						const SetRead read;
+						const auto* members = subtreeMembers.load(std::memory_order_seq_cst);
+						member = node && members && std::ranges::binary_search(*members, static_cast<const void*>(node));
+					}
 					if (member)
 						SubtreeEvents().Push(SubtreeEvent{ node, (record->flags & 1u) ? SubtreeEvent::Kind::Hidden : SubtreeEvent::Kind::Shown });
 				}
@@ -250,7 +373,7 @@ namespace DCLF
 
 	SceneTracker::Event* SceneTracker::Drain()
 	{
-		// The stack holds the newest event first; reverse it to replay in order.
+		// The stack holds the newest event first. Reverse it to replay in order.
 		Event* newestFirst = head.exchange(nullptr, std::memory_order_acquire);
 		Event* oldestFirst = nullptr;
 		while (newestFirst) {
@@ -276,7 +399,7 @@ namespace DCLF
 		if (!a_root)
 			return;
 
-		// Iterative walk; scene subtrees can be deep enough that recursion is a risk on loader threads.
+		// Iterative, because scene subtrees can be deep enough to risk recursion on loader threads.
 		Engine::ForEachLive(a_root, [&](RE::NiAVObject& a_object, std::uint32_t) {
 			if (auto* geometry = a_object.AsGeometry())
 				a_out.push_back(geometry);
@@ -285,23 +408,28 @@ namespace DCLF
 		});
 	}
 
-	void SceneTracker::NoteEdit(const RE::NiAVObject* a_child, bool a_inWorld)
+	bool SceneTracker::NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld)
 	{
-		// A watched category node attached or detached, or a child of one (the hook's thread: the child and its parent alive).
-		categoryReaders.fetch_add(1, std::memory_order_seq_cst);
-		if (const auto* set = categoryNodes.load(std::memory_order_seq_cst))
-			if (std::ranges::binary_search(*set, static_cast<const void*>(a_child)) ||
-				(a_child->parent && std::ranges::binary_search(*set, static_cast<const void*>(a_child->parent))))
-				categoryEdits.fetch_add(1, std::memory_order_release);
-		categoryReaders.fetch_sub(1, std::memory_order_seq_cst);
-		// The frame start's leased captures push in order with the hooks only while nothing in the world is attached or detached inside
-		// the window: what breaks that premise is counted.
+		// The particle manager holds its masters without being their parent, so its edits are counted apart.
+		const auto* owner = unheldOwner.load(std::memory_order_acquire);
+		const bool unheld = owner && a_parent == owner;
+		if (unheld)
+			unheldEdits.fetch_add(1, std::memory_order_release);
+		{
+			const SetRead read;
+			if (const auto* set = categoryNodes.load(std::memory_order_seq_cst))
+				if (std::ranges::binary_search(*set, static_cast<const void*>(a_child)) ||
+					(!unheld && a_parent && std::ranges::binary_search(*set, static_cast<const void*>(a_parent))))
+					categoryEdits.fetch_add(1, std::memory_order_release);
+		}
+		// The frame start's leased captures assume nothing in the world is attached or detached inside the window. Count what breaks that.
 		if (a_inWorld && EngineReadWindow::IsOpen()) {
 			const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 			(thread == renderThread.load(std::memory_order_relaxed) ? windowEditsRender : windowEditsOther).fetch_add(1, std::memory_order_relaxed);
 			std::uint32_t none = 0;
 			windowEditFirst.compare_exchange_strong(none, thread, std::memory_order_relaxed);
 		}
+		return unheld;
 	}
 
 	void SceneTracker::WatchSubtree(const RE::NiAVObject* a_root)
@@ -317,8 +445,7 @@ namespace DCLF
 			return;
 		auto set = std::make_unique<const std::vector<const void*>>(std::move(a_members));
 		subtreeMembers.store(set.get(), std::memory_order_seq_cst);
-		if (subtreeCurrent)
-			categoryRetired.push_back(std::move(subtreeCurrent));
+		RetireSet(std::move(subtreeCurrent));
 		subtreeCurrent = std::move(set);
 	}
 
@@ -330,7 +457,8 @@ namespace DCLF
 
 	void SceneTracker::WatchCategoryNodes(std::vector<const void*> a_nodes)
 	{
-		renderThread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()), std::memory_order_relaxed);
+		if (const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId()); renderThread.exchange(thread, std::memory_order_relaxed) != thread)
+			logger::info("[DCLF] scene tracker: the render thread is {}", thread);
 		std::erase(a_nodes, nullptr);
 		std::ranges::sort(a_nodes);
 		a_nodes.erase(std::unique(a_nodes.begin(), a_nodes.end()), a_nodes.end());
@@ -338,8 +466,7 @@ namespace DCLF
 			return;
 		auto set = std::make_unique<const std::vector<const void*>>(std::move(a_nodes));
 		categoryNodes.store(set.get(), std::memory_order_seq_cst);
-		if (categoryCurrent)
-			categoryRetired.push_back(std::move(categoryCurrent));
+		RetireSet(std::move(categoryCurrent));
 		categoryCurrent = std::move(set);
 	}
 
@@ -350,9 +477,35 @@ namespace DCLF
 
 	void SceneTracker::RetireCategoryNodes()
 	{
-		// Every set replaced before this load is unreachable once no hook is in: a hook that loaded one counted itself in first.
+		// A reader that loaded a retired set counted itself in first, so once none is in, every retired set is unreachable.
 		if (!categoryRetired.empty() && categoryReaders.load(std::memory_order_seq_cst) == 0)
 			categoryRetired.clear();
+	}
+
+	SceneTracker::SetRead::SetRead()
+	{
+		categoryReaders.fetch_add(1, std::memory_order_seq_cst);
+	}
+
+	SceneTracker::SetRead::~SetRead()
+	{
+		categoryReaders.fetch_sub(1, std::memory_order_seq_cst);
+	}
+
+	void SceneTracker::RetireSet(std::unique_ptr<const std::vector<const void*>> a_set)
+	{
+		if (a_set)
+			categoryRetired.push_back(std::move(a_set));
+	}
+
+	void SceneTracker::WatchUnheldOwner(const RE::NiAVObject* a_owner)
+	{
+		unheldOwner.store(a_owner, std::memory_order_release);
+	}
+
+	std::uint64_t SceneTracker::UnheldEdits()
+	{
+		return unheldEdits.load(std::memory_order_acquire);
 	}
 
 	SceneTracker::WindowEdits SceneTracker::TakeWindowEdits()

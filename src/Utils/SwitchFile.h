@@ -24,6 +24,12 @@ namespace Util::SwitchFile
 	/** @brief Whether a switch is set to "1". */
 	inline bool Enabled(std::string_view a_name) { return Value(a_name) == "1"; }
 
-	/** @brief Every name the file sets, read once. */
+	/**
+	 * @brief SKSEPlugin_Load, before any switch is read: a value served as though the file set it (the test configuration's
+	 * dclf_ini). It wins over the file; the environment still wins over it.
+	 */
+	void SetFileValue(std::string_view a_name, std::string_view a_value);
+
+	/** @brief Every name the file sets, read once, and every SetFileValue name. */
 	std::vector<std::string> FileNames();
 }

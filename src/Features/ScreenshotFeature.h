@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "Features/Screenshot/ORGScreenshot.h"
 #include "Utils/Subrect.h"
 #include <DirectXTex.h>
 #include <atomic>
@@ -36,8 +37,10 @@ struct ScreenshotFeature : public Feature
 	virtual void ClearShaderCache() override;
 	/** @brief Resets transient state (no-op for this feature). */
 	virtual void Reset() override;
-	/** @brief Called after all features are loaded (no-op for this feature). */
+	/** @brief Called after all features are loaded: the vanilla screenshot setting, and the render graph's Capture anchor. */
 	virtual void PostPostLoad() override;
+	/** @brief Registers the render graph's capture copy when CS_ORG_SCREENSHOT=1 (ORGScreenshot). */
+	virtual void SetupResources() override;
 
 	/** @brief Captures a screenshot from the current back buffer and enqueues it for async encoding and save. */
 	void Capture();
@@ -48,6 +51,8 @@ struct ScreenshotFeature : public Feature
 	 * runs that must tie a capture to a frame (DCLF's test harness, dclf:shot=).
 	 */
 	void RequestCapture(std::filesystem::path a_outputPath);
+	/** @brief Any thread: whether a RequestCapture capture is still to be saved (requested, read back or being encoded). */
+	bool ScriptedCapturesPending() const { return scriptedInFlight.load(std::memory_order_acquire) != 0; }
 	bool applyCropToScreenshot = true;
 
 	// Settings
@@ -63,6 +68,8 @@ struct ScreenshotFeature : public Feature
 	bool disableVanillaScreenshot = true;
 
 	std::atomic<bool> captureRequested{ false };
+	// RequestCapture's captures not yet saved (or failed): the test runner's exit waits for them.
+	std::atomic<std::uint32_t> scriptedInFlight{ 0 };
 
 private:
 	struct PendingScreenshot
@@ -81,6 +88,10 @@ private:
 		// Suppress the game's own PrintScreen capture by clearing bAllowScreenShot in memory.
 		bool disableVanillaScreenshot = true;
 		bool notify = true;  // the in-game "saved" message (not for RequestCapture's)
+		// A render-graph readback (ORGScreenshot) of the whole source, which the worker crops at cropX, cropY.
+		ORGScreenshot::Pixels readback;
+		uint32_t cropX = 0;
+		uint32_t cropY = 0;
 	};
 
 	std::mutex screenshotQueueMutex;

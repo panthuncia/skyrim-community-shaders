@@ -1,9 +1,10 @@
-// The snapshot builder (one pass at a time on DCLF's preparation pool): the builds ahead of a publication's draws, from the context
-// the render thread posts at the frame's start, its revision made and sealed, the snapshot posted; and the render thread's adoption of
-// the newest one (AdoptSnapshot; once DCLF draws, AdoptCurrentSnapshot waits for a current one). PostSnapshotWork and the fits
-// (FitsScene) are the coordinator's.
+// The snapshot builder. It runs one pass at a time on DCLF's preparation pool. For each publication it builds the draws ahead,
+// makes and seals the revision, and posts a snapshot. The render thread adopts the newest snapshot. Once DCLF draws, it waits
+// for a current one.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
@@ -11,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "Features/DrawcallLimitFix.h"
 
 #include <thread>
 
@@ -22,8 +24,6 @@ namespace DCLF
 
 	void IndirectDraws::PostAheadContext()
 	{
-		// Without main resources: the cleared context, the fits as they stood (the coordinator builds nothing ahead from it).
-		// Made in the post itself: the coordinator's copy is the post's.
 		auto post = std::make_unique<Impl::AheadPost>();
 		TracyCZoneN(make, "CS.DCLF.Ahead.Make", true);
 		const bool fit = impl->MakeAheadContext(post->context, failed);
@@ -36,18 +36,16 @@ namespace DCLF
 	{
 		auto& c = a_out;
 		c = {};
-		// For the coordinator's next commit, made under the newest toggles (the frame inputs': SceneToggles), not the frame's.
+		// Use the newest toggles, not the frame's, because this is for the coordinator's next commit.
 		c.toggles = SceneToggles();
 		if (a_failed || !resources || !resources->scene)
 			return false;
 		auto* lighting = EngineShaders::Lighting();
 		if (!lighting || !DrawPipelines::Get().Enabled() || !FrameIndirectStateValid())
 			return true;
-		// The capacities the builds are made against are MakeRevision's (it reserves them from the newest publication's tables, the only
-		// tables the kept draw bound follows).
 		for (const std::size_t j : { kAsyncZPrepass, kAsyncColour }) {
 			const auto& masks = epochMasks[j];
-			// The frame slots the epochs last supplied; the colour build replays the Z-prepass's vertex inputs.
+			// The colour build replays the Z-prepass's vertex inputs, so it needs them first.
 			if (!masks.known || (j == kAsyncColour && !prepassInputs))
 				continue;
 			DCLF_ZONE("CS.DCLF.Ahead.MainInputs");
@@ -55,7 +53,6 @@ namespace DCLF
 			c.build[j] = true;
 		}
 		c.target = resources;
-		// The participants' parts (Revision/Participant.h: the shadow engine's payload inputs, for the last epoch's views).
 		DCLF_ZONE("CS.DCLF.Ahead.Participants");
 		for (auto* participant : participants)
 			participant->PrepareAhead(c);
@@ -65,8 +62,8 @@ namespace DCLF
 
 	void IndirectDraws::Impl::PostResourcesAhead(bool a_failed)
 	{
-		// The builder's alone: the coordinator's context stays the frame start's (a second post in a frame would read to it as the next
-		// frame's input). A context without both main builds builds no complete draws, so none is posted: the frame start's is the next.
+		// Post to the builder only. A second post to the coordinator in one frame would look like the next frame's input.
+		// A context without both main builds cannot build complete draws, so it is not posted.
 		auto context = std::make_unique<AheadContext>();
 		if (!MakeAheadContext(*context, a_failed) || !context->target || !context->build[kAsyncZPrepass] || !context->build[kAsyncColour])
 			return;
@@ -81,12 +78,9 @@ namespace DCLF
 		resourcesAheadSlot.TakeInto(resourcesAhead);
 		auto& context = snapshotBuilder.work->context;
 		const auto& main = producer.inputs.main;
-		// Its draws are for the revision inputs' main resources already, or the frame posted no context for them yet (its post wakes the
-		// builder, which makes the snapshot again).
+		// Nothing to do if the draws already target these main resources, or no context for them was posted yet.
 		if (!main || context.target == main || resourcesAhead.target != main)
 			return false;
-		// The frame's context, under its toggles: one other than the publication's drops its shadow part (BuildSnapshotDraws) and is not
-		// passed through to.
 		context = resourcesAhead;
 		++snapshotBuilder.contextsReplaced;
 		return true;
@@ -94,7 +88,7 @@ namespace DCLF
 
 	void IndirectDraws::Impl::PostAhead(std::unique_ptr<AheadPost> a_post, bool a_fit)
 	{
-		// Immutable once posted, latest wins; the coordinator takes it at its passes' start (TakeAheadContext).
+		// Immutable once posted, and the latest wins. The coordinator takes it at the start of its pass.
 		if (a_fit) {
 			DCLF_ZONE("CS.DCLF.Ahead.PostFit");
 			PostFit();
@@ -103,7 +97,6 @@ namespace DCLF
 		post->fit = postedFit;
 		post->fitSerial = postedFitSerial;
 		aheadSlot.Post(std::move(post));
-		// A frame input of the coordinator's: its pump woken (folded with the frame start's other posts).
 		WakeScenePass(SceneWake::FrameInput);
 	}
 
@@ -115,7 +108,7 @@ namespace DCLF
 
 	void IndirectDraws::Impl::PostFit()
 	{
-		// What the commit's set may claim (FitsScene): the buffers' versions the adopted set names (none before the first adoption).
+		// What a commit may claim is bounded by the buffer versions the adopted set names.
 		const auto& adopted = Adopted();
 		const auto& shadow = shadowEngine->shadow;
 		const auto same = [](const std::weak_ptr<const void>& a_kept, const std::shared_ptr<const void>& a_now) {
@@ -139,10 +132,10 @@ namespace DCLF
 	{
 		if (!impl)
 			return true;
-		// The coordinator's copy of the posted fits (TakeAheadContext), never the render thread's.
+		// Read the coordinator's copy, never the render thread's.
 		const auto& posted = impl->aheadTaken;
 		const auto& tables = *static_cast<const SceneTables*>(a_tables);
-		// The rows have no capacity to wait for: the payload's parts grow with it (PayloadPools: a version of a larger class).
+		// Rows never wait for capacity, because the payload parts grow with it.
 		return a_slot < tables.objects.size() && ObjectFits(tables, a_slot, posted.fit[a_shadow ? 1 : 0]);
 	}
 
@@ -158,9 +151,8 @@ namespace DCLF
 		auto& s = *impl;
 		auto publication = std::static_pointer_cast<const ScenePublication>(std::move(a_publication));
 		if (failed) {
-			// No draws and no revision: the publication alone (its tables and claims; DCLF draws nothing, DecideCoverage).
+			// Failed. Post the publication alone, with no draws or revision, and mark it taken at once.
 			auto snapshot = std::make_unique<Impl::SceneSnapshot>();
-			// Nothing to build: taken at once (publication pacing waits on nothing).
 			s.snapshotWorkTaken.store(publication->sequence, std::memory_order_release);
 			snapshot->publication = std::move(publication);
 			snapshot->drawsComplete = true;
@@ -169,18 +161,15 @@ namespace DCLF
 			return;
 		}
 		auto& store = Scene::Coordinator::Get();
-		// What the builds ahead read that the coordinator or the frame write later is copied now: the context (the coordinator's copy of
-		// the frame's post, TakeAheadContext), the frame, the candidates. The tables and lookups are the publication's, immutable.
+		// Copy now anything the coordinator or frame will overwrite later. The tables and lookups are immutable.
 		auto work = std::make_unique<Impl::SnapshotWork>();
 		work->publication = std::move(publication);
 		work->context = s.aheadTaken.context;
-		work->frame = store.GetFrame();  // the coordinator's frame (its pass's frame inputs)
+		work->frame = store.GetFrame();
 		work->sun = store.CoordinatorSunCandidates();
 		work->light = store.CoordinatorLightCandidates();
 		work->aheadNumber = s.aheadKicked.fetch_add(1, std::memory_order_acq_rel) + 1;
-		// Latest wins: one the builder has not taken yet is replaced (dropped here, on the coordinator, as a returned publication is).
-		// The builder takes the newest once idle and the frame took its last snapshot (one build per adoption: WorkToBuild), so the
-		// publications made meanwhile coalesce here.
+		// Latest wins, so publications made while the builder is busy coalesce here. The replaced one is dropped on this thread.
 		s.snapshotWorkSlot.Post(std::move(work));
 		(void)s.SnapshotPump();
 		WakeSnapshotBuilder();
@@ -188,30 +177,24 @@ namespace DCLF
 
 	namespace
 	{
-		// RunAhead's: the most unread change-log entries (object records and geometry rows together) for which its two stages run on
-		// the builder's thread, one after the other, instead of on two pool tasks.
+		// Up to this many unread change-log entries, RunAhead runs its two stages inline instead of on two pool tasks.
 		constexpr std::uint64_t kInlineStageChanges = 128;
 
 		template <class Resources>
 		void NamedAddressesOf(const NamedVersions& a_sealed, const Resources& a_resources, std::uint32_t a_frame, ResourceAddresses& a_out)
 		{
-			// The payload's parts (objects, extras, rows, inputs) are none of theirs: the epochs take them from the installed payload.
 			const auto& scene = *a_resources.scene;
 			std::uint64_t objects = a_sealed.Of(a_resources.visibility).units;
 			if constexpr (requires { a_resources.frustum; })
 				objects = std::min(objects, a_sealed.Of(a_resources.frustum).units);
 			Extensions::FrameBindingValuesOf(a_sealed, scene, a_frame, a_out.frameBindings, false);
-			// The vertex stream's buffer while its entry class's objects are DCLF's (Features/Faces' face positions: it takes the face shapes
-			// once its engine side is in).
-			a_out.streamBuffer = Extensions::VertexStreamTaken() ? a_sealed.Of(scene.vertexStream).deviceAddress : 0;
+			a_out.streamBuffer = Extensions::VertexStreamTaken() ? RefOf(a_sealed.Of(scene.vertexStream)) : RenderGraph::BufferRef{};
 			a_out.fit = SceneFitOf(a_sealed, scene, objects);
 		}
 
 		/**
-		 * @brief SnapshotPass: whether a_work's publication would build into the last snapshot posted (a_posted): the coordinator
-		 * publishes its tables, lookups, claims, category nodes and candidates again only when they changed (a pass whose only change is
-		 * the frame's deltas shares them all), so the same objects with the same generations, revision counts and ahead context's
-		 * shape are the same build. The frame number a build reads moves on as it does for a snapshot no publication replaced.
+		 * @brief Whether a_work would build the same snapshot as the last one posted. The coordinator republishes shared objects only
+		 * when they change, so pointer equality plus generations means the same build.
 		 */
 		bool PassesThrough(const ImplSnapshotBuilder::SnapshotBuilder::Posted& a_posted, const ImplSnapshotBuilder::SnapshotWork& a_work)
 		{
@@ -223,6 +206,7 @@ namespace DCLF
 				next.sunCandidates != prior.sunCandidates || next.lightCandidates != prior.lightCandidates || next.categoryNodes != prior.categoryNodes)
 				return false;
 			if (next.tablesGeneration != prior.tablesGeneration || next.togglesGeneration != prior.togglesGeneration || next.lackingCount != prior.lackingCount ||
+				next.TransientWaiting() != prior.TransientWaiting() || next.built != prior.built ||
 				next.lightEntriesAppeared != prior.lightEntriesAppeared || next.revision.pipelines != prior.revision.pipelines ||
 				next.revision.shadowSlotKeys != prior.revision.shadowSlotKeys || next.revision.shadowKeys != prior.revision.shadowKeys)
 				return false;
@@ -238,7 +222,7 @@ namespace DCLF
 			return true;
 		}
 
-		/** @brief RunAhead's: every payload of a_out given the scene list's region as both builds left it (see there). */
+		/** @brief Give every payload of a_out the scene list region as both builds left it. */
 		void ShareAheadRegion(ImplSnapshotBuilder::DrawPublication& a_out, BuildCache& a_mainCache)
 		{
 			KeptView<DrawInput> region;
@@ -265,11 +249,11 @@ namespace DCLF
 			return nullptr;
 		bool closed = PublicationGateClosed();
 		if (closed) {
-			// The scene pass's end wakes the builder only while it waits (NoteScenePassDone); the gate read again after saying so.
+			// The scene pass's end wakes the builder only while it is flagged as waiting. Re-read the gate after setting the flag.
 			publicationGated.store(true, std::memory_order_seq_cst);
 			closed = PublicationGateClosed();
 		}
-		// A publication that moved only deltas, while the last snapshot stands unchanged: passed through at once (nothing built).
+		// A publication that moved only deltas passes through at once with nothing built.
 		if (!closed || (b.stage == SnapshotBuilder::Stage::Idle && !snapshotInputsMoved.load(std::memory_order_acquire) && PassesThrough(b.posted, *b.held)))
 			return std::move(b.held);
 		++b.heldPasses;
@@ -293,15 +277,10 @@ namespace DCLF
 		auto& work = *b.work;
 		const auto start = std::chrono::steady_clock::now();
 		const auto& publication = *work.publication;
-		// The draws embed versioned buffers' addresses and SRV indices, and a snapshot's draws must embed the versions its revision names -
-		// the ones its adoption makes current - never what the frame had when it posted the context (a grown version replaces it at that
-		// adoption, and the old one is released once its last holder goes: a shader reading it loses the device). Every one is taken from
-		// the sealed set, so draws and revision are one consistent build.
+		// Draws embed buffer addresses and SRV indices. They must come from the sealed set, never from the context, or a draw may
+		// read a version that was released after a growth, which loses the device.
 		AheadContext context = work.context;
-		// A context made under other toggles than the publication's commit (its pass took the frame inputs and the ahead context of two
-		// frame starts with a toggle between them): its shadow part was prepared for those (the shadow toggle, the occlusion maps' modes),
-		// so it is dropped, the publication's frames leave the shadow views to the engine, and its snapshot is never passed through to
-		// (PostSnapshot): the next publication's builds take a context of its own toggles.
+		// A context made under other toggles has a stale shadow part, so drop it and leave the shadow views to the engine.
 		if (context.toggles != publication.toggles) {
 			context.shadow = false;
 			context.shadowTarget.reset();
@@ -328,13 +307,12 @@ namespace DCLF
 		}
 		aheadRunning.store(false, std::memory_order_release);
 		aheadRunning.notify_all();
-		// The builds ahead done up to this item's number: the ones it replaced included.
 		aheadDone.store(work.aheadNumber, std::memory_order_release);
 		aheadDone.notify_all();
 		b.draws = std::move(built);
 		b.drawsPosted = false;
 		++b.buildsStarted;
-		b.payload.reset();  // new draws: their payload is published with the snapshot (PublishPayload)
+		b.payload.reset();
 		b.payloadFailed = false;
 		b.publicationWaited = false;
 		b.timing.ahead = true;
@@ -343,8 +321,6 @@ namespace DCLF
 
 	void IndirectDraws::Impl::WaitAhead()
 	{
-		// The build ahead running now (teardown, the toggle, a load screen): one the builder has not started reads nothing until it does,
-		// and the frame's fallback streams are refused until it is done (aheadDone).
 		while (aheadRunning.load(std::memory_order_acquire))
 			aheadRunning.wait(true, std::memory_order_acquire);
 	}
@@ -356,18 +332,15 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.BuildAhead");
 		auto out = std::make_shared<DrawPublication>();
 		out->tables = a_tables;
-		// The journals keep their changes back to the oldest journal position a backing of the part's pool holds
-		// (PayloadPools::OldestContentEpoch); none holding anything, every change may go (a version then is copied whole).
+		// Journals keep changes back to the oldest position any backing still holds. With no backings, everything may go.
 		const auto oldest = [](PayloadPart a_part) { return PayloadPools::OldestContentEpoch(a_part).value_or(~std::uint64_t{ 0 }); };
-		// The publication's stream views: the stores are this task's alone (no build in the frame updates them).
 		const TablesContentEpochs oldestTables{ oldest(PayloadPart::Objects), oldest(PayloadPart::Extras), oldest(PayloadPart::Geometries) };
 		const auto& c = a_context;
 		const bool buildMain = c.valid && c.target && c.target->scene;
-		// The scene list: the main build's region, into which the shadow build writes its words; its journal's build begins once a
-		// publication, with whichever writes first.
+		// The shadow build writes into the main build's region. Its journal begins once per publication, by whichever writes first.
 		if (buildMain)
 			mainCache.region.begun = false;
-		// Both segments in one build: one list, read by each through its view bits.
+		// Both segments share one list and read it through their view bits.
 		std::array<MainInputs, 2> inputs;
 		std::array<const MainInputs*, 2> segmentIn{};
 		std::array<MainPayload*, 2> segmentOut{};
@@ -379,7 +352,6 @@ namespace DCLF
 			in.frameNumber = a_frame;
 			in.tablesGeneration = a_generation;
 			in.lookupGeneration = a_lookups.generation;
-			// What the rows' and the region's journals keep changes back to.
 			in.materialRowsOldestContentEpoch = oldest(PayloadPart::MaterialRows);
 			in.pipelineRowsOldestContentEpoch = oldest(PayloadPart::PipelineRows);
 			in.inputsOldestContentEpoch = oldest(PayloadPart::Inputs);
@@ -388,18 +360,14 @@ namespace DCLF
 			segmentIn[j] = &in;
 			segmentOut[j] = out->payloads[j].get();
 		}
-		// The publication's stream views (the stores are this task's alone: no build in the frame updates them), then the participants' shared
-		// halves, beside the main build, which reads the views only in its Finish: two pool tasks, unless the parity keeps the fan-outs on
-		// this thread (Policy::SerialFanout).
+		// Stage 0 makes the stream views and runs the participants' shared halves. Stage 1 is the main build, which reads the
+		// stream views only in Finish, so the two stages can run in parallel.
 		auto& pairStats = mainRows.pairStats;
 		const auto msSince = [](std::chrono::steady_clock::time_point a_start) {
 			return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a_start).count();
 		};
 		const auto stagesStart = std::chrono::steady_clock::now();
 		Draws::MainBuildStages mainBuild(segmentIn, *a_tables, Scene::FrameView::Get().GetFrameTables(), a_lookups, segmentOut, mainRows, &mainCache);
-		// The participants' build (Revision/Participant.h), from the same tables, stream views and lookups: the shadow engine's, with the
-		// publication's candidates. Their shared halves run in the first stage, after the stream views they read and beside the main build
-		// (BuildPayloadShared's contract: they touch neither its region nor its payloads); their payloads after it (BuildPayload).
 		static constexpr PayloadFloors kPayloadFloors{};
 		const AheadBuild build{ *out, c, *a_tables, a_lookups, a_generation, a_frame, a_sunCandidates, a_lightCandidates, oldestTables, kPayloadFloors, mainCache.region,
 			pairStats };
@@ -408,7 +376,7 @@ namespace DCLF
 			if (a_stage == 0) {
 				out->streams = MakeStreamViews(objectStore, extrasStore, geometryStore, oldestTables, a_tables, *a_tables, a_generation, a_frame);
 				pairStats.streamsMs += msSince(start);
-				// Only for a build whose participants' payloads follow (BuildPayload after the main build): every shared half is.
+				// Only when BuildPayload will follow, because every shared half must be followed by it.
 				if (buildMain)
 					for (auto* participant : participants)
 						participant->BuildPayloadShared(build);
@@ -417,9 +385,7 @@ namespace DCLF
 				pairStats.mainMs += msSince(start);
 			}
 		};
-		// A small change runs both stages here, in order: the stream views (and the shadow engine's kept records after them) catch up only
-		// the change log's unread entries (the object records' and the geometry rows', both stores continuing), so overlapping them with the
-		// main build saves less than this thread's wait on the helper costs.
+		// For a small change, overlapping the stages saves less than waiting on the helper task costs.
 		const auto unread = [a_generation](const LogCursor& a_cursor, const auto& a_log) -> std::uint64_t {
 			return a_cursor.Continues(a_log, a_generation) ? a_cursor.Unread(a_log).size() : kInlineStageChanges + 1;
 		};
@@ -439,19 +405,14 @@ namespace DCLF
 			snapshotBuilder.stagesInline += buildMain && smallChange ? 1u : 0u;
 		}
 		++pairStats.aheads;
-		// CS_DCLF_PERSISTENT_PARITY: the extras rows are checked by each version that holds them, as it is built (PayloadPools).
 		if (!buildMain) {
 			pairStats.stagesMs += msSince(stagesStart);
 			return out;
 		}
 		mainBuild.Finish(out->streams);
 		pairStats.stagesMs += msSince(stagesStart);
-		// The participants' payloads: their halves after the main build (the shadow engine's region half, into the main region as it left
-		// it), and the next frame's exclusions from it.
 		for (auto* participant : participants)
 			participant->BuildPayload(build);
-		// Every payload of the publication holds the scene list's region as both builds left it: the shadow payload's view, taken
-		// after its words, or without it the main region's; and the shadow payload where its own frame inputs follow the main ones'.
 		ShareAheadRegion(*out, mainCache);
 		Diagnostics::Notify(Diagnostics::DrawsBuiltAhead{ *out, *a_tables, a_frame });
 		return out;
@@ -459,7 +420,6 @@ namespace DCLF
 
 	namespace
 	{
-		// The snapshot builder's pump, once configured (Impl::SnapshotPump): what WakeSnapshotBuilder notifies.
 		std::atomic<org::async::SerializedTaskPump*> builderPump{ nullptr };
 	}
 
@@ -471,8 +431,7 @@ namespace DCLF
 
 	org::async::SerializedTaskPump& IndirectDraws::Impl::SnapshotPump()
 	{
-		// Configured once (the first work or inputs posted), never destroyed: a revision's completion may still wake it while the process
-		// tears down. Its passes run on DCLF's preparation pool, one at a time (level-triggered, lock-free: SerializedTaskPump).
+		// Never destroyed, because a revision's completion may still wake it during process teardown.
 		static auto* pump = [this] {
 			auto* created = SceneScheduler::MakeLanePump(
 				SceneScheduler::Executor(), SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF snapshot builder",
@@ -484,9 +443,7 @@ namespace DCLF
 		return *pump;
 	}
 
-	// The CPU pipeline's view batches of the draws' payload (ViewBatches.h), while the graph the revision inputs are of is the CPU
-	// pipeline's: made once the payload is, their sequences' version GPU ready before the snapshot is posted (its readiness wakes the
-	// builder). True: nothing to wait for (none wanted, made, or failed: the snapshot is posted without).
+	// The CPU pipeline's view batches must be GPU ready before the snapshot is posted. Returns true when there is nothing to wait for.
 	bool IndirectDraws::Impl::ViewBatchesReady()
 	{
 		auto& b = snapshotBuilder;
@@ -521,9 +478,8 @@ namespace DCLF
 	void IndirectDraws::Impl::SnapshotPass()
 	{
 		DCLF_ZONE("CS.DCLF.SnapshotBuilder");
-		// What the frame replaced: dropped here, never on the render thread.
+		// Drop retired snapshots here, never on the render thread.
 		retiredSnapshots.Drop();
-		// The frame's report asked for the builder's lines.
 		if (producerReportWanted.exchange(false, std::memory_order_acq_rel))
 			producerReportSlot.Post(std::make_unique<std::string>(ProducerReport()));
 		auto& b = snapshotBuilder;
@@ -532,13 +488,12 @@ namespace DCLF
 		auto msSince = [](std::chrono::steady_clock::time_point a_start) {
 			return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a_start).count();
 		};
-		// The newest work taken (latest wins: the publications it skipped coalesce into it, and their log deltas reach the frame with it).
 		const auto takeWork = [&](std::unique_ptr<SnapshotWork> a_next) {
 			const std::uint64_t sequence = a_next->publication ? a_next->publication->sequence : 0;
 			if (b.lastPublication && sequence > b.lastPublication + 1)
 				snapshotsCoalesced.fetch_add(sequence - b.lastPublication - 1, std::memory_order_relaxed);
 			b.lastPublication = sequence;
-			// The coordinator publishes again once this one is taken (SnapshotWorkTaken: publication pacing).
+			// Publication pacing. The coordinator publishes again once this one is taken.
 			snapshotWorkTaken.store(sequence, std::memory_order_release);
 			b.work = std::move(a_next);
 			b.buildsDiscarded += b.draws && !b.drawsPosted ? 1u : 0u;
@@ -546,21 +501,17 @@ namespace DCLF
 			b.timing = {};
 			b.stage = Stage::Make;
 			b.fresh = true;
-			publicationGated.store(false, std::memory_order_relaxed);  // new draws: the scene pass's end wakes nobody until they wait
+			publicationGated.store(false, std::memory_order_relaxed);
 		};
 		++b.passes;
 		try {
 			for (;;) {
 				if (b.stage == Stage::Recordings) {
-					// One snapshot in flight: its revision complete (the assembler's newest, at or past the one sealed for it), failed, or
-					// still recording (its completion wakes the builder). Producer-side alone: the exchange's consumer is this builder.
+					// Wait for the sealed revision's recordings. Their completion wakes the builder.
 					const auto collected = rv.assembler.Collect();
 					const bool failedHere = std::any_of(collected.failures.begin(), collected.failures.end(),
 						[&](const auto& a_failure) { return a_failure.sequence == b.sealedSequence; });
-					// Not published yet: published once the frame will adopt it (the frame's take and the scene pass's end wake the
-					// builder). No newer work replaces it: it waits held (a build starts only while the gate is open). Its payload is ready
-					// once every part's version it posted is GPU ready (their readiness wakes the builder); a failed one posts the snapshot
-					// without a payload (it draws nothing), and the next make builds it again.
+					// The payload is published only once the frame will adopt it. A failed payload posts the snapshot without one.
 					if (!b.payload && PayloadWanted())
 						PublishPayload();
 					(void)rv.assembler.TrySelect();
@@ -570,8 +521,7 @@ namespace DCLF
 						PostSnapshot(std::move(lease));
 						b.stage = Stage::Idle;
 					} else if (failedHere) {
-						// A recording failed or was dropped by a graph build: made again (a failed epoch has none in it until its inputs
-						// change; a dropped one is asked again once the inputs carry the new build), never kept (RevisionReuse).
+						// A recording failed or was dropped by a graph build. Make the revision again rather than keep it.
 						revisionReuse.valid = false;
 						b.stage = Stage::Make;
 					} else {
@@ -579,20 +529,16 @@ namespace DCLF
 					}
 					continue;
 				}
-				// One build in flight, and one build per adoption: the next starts from the newest work only while the publication gate
-				// is open (the frame took the last snapshot posted and its scene pass ended: PublishPayload's), so a sealed build never
-				// waits there for newer work to replace it. Work posted meanwhile is held untaken (latest wins); the coordinator publishes
-				// no more until it is taken (SnapshotWorkTaken), so its passes fold into the frame's own publication, and the gate's
-				// opening wakes the builder (publicationGated). A publication that moved only deltas passes through at once.
+				// One build per adoption. New work is taken only while the publication gate is open, and the coordinator does not
+				// publish again until it is taken. The gate opening wakes the builder.
 				if (auto next = WorkToBuild())
 					takeWork(std::move(next));
 				if (!b.work || !b.work->publication) {
 					++b.idlePasses;
 					return;
 				}
-				// Only deltas moved since the last snapshot posted (PassesThrough): that snapshot again for this publication, whose deltas
-				// reach the frame with it (HandOverAtFrameStart walks the log up to the publication installed). Nothing built, sealed or
-				// uploaded: a build would make these draws, this revision and this payload again from the same objects.
+				// Only deltas moved, so post the last snapshot again for this publication. The deltas still reach the frame through
+				// the change log.
 				if (b.stage == Stage::Make && std::exchange(b.fresh, false) && !snapshotInputsMoved.load(std::memory_order_acquire) &&
 					PassesThrough(b.posted, *b.work)) {
 					b.draws = b.posted.draws;
@@ -600,7 +546,7 @@ namespace DCLF
 					b.payloadFailed = false;
 					b.drawsSerial = b.posted.drawsSerial;
 					b.publicationWaited = false;
-					// The builds ahead done up to this item's number (as BuildSnapshotDraws: the frame's fallback streams wait on it).
+					// The frame's fallback streams wait on this, as in BuildSnapshotDraws.
 					aheadDone.store(b.work->aheadNumber, std::memory_order_release);
 					aheadDone.notify_all();
 					++b.passedThrough;
@@ -609,45 +555,38 @@ namespace DCLF
 					continue;
 				}
 				if (b.stage == Stage::Idle) {
-					// A snapshot of the work stands: made again when the frame's inputs moved (a graph build, a capture, new
-					// resources), so its revision is the frame's as it is now.
+					// Remake the snapshot only when the frame's inputs moved.
 					if (!snapshotInputsMoved.exchange(false, std::memory_order_acq_rel)) {
 						++b.idlePasses;
 						return;
 					}
 					b.timing = {};
 				}
-				// The revision (Stage::Make, or Waiting: made again at every wake - a growth settled, the inputs moved).
 				snapshotInputsMoved.store(false, std::memory_order_release);
 				const auto start = std::chrono::steady_clock::now();
 				const std::uint64_t before = rv.assembler.LatestSequence();
 				const auto& publication = *b.work->publication;
 				MakeRevision(publication, publication.commitFrame);
 				b.timing.shapesMs += msSince(start);
-				// Sealed, or the last revision kept (its requirement pass unchanged: RevisionReuse), which is the assembler's latest.
+				// Either a new revision was sealed or the last one was kept.
 				if (rv.assembler.LatestSequence() != before || revisionReuse.reusedNow) {
 					b.sealedSequence = rv.assembler.LatestSequence();
 					b.sealedAt = std::chrono::steady_clock::now();
-					// The draws, for exactly the versions the sealed revision names (its adoption makes them current): built now, while its
-					// recordings are made, or again after a make whose set names other versions than the ones they embed (a growth became
-					// ready meanwhile), or for the frame's context when the work's was made for other main resources (RefreshWorkContext).
-					// One consistent build: a snapshot never pairs draws and a revision of different versions.
+					// Rebuild the draws when the sealed set names other versions than they embed. A snapshot must never pair draws
+					// and a revision of different versions.
 					const auto& versions = rv.revisionVersions;
 					const bool contextReplaced = RefreshWorkContext();
 					if (!b.draws || contextReplaced || b.drawsSerial != versions->Serial())
 						BuildSnapshotDraws(versions.get(), rv.revisionLayout.get());
 					if (b.draws)
 						Diagnostics::Notify(Diagnostics::SnapshotSealed{ *versions, *b.draws, b.work->context });
-					// The draws' payload, built while the recordings are made once the frame will adopt it (kept when the draws are; a
-					// failed one is built again).
 					b.payloadFailed = false;
 					PublishPayload();
 					b.stage = Stage::Recordings;
 					continue;
 				}
-				// None sealed. Without what a revision is made of (no main resources yet, no claims): the publication alone, so the frame has
-				// its tables and catalog (its epochs then capture what the next revision needs; its draws, without a revision, draw nothing:
-				// DecideCoverage). Else a growth or a build it asked for is pending: made again when woken.
+				// Nothing sealed. Without claims or main resources, post the publication alone so the frame still gets its tables.
+				// Otherwise a growth or build is pending and will wake the builder.
 				if (!producer.inputs.claims || !producer.inputs.main) {
 					if (!b.draws)
 						BuildSnapshotDraws(nullptr, nullptr);
@@ -663,9 +602,8 @@ namespace DCLF
 			if (logged++ < 4)
 				logger::error("[DCLF] the snapshot builder's pass failed: {}; it makes the snapshot again when woken", e.what());
 			b.stage = b.work ? Stage::Waiting : Stage::Idle;
-			// The wake it waits for may have come already: inputs posted for a graph build (whose uploader replaced the one a sealed
-			// revision's payload goes through) moved the inputs and woke this pass, which then failed on the old ones. Woken again, the next
-			// pass makes the revision from the posted inputs; it clears the flag first, so a failure there does not wake it once more.
+			// The wake this pass needs may already have been used by the pass that just failed. Wake again so the new inputs
+			// are not missed. The next pass clears the flag first, so this cannot loop.
 			if (b.work && snapshotInputsMoved.load(std::memory_order_acquire))
 				WakeSnapshotBuilder();
 		}
@@ -673,7 +611,6 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::PayloadWanted() const
 	{
-		// Nothing to draw: the snapshot is posted without one and is not covered (DecideCoverage).
 		const auto& b = snapshotBuilder;
 		return b.draws && b.draws->streams && (NewestMainPayload(*b.draws) || b.draws->shadow);
 	}
@@ -681,11 +618,9 @@ namespace DCLF
 	void IndirectDraws::Impl::PublishPayload()
 	{
 		auto& b = snapshotBuilder;
-		// Once per draws: a snapshot made again for the same draws keeps their payload.
 		if (b.payload || b.payloadFailed || !PayloadWanted())
 			return;
-		// Each part's versions are a chain: one source's in flight at a time (their readiness wakes the builder). A source whose versions
-		// all ended is these draws' payload, or was replaced draws' (its versions stand as the parts' newest, these draws' built from them).
+		// Each part has one source in flight at a time. Wait for it to settle first.
 		if (!PayloadPools::Settle())
 			return;
 		if (auto source = std::move(b.payloadSource); source && source->keep == b.draws) {
@@ -693,12 +628,10 @@ namespace DCLF
 			b.payloadFailed = !b.payload;
 			return;
 		}
-		// Only a snapshot the frame will adopt is published, so every publication is installed and none is built for nothing: not while
-		// the last one posted is still in the slot (the frame's take wakes the builder), nor before the scene pass of the frame that took
-		// it has ended (its end wakes the builder). A build starts only while that gate is open (SnapshotPass), so only draws made again
-		// for a snapshot already posted wait here. Posted with its payload, the snapshot is the frame's next.
+		// Publish only a payload the frame will adopt, so none is built for nothing. Wait until the frame has taken the last
+		// snapshot and its scene pass has ended.
 		if (PublicationGateClosed()) {
-			// The scene pass's end wakes the builder only while it waits here (NoteScenePassDone); the gate read again after saying so.
+			// The scene pass's end wakes the builder only while it is flagged as waiting. Re-read the gate after setting the flag.
 			publicationGated.store(true, std::memory_order_seq_cst);
 			if (PublicationGateClosed()) {
 				b.publicationsWaited += std::exchange(b.publicationWaited, true) ? 0u : 1u;
@@ -707,13 +640,11 @@ namespace DCLF
 		}
 		publicationGated.store(false, std::memory_order_relaxed);
 		auto source = PayloadPools::MakeSource(b.draws, *b.draws->streams, NewestMainPayload(*b.draws), b.draws->shadow.get());
-		// The parts that changed for it (the others keep their versions), built on the preparation pool through the frame's uploader.
 		if (!source || !PayloadPools::Post(source, producer.inputs.uploads.lock())) {
 			b.payloadFailed = true;
 			return;
 		}
 		if (PayloadPools::Settle()) {
-			// Nothing changed: the parts' versions are its payload at once.
 			b.payload = PayloadPools::Finish(*source);
 			b.payloadFailed = !b.payload;
 			return;
@@ -732,28 +663,37 @@ namespace DCLF
 		b.drawsPosted = true;
 		snapshot->payload = b.payload;
 		snapshot->revision = std::move(a_revision);
-		// Its draws: both main payloads, for the main resources its revision is of. The builder's verdict: without, its frames have no
-		// claims (DecideCoverage), whatever the frame finds.
+		// Complete means both main payloads exist for the current main resources. Without that, frames make no claims.
 		bool complete = b.draws != nullptr && inputs.main != nullptr;
 		for (const std::size_t j : { kAsyncZPrepass, kAsyncColour })
 			complete = complete && b.draws->payloads[j] && b.draws->payloads[j]->inputs.addresses.identity == inputs.main.get();
 		snapshot->drawsComplete = complete && snapshot->revision != nullptr;
 		if (!snapshot->drawsComplete)
 			snapshotsWithoutDraws.fetch_add(1, std::memory_order_relaxed);
-		// The generations it was built for (its last make's inputs), which the adoption compares.
+		if (!snapshot->drawsComplete && RenderGraph::Engine::Native::Active()) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set()) {
+				const auto payloadState = [&](std::size_t a_index) -> std::string {
+					if (!b.draws)
+						return "no draws";
+					const auto& payload = b.draws->payloads[a_index];
+					if (!payload)
+						return "none";
+					return payload->inputs.addresses.identity == inputs.main.get() ? "built" : "built for other main resources";
+				};
+				logger::warn("[DCLF] native: snapshot {} has no complete draws: draws {}, main resources {}, revision {}, Z-prepass payload {}, colour payload {}",
+					snapshot->serial, b.draws != nullptr, inputs.main != nullptr, snapshot->revision != nullptr, payloadState(kAsyncZPrepass), payloadState(kAsyncColour));
+			}
+		}
 		snapshot->buildGeneration = inputs.buildGeneration;
 		snapshot->mainGeneration = inputs.mainGeneration;
-		// The targets' generation its pipeline sets are actually for: its publication's catalog's. A make for new targets before the pipeline
-		// lane built their catalog has no indirect state (RequireRevisionSet) and draws nothing, so it stays stale for them, and the frame
-		// waits for the new catalog's snapshot rather than adopting one that cannot draw (open defect: frames with no epoch after a target
-		// format change).
-		// (~0: no generation, so stale for every one.)
+		snapshot->buildSerial = inputs.build ? inputs.build->serial : 0;
+		// Use the catalog's own targets generation. A snapshot made before the new catalog exists stays stale, so the frame waits
+		// rather than adopting one that cannot draw. ~0 is stale for every generation.
 		const auto* catalog = snapshot->publication ? snapshot->publication->catalog.get() : nullptr;
 		snapshot->targetsGeneration = catalog && catalog->setVersion && catalog->targetsGeneration == inputs.targetsGeneration ? inputs.targetsGeneration : ~0u;
 		snapshot->shadowFormat = inputs.shadowFormat;
-		// The CPU pipeline's view batches: the set made for its payload, else (passed through) the one posted with that payload; a new set's
-		// serial is the first snapshot's it is.
-		// (A forward-only set is the GPU-driven graph's alone: the CPU pipeline's sites draw every list.)
+		// A forward-only batch set is only valid for the GPU-driven graph. The CPU pipeline's sites draw every list.
 		if ((inputs.cpuPipeline || inputs.forwardDirect) && b.payload) {
 			if (const auto& set = b.viewBatches ? b.viewBatches->Set() : nullptr; set && b.viewBatches->For() == b.payload.get()) {
 				if (!set->serial)
@@ -763,8 +703,7 @@ namespace DCLF
 				snapshot->viewBatches = b.posted.viewBatches;
 			}
 		}
-		// What a publication changing only deltas passes through to (PassesThrough): a snapshot with a revision, complete draws and
-		// their payload, and what it was built from (a context of its publication's toggles: BuildSnapshotDraws).
+		// Remember what this snapshot was built from, so a deltas-only publication can pass through to it.
 		auto& posted = b.posted;
 		if (snapshot->revision && snapshot->drawsComplete && snapshot->payload && b.work->context.toggles == b.work->publication->toggles) {
 			const auto& context = b.work->context;
@@ -788,7 +727,8 @@ namespace DCLF
 		} else {
 			posted = {};
 		}
-		// Latest wins: one the frame has not taken is dropped here, on the builder. Counted after the post (a waiting frame polls it).
+		// Latest wins, and a replaced one is dropped here on the builder.
+		// Count after the post, because a waiting frame polls the count.
 		snapshotSlot.Post(std::move(snapshot));
 		snapshotsPosted.fetch_add(1, std::memory_order_release);
 		snapshotsBuilt.fetch_add(1, std::memory_order_relaxed);
@@ -805,20 +745,18 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.Snapshot.Adopt");
 		ZoneValue(taken ? 1 : 0);
 		if (!taken) {
-			// The producer's lag alone: nothing newer was built since the last adoption.
 			++s.snapshotFramesKept;
 			return adoptedPublication();
 		}
-		// The slot is free: the builder may publish the next snapshot's payload once this frame's scene pass has ended (PublishPayload).
-		// Told whether adopted or stale (the builder's posts are numbered; a failed feature's are not); the wake below is the builder's.
+		// The slot is free, so the builder may publish the next payload after this frame's scene pass.
+		// A failed feature's posts have no serial.
 		if (taken->serial) {
 			s.snapshotTakenFrame.store(Scene::FrameView::Get().GetFrame(), std::memory_order_release);
 			s.snapshotTaken.store(taken->serial, std::memory_order_release);
 		}
 		using Stale = Impl::SnapshotStale;
 		if (const std::size_t stale = s.StaleKindOf(*taken); stale != Stale::kStaleKinds) {
-			// Not adopted (the adopted one is older still): the frame waits for a current one once DCLF draws (AdoptCurrentSnapshot). The
-			// builder makes the snapshot again for the frame's inputs.
+			// Stale, so not adopted. Ask the builder for a new one.
 			++s.snapshotsStale[stale];
 			s.snapshotStale = true;
 			s.retiredSnapshots.Push(std::shared_ptr<const Impl::SceneSnapshot>(std::move(taken)));
@@ -826,8 +764,6 @@ namespace DCLF
 			WakeSnapshotBuilder();
 			return adoptedPublication();
 		}
-		// Adopted whole: the versions its revision's set names become current (the graph host told of new ones), its revision the frame's
-		// epochs', its draws theirs.
 		std::shared_ptr<const Impl::SceneSnapshot> snapshot(std::move(taken));
 		TracyCZoneN(adoptVersions, "CS.DCLF.Snapshot.AdoptVersions", true);
 		const auto versions = snapshot->revision ? snapshot->revision->Get<NamedVersions>(Impl::SceneRevisions::kVersionsSlot) : nullptr;
@@ -843,15 +779,12 @@ namespace DCLF
 		s.installedDraws = snapshot->draws;
 		if (s.installedPayload != snapshot->payload) {
 			DCLF_ZONE("CS.DCLF.Snapshot.InstallPayload");
-			// The replaced versions are kept from reuse until what was submitted so far retires (a frame whose EndFrame did not come
-			// read them).
+			// Keep the replaced versions from reuse until submitted work retires, because a frame without EndFrame may have read them.
 			PayloadPools::BindInstalled(SubmittedRetirementPoint());
-			s.installedPayload = snapshot->payload;  // the snapshot holds it too: its release is the builder's
+			s.installedPayload = snapshot->payload;  // the snapshot holds it too, so the builder does the final release
 			if (s.installedPayload)
 				s.payloadsInstalled.fetch_add(1, std::memory_order_relaxed);
-			// The versions the frames read from this frame's start (MakeFramePayload).
 			PayloadPools::Install(s.installedPayload);
-			// Its products, for the features that registered them (Api::PayloadProduct::install).
 			Extensions::InstallPayloadProducts(s.installedPayload ? &s.installedPayload->products : nullptr);
 		}
 		s.snapshotStale = false;
@@ -864,28 +797,28 @@ namespace DCLF
 			const std::uint32_t frameNow = Scene::FrameView::Get().GetFrame();
 			s.adoptionLatency.push_back(frameNow >= publication->commitFrame ? frameNow - publication->commitFrame : 0u);
 		}
-		// The replaced one back to the builder last, once nothing of the frame's holds it alone: its release is the builder's.
+		// Hand the replaced snapshot back so it is released on the builder, not here.
 		{
 			DCLF_ZONE("CS.DCLF.Snapshot.RetireReplaced");
 			if (auto replaced = std::exchange(s.adoptedSnapshot, snapshot))
 				s.retiredSnapshots.Push(std::move(replaced));
 		}
-		// The slot is free (a builder idle with inputs moved remakes for the frame as it is now).
 		WakeSnapshotBuilder();
 		return snapshot->publication;
 	}
 
 	std::size_t IndirectDraws::Impl::StaleKindOf(const SceneSnapshot& a_snapshot) const
 	{
-		// The one check: what a snapshot cannot know ahead, by generation. Its recordings of the graph as built now, its pipeline sets for the
-		// targets and the shadow format as they are, its draws and shapes for the main resources as they are. Its commit's toggles are
-		// none of it: installed, they become the frame's (Toggles::Adopt), and its revision was made for them (MakeRevision). One without
-		// a revision (the publication alone) is adopted for its tables whatever the graph.
+		// Checks only what a snapshot cannot know ahead, by generation. Toggles are not checked, because adopting a snapshot
+		// adopts its toggles. A snapshot without a revision is always adopted for its tables.
 		if (!a_snapshot.revision)
 			return kStaleKinds;
 		auto* host = RenderGraphRuntime::Get().Host();
 		const auto& drawPipelines = DrawPipelines::Get();
-		if (host && a_snapshot.buildGeneration != host->BuildGeneration())
+		if (host && a_snapshot.buildGeneration != GraphBuildGeneration(*host))
+			return kStaleBuild;
+		// Its graphs are still building or waiting to attach at a frame's end.
+		if (a_snapshot.buildSerial > AttachedBuildSerial())
 			return kStaleBuild;
 		if (a_snapshot.targetsGeneration != drawPipelines.Generation())
 			return kStaleTargets;
@@ -898,8 +831,7 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::AdoptedCurrent() const
 	{
-		// What DecideEpochCoverage asks of the snapshot before it looks at the epochs' recordings, the generations checked again: a
-		// snapshot adopted before this frame's build point is stale for a build it made.
+		// Recheck the generations, because a snapshot adopted before this frame's build point is stale for a build made there.
 		const auto& adopted = adoptedSnapshot;
 		return adopted && adopted->revision && adopted->drawsComplete && StaleKindOf(*adopted) == kStaleKinds && installedPayload;
 	}
@@ -910,47 +842,68 @@ namespace DCLF
 		const std::uint64_t postedBefore = impl ? impl->snapshotsPosted.load(std::memory_order_acquire) : 0;
 		auto publication = AdoptSnapshot();
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!a_wait || !impl || failed || !host || impl->AdoptedCurrent())
+		// The first frame after a frame-end attach needs the new graphs' recordings. Logged to show the worst-case wait.
+		const bool afterAttach = impl && impl->graphsAttachedFrame != ~0u && Scene::FrameView::Get().GetFrame() == impl->graphsAttachedFrame + 1;
+		if (!a_wait || !impl || failed || !host || impl->AdoptedCurrent()) {
+			if (afterAttach && impl->AdoptedCurrent() && (++impl->graphsAttachWaitLogs <= 50 || impl->graphsAttachWaitLogs % 100 == 0))
+				logger::info("[DCLF] frame {} adopted a snapshot of the graphs attached at the last frame's end without waiting",
+					Scene::FrameView::Get().GetFrame());
 			return publication;
+		}
 		DCLF_ZONE("CS.DCLF.WaitCurrentSnapshot");
 		auto& s = *impl;
 		using Clock = std::chrono::steady_clock;
-		// Generous: a snapshot made again for a build (its recordings, its draws for new main resources and their payload) takes
-		// milliseconds; five seconds without one is a builder that cannot make it, never a slow one. New targets wait for the pipeline lane's
-		// catalog for them instead, which compiles every pipeline of the set for the new formats: up to kCatalogTimeout, logged as it goes.
+		// A snapshot normally takes milliseconds, so five idle seconds means the builder is stuck. Compiles share the builder's
+		// threads, so the five seconds count from the last time no compile ran. New targets wait up to kCatalogTimeout.
 		constexpr auto kTimeout = std::chrono::seconds(5);
 		constexpr auto kCatalogTimeout = std::chrono::seconds(120);
 		auto progressAt = std::chrono::seconds(5);
 		constexpr auto kSpin = std::chrono::milliseconds(2);
 		constexpr auto kTicketPeriod = std::chrono::milliseconds(16);
 		const auto start = Clock::now();
-		auto ticketsAt = start;  // the build point gave back the unsubmitted epochs' tickets just now
+		auto ticketsAt = start;
+		auto busyAt = start;     // last poll that saw a shader compile or pipeline build running
+		std::size_t busyBuilds = 0;
+		bool busyCompiling = false;
 		const auto staleBefore = s.snapshotsStale;
 		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
-		// The frame adopts whatever is posted next: the publication gate's scene pass half open (this frame's pass is woken only when its
-		// start ends), and the builder told to make its snapshot again for the inputs the build point posted.
+		// Open the scene pass half of the publication gate, because this frame's pass only runs after its start ends.
 		s.frameWaiting.store(true, std::memory_order_seq_cst);
-		// What the snapshot's payload may wait for on the GPU (a backing the last frame read) reaches it while this frame waits.
+		// The payload may wait on a backing the last frame read, so submit queued work now.
 		Direct::SubmitQueued();
 		(void)s.SnapshotPump();
 		s.snapshotInputsMoved.store(true, std::memory_order_release);
 		WakeSnapshotBuilder();
 		std::uint64_t seen = postedBefore;
 		for (;;) {
-			// The owner thread's part of the build point, served while it waits: the shadow view slots a make asks for (sealed only once
-			// the inputs carry their build) and an extension added or removed (built here, still before anything decides what the frame's
-			// recordings cover); and now and then the ready tickets a recording's slot waits for given back (a released ticket is prepared
-			// again, so not every poll), what was queued in DXVK's stream meanwhile submitted, the CPU frames' slots done released, and the
-			// retirement clock advanced (the host's submissions and the CPU frames' timeline are otherwise polled only as frames go on): a
-			// payload version may wait for a backing the last frames read or hold.
+			// Serve the owner thread's build point work while waiting, since nothing else will run it during this wait.
 			s.ServeRevisionRequests();
-			if (s.revisions.explicitBuilds && host->RebuildRequested())
-				s.BuildIfAsked(*host);
+			if (s.revisions.explicitBuilds && (host->RebuildRequested() || !RenderGraphRuntime::Get().DclfBuildsSettled()))
+				s.BuildIfAsked(true);
+			// The graph stopped after a host failure, so no snapshot will come.
+			if (!RenderGraphRuntime::Get().IsActive()) {
+				s.frameWaiting.store(false, std::memory_order_release);
+				return publication;
+			}
 			if (const auto now = Clock::now(); now - ticketsAt >= kTicketPeriod) {
+				// A failed epoch means no snapshot will ever be current. Fail clearly now instead of after a timeout.
+				RenderGraphRuntime::Get().PollEpochFailures();
+				if (const auto& failure = DrawcallLimitFix::GraphEpochFailure(); !failure.empty())
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} waited at its start for a scene snapshot, and {}. DCLF does not "
+													 "hand drawing back to the engine within a frame it draws",
+						frame, failure));
 				s.ReleaseTicketsForRecordings(*host, 0);
-				Direct::SubmitQueued();
+				// Flush DXVK's stream. A recording waits for each slot's last run, and a run still in this thread's stream never
+				// completes until flushed, so the wait would never end.
+				Direct::SubmitQueued(true);
+				// Guards against a lost wake on ORG's host thread.
+				(void)host->NudgeHostThread();
 				Direct::ReleaseCompletedSlots();
 				PollHostRetirement();
+				busyBuilds = DrawPipelines::Get().BuildsInFlight();
+				busyCompiling = SIE::ShaderCache::Instance().IsCompiling();
+				if (busyBuilds != 0 || busyCompiling)
+					busyAt = now;
 				ticketsAt = now;
 			}
 			if (const std::uint64_t posted = s.snapshotsPosted.load(std::memory_order_acquire); posted != seen) {
@@ -959,14 +912,21 @@ namespace DCLF
 				if (s.AdoptedCurrent())
 					break;
 			}
-			const auto waited = Clock::now() - start;
+			const auto checkedAt = Clock::now();
+			const auto waited = checkedAt - start;
+			const auto idle = checkedAt - busyAt;
 			const bool catalogWait = s.adoptedSnapshot && s.StaleKindOf(*s.adoptedSnapshot) == Impl::kStaleTargets;
-			if (catalogWait && waited > progressAt && waited <= kCatalogTimeout) {
-				logger::info("[DCLF] frame {} has waited {} s at its start for the pipelines of the new target formats (generation {})", frame,
-					std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
+			if (waited > progressAt && waited <= kCatalogTimeout) {
+				if (catalogWait)
+					logger::info("[DCLF] frame {} has waited {} s at its start for the pipelines of the new target formats (generation {})", frame,
+						std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
+				else if (idle < kTimeout)
+					logger::info("[DCLF] frame {} has waited {} s at its start for a scene snapshot while shaders compile ({} pipeline builds in flight, "
+								 "Community Shaders' compile workers {})",
+						frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), busyBuilds, busyCompiling ? "busy" : "idle");
 				progressAt += std::chrono::seconds(5);
 			}
-			if (waited > (catalogWait ? kCatalogTimeout : kTimeout)) {
+			if (catalogWait ? waited > kCatalogTimeout : (idle > kTimeout || waited > kCatalogTimeout)) {
 				const auto& adopted = s.adoptedSnapshot;
 				const auto pumpStats = s.SnapshotPump().GetStats();
 				const auto assembler = s.revisions.assembler.GetStats();
@@ -976,14 +936,14 @@ namespace DCLF
 					stale += fmt::format("{}{}", k ? "/" : "", s.snapshotsStale[k] - staleBefore[k]);
 				stl::report_and_fail(fmt::format(
 					"Drawcall Limit Fix: frame {} waited {} s at its start for a scene snapshot current for the graph as built and never got one, and DCLF does "
-					"not hand drawing back to the engine. Waiting for: build generation {} (rebuild requested: {}), main resources generation {}, targets "
+					"not hand drawing back to the engine (no shader compile or pipeline build ran for the last {} s). Waiting for: build generation {} (rebuild requested: {}), main resources generation {}, targets "
 					"generation {}. Stale snapshots taken meanwhile (build/targets/shadow format/main): {}; snapshots posted {}, recordings outstanding {}, "
 					"inputs moved {}, publication gated {}, build ahead running {}. Adopted snapshot: serial {}, revision {}, draws complete {}, build "
 					"generation {}, main generation {}, payload {}. The builder (read racily, for this message): stage {}, passes {} ({} idle), work {}, draws {}, "
 					"payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest {} pending {} (sealed {}, published {}, "
 					"failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained {}, notifications {}, passes {}, "
-					"rejected {}; retirement: {}",
-					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), host->BuildGeneration(), host->RebuildRequested(),
+					"rejected {}; retirement: {}. ORG's {}",
+					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(), Impl::GraphBuildGeneration(*host), host->RebuildRequested(),
 					s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen, s.recordingsOutstanding.load(std::memory_order_acquire),
 					s.snapshotInputsMoved.load(std::memory_order_acquire), s.publicationGated.load(std::memory_order_acquire),
 					s.aheadRunning.load(std::memory_order_acquire), adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete,
@@ -993,7 +953,7 @@ namespace DCLF
 					s.snapshotBuilder.payload != nullptr, s.snapshotBuilder.payloadFailed, s.snapshotBuilder.payloadSource != nullptr, PayloadPools::PendingParts(),
 					s.snapshotBuilder.sealedSequence, s.revisions.assembler.LatestSequence(), s.revisions.assembler.Pending(), assembler.sealed, assembler.published,
 					assembler.failed, assembler.superseded, assembler.abandoned, active ? active->Sequence() : 0, pumpStats.runnerActive, pumpStats.requestedEpoch, pumpStats.drainedEpoch, pumpStats.notifications,
-					pumpStats.drainPasses, pumpStats.rejected, RetirementState()));
+					pumpStats.drainPasses, pumpStats.rejected, RetirementState(), host->DescribeAsyncState()));
 			}
 			if (waited < kSpin)
 				std::this_thread::yield();
@@ -1008,7 +968,9 @@ namespace DCLF
 		s.snapshotWaitMaxMs = std::max(s.snapshotWaitMaxMs, ms);
 		logger::info("[DCLF] frame {} waited {:.2f} ms at its start for a snapshot current for the graph as built (build generation {}, main resources "
 					 "generation {}): adopted serial {}",
-			frame, ms, host->BuildGeneration(), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+			frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+		if (afterAttach && (++s.graphsAttachWaitLogs <= 50 || s.graphsAttachWaitLogs % 100 == 0))
+			logger::info("[DCLF] frame {} waited {:.2f} ms at its start for the recordings of the graphs attached at the last frame's end", frame, ms);
 		return publication;
 	}
 
@@ -1016,8 +978,7 @@ namespace DCLF
 	{
 		if (!impl)
 			return;
-		// A builder holding a sealed snapshot's publication for this frame's pass publishes now; the pass's own publication woke it
-		// already (PostSnapshotWork). Any other builder has nothing to do for the pass's end: not woken (publicationGated).
+		// Wake the builder only if it is waiting on this gate.
 		impl->scenePassDoneFrame.store(a_frame, std::memory_order_seq_cst);
 		if (impl->publicationGated.load(std::memory_order_seq_cst))
 			WakeSnapshotBuilder();
@@ -1037,8 +998,7 @@ namespace DCLF
 
 	void IndirectDraws::BindAdopted()
 	{
-		// After the frame's last submission, never at its start: the point must cover the frame's own GPU work. Every frame binds the
-		// set and the payload versions it holds (the next adoption replaces them after this frame bound them), stale or not: they are its.
+		// Call after the frame's last submission, so the point covers the frame's own GPU work. Bind even when stale.
 		if (!impl)
 			return;
 		const std::uint64_t point = SubmittedRetirementPoint();

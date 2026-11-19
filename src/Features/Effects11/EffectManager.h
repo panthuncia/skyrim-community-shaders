@@ -150,6 +150,15 @@ public:
 	// Execute a single effect with perf events and common variable setup
 	void ExecuteEffect(EffectBase& effect, uint32_t enableSettingID = 0xFFFFFFFF);
 
+	/**
+	 * @brief Writes this frame's values into the effect's variables: weather and time-of-day blending, the common ENB variables, the
+	 * extern bindings and the effect's own. What ExecuteEffect does before it draws; the ORG FX runtime reads the values from there.
+	 */
+	void UpdateEffectValues(EffectBase& effect);
+
+	/** @brief True if the effect is compiled and its enable setting (if any) is on. */
+	bool WillEffectRun(EffectBase& effect, uint32_t enableSettingID);
+
 	// Texture copy using pixel shader
 	/** @return false if nothing was drawn (missing shaders or invalid views). */
 	bool CopyTexture(ID3D11ShaderResourceView* source, ID3D11RenderTargetView* destination, bool dither = true);
@@ -174,8 +183,6 @@ private:
 	void UpdateCursorData();
 	/** @brief Fills ENB LightParameters with the sun's screen position in NDC (xy, -1..1, y up) and visibility (w). */
 	void UpdateLightParameters();
-	/** @brief True if the effect is compiled and its enable setting (if any) is on. */
-	bool WillEffectRun(EffectBase& effect, uint32_t enableSettingID);
 
 	bool initialized = false;
 

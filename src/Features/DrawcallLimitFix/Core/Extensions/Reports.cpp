@@ -1,4 +1,4 @@
-// The registered report lines' calls (see the header).
+// The registered report lines' calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Reports.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"

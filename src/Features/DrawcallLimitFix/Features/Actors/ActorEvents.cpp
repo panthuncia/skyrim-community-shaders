@@ -1,6 +1,5 @@
-// Actors' engine events (the feature's early hooks, SceneWriterFramework's actor calls): Actor::SetAlpha's fadeAmount writes into the
-// fade amounts channel (needed by name at install: InstallContext::NeedEngineChannel), and the actors' move writers Core's own complete
-// (MoveEvents, Core/Engine/Capture/SceneEvents.h), on reserved slots of the report's move writers' calls.
+// Actors' engine events. SetAlpha fade writes go to the fade amounts channel. The actors' move writers fill reserved slots
+// next to Core's own move writers.
 
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
 
@@ -16,15 +15,11 @@ namespace DCLF::Features::Actors
 {
 	namespace
 	{
-		// The reserved writers (Extensions::ReserveMoveWriter), before their subscriptions go in: slots 2-4, where Core's table had them.
 		Api::MoveWriterId actor3DPosition, skyCellSkin, ragdoll;
-		// The fade amounts channel, needed at install (bound at the end of InstallFeatures, before the early hooks fire).
 		Api::EngineChannelId fadeAmounts;
 
-		/**
-		 * @brief Actor::SetAlpha (vfunc 0xE1, 0x1406c1a50; Actor, Character, PlayerCharacter tables): fadeAmount (+0x100) of the 3D
-		 * root, and the player's first-person root. PRE records both roots (scratch[0], [1]) and their fadeAmount ([2], [3]).
-		 */
+		// Actor::SetAlpha (vfunc 0xE1, 0x1406c1a50) writes fadeAmount (+0x100) on the 3D root and the first-person root.
+		// PRE saves both roots in scratch[0..1] and their fadeAmount in scratch[2..3].
 		void OnSetAlpha(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			if (SceneWriter::IsPre(a_event)) {
@@ -46,7 +41,6 @@ namespace DCLF::Features::Actors
 			}
 		}
 
-		// The move writers, each pushing its key to the scene pass and to FrameValues' producer (as Core's writers do).
 		void OnUpdate3DPosition(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			Extensions::PushReservedMove(actor3DPosition, SceneWriter::Arg<RE::Actor*>(a_event, 0), Api::MoveReach::WithPlacements);
@@ -64,7 +58,7 @@ namespace DCLF::Features::Actors
 			const auto* handles = *reinterpret_cast<const RE::RefHandle* const*>(list + 0x30);
 			const auto count = *reinterpret_cast<const std::uint32_t*>(list + 0x40);
 			for (std::uint32_t i = 0; handles && i < count; ++i) {
-				// Every handle a call; a handle that no longer resolves pushes nothing.
+				// A handle that no longer resolves pushes nothing.
 				RE::NiPointer<RE::TESObjectREFR> reference;
 				const bool found = RE::LookupReferenceByHandle(handles[i], reference);
 				Extensions::PushReservedMove(ragdoll, found ? reference.get() : nullptr, Api::MoveReach::WithPlacements);
@@ -79,10 +73,10 @@ namespace DCLF::Features::Actors
 
 	void InstallEngineEvents()
 	{
-		// SceneWriterFramework's actor calls, which DrawcallLimitFix::PostPostLoad required (SceneWriter::kRequiredCaps).
+		// PostPostLoad already required these calls, so a refusal here is fatal.
 		if (!SceneWriter::SubscribeCall(SWF_HOOK_ACTOR_SET_ALPHA, &OnSetAlpha))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused Actor::SetAlpha after reporting it installed");
-		// The move writers complete Core's (its install line names them): all or none, so only when Core's are in.
+		// All move writers or none, so only when Core's are installed.
 		if (!Extensions::CoreMoveWritersLive())
 			return;
 		actor3DPosition = Extensions::ReserveMoveWriter("actor 3D position");

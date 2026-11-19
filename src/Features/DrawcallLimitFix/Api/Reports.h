@@ -1,7 +1,6 @@
 #pragma once
 
-// The report lines contract (Api::InstallContext::RegisterReportLines): a feature's lines in DCLF's periodic report (CS_DCLF_STATS,
-// Diagnostics/Reports), at a named point of it.
+// A feature's lines in DCLF's periodic report (CS_DCLF_STATS), placed at a named point.
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 
@@ -11,83 +10,58 @@
 
 namespace DCLF::Api
 {
-	/** @brief Where in the report a feature's lines go; lines at one point run in registration order. */
+	/** @brief Where in the report a feature's lines go. Lines at one point run in registration order. */
 	enum class ReportPoint : std::uint8_t
 	{
-		// The render thread's report (Reports::RenderThread, at Present, once a frame number), first (Features/Shadows/Sun's accumulation
-		// lines), before the primary cull's: every frame, so the lines test their own report frames (Reports::Due) and conditions. Logged lines, handed
-		// the frame.
+		// Render thread, every frame. The lines must check Reports::Due themselves. Logged.
 		RenderThread,
-		// The primary cull's lines (Reports::PrimaryCullLines), after its scene lists' and culls-off lines, before PrimaryCullSources':
-		// only on a report frame whose window had cut frames, with the primary cull installed.
+		// Primary cull lines. Only on report frames whose window had cut frames. Logged.
 		PrimaryCull,
-		// The shadow sources' culls' lines (Reports::PrimaryCullLines; Features/Shadows/Local's point culls), right after PrimaryCull's,
-		// before the stand-in walk parity: on the same report frames. Logged lines, handed the frame.
+		// Shadow source cull lines, on the same frames as PrimaryCull. Logged.
 		PrimaryCullSources,
-		// The primary cull's parity lines (Reports::PrimaryCullLines), after the light masks' line, before the frame camera's
-		// (Features/Fades' fade port parity): on the same report frames. Logged lines, handed the frame.
+		// Primary cull parity lines, on the same frames. Logged.
 		PrimaryCullParity,
-		// The primary cull's last lines (Reports::PrimaryCullLines), after the frame camera's (Features/Fades' fade roots line, with the
-		// cut's engine-culled entries a frame: Reports::CutMixedPerFrame): on the same report frames. Logged lines, handed the frame.
+		// The primary cull's last lines, on the same frames. Logged.
 		PrimaryCullLast,
-		// The write-backs' lines in the draws' async work (IndirectDraws::AsyncReport), right after the engine read window's line, before
-		// the visibility lines (Features/Fades' fade write-back and fade writers): every report. Text lines.
+		// Write-back lines in the draws' async report, every report. Text.
 		AsyncWorkWriteBack,
-		// The views' lines in the draws' async work (IndirectDraws::AsyncReport), after the visibility lines and the reflection's, before
-		// the forward epoch's: every report. Text lines (ReportLines::text).
+		// View lines in the draws' async report, every report. Text.
 		AsyncWorkViews,
-		// The accumulated writes' lines (IndirectDraws::VisibilityReport, in the draws' async work), after its every-listed-root lines,
-		// before the accumulated parity's (Features/Actors' animation stamp): on a report whose scene has the visibility readback. Text lines.
+		// Accumulated write lines, only when the scene has the visibility readback. Text.
 		AccumulatedWrites,
-		// The forward epoch's lines (IndirectDraws::SharedEpochReport; Features/Forward's lines first), after its own and the refraction's, before AsyncWork's: on a report
-		// that prints the forward epoch's (it reached a frame since the last, or its toggle is on). Text lines.
+		// Forward epoch lines, when the forward epoch ran since the last report or its toggle is on. Text.
 		AsyncWorkForward,
-		// The draws' async work lines (IndirectDraws::AsyncReport), after the forward epoch's lines, before the tree LOD draws': every
-		// report. Text lines (ReportLines::text), printed with the rest of that report.
+		// The draws' async report, every report. Text.
 		AsyncWork,
-		// The draw families' lines in the draws' async work (IndirectDraws::AsyncReport), right after AsyncWork's, where the tree LOD
-		// draws' lines are (before them while Core prints them), before the frame values' line: every report. Text lines.
+		// Draw family lines in the draws' async report, every report. Text.
 		AsyncWorkFamilies,
-		// The render thread's scene lines (Reports::SceneFrameLines), after the extras parity's, where tree LOD's mirror line is (before
-		// it while Core prints it), before the mirror watch's: every report. Text lines.
+		// Render thread scene lines, every report. Text.
 		SceneFrame,
-		// The LOD gates' releases (Reports::GateReleases, render thread), once a report window, after the releases' and the engine
-		// side's gate lines: logged lines, handed the frame.
+		// LOD gate releases, once per report window. Logged.
 		GateReleases,
-		// The coordinator's lines (Reports' scene pass report: the scene lane, not the render thread), after the LOD gates' line, at the
-		// end of the pump's lines: logged lines, handed the scene frame.
+		// Coordinator gate lines, on the scene lane. Logged.
 		SceneCoordinatorGates,
-		// The coordinator's set lines (Reports' scene pass report: the scene lane), right after the set's line ("DCLF set: ..."), before its
-		// leaves by cause: logged lines, handed the scene frame, or a coordinator component's (logged as one line).
+		// Coordinator set lines, on the scene lane, right after the "DCLF set:" line. Logged.
 		SceneCoordinatorSet,
-		// The coordinator's scene lines (the scene lane), after the shared bindings', where the object LOD segments' line was (Features/Lod's
-		// now), before the change log parity's. Text lines, or a coordinator component's (ReportLines::componentText).
+		// Coordinator scene lines, on the scene lane. Text.
 		SceneCoordinatorSegments,
-		// The coordinator's scene lines (the scene lane), after the material records' line, before the material captures' (Features/Decals'
-		// order parity). Text lines, or a coordinator component's.
+		// Coordinator lines after the material records, on the scene lane. Text.
 		SceneCoordinatorMaterials,
-		// Inside the coordinator's scene delta line (the scene lane), at its end, before its newline (Features/Faces' publications): text
-		// fragments, each beginning "; " and ending in no newline, or a coordinator component's; only when the line prints (a walk since).
+		// Fragments appended inside the coordinator's delta line. Each starts with "; " and has no newline. Only when the line prints.
 		SceneCoordinatorDelta,
-		// The coordinator's statistics of its last pass (the scene lane, under CS_DCLF_STATS), after the fading line, before the derived
-		// cache's (Features/Skins' skinned line, then Features/Decals' candidates): logged lines, handed the scene frame, or a coordinator
-		// component's (logged as one line).
+		// Coordinator statistics for its last pass, on the scene lane, under CS_DCLF_STATS. Logged.
 		SceneCoordinatorLastPass,
-		// The shadow views' lines in the frame report's statistics (Reports::Stats, with the shadows' toggle on), after the shadow views'
-		// "by the set" line, before the shadow counters' reset (IndirectDraws::ResetShadowStats): on a report frame with CS_DCLF_STATS.
-		// Logged lines, handed the frame.
+		// Shadow view statistics on report frames with CS_DCLF_STATS and shadows on. Logged.
 		ShadowViews,
-		// The frame report's statistics (Reports::Stats), last, after the scene publications' line: on a report frame with CS_DCLF_STATS.
+		// The last statistics on report frames with CS_DCLF_STATS.
 		Statistics,
-		// The diagnostic capture's census (Coordinator::FadeCensus: the scene lane, at a pass's end, only when a capture asks). Text: one
-		// JSON document per registration, or a coordinator component's. Not part of the periodic report.
+		// Diagnostic capture census, on the scene lane. One JSON document per registration. Not part of the periodic report.
 		CaptureCensus,
-		// The diagnostic capture's growth census (Coordinator::SceneGrowthLines: the scene lane, when a capture asks). Text lines, each
-		// "<name> <value>", or a coordinator component's. Not part of the periodic report.
+		// Diagnostic capture growth census, on the scene lane. Lines of "<name> <value>". Not part of the periodic report.
 		CaptureGrowth,
 	};
 
-	/** @brief Whether a_point composes its lines into the report's text (ReportLines::text), not logs them (ReportLines::lines). */
+	/** @brief Whether a_point composes its lines into the report's text instead of logging them. */
 	constexpr bool ReportPointComposesText(ReportPoint a_point)
 	{
 		return a_point == ReportPoint::AsyncWorkWriteBack || a_point == ReportPoint::AsyncWorkViews || a_point == ReportPoint::AccumulatedWrites || a_point == ReportPoint::AsyncWorkForward || a_point == ReportPoint::AsyncWork ||
@@ -96,7 +70,7 @@ namespace DCLF::Api
 		       a_point == ReportPoint::CaptureGrowth;
 	}
 
-	/** @brief Whether a_point is the coordinator's, where a coordinator component's lines go (ReportLines::componentText). */
+	/** @brief Whether a_point belongs to the coordinator and so accepts a coordinator component's lines. */
 	constexpr bool ReportPointTakesComponents(ReportPoint a_point)
 	{
 		return a_point == ReportPoint::SceneCoordinatorGates || a_point == ReportPoint::SceneCoordinatorSet || a_point == ReportPoint::SceneCoordinatorSegments ||
@@ -105,17 +79,8 @@ namespace DCLF::Api
 	}
 
 	/**
-	 * @brief A feature's report lines.
-	 *
-	 * - lines: render thread, at its point of a report (the report's own schedule and conditions), handed the report's frame (FrameView's
-	 *   number): logs the feature's lines, taking its counters since the last report. A parity it runs there is gated as any other
-	 *   (Diagnostics::Observe). For a point that logs.
-	 * - text: the same, at a point that composes its lines into the report's text (ReportPointComposesText): appends them to a_text, each
-	 *   ending in a newline (SceneCoordinatorDelta's: fragments of its line, as it says). One of the two, as the point asks.
-	 *   The SceneCoordinator points run on the scene lane, in the coordinator's report pass.
-	 * - componentText (with component): at a coordinator point (ReportPointTakesComponents), in text's (or lines') place: the lines of a
-	 *   coordinator component's (what it keeps, and what the coordinator keeps for it), handed the component's context. Registered after
-	 *   the component.
+	 * @brief A feature's report lines. Set `lines` for a point that logs, or `text` for one that composes text.
+	 * componentText replaces either at a coordinator point, and must be registered after its component.
 	 */
 	struct ReportLines
 	{

@@ -1,47 +1,33 @@
 #pragma once
 
-// Fades' registrations, one per source file, called by the feature's install (FadesFeature.cpp) in the order Core's fade code registered
-// in (the family and component, the channels, the render side, the root states, the writers last), and its settings. Included by the
-// feature's sources only.
+// Fades' per-file registrations and settings, for the feature's own sources only.
+// The install calls the registrations in a fixed order, with the writers last.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 namespace DCLF::Features::Fades
 {
-	// FadeRoots.cpp: the fade roots' table family and the coordinator component that lists and steps its rows.
 	void RegisterScene(Api::InstallContext& a_context);
-	// FadeRender.cpp (its parts in FadeSeeds, FadeResources, FadeCommit, FadeStage: FadeScene.h): the seeds pool, the scene resources, the
-	// depth commit hook, the passes, the frame and cull bindings.
 	void RegisterRender(Api::InstallContext& a_context);
-	// FadeEvents.cpp: the engine channels "fade snaps" then "fade amounts" (their ids for the component's events.keys).
+	// Snaps register before amounts.
 	void RegisterEngine(Api::InstallContext& a_context, Api::EngineChannelId& a_snaps, Api::EngineChannelId& a_amounts);
-	// FadeWriters.cpp: the stand-in observer (the writer tables and stores; the animated batch at listJobsDone), and the AnimatedFade and
-	// FadeOnVisible hooks. Last: Main::Update's entry keeps its order.
+	// Must be last, to keep the order of work at Main::Update's entry.
 	void RegisterWriters(Api::InstallContext& a_context);
-	// FadeWriters.cpp: the writer hooks' sites, before any hook is written (HookSites). They do not chain (a DCLF-written root skips the
-	// engine's fade update and OnVisibles, and with them any hook another plugin put there), so each needs the engine's own code.
+	// The writer hooks do not chain to other plugins' hooks at those sites, so each site must still hold the engine's own code.
 	void PreflightWriters();
-	// FadeEvents.cpp: the feature's early hook (FadeSnap).
 	void InstallEarlyHooks();
 	/**
-	 * @brief FadeEvents.cpp, render thread (the seeds' frame start): a newly seeded actor root's fadeAmount taken again, as a SetAlpha
-	 * event is (the mirror's value from the node now, then RefreshFadeAmount on the listed row). Actor::UpdateAlpha ramps an actor's
-	 * fadeAmount over the frames after a cell load; a listing may take the mirror's value from a capture made mid-ramp, and the ramp's
-	 * events drained before the listing name no root. Without this the row keeps the partial value, and DCLF draws the actor
-	 * translucent until it is listed again.
+	 * @brief Render thread. Rereads a newly seeded actor root's fadeAmount, because the listing may have caught it mid-ramp after a cell load.
+	 * Without this the actor stays translucent until it is listed again.
 	 */
 	void RecheckFadeAmount(RE::NiAVObject* a_node);
-	/**
-	 * @brief FadeEvents.cpp, the scene lane (RefreshFadeAmount): whether a_node's fadeAmount event came from RecheckFadeAmount. True
-	 * once per recheck. One relaxed load while no recheck is pending. Only the diagnostic capture's census reads the answer.
-	 */
+	/** @brief Scene lane. True once per recheck of a_node. Only the census uses the answer. */
 	bool TakeRecheck(const void* a_node);
-	// Diagnostics/: the report lines, the parity and the port check.
 	void RegisterDiagnostics(Api::InstallContext& a_context);
 
-	// FadesFeature.cpp: the feature's switches (any thread after the install).
-	/** @brief CS_DCLF_FADE_PARITY: the fade port against the engine's functions, and FadeStateCS against the port. */
+	// Settings. Readable from any thread after install.
+	/** @brief CS_DCLF_FADE_PARITY. Checks the port against the engine and FadeStateCS against the port. */
 	bool FadeParity();
-	/** @brief CS_DCLF_EMPTY_FADE_NODE (default on): the engine's empty fade node is no fade root. */
+	/** @brief CS_DCLF_EMPTY_FADE_NODE, on by default. The engine's shared empty fade node is not treated as a fade root. */
 	bool EmptyFadeNodeIsNone();
 }

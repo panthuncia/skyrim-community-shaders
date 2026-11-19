@@ -1,7 +1,8 @@
-// The shadow and occlusion views' captures (render thread): at the engine's shadow and occlusion hooks, each view's target,
-// viewport, camera and constants, DCLF's own where it has them; the views' coverage and the occlusion maps' predicted layout.
+// Captures the shadow and occlusion views at the engine's hooks, on the render thread. For each view it records the target,
+// viewport, camera and constants, using DCLF's own camera where it has one. Also decides whether DCLF covers the frame's shadows.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
@@ -10,7 +11,7 @@ namespace DCLF
 {
 	namespace Draws
 	{
-		/** @brief DCLF's id for the engine rasterizer state at (fill, cull, bias, scissor); 0 when out of the table or empty. */
+		/** @brief DCLF's id for an engine rasterizer table entry, or 0 if the entry is out of range or empty. */
 		std::uint32_t EngineRasterStateId(std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_bias, std::uint32_t a_scissor, std::uint32_t a_renderMode)
 		{
 			if (a_fill >= 2 || a_cull >= 3 || a_bias >= 12 || a_scissor >= 2)
@@ -41,10 +42,7 @@ namespace DCLF
 			a_view.eye = shadowState.posAdjust.getEye();
 		}
 
-		/**
-		 * @brief Replaces the captured viewport and eye with DCLF's own (its source's camera, from the light's
-		 * UpdateCamera): port times target size. False without DCLF's view this frame (captured values stand).
-		 */
+		/** @brief Replaces the captured viewport and eye with DCLF's own camera. Returns false and keeps the captured values if there is none. */
 		bool ApplyOwnViewport(PendingView& a_view, const ShadowCameras::Camera* a_cascade, std::uint32_t a_descriptor, std::uint32_t a_target, Diagnostics::ShadowView a_kind)
 		{
 			Diagnostics::Notify(Diagnostics::OwnShadowViewport{ a_view, a_cascade, a_descriptor, a_target, a_kind });
@@ -65,10 +63,7 @@ namespace DCLF
 			return true;
 		}
 
-		/**
-		 * @brief Sets the view's VS_PerFrame block and caster planes from DCLF's own camera (ShadowCameras::Block). a_engineBlock: the
-		 * engine's block was captured too, for the observers.
-		 */
+		/** @brief Sets the view's VS_PerFrame block and caster planes from DCLF's own camera. */
 		void ApplyOwnCamera(PendingView& a_view, const ShadowCameras::Camera& a_cascade, std::uint32_t a_descriptor, Diagnostics::ShadowView a_kind, bool a_engineBlock)
 		{
 			if (a_engineBlock)
@@ -87,10 +82,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Draws a focus view over its whole slice. The engine draws it into a sub-rectangle sized from the target's distance
-		 * (BSShadowDirectionalLight::sub), new most frames, while DCLF's placements are per slice. The sub-rectangle's viewport
-		 * transform moves into the projection (x' = x * sw/W + (sw + 2 sx)/W - 1, y' = y * sh/H + 1 - (sh + 2 sy)/H on c4, c8, c12
-		 * and the culling view-projection), so casters land on the same pixels; the rest of the slice is sampled by no receiver.
+		 * @brief Draws a focus view over its whole slice. The engine uses a sub-rectangle that changes most frames, but placements are
+		 * per slice. Folding the sub-rectangle into the projection puts casters on the same pixels.
 		 */
 		void FocusToSlice(PendingView& a_view, const ShadowCameras::Camera& a_cascade, std::uint32_t a_target)
 		{
@@ -100,7 +93,7 @@ namespace DCLF
 			D3D11_TEXTURE2D_DESC desc{};
 			texture->GetDesc(&desc);
 			const float w = static_cast<float>(desc.Width), h = static_cast<float>(desc.Height);
-			// Renderer::UpdateViewPort's rectangle, unrounded.
+			// The same rectangle as Renderer::UpdateViewPort, without rounding.
 			const auto& port = a_cascade.port;
 			const float sx = port[0] * w, sy = (1.0f - port[2]) * h, sw = (port[1] - port[0]) * w, sh = (port[2] - port[3]) * h;
 			const float ax = sw / w, bx = (sw + 2.0f * sx) / w - 1.0f;
@@ -118,11 +111,7 @@ namespace DCLF
 			std::memcpy(a_view.viewProj.data(), block + 32, sizeof(float) * 16);
 		}
 
-		/**
-		 * @brief DCLF's own camera for a view, from its source (Api::ShadowSourceContribution::camera, by its kind:
-		 * Extensions::ShadowViewSet::sourceOf: the sun's cascades, the kept local lights' views, the focus views), with the observers' kind
-		 * and a focus view's target. False for a view of no source (its captured values stand).
-		 */
+		/** @brief Asks the view's shadow source for DCLF's own camera. Returns false if no source owns this kind of view. */
 		bool OwnViewOf(const ShadowViews::View& a_view, std::uint32_t a_sceneFrame, PendingView& a_pending, const ShadowCameras::Camera*& a_own,
 			Diagnostics::ShadowView& a_kind)
 		{
@@ -156,10 +145,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief The engine's caster volume: BSShadowDirectionalLight::UpdateCamera builds it from the main frustum's corners and the
-		 * light direction into the descriptor's culling process, and the accumulation's cull (FUN_1414f0920) tests it on top of the shadow
-		 * frustum. Much tighter than the orthographic box, it keeps casters no visible receiver can see out of the far cascade. A focus
-		 * view has no culling process (its descriptor indexes the focus array).
+		 * @brief Copies the engine's caster volume, which BSShadowDirectionalLight::UpdateCamera builds and FUN_1414f0920 tests.
+		 * It is much tighter than the cascade box. Focus views have none, because their descriptor indexes the focus array.
 		 */
 		void CaptureCasterVolume(PendingView& a_view, const ShadowViews::View& a_shadowView)
 		{
@@ -179,7 +166,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief Capture check: the block's CameraPosAdjust (c40) against the renderer's eye for the view, reported every 1000 views. */
+		/** @brief Checks the block's CameraPosAdjust (c40) against the renderer's eye, and reports every 1000 views. */
 		void CheckCapturedEye(const PendingView& a_view, std::uint32_t a_viewId, std::uint32_t a_renderMode)
 		{
 			static std::uint64_t views = 0, fallback = 0, differ = 0;
@@ -209,8 +196,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Captures VS_PerFrame (b12) now, before the next view rewrites it: from the mirror, or CS's cached copy
-		 * (CacheFramebuffer) until the mirror has seen a write. Its view-projection is the draws'.
+		 * @brief Captures VS_PerFrame (b12) now, before the next view rewrites it. Uses CS's cached copy until the constant
+		 * mirror has seen a write.
 		 */
 		void CapturePerFrame(PendingView& a_view)
 		{
@@ -236,40 +223,45 @@ namespace DCLF
 
 	std::uint32_t IndirectDraws::ShadowViewCapacity()
 	{
-		// None when DCLF draws no shadows: the engine draws every view.
+		// 0 means the engine draws every view.
 		auto& engine = *impl->shadowEngine;
 		if (failed || !engine.SetupShadow() || engine.shadowPlacements.empty())
 			return 0;
-		// Re-import shadow maps the engine replaced; a new import is built at the next build point.
+		// Re-import shadow maps the engine replaced. The graph picks up a new import at its next build.
 		if (auto* renderer = globals::game::renderer) {
 			using T = RE::RENDER_TARGETS_DEPTHSTENCIL;
 			for (const auto [index, target] : { std::pair{ 0u, T::kSHADOWMAPS_ESRAM }, std::pair{ 1u, T::kSHADOWMAPS }, std::pair{ 2u, T::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM } })
 				if (renderer->GetDepthStencilData().depthStencils[target].texture)
 					(void)engine.ImportShadowDepth(index, target);
 		}
-		// None while the built graph lacks a new import, or the frame has no claims.
-		if (auto* host = RenderGraphRuntime::Get().Host(); !host || host->RebuildRequested() || Scene::FrameView::Get().NotDrawingYet())
+		if (Scene::FrameView::Get().NotDrawingYet())
 			return 0;
-		// Every view: each draws at its placement's slot.
+		// A pending rebuild holds the frame instead of handing shadows to the engine, which would draw every caster.
+		// Staged rebuilds do not count, because the attached graph keeps running.
+		if (auto* host = RenderGraphRuntime::Get().Host(); !host || RenderGraphRuntime::Get().RebuildRequestedUnstaged()) {
+			LoadHold::BeginReentry(host ? "a graph rebuild (re-imported shadow maps or other resources)" : "no graph host");
+			return 0;
+		}
 		return UINT32_MAX;
 	}
 
 	void IndirectDraws::DecideShadowCoverage()
 	{
-		// Before the engine keeps its first shadow light (ShadowViews::BeginCasters), so that every registration and the sun's claims
-		// test this frame's verdict. Nothing it reads changes before the shadow draw: the frame's start adopted the revision and installed
-		// the publication.
+		// Must run before the engine keeps its first shadow light, so every caster registration sees this frame's verdict.
 		if (failed || !impl->shadowEngine->shadow || impl->shadowEngine->shadowPlacements.empty())
 			return;
-		// The views are DCLF's once the selected revision has the shadow epoch's recording (shaped for all placements) on the built
-		// graph and the installed publication has a shadow payload; until then (startup, a toggle) the engine's. Both are trusted.
-		if (!impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)) || !impl->installedDraws || !impl->installedDraws->shadow)
+		// DCLF owns the views once the shadow epoch is recorded and a shadow payload is installed.
+		if (!impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)) || !impl->installedDraws || !impl->installedDraws->shadow) {
 			ShadowViews::Get().SetDrawable(false);
+			// Hold the frame while the epoch is not recorded yet. A missing payload alone does not hold it,
+			// since a scene with no casters has none.
+			if (ActiveToggles().shadows && !impl->EpochCovered(EpochOfShape(ShapeKind::Shadow, kShadowShape)))
+				LoadHold::BeginReentry("the shadow epoch not recorded yet");
+		}
 	}
 
 	void IndirectDraws::BeginShadowFrame()
 	{
-		// A frame whose listed views DCLF would draw but does not (DecideShadowCoverage).
 		if (ShadowViews::Get().Unrecorded())
 			++impl->shadowUnrecorded;
 		impl->shadowEngine->pendingViews.clear();
@@ -277,7 +269,7 @@ namespace DCLF
 
 	void IndirectDraws::CaptureShadowView(std::uint32_t a_viewId, std::uint32_t a_renderMode)
 	{
-		// Captures where the engine just drew the view and its constants, for ExecuteShadowFrame. Nothing is drawn here.
+		// Nothing is drawn here. ExecuteShadowFrame draws the captured views later.
 		if (!ActiveToggles().shadows || failed)
 			return;
 		ScopedPerfEvent event("CS DCLF: shadow view capture");
@@ -294,18 +286,18 @@ namespace DCLF
 		};
 		if (!pipelines.Enabled() || !utility || !engine.SetupShadow())
 			return notReady(ShadowNotReady::Setup);
-		// The tables are not read while the engine draws the shadow maps: ExecuteShadowFrame checks them.
+		// The scene tables are not read here. ExecuteShadowFrame checks them.
 		const auto* shadowView = ShadowViews::Get().At(a_viewId);
 		if (!shadowView)
 			return notReady(ShadowNotReady::Tables);
 		if (a_renderMode < PassCapture::kFirstShadowMode || a_renderMode >= PassCapture::kFirstShadowMode + kShadowModeCount)
 			return notReady(ShadowNotReady::Tables);
-		// Not DCLF's this frame (no revision shape for the placements yet): the engine drew it whole.
+		// Not covered this frame, so the engine drew it.
 		if (!shadowView->covered) {
 			++shadowStats.uncovered;
 			return;
 		}
-		// The target is DCLF's prediction (ShadowViews::PredictTargets); a cascade's first capture of the frame is its volumetric copy.
+		// The target is predicted. A cascade's first capture each frame is its volumetric copy.
 		auto& shadowState = globals::game::shadowState->GetRuntimeData();
 		const std::uint32_t occurrence = ShadowViews::Get().NextCapture(a_viewId);
 		const bool copyDraw = shadowView->volumetricCopy && occurrence == 0;
@@ -316,10 +308,10 @@ namespace DCLF
 		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS                           ? 1u :
 		                                  target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM ? 2u :
 		                                                                                                                     ~0u;
-		// The volumetric copy holds only volumetric-only casters (batch group 15, all the engine's flag-0x100 draw renders): casterClass 1.
+		// The volumetric copy holds only volumetric-only casters, batch group 15 with flag 0x100.
 		const bool volumetricCopy = target == RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM;
 		if (targetIndex == ~0u || !engine.ImportShadowDepth(targetIndex, target)) {
-			// Logged once per target: a view the design has not met.
+			// An unexpected target. Logged once per target.
 			if (target < 32 && !((engine.shadowLoggedTargets >> target) & 1)) {
 				engine.shadowLoggedTargets |= 1u << target;
 				logger::info("[DCLF] shadow view {} ({}, light {} descriptor {}, mode {:#x}) draws into depth target {} slice {}; it stays native",
@@ -327,18 +319,15 @@ namespace DCLF
 			}
 			return notReady(ShadowNotReady::Depth);
 		}
-		// The engine's rasterizer table entry for this view, read now: CS's ShadowmapCascadeRasterizerFix swaps per-cascade depth-bias
-		// copies into the table for exactly this window. The cull mode is taken at 1, not the renderer's: the Utility shader sets it
-		// per pass (0 for a two-sided property, 1 otherwise), so the renderer's is whatever drew last. Two-sided keys draw without
-		// culling (kRasterTwoSided) as the engine's pass does, so the state changes only with the view. A view with no entry at 1
-		// (the volumetric copy, culling off) takes its entry at 0.
+		// Read the table entry now, because CS's ShadowmapCascadeRasterizerFix swaps in per-cascade bias copies only for this window.
+		// Use cull mode 1, not the renderer's, which is whatever drew last. Fall back to 0 for views like the volumetric copy.
 		std::uint32_t rasterState = EngineRasterStateId(shadowState.rasterStateFillMode, 1, shadowState.rasterStateDepthBiasMode,
 			shadowState.rasterStateScissorMode, a_renderMode);
 		if (rasterState == 0)
 			rasterState = EngineRasterStateId(shadowState.rasterStateFillMode, 0, shadowState.rasterStateDepthBiasMode, shadowState.rasterStateScissorMode,
 				a_renderMode);
 		if (rasterState == 0)
-			return notReady(ShadowNotReady::Pipelines);
+			return notReady(ShadowNotReady::RasterState);
 
 		auto& view = engine.pendingViews.emplace_back();
 		view.viewId = a_viewId;
@@ -350,12 +339,11 @@ namespace DCLF
 		view.casterClass = volumetricCopy ? 1u : 0u;
 		view.sunView = shadowView->kind == ShadowViews::Kind::Directional && !shadowView->focus;
 		CaptureViewTarget(view, target);
-		// The sun's, local lights' and focus views' viewport and eye are DCLF's; the renderer's are the observers'.
 		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
 		const ShadowCameras::Camera* ownView = nullptr;
 		auto ownKind = Diagnostics::ShadowView::Sun;
 		const bool owned = OwnViewOf(*shadowView, sceneFrame, view, ownView, ownKind) && ApplyOwnViewport(view, ownView, shadowView->descriptor, target, ownKind);
-		// A focus view draws over its whole slice (FocusToSlice).
+		// A focus view draws over its whole slice. See FocusToSlice.
 		if (owned && shadowView->focus)
 			if (auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[target].texture) {
 				D3D11_TEXTURE2D_DESC desc{};
@@ -365,7 +353,7 @@ namespace DCLF
 				view.width = desc.Width;
 				view.height = desc.Height;
 			}
-		// The placement slot: foreseen by setup, under its state, the frame's only view there; else a defect (a hole).
+		// The view must match a placement's mode and state and be the only view there this frame. Otherwise it is a defect.
 		{
 			const std::size_t placement = engine.PlacementOf(view);
 			std::string defect;
@@ -385,25 +373,24 @@ namespace DCLF
 			view.slot = engine.shadowPlacements[placement].slot;
 		}
 		CaptureCasterVolume(view, *shadowView);
-		// PerTechnique (b0): HighDetailRange (LOD landscape only; zero until owned) and ParabolaParam from the engine's two globals as
-		// SetupTechnique reads them.
+		// PerTechnique (b0). ParabolaParam comes from the same two engine globals SetupTechnique reads.
 		{
 			static const REL::Relocation<float*> parabolaRadius{ REL::Offset(Engine::Address::kParabolaRadius) };
 			static const REL::Relocation<float*> parabolaSide{ REL::Offset(Engine::Address::kParabolaSide) };
 			const float radius = *parabolaRadius.get();
 			view.viewBlock[4] = radius != 0.0f ? 1.0f / radius : 0.0f;
 			view.viewBlock[5] = *parabolaSide.get();
-			// c2 (DCLFEyeDelta) unused: records are absolute and Utility.hlsl subtracts the view's CameraPosAdjust.
+			// c2 is unused. Records are absolute and Utility.hlsl subtracts the view's CameraPosAdjust.
 			view.viewBlock[8] = view.viewBlock[9] = view.viewBlock[10] = 0.0f;
 		}
-		// DCLF's view-projection; the engine's block is captured only for the observers.
+		// With DCLF's own camera, the engine's block is captured only for diagnostics.
 		const bool engineBlock = Policy::CaptureEngineShadowBlock();
 		const bool capturePerFrame = !owned || engineBlock;
 		if (capturePerFrame)
 			CapturePerFrame(view);
 		if (owned)
 			ApplyOwnCamera(view, *ownView, shadowView->descriptor, ownKind, engineBlock);
-		// After the observers compared the engine's block.
+		// Must come after ApplyOwnCamera, which compares against the engine's block.
 		if (owned && shadowView->focus)
 			FocusToSlice(view, *ownView, target);
 		CheckCapturedEye(view, a_viewId, a_renderMode);
@@ -412,11 +399,8 @@ namespace DCLF
 
 	void IndirectDraws::OcclusionView(std::uint32_t a_view, const RE::NiCamera& a_camera)
 	{
-		// DCLF's view from the camera Skylighting just set up for the map (Precipitation's occlusion camera; for the sky map a quarter
-		// of its square, SetViewFrustum), before RenderMask draws it: ShadowCameras' matrices and eye, port times map size; depth target 10
-		// (Skylighting swaps its own texture in for the sky map), slice 0; back-face culling, solid fill, no bias or scissor (the
-		// Utility shader's state but for two-sided keys). Computed every frame the map renders, drawn or not: next frame's build
-		// prepares pipelines for its state and format.
+		// Builds DCLF's view from the camera Skylighting just set up, before RenderMask draws the map. Skylighting swaps its own
+		// texture into depth target 10 for the sky map. Runs every frame the map renders, so next frame's build has its pipelines.
 		auto& engine = *impl->shadowEngine;
 		if (a_view >= kOcclusionViews || !ActiveToggles().shadows || failed || !Extensions::OcclusionOn(ActiveToggles(), a_view) || !engine.SetupShadow())
 			return;
@@ -471,13 +455,11 @@ namespace DCLF
 			occlusion.dsvFormat = view.dsvFormat;
 		}
 		occlusion.capturedFrame = Scene::FrameView::Get().GetFrame();
-		// A revision input (PredictedOcclusion).
 		impl->PostRevisionInputs();
 	}
 
 	void IndirectDraws::CaptureOcclusion(std::uint32_t a_view)
 	{
-		// The engine's RenderMask just drew the map: for the observers only.
 		Diagnostics::Notify(Diagnostics::OcclusionCaptured{ a_view });
 	}
 

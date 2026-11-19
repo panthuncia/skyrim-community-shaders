@@ -1,7 +1,5 @@
-// The shadow epochs' checks (render thread): DCLF's views against the engine's (the viewport, eye, matrices and caster volume at each
-// view's draw, the predicted target), the sun entry test on the GPU against the CPU's, and the index pool's ranges against the tables.
-// (The occlusion maps' views and the sun's full-frustum processes are their features': Features/OcclusionMaps/Diagnostics,
-// Features/Shadows/Sun/Diagnostics.)
+// Shadow epoch checks on the render thread. DCLF's views against the engine's at each view's draw, the GPU sun entry test
+// against the CPU's, and the index pool's ranges against the tables.
 
 #include "DrawsState.h"
 #include <ankerl/unordered_dense.h>
@@ -10,7 +8,7 @@
 #include "Events.h"
 #include "Observers.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/ShadowViewTally.h"
-// ShadowCapture.cpp's: the engine's rasterizer state id, and where and with which block the engine has just drawn a view.
+// The engine's rasterizer state id, and where and with which block it just drew a view.
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 
@@ -18,8 +16,7 @@ namespace DCLF::Diagnostics
 {
 	void CheckIndexPool(const IndexPoolUpdated& a_updated)
 	{
-		// Every range against its slot's buffer as the tables have it now (a slot whose buffer changed with no log entry would keep
-		// drawing the old buffer's indices).
+		// Every range against its slot's buffer now. A buffer change with no log entry would keep drawing the old indices.
 		auto& checks = DrawsState::Get().indexPoolChecks;
 		if ((++checks % 300) != 0)
 			return;
@@ -69,7 +66,7 @@ namespace DCLF::Diagnostics
 
 	void CheckOwnViewport(const OwnShadowViewport& a_own)
 	{
-		// The viewport and eye CaptureViewTarget read from the renderer's state, against DCLF's (its port times the depth target's size).
+		// The viewport and eye read from the renderer's state, against DCLF's.
 		auto& p = ShadowViewTally(a_own.kind);
 		++p.views;
 		auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[a_own.target].texture;
@@ -82,9 +79,8 @@ namespace DCLF::Diagnostics
 		texture->GetDesc(&desc);
 		const auto port = ShadowCameras::Viewport(a_own.cascade->port, desc.Width, desc.Height);
 		const RE::NiPoint3 eye{ a_own.cascade->eye[0], a_own.cascade->eye[1], a_own.cascade->eye[2] };
-		// The depth range against the camera state's (0x14202b130, FUN_140e57e10), which every draw's state flush starts from
-		// (FUN_140e4b5b0): the renderer's viewport holds the last draw's, less its depth bias's step (0x143286a80[bias]) when it had
-		// one - a per-draw state, not the view's.
+		// Depth range against the camera state's at 0x14202b130, which every draw's state flush starts from. The renderer's viewport holds
+		// the last draw's range less its depth bias step at 0x143286a80[bias], a per-draw state, not the view's.
 		static const REL::Relocation<const float*> cameraDepthRange{ REL::Offset(Engine::Address::kCameraDepthRange) };
 		const float engineMin = cameraDepthRange.get()[0], engineMax = cameraDepthRange.get()[1];
 		if (port[0] != a_view.x || port[1] != a_view.y || port[2] != a_view.width || port[3] != a_view.height || engineMin != 0.0f || engineMax != 1.0f) {
@@ -101,8 +97,8 @@ namespace DCLF::Diagnostics
 
 	void CheckOwnCamera(const OwnShadowCamera& a_own)
 	{
-		// The matrices the draws use: CameraView, CameraProj and CameraViewProj (c0-c11; Utility.hlsl's paraboloid modes read the view
-		// too), and the engine's caster volume, against DCLF's block (the engine's taken for this: Policy::CaptureEngineShadowBlock).
+		// The draws' CameraView, CameraProj and CameraViewProj at c0-c11, and the caster volume, against DCLF's block.
+		// Utility.hlsl's paraboloid modes read the view too.
 		auto& p = ShadowViewTally(a_own.kind);
 		const auto& a_view = a_own.view;
 		const auto& a_cascade = a_own.cascade;
@@ -136,8 +132,7 @@ namespace DCLF::Diagnostics
 
 	void CheckSunEntry(const ShadowViewLatched& a_latched)
 	{
-		// The test BuildDraws makes on the placement row's entry sphere (the kept rows the epoch uploads), against the CPU's verdict from
-		// the tables' entry, per input of a sun view.
+		// BuildDraws' test on the placement row's entry sphere against the CPU's verdict from the tables' entry, per sun view input.
 		if (!a_latched.view.sunView || !ParityDue(a_latched.frame))
 			return;
 		const auto& payload = a_latched.payload;
@@ -153,7 +148,7 @@ namespace DCLF::Diagnostics
 			const bool differ = cpu != OutsideSunEntryProcesses(payload.inputs.sunEntryProcesses, row);
 			++a_latched.stats.sunEntryChecks;
 			a_latched.stats.sunEntryMismatches += differ ? 1 : 0;
-			// The first ones named: the entry root, its reference, and the placement row's sphere against the node's bound now.
+			// Name the first few, with the entry root, its reference, and the row's sphere against the node's bound now.
 			static std::uint32_t named = 0;
 			if (differ && named < 40) {
 				++named;
@@ -163,7 +158,7 @@ namespace DCLF::Diagnostics
 						a_latched.frame, input.objectIndex, row[0], row[1], row[2], row[3]);
 					continue;
 				}
-				// Each root once (its other objects and later frames repeat it).
+				// Each root once.
 				static ankerl::unordered_dense::set<const void*> seen;
 				if (!seen.insert(node).second) {
 					--named;
@@ -181,7 +176,7 @@ namespace DCLF::Diagnostics
 					now.center.z, now.radius, std::sqrt((now.center.x - row[0]) * (now.center.x - row[0]) + (now.center.y - row[1]) * (now.center.y - row[1]) +
 					                                        (now.center.z - row[2]) * (now.center.z - row[2])),
 					cpu ? "outside" : "inside");
-				// The object's own bound as the row has it against now, and the root's children now (the union its bound is).
+				// The object's own bound in the row against now, and the root's children now, whose union is its bound.
 				const auto* geometry = input.objectIndex < tablesNow.objectGeometry.size() ? tablesNow.objectGeometry[input.objectIndex] : nullptr;
 				const float* sampled = placements[input.objectIndex].bound;
 				std::string children;

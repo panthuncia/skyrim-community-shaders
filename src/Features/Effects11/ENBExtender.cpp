@@ -5,6 +5,7 @@
 #include <sstream>
 #include <unordered_set>
 
+#include "Features/Effects11/ORG/FxSourceText.h"
 #include "Features/Effects11/ShaderPatches.h"
 #include "Globals.h"
 
@@ -324,136 +325,6 @@ namespace ENBExtender
 		content = std::move(result);
 	}
 
-	// D3DPreprocess doesn't support the # stringification operator, so macros like
-	// #define TO_STRING(x) #x produce unexpanded tokens instead of string literals.
-	// We detect these definitions, strip them, and replace all invocations with quoted arguments.
-
-	static std::optional<std::string> ParseStringifyDefine(const std::string& line)
-	{
-		std::string trimmed = line;
-		if (!trimmed.empty() && trimmed.back() == '\r')
-			trimmed.pop_back();
-
-		auto hash = trimmed.find_first_not_of(" \t");
-		if (hash == std::string::npos || trimmed[hash] != '#')
-			return std::nullopt;
-
-		auto keyword = trimmed.find_first_not_of(" \t", hash + 1);
-		if (keyword == std::string::npos || trimmed.compare(keyword, 6, "define") != 0)
-			return std::nullopt;
-
-		auto nameStart = trimmed.find_first_not_of(" \t", keyword + 6);
-		if (nameStart == std::string::npos)
-			return std::nullopt;
-
-		auto nameEnd = trimmed.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", nameStart);
-		if (nameEnd == std::string::npos || nameEnd == nameStart)
-			return std::nullopt;
-
-		auto openParen = trimmed.find('(', nameEnd);
-		if (openParen == std::string::npos || trimmed.find_first_not_of(" \t", nameEnd) != openParen)
-			return std::nullopt;
-
-		auto closeParen = trimmed.find(')', openParen);
-		if (closeParen == std::string::npos)
-			return std::nullopt;
-
-		std::string param = trimmed.substr(openParen + 1, closeParen - openParen - 1);
-		Trim(param);
-
-		auto bodyStart = trimmed.find_first_not_of(" \t", closeParen + 1);
-		if (bodyStart == std::string::npos || trimmed[bodyStart] != '#')
-			return std::nullopt;
-
-		std::string body = trimmed.substr(bodyStart + 1);
-		Trim(body, " \t\r");
-
-		if (body != param)
-			return std::nullopt;
-
-		return trimmed.substr(nameStart, nameEnd - nameStart);
-	}
-
-	static std::string ReplaceStringifyInvocations(const std::string& source, const std::string& macroName)
-	{
-		std::string result;
-		result.reserve(source.size());
-		size_t pos = 0;
-
-		while (pos < source.size()) {
-			size_t found = source.find(macroName, pos);
-			if (found == std::string::npos) {
-				result.append(source, pos);
-				break;
-			}
-
-			bool partOfLargerIdent =
-				(found > 0 && IsIdentChar(source[found - 1])) ||
-				(found + macroName.size() < source.size() && IsIdentChar(source[found + macroName.size()]));
-
-			if (partOfLargerIdent) {
-				result.append(source, pos, found + macroName.size() - pos);
-				pos = found + macroName.size();
-				continue;
-			}
-
-			size_t afterName = found + macroName.size();
-			while (afterName < source.size() && (source[afterName] == ' ' || source[afterName] == '\t'))
-				++afterName;
-
-			if (afterName >= source.size() || source[afterName] != '(') {
-				result.append(source, pos, found + macroName.size() - pos);
-				pos = found + macroName.size();
-				continue;
-			}
-
-			int depth = 1;
-			size_t argEnd = afterName + 1;
-			while (argEnd < source.size() && depth > 0) {
-				if (source[argEnd] == '(')
-					++depth;
-				else if (source[argEnd] == ')')
-					--depth;
-				++argEnd;
-			}
-
-			if (depth != 0) {
-				result.append(source, pos, found + macroName.size() - pos);
-				pos = found + macroName.size();
-				continue;
-			}
-
-			std::string arg = source.substr(afterName + 1, argEnd - afterName - 2);
-			Trim(arg);
-
-			// D3DPreprocess inserts spaces between tokens. Collapse to
-			// match the spacing ENB's #x stringification would produce:
-			//   "| -" → "|-"  (UI name prefix)
-			//   " . " → "."  (group path separator — no spaces)
-			std::string collapsed;
-			collapsed.reserve(arg.size());
-			for (size_t ci = 0; ci < arg.size(); ++ci) {
-				if (ci + 2 < arg.size() && arg[ci] == '|' && arg[ci + 1] == ' ' && arg[ci + 2] == '-') {
-					collapsed += "|-";
-					ci += 2;
-				} else if (arg[ci] == ' ' && ci + 1 < arg.size() && arg[ci + 1] == '.') {
-					continue;
-				} else if (arg[ci] == '.' && ci + 1 < arg.size() && arg[ci + 1] == ' ') {
-					collapsed += '.';
-					++ci;
-				} else {
-					collapsed += arg[ci];
-				}
-			}
-
-			result.append(source, pos, found - pos);
-			result += "\"" + collapsed + "\"";
-			pos = argEnd;
-		}
-
-		return result;
-	}
-
 	void ExpandStringificationMacros(std::string& source)
 	{
 		std::vector<std::string> macroNames;
@@ -464,29 +335,14 @@ namespace ENBExtender
 
 	void StripStringifyDefines(std::string& source, std::vector<std::string>& macroNames)
 	{
-		std::string stripped;
-		stripped.reserve(source.size());
-
-		std::istringstream stream(source);
-		std::string line;
-		while (std::getline(stream, line)) {
-			if (auto name = ParseStringifyDefine(line)) {
-				macroNames.push_back(*name);
-				stripped += "\n";
-			} else {
-				stripped += line + "\n";
-			}
-		}
-
-		source = std::move(stripped);
+		OrgFx::SourceText::StripStringifyDefines(source, macroNames);
 	}
 
 	void ExpandStringifyMacros(std::string& source, const std::vector<std::string>& macroNames)
 	{
-		for (auto& name : macroNames) {
+		for (auto& name : macroNames)
 			logger::debug("[ENBEXTENDER] Expanding stringification macro: {}", name);
-			source = ReplaceStringifyInvocations(source, name);
-		}
+		OrgFx::SourceText::ExpandStringifyMacros(source, macroNames);
 	}
 
 	// Source-based group scoping (compiled effect reorders variable types, so source text is the ground truth for declaration order)
@@ -983,24 +839,7 @@ namespace ENBExtender
 
 	void StripLineDirectives(std::string& source)
 	{
-		std::string result;
-		result.reserve(source.size());
-		std::istringstream stream(source);
-		std::string line;
-		while (std::getline(stream, line)) {
-			size_t firstNonSpace = line.find_first_not_of(" \t");
-			if (firstNonSpace != std::string::npos && line[firstNonSpace] == '#') {
-				auto directive = line.substr(firstNonSpace + 1);
-				size_t dirStart = directive.find_first_not_of(" \t");
-				if (dirStart != std::string::npos && directive.compare(dirStart, 4, "line") == 0) {
-					result += "\n";
-					continue;
-				}
-			}
-			result += line;
-			result += "\n";
-		}
-		source = std::move(result);
+		OrgFx::SourceText::StripLineDirectives(source);
 	}
 
 	static std::string ReadAndProcessInclude(const std::filesystem::path& fullPath,
@@ -1239,7 +1078,7 @@ namespace ENBExtender
 
 	bool IsEncryptedSource(std::string_view source)
 	{
-		return source.starts_with("KIEFX");
+		return OrgFx::SourceText::IsEncrypted(source);
 	}
 
 	/** @brief Maps the game root's enbseries onto the selected preset's for one ENBExt_Compile call. */

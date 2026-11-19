@@ -20,9 +20,9 @@ namespace DCLF
 	namespace
 	{
 		thread_local const void* currentExecutor = nullptr;
-		// A worker's current priority, read once after ThreadStart and kept by the boosts that change it (no query per chunk).
+		// A worker's current priority, read once after ThreadStart and kept up to date by boosts, so nothing queries per chunk.
 		thread_local int threadPriority = 0;
-		// The worker is running a frame-critical job: its ParallelFor's helpers are frame-critical too.
+		// The worker runs a frame-critical job, so its ParallelFor's helpers are frame-critical too.
 		thread_local bool inFrameCritical = false;
 
 		template <class T>
@@ -46,7 +46,7 @@ namespace DCLF
 		struct Queue
 		{
 			tbb::concurrent_queue<Job> jobs;
-			std::atomic<std::size_t> size{ 0 };  // pushed and not yet popped: the statistics' queued count
+			std::atomic<std::size_t> size{ 0 };  // pushed and not yet popped, for statistics
 			void Push(Job&& a_job)
 			{
 				size.fetch_add(1, std::memory_order_relaxed);
@@ -65,13 +65,13 @@ namespace DCLF
 		struct Domain
 		{
 			Queue ring;
-			Queue frameCritical;  // DispatchFrameCritical's jobs (the preparation domain's): taken before the ring's
-			std::counting_semaphore<> available{ 0 };  // one release per pushed job, and per wake-up (Cancel, Shutdown)
+			Queue frameCritical;  // taken before the ring's
+			std::counting_semaphore<> available{ 0 };  // one release per pushed job and per wake-up
 			unsigned workers = 0;
 			std::atomic<std::size_t> active{ 0 }, highWater{ 0 };
 		};
 
-		// One per ParallelFor name; never removed, so a helper that outlives its caller still counts into it.
+		// One per ParallelFor name. Never removed, so a helper outliving its caller still counts into it.
 		struct ParallelForEntry
 		{
 			std::string name;
@@ -80,7 +80,7 @@ namespace DCLF
 		};
 		struct NameHash
 		{
-			using transparent_key_equal = std::equal_to<>;  // looked up by string_view: no string per call
+			using transparent_key_equal = std::equal_to<>;  // lookup by string_view, so no string per call
 			std::size_t operator()(std::string_view a_name) const noexcept { return std::hash<std::string_view>{}(a_name); }
 		};
 
@@ -88,7 +88,7 @@ namespace DCLF
 		std::array<std::unique_ptr<Domain>, kDomains> domains;
 		std::atomic<std::uint64_t> accepted{ 0 }, completed{ 0 }, cancelled{ 0 }, rejected{ 0 }, failed{ 0 };
 		ThreadPriority priority;  // both set, or ParallelFor leaves priorities alone
-		// The frame-critical threads (RunFrameCritical): they take the preparation domain's frame-critical queue alone, one token per job.
+		// The frame-critical threads, which take only the frame-critical queue, one token per job.
 		unsigned frameCriticalWorkers = 0;
 		std::counting_semaphore<> frameCriticalAvailable{ 0 };
 		// Lock-free lookup and insertion; nodes never move.
@@ -116,7 +116,7 @@ namespace DCLF
 			domains[Scene.domain]->workers = 1;
 			domains[Streaming.domain]->workers = kStreamingWorkers;
 		}
-		// Every worker of every domain looks again (a cancelled scope's timers, shutdown).
+		// Every worker of every domain looks again, for a cancelled scope's timers or shutdown.
 		void WakeAll()
 		{
 			for (auto& domain : domains)
@@ -133,7 +133,7 @@ namespace DCLF
 		std::shared_ptr<State> owner;
 		std::atomic_bool cancelled{ false };
 		std::atomic<std::size_t> pending{ 0 };  // includes executing work and timers
-		// The first failure: written when a task throws, read by Wait (both off the frame path).
+		// The first failure. Written when a task throws and read by Wait, both off the frame path.
 		mutable std::mutex failureMutex;
 		std::exception_ptr failure;
 		explicit ExecutorScope(std::shared_ptr<State> value) : owner(std::move(value)) {}
@@ -141,7 +141,7 @@ namespace DCLF
 		void Cancel() noexcept override
 		{
 			cancelled.store(true);
-			owner->WakeAll();  // its timers are reclaimed now, not at their deadline
+			owner->WakeAll();  // reclaims its timers now, not at their deadline
 		}
 		void Wait() const override
 		{
@@ -171,7 +171,7 @@ namespace DCLF
 		std::exception_ptr error;
 		const bool wasCancelled = scope->StopRequested();
 		if (!wasCancelled) {
-			// A frame-critical job holds the worker at the frame's priority (workers sit below the engine's job threads), restored after.
+			// Hold the worker at frame priority for a frame-critical job, since workers sit below the engine's job threads. Restored after.
 			const int previous = threadPriority;
 			const bool raise = job.frameCritical && Boosts() && priority.frameCritical > previous;
 			if (raise) {
@@ -187,8 +187,7 @@ namespace DCLF
 				threadPriority = previous;
 			}
 		}
-		// Release captured resources before signalling completion, including when the task never started. Cancel never
-		// destroys queued work.
+		// Release captured resources before signalling completion, even when the task never started. Cancel never destroys queued work.
 		job.task = {};
 		d.active.fetch_sub(1, std::memory_order_relaxed);
 		if (error) {
@@ -210,11 +209,11 @@ namespace DCLF
 		if (Boosts())
 			threadPriority = priority.get();  // after ThreadStart set it
 		auto& d = *domains[domain];
-		// The delayed jobs this worker took from the ring before their time: its own, earliest first.
+		// Delayed jobs this worker took from the ring early, earliest first.
 		std::vector<Job> timers;
 		auto later = [](const Job& a, const Job& b) { return a.ready > b.ready; };
 		for (;;) {
-			// Due timers and cancelled ones first (a cancelled scope's timers are reclaimed now, not at their deadline).
+			// Due and cancelled timers first. A cancelled scope's timers are reclaimed now, not at their deadline.
 			const auto now = std::chrono::steady_clock::now();
 			if (std::any_of(timers.begin(), timers.end(), [&](const Job& a_job) { return a_job.ready <= now || a_job.scope->StopRequested(); })) {
 				std::vector<Job> kept;
@@ -231,9 +230,9 @@ namespace DCLF
 				currentExecutor = nullptr;
 				return;
 			}
-			// One token per pushed job, and per wake-up (Cancel, Shutdown): acquired before the pop, so tokens never pile up.
+			// One token per pushed job and per wake-up, acquired before the pop, so tokens never pile up.
 			if (stopping.load())
-				(void)d.available.try_acquire_for(std::chrono::milliseconds(1));  // draining: never block on a spent token
+				(void)d.available.try_acquire_for(std::chrono::milliseconds(1));  // draining, so never block on a spent token
 			else if (timers.empty())
 				d.available.acquire();
 			else if (!d.available.try_acquire_until(timers.front().ready))
@@ -266,7 +265,7 @@ namespace DCLF
 			else
 				frameCriticalAvailable.acquire();
 			Job job;
-			if (d.frameCritical.Pop(job))  // else a preparation worker took it, or a wake-up
+			if (d.frameCritical.Pop(job))  // otherwise a preparation worker took it, or it was a wake-up
 				Execute(Preparation.domain, job);
 		}
 	}
@@ -335,7 +334,7 @@ namespace DCLF
 			return false;
 		}
 		auto& domain = *state->domains[cls.domain];
-		// Counted before the push: a worker may finish the job before this returns.
+		// Count before the push, because a worker may finish the job before this returns.
 		own->pending.fetch_add(1, std::memory_order_acq_rel);
 		domain.ring.Push({ now + (std::max)(delay, std::chrono::steady_clock::duration::zero()), own, std::move(task) });
 		state->accepted.fetch_add(1, std::memory_order_relaxed);
@@ -380,14 +379,14 @@ namespace DCLF
 			a_body(0, a_count);
 			return;
 		}
-		// Shared with the helpers, which may start after the caller returned: they touch the body only for a chunk they
-		// claimed, and the caller returns only once every claimed chunk is done. The state and its entry outlive every worker.
+		// Shared with helpers, which may start after the caller returned. They only touch the body for a chunk they claimed,
+		// and the caller returns only once every claimed chunk is done. The state outlives every worker.
 		struct Shared
 		{
 			std::atomic<std::size_t> next{ 0 }, done{ 0 };
 			std::size_t count = 0, grain = 0, chunks = 0;
 			const std::function<void(std::size_t, std::size_t)>* body = nullptr;
-			const ThreadPriority* priority = nullptr;  // null: priorities left alone
+			const ThreadPriority* priority = nullptr;  // null leaves priorities alone
 			int callerPriority = 0;
 			State::ParallelForEntry* entry = nullptr;
 			std::mutex errorMutex;
@@ -410,8 +409,8 @@ namespace DCLF
 				}
 				return ran;
 			}
-			// A preparation worker's share. Workers sit below normal priority, beside the engine's job threads; a caller above them
-			// waits on any chunk a helper holds, so the helper holds it at the caller's priority (never lowered), restored after.
+			// A preparation worker's share. Workers sit below normal priority, so a helper holding a chunk the caller waits on is raised
+			// to the caller's priority, never lowered, and restored after.
 			void Help()
 			{
 				const int previous = threadPriority;
@@ -440,20 +439,20 @@ namespace DCLF
 		shared->entry = &entry;
 		if (state->Boosts()) {
 			shared->priority = &state->priority;
-			// A worker's priority is cached (a helper running boosted counts as its caller's); any other thread is asked.
+			// A worker's priority is cached, and a boosted helper counts as its caller's. Any other thread is asked.
 			shared->callerPriority = currentExecutor == state.get() ? threadPriority : state->priority.get();
 		}
 		const std::size_t helpers = (std::min)(chunks - 1, std::size_t(state->domains[1]->workers));
-		// A frame-critical caller's helpers are frame-critical: no queued preparation job stands between it and its chunks.
+		// A frame-critical caller's helpers are frame-critical, so no queued preparation job stands in front of its chunks.
 		const bool critical = currentExecutor == state.get() && inFrameCritical;
 		for (std::size_t i = 0; i < helpers; ++i) {
 			auto help = [shared](const org::async::TaskContext&) { shared->Help(); };
 			if (!(critical ? DispatchFrameCritical(parallelScope, a_name, std::move(help)) : Dispatch(parallelScope, Preparation, org::async::TaskDispatch::Cpu, a_name, std::move(help))))
-				break;  // the caller takes what no helper does
+				break;  // the caller takes whatever no helper does
 		}
 		shared->Work();
 		if (std::size_t done = shared->done.load(std::memory_order_acquire); done != chunks) {
-			// Only chunks a helper claimed and still runs: the wait the statistics report.
+			// Only chunks a helper claimed and still runs count as blocked time.
 			const auto blockedSince = std::chrono::steady_clock::now();
 			for (; done != chunks; done = shared->done.load(std::memory_order_acquire))
 				shared->done.wait(done, std::memory_order_acquire);
@@ -509,8 +508,7 @@ namespace DCLF
 		state->stopping.store(true);
 		state->WakeAll();
 		for (auto& worker : threads->workers) if (worker.joinable()) worker.join();
-		// A dispatch that passed its check before stopping and pushed after its domain's workers left: run as cancelled here,
-		// so its scope's count still reaches zero.
+		// A dispatch that passed its check before stopping but pushed after its workers left runs as cancelled here, so its scope still reaches zero.
 		for (unsigned domain = 0; domain < kDomains; ++domain)
 			for (State::Job job; state->domains[domain]->frameCritical.Pop(job) || state->domains[domain]->ring.Pop(job);)
 				state->Execute(domain, job);

@@ -1,0 +1,117 @@
+# Converted from tools/cs-ab/scenarios/native-validation.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# native.env with BasicRHI's Vulkan validation on (P6.4): Whiterun, the inventory and the map, a save and its load, then
+# Dragonsreach, a shot at each, exit at frame 3600. Validation is slow: frame counts are frames, not seconds. Read the validation
+# messages (BasicRHI logs them) and the "[ORG native]" lines.
+extends = ["native-vulkan"]
+
+[org]
+validation = true
+tripwire_log = true
+residue_census = true
+residue_census_frames = 300
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 99
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "shot"
+arg = "inventory"
+
+[[steps]]
+at = "previous"
+frames = 50
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "menu"
+arg = "MapMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "shot"
+arg = "map"
+
+[[steps]]
+at = "previous"
+frames = 50
+do = "menu"
+arg = "MapMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "save"
+arg = "nativetour"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "load"
+arg = "recent"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "loaded"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "dragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "whiterun", "inventory", "map", "loaded", "dragonsreach"]

@@ -1,8 +1,7 @@
 #pragma once
 
-// Raw access to the engine, for the hooks and the engine state DCLF reads without CommonLib declarations. Every address here and at
-// the hooks is an Offset: Address Library ids, resolved to the module-relative offset (as REL::Offset takes them) of the running
-// runtime.
+// Raw access to the engine for the hooks and the engine state DCLF reads without CommonLib declarations.
+// Every address is an Offset of Address Library ids, resolved to the running runtime's module offset.
 
 #include <array>
 #include <atomic>
@@ -12,7 +11,7 @@
 
 namespace DCLF::Engine
 {
-	/** @brief The game versions DCLF's addresses are checked against: anything else gets no address at all (Supported). */
+	/** @brief The game versions DCLF's addresses are checked against. Any other gets no address at all. */
 	enum class Runtime
 	{
 		Unsupported,
@@ -39,9 +38,8 @@ namespace DCLF::Engine
 	inline bool Supported() { return Running() != Runtime::Unsupported; }
 
 	/**
-	 * @brief An Address Library id, and a place `at` bytes past the address it names (a hook site inside a function). Built at
-	 * compile time only, and refused there when it cannot be one: an id at or above 2^20 (SE's largest is 847307) or a place 0x4000
-	 * or more into a function, as a module offset pair written where an id belongs (`{ 0x14f50b0, 0x1309250 }`) would be.
+	 * @brief An Address Library id, plus a place `at` bytes into the function it names. Built at compile time only. It rejects ids at or
+	 * above 2^20 and places 0x4000 or more in, which catches a module offset pair written where an id belongs.
 	 */
 	struct Id
 	{
@@ -59,11 +57,7 @@ namespace DCLF::Engine
 
 	namespace detail
 	{
-		/**
-		 * @brief An id's module offset, looked up once: CommonLib's lookup is a binary search on SE and AE 1.6.1170, and some
-		 * offsets are read per object. Every id an Offset names is in each supported runtime's database (CommonLib fails on one
-		 * that is not).
-		 */
+		/** @brief An id's module offset, looked up once, because CommonLib's lookup is a binary search and some offsets are read per object. */
 		inline std::uintptr_t Resolve(std::uint64_t a_id)
 		{
 			constexpr std::uint64_t kCached = 1u << 20;  // above every id SE (847307) and AE 1.7.104 (565758) have
@@ -81,13 +75,12 @@ namespace DCLF::Engine
 	}
 
 	/**
-	 * @brief An engine address on each runtime DCLF supports: an Address Library id for AE and one for SE (with the place inside the
-	 * function for a site within one), and AE 1.7.104's where it moved the site or renumbered the function. An empty id is one not
-	 * found for that runtime; whatever uses it must not install there (Known). On an unsupported runtime no Offset is Known.
+	 * @brief An engine address on each supported runtime: AE, SE, and AE 1.7.104 where it differs. An empty id means not found for
+	 * that runtime, and whatever uses it must not install there.
 	 */
 	struct Offset
 	{
-		Id ae{};    // AE 1.6.1170, and 1.7.104 unless ae17 is given
+		Id ae{};  // AE 1.6.1170, and 1.7.104 unless ae17 is given
 		Id se{};    // SE 1.5.97
 		Id ae17{};  // AE 1.7.104, where it differs from ae
 
@@ -113,7 +106,7 @@ namespace DCLF::Engine
 		operator std::uintptr_t() const { return Get(); }
 	};
 
-	/** @brief Whether the instruction at a_address is a CALL rel32 to a_target: a hook site is what was reverse engineered. */
+	/** @brief Whether the instruction at a_address is a CALL rel32 to a_target, as reverse engineered. */
 	inline bool CallsTo(std::uintptr_t a_address, std::uintptr_t a_target)
 	{
 		const auto* bytes = reinterpret_cast<const std::uint8_t*>(a_address);
@@ -146,10 +139,7 @@ namespace DCLF::Engine
 		return value.QuadPart;
 	}
 
-	/**
-	 * @brief BSGraphics::SetDirtyStates(false): applies the engine's pending render state (targets, viewport, clears) to
-	 * D3D11, as its next draw would. Render thread.
-	 */
+	/** @brief Render thread. BSGraphics::SetDirtyStates(false): applies the engine's pending render state as its next draw would. */
 	inline void ApplyPendingState()
 	{
 		static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
@@ -157,11 +147,8 @@ namespace DCLF::Engine
 	}
 
 	/**
-	 * @brief The engine's "no fade node": the parentless, unnamed BSFadeNode the NiPointer at 0x14332a2a0 holds (made by FUN_14147ac00 at
-	 * the engine's static initialisation, released only at exit, so the pointer is immutable while any plugin runs). BSShaderProperty's
-	 * constructor (0x14147b580) points every property's fadeNode at it, and the engine's readers treat it as null (GetRenderPasses
-	 * 0x1414ae146, BSLightingShader::Func6 0x1414dd379, BSUtilityShader::SetupGeometry 0x1414fb720). Terrain, object LOD and references
-	 * whose root is no BSFadeNode keep it.
+	 * @brief The engine's "no fade node", a parentless BSFadeNode (0x14332a2a0) alive for the whole process. Every shader property's
+	 * fadeNode starts pointing at it, and the engine's readers treat it as null. Terrain, object LOD and non-fade-root references keep it.
 	 */
 	inline constexpr Offset kEmptyFadeNode{ { 414561 }, { 527632 } };  // NiPointer<BSFadeNode>
 	inline const void* EmptyFadeNode()
@@ -169,7 +156,7 @@ namespace DCLF::Engine
 		return Global<const void*>(kEmptyFadeNode);
 	}
 
-	// The engine addresses DCLF reads or calls; the hooks' patch sites stay named where they are installed. The comments' addresses are AE 1.6.1170's.
+	// Engine addresses DCLF reads or calls. The comments' addresses are AE 1.6.1170's.
 	namespace Address
 	{
 		inline constexpr Offset kDepthAccumulator{ { 415008 }, { 528063 } };  // BSShaderAccumulator*: the main camera's depth pass (render mode 0xC)
@@ -214,7 +201,7 @@ namespace DCLF::Engine
 		inline constexpr Offset kFloatControllerTargets{ { 415317 }, { 528371 } };  // std::uint32_t per type: the float controller's material float index
 		inline constexpr Offset kColorControllerTargets{ { 415344 }, { 528398 } };  // std::uint32_t per type: the colour controller's material byte offset
 
-		// The feature's hook sites (DrawcallLimitFix::Hooks::Install), each checked with CallsTo before it is patched.
+		// The feature's hook sites, each checked with CallsTo before it is patched.
 		inline constexpr Offset kGeometryGroupDraw{ { 107630, 0xfd }, {} };     // a geometry group's pass list draw (FUN_1414f19d0; SE: the loop is RenderPassImmediately<1>'s)
 		inline constexpr Offset kRenderPassImmediately{ { 107644 }, { 100854 } };  // what it calls: BSBatchRenderer::RenderPassImmediately
 		inline constexpr Offset kUpdateEntryCall{ { 36564, 0x3e }, { 35565, 0x1e } };         // Main::Update's first call
@@ -240,23 +227,19 @@ namespace DCLF::Engine
 	constexpr std::uint32_t kFlagAccumulated = 1u << 26;  // kAccumulated: passed the last cull that reached it
 
 	/**
-	 * @brief A node's flags, read atomically: the engine's threads store other bits of the same dword (LOD swaps, culls, fades), so
-	 * no reader may tear or cache it. Any thread; a_node must be alive.
+	 * @brief A node's flags, read atomically because engine threads store other bits of the same dword. Any thread. a_node must be alive.
 	 */
 	inline std::uint32_t FlagsOf(const void* a_node)
 	{
 		return std::atomic_ref<std::uint32_t>(At<std::uint32_t>(a_node, kObjectFlags)).load(std::memory_order_relaxed);
 	}
-	/** @brief Whether a node is app-culled (kHidden). */
+	/** @brief Whether a node is app-culled. */
 	inline bool IsHidden(const void* a_node) { return (FlagsOf(a_node) & kFlagHidden) != 0; }
 
-	// NiAVObject's vtable slot of OnVisible: the fade nodes' class is told by it (FadeState::PlanOf).
+	// NiAVObject's OnVisible vtable slot, which tells the fade node classes apart.
 	constexpr std::size_t kOnVisibleSlot = 0x34;
 
-	/**
-	 * @brief The tree's LOD switch (+0x180), whose selection changes by switch event (kFadeRootTreeLod), or null: a node whose
-	 * OnVisible is not BSTreeNode's has none. The capture reads it; the fade roots key their switch events by it.
-	 */
+	/** @brief A BSTreeNode's LOD switch (+0x180), or null for a node whose OnVisible is not BSTreeNode's. */
 	inline const RE::NiAVObject* TreeLodSwitch(const RE::NiAVObject& a_node)
 	{
 		const auto onVisible = (*reinterpret_cast<const std::uintptr_t* const*>(&a_node))[kOnVisibleSlot];
@@ -265,17 +248,14 @@ namespace DCLF::Engine
 		return At<const RE::NiAVObject*>(&a_node, 0x180);
 	}
 
-	/**
-	 * @brief A ShadowSceneNode's object root: its child 3, the cells' parent (DrawWorld_BuildSceneLists' walk), or null. The tree must be
-	 * held (the render or main thread inside the frame).
-	 */
+	/** @brief A ShadowSceneNode's object root, its child 3 and the cells' parent, or null. The tree must be held. */
 	inline RE::NiAVObject* ObjectRoot(const RE::NiNode& a_sceneNode)
 	{
 		const auto& children = a_sceneNode.GetChildren();
 		return children.free_idx() > 3 ? children[3].get() : nullptr;
 	}
 
-	/** @brief An object root's cell nodes from child a_first (children 0 and 1 are whole entries), those not hidden: a_visit(cell). */
+	/** @brief An object root's visible cell nodes from child a_first. Children 0 and 1 are whole entries. */
 	template <class Visit>
 	void ForEachCell(const RE::NiAVObject* a_objectRoot, std::uint16_t a_first, Visit&& a_visit)
 	{
@@ -288,7 +268,7 @@ namespace DCLF::Engine
 				a_visit(*cell);
 	}
 
-	/** @brief A cell node's category nodes (its children) not hidden: a_visit(index, node). */
+	/** @brief A cell node's visible category nodes. */
 	template <class Visit>
 	void ForEachCategory(RE::NiNode& a_cell, Visit&& a_visit)
 	{
@@ -298,7 +278,7 @@ namespace DCLF::Engine
 				a_visit(j, *category);
 	}
 
-	/** @brief The loaded cells TES draws: the interior cell, else every cell of the grid (empty slots passed as null). */
+	/** @brief The loaded cells TES draws: the interior cell, else every grid cell, empty slots passed as null. */
 	template <class Visit>
 	void ForEachLoadedCell(const RE::TES& a_tes, Visit&& a_visit)
 	{
@@ -311,24 +291,20 @@ namespace DCLF::Engine
 		}
 	}
 
-	/** @brief Whether an NiObject's RTTI is named a_name (its exact class). */
+	/** @brief Whether an NiObject's exact class is named a_name. */
 	inline bool RttiIs(const void* a_object, const char* a_name)
 	{
 		const auto* rtti = static_cast<const RE::NiObject*>(a_object)->GetRTTI();
 		return rtti && rtti->name && std::strcmp(rtti->name, a_name) == 0;
 	}
 
-	/** @brief Whether an object's vtable is a_vtable (its exact class; the caller keeps the vtable's address, a relocation lookup). */
+	/** @brief Whether an object's exact class has vtable a_vtable. */
 	inline bool VtableIs(const void* a_object, std::uintptr_t a_vtable)
 	{
 		return a_object && *static_cast<const std::uintptr_t*>(a_object) == a_vtable;
 	}
 
-	/**
-	 * @brief BSLightingShaderMaterial and its 13 subclasses' vtables, in this order: Base, Envmap, Eye, Glowmap, Parallax, ParallaxOcc,
-	 * Facegen, FacegenTint, HairTint, Landscape, LODLandscape, Snow, MultiLayerParallax (the material write hooks' and the vanilla
-	 * material port's classes).
-	 */
+	/** @brief BSLightingShaderMaterial and its 13 subclasses' vtables, in a fixed order. */
 	inline const std::array<REL::VariantID, 14>& LightingMaterialVtables()
 	{
 		static const std::array<REL::VariantID, 14> vtables{ RE::VTABLE_BSLightingShaderMaterial[0], RE::VTABLE_BSLightingShaderMaterialBase[0],
@@ -339,14 +315,13 @@ namespace DCLF::Engine
 		return vtables;
 	}
 
-	// BSShaderProperty's light data, and in it the mask of the shadow lights the geometry is registered with.
+	// BSShaderProperty's light data, holding the mask of the shadow lights the geometry is registered with.
 	constexpr std::size_t kPropertyLightData = 0x70;
 	constexpr std::size_t kLightDataActiveMask = 0x1C;
 
 	/**
-	 * @brief An NiSwitchNode's own fields, read at their AE offsets (NiSwitchNode::OnVisible, AE 140d29700):
-	 * CommonLib declares them after NiNode, whose declared size in a multi-runtime build is VR's, so its members
-	 * read the wrong memory.
+	 * @brief An NiSwitchNode's own fields at their AE offsets. CommonLib declares them after NiNode, whose size in a multi-runtime
+	 * build is VR's, so its members read the wrong memory.
 	 */
 	struct SwitchState
 	{
@@ -357,9 +332,8 @@ namespace DCLF::Engine
 		std::uint16_t childRevCapacity = 0;
 	};
 	/**
-	 * @brief The child a switch selects: children[index], null when the index or its revision is out of range
-	 * (bounded by capacity, not size: a Gamebryo array is indexed by slot). Current when childRevID[index] ==
-	 * revID; otherwise NiSwitchNode::OnVisible brings the child up to date before culling it.
+	 * @brief The child a switch selects, bounded by capacity since Gamebryo arrays are indexed by slot. It is current when
+	 * childRevID[index] == revID. Otherwise NiSwitchNode::OnVisible updates it before culling.
 	 */
 	struct SwitchSelection
 	{
@@ -375,7 +349,7 @@ namespace DCLF::Engine
 		state.flags = *reinterpret_cast<const std::uint16_t*>(base + 0x128);
 		state.index = *reinterpret_cast<const std::int32_t*>(base + 0x12C);
 		state.revID = *reinterpret_cast<const std::uint32_t*>(base + 0x134);
-		// childRevID, an NiTPrimitiveArray at +0x138: its data pointer at +0x8, its capacity at +0x10.
+		// childRevID is an NiTPrimitiveArray at +0x138, data at +0x8 and capacity at +0x10.
 		state.childRevID = *reinterpret_cast<const std::uint32_t* const*>(base + 0x140);
 		state.childRevCapacity = *reinterpret_cast<const std::uint16_t*>(base + 0x148);
 		return state;
@@ -393,10 +367,8 @@ namespace DCLF::Engine
 
 	inline bool SwitchSelects(const RE::NiSwitchNode& a_switch, const RE::NiAVObject* a_child)
 	{
-		// NiSwitchNode::OnVisible (AE 140d29700) culls children[index] and nothing else. A child that has
-		// become the selected one since the last update pass is brought up to date there, in the cull
-		// (childRevID[index] != revID), which is after this walk read its transforms: leave it native for
-		// that frame.
+		// NiSwitchNode::OnVisible (AE 140d29700) brings a newly selected child up to date in the cull, after this walk read its transforms.
+		// So leave it native for that frame.
 		const auto selection = SelectionOf(a_switch, ReadSwitch(a_switch));
 		return selection.child && selection.child == a_child && selection.current;
 	}

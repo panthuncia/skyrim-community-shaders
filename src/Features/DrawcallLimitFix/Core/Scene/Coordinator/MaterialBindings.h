@@ -1,7 +1,6 @@
 #pragma once
 
-// The coordinator's material texture bindings: the requests in flight, the answers kept and the slots holding a previous view. Scene
-// lane only, except the replies queue (the import thread answers into it).
+// The coordinator's material texture bindings. Scene lane only, except the replies queue, which the import thread fills.
 
 #include <cstdint>
 #include <memory>
@@ -19,17 +18,11 @@ struct ID3D11ShaderResourceView;
 namespace DCLF
 {
 	/**
-	 * @brief The material slots' texture bindings, made by the scene work (Coordinator::UpdateMaterialBindings).
+	 * @brief The material slots' texture bindings.
 	 *
-	 * Where the scene work makes or changes a material slot's record (the tables' material log), or a slot becomes used, it asks
-	 * GpuTextures for the bindings of the record's views (GpuTextures::Request) and writes the slot's entry: the descriptor
-	 * indices, the owners, the binding block. Every answer is an event in `replies`, drained by the next scene work pass, which
-	 * writes the entries of the slots waiting on it. A view the scene work has had answered before is served from `cache` (the
-	 * owner held weakly: an import nobody holds goes), so a record whose views are known resolves in the pass that makes it.
-	 *
-	 * The entries are the scene lane's lookups' (Lookups::materials, written straight in); the slots changed since the last commit or
-	 * publication take their versions and their log entries before it (Coordinator::VersionMaterialBindings). This holds what is not
-	 * published: the requests, the answers kept, the slots holding a previous view.
+	 * A new or changed record requests bindings for its views, and answers arrive as events in `replies` for the next pass.
+	 * A view answered before is served from `cache`, which holds the owner weakly so an import nobody holds goes.
+	 * The entries live in the lookups. This holds only what is not published.
 	 */
 	struct MaterialBindings
 	{
@@ -51,7 +44,6 @@ namespace DCLF
 			std::uint64_t followed = 0;   // pinless: entries resolved again for a moved view (FollowRelocatedTextures)
 			std::uint64_t superseded = 0;  // pinless: answers whose import a move superseded meanwhile (asked again)
 		};
-		/** @brief The work the bindings saved, for the material records' line (Coordinator::RefreshMaterialRecords, which resets it). */
 		struct Work
 		{
 			std::uint64_t sealed = 0;          // owner blocks sealed (GpuTextures::Seal)
@@ -59,25 +51,21 @@ namespace DCLF
 			std::uint64_t waitersDeduped = 0;  // a slot already waiting on a view, not listed again
 		};
 
-		// Parallel to Tables::materials: a slot whose view changed and whose new one is still asked for: it keeps the previous view's
-		// binding meanwhile.
+		// A slot whose new view is still requested keeps the previous view's binding meanwhile.
 		std::vector<std::uint8_t> held;
-		// The slots whose entry changed since they were last versioned (VersionMaterialBindings), once each.
 		std::vector<std::uint32_t> changed;
 		std::vector<std::uint8_t> changedMark;
-		// The views asked for and not answered yet, with the slots waiting on each.
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, std::vector<std::uint32_t>> inFlight;
-		// (view, slot) for every slot listed in inFlight: a slot resolved again while it waits is listed once.
+		// A slot resolved again while it waits is listed once.
 		ankerl::unordered_dense::set<std::pair<ID3D11ShaderResourceView*, std::uint32_t>> waiting;
-		// Each material's newest owner block (weak: the entries hold it): a slot of the material with the same owners takes it instead of
-		// sealing its own (a material's passes name the same textures). Swept as it grows.
+		// Weak, the entries hold it. A material's passes name the same textures, so its slots can share one block. Swept as it grows.
 		ankerl::unordered_dense::map<const void*, std::weak_ptr<const Lookups::MaterialOwners>> sealed;
 		std::size_t sealedSweep = 0;
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, Cached> cache;
 		std::size_t cacheSweep = 0;
-		// The answers of the drain being applied (rejections included), what the waiting slots take.
+		// Rejections included.
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, GpuTextures::Binding> arrived;
-		// The used set as the last pass saw it: a slot set since is resolved (a member joined on a slot made earlier).
+		// A slot set since then is resolved.
 		std::vector<std::uint64_t> usedSeen;
 		LogCursor cursor;  // the tables' material log
 		std::uint64_t relocationCursor = 0;  // GpuTextures::RelocatedViews

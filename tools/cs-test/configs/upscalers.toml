@@ -1,0 +1,63 @@
+# Each upscale method in turn at the autoloaded save, a shot each (the "upscale" command), then exit. Compose it: guest+upscalers,
+# native-vulkan+upscalers, native-d3d12+upscalers. Read the "[Streamline] ... evaluate result" and "[UPTEST]" lines.
+extends = ["base"]
+
+[run]
+timeout_s = 360
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "upscale"
+arg = "dlss"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "dlss"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "upscale"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "upscale"
+arg = "xess"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "xess"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["dlss", "fsr", "xess", "taa"]

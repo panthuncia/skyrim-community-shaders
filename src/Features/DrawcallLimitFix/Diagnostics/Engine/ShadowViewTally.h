@@ -6,12 +6,8 @@
 namespace DCLF::Diagnostics
 {
 	/**
-	 * @brief The shadow views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): DCLF's views (the sources' boards, Features/Shadows' Sun, Lights, Focus:
-	 * from the cameras the engine's UpdateCamera set up) against the engine's captures - the view-projection, eye, viewport and caster
-	 * volume at each view's draw (the shadow epochs' checks, Diagnostics/Draws/ShadowChecks.cpp), the sun's cascade planes at each cascade
-	 * cull, the full-frustum processes (the sun source's observers). One tally per kind of view; each kind's line every 300 frames that
-	 * had such views, by its source's observers (Features/Shadows/Sun/Diagnostics/SunViewParity.cpp, Features/Shadows/Local/Diagnostics/
-	 * LightParity.cpp, FocusParity.cpp).
+	 * @brief Shadow view parity. DCLF's views against the engine's captures at each view's draw, cascade cull and full-frustum process.
+	 * One tally per view kind, reported every 300 frames by its source's observers.
 	 */
 	struct ViewTally
 	{
@@ -21,7 +17,7 @@ namespace DCLF::Diagnostics
 		std::uint64_t missing = 0;                                                   // a view or cascade without DCLF's values
 		float largest = 0.0f;
 		std::string first;
-		/** @brief A difference: the largest so far, and the first of each kind (up to four kinds) for the report. */
+		/** @brief Notes a difference, keeping the largest and the first of up to four kinds. */
 		void Note(const char* a_what, float a_size, std::string a_detail);
 	};
 
@@ -32,6 +28,6 @@ namespace DCLF::Diagnostics
 		Focus,
 	};
 
-	/** @brief The tally of a_view's kind (render thread). */
+	/** @brief The tally for a_view's kind. Render thread. */
 	ViewTally& ShadowViewTally(ShadowView a_view);
 }

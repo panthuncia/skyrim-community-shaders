@@ -1,12 +1,9 @@
 #pragma once
 
-// The CPU-driven pipeline's recorder (Direct.h; dclf-architecture.md, "The CPU-driven pipeline"): a CulledBatch's draws as direct draws
-// onto an rhi::CommandList, DXVK's adopted buffer (Serial mode, inside a site's callback) or a secondary (Parallel mode, a per-snapshot
-// view). One plain indexed draw a resident sequence, its lane's bucket's pipeline bound when the bucket changes, its arguments from the
-// set's CPU copy (ViewBatchSet::sequenceArgs): in the colour and depth lists the key's own pipeline under the main layout, the draw pushing
-// its sequence's 24 words as a device-generated draw's Constant argument (kExpPushedColour, kExpPushedDepth); elsewhere the pulled
-// pipeline, the draw pushing the sequence's address and its object word (DrawPipelines.h, kDirectDrawPush*).
-// Recording reads only immutable inputs (the set, the culled batch, the frame's bindings), so any thread may record its own list.
+// The CPU-driven pipeline's recorder. It turns a CulledBatch into direct indexed draws on a command list, binding a pipeline
+// only when the lane's bucket changes. Colour and depth lists push the sequence's 24 words to the key's own pipeline,
+// other lists push the sequence's address and object word to a pulled pipeline.
+// Recording reads only immutable inputs, so any thread may record its own list.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -32,11 +29,12 @@ namespace DCLF::Direct
 	class CullArena;
 
 	/**
-	 * @brief A draw in a frame slot's draw buffer: an indexed draw's arguments, which a cull job writes, then what its stages read through
-	 * its instance (firstInstance: its own index in the buffer; DCLFObjects.hlsli, DCLFDrawSequence). The stride of an indirect run.
+	 * @brief One draw in a frame slot's draw buffer, also the stride of an indirect run. D3D12's SV_InstanceID does not count
+	 * the first instance, so D3D12's signature writes the instance word into kDrawPushInstance first. Vulkan reads the arguments alone.
 	 */
 	struct IndirectDraw
 	{
+		std::uint32_t instance;  // its index in the buffer, as firstInstance
 		std::uint32_t indexCount;
 		std::uint32_t instanceCount;
 		std::uint32_t firstIndex;
@@ -45,9 +43,9 @@ namespace DCLF::Direct
 		std::uint32_t sequence;    // the resident sequence's index
 		std::uint32_t objectWord;  // with its per-frame bits
 	};
-	static_assert(sizeof(IndirectDraw) == 28 && offsetof(IndirectDraw, sequence) == 20);
+	static_assert(sizeof(IndirectDraw) == 32 && offsetof(IndirectDraw, indexCount) == 4 && offsetof(IndirectDraw, sequence) == 24);  // must match DCLFDrawSequence
 
-	/** @brief Consecutive draws in the buffer with one pipeline: one indirect draw. */
+	/** @brief Consecutive draws with one pipeline, recorded as one indirect draw. */
 	struct IndirectRun
 	{
 		rhi::PipelineHandle pipeline{};
@@ -56,20 +54,22 @@ namespace DCLF::Direct
 		std::uint32_t count = 0;
 	};
 
-	/** @brief A frame slot's draw buffer, as its recordings read it (null in RecordContext::indirect: draw directly). */
+	/** @brief A frame slot's draw buffer as its recordings read it. */
 	struct IndirectBuffer
 	{
-		rhi::CommandSignatureHandle signature{};
+		rhi::CommandSignatureHandle signature{};  // Vulkan's, one for every layout
+		// D3D12's, made per bound layout because it names a root signature. Null on Vulkan.
+		rhi::CommandSignatureHandle (*signatureFor)(rhi::PipelineLayoutHandle a_layout) = nullptr;
+		std::uint64_t argumentsOffset = 0;  // Vulkan starts past the instance word
 		rhi::ResourceHandle buffer{};
-		std::uint64_t address = 0;
-		// The cull jobs': the mapped draws, the capacity, and the draws reserved so far (past capacity: those batches draw directly, and
-		// the next frame of the slot has a larger buffer).
+		RenderGraph::BufferRef ref;  // the draws' buffer view ref, which the pulled stages read their records through
+		// Draws past capacity are not written. Those batches draw directly, and the slot's next frame gets a larger buffer.
 		IndirectDraw* mapped = nullptr;
 		std::uint32_t capacity = 0;
 		std::atomic<std::uint32_t>* cursor = nullptr;
 	};
 
-	/** @brief Which pass of its site a recording is in: the pipeline a lane's bucket binds (ViewBuckets). */
+	/** @brief Which pass a recording is in, which decides the pipeline a lane's bucket binds. */
 	enum class RecordPass : std::uint8_t
 	{
 		Depth,       // the Z pipelines (IndirectState::zPipelines by zGroups): main depth, reflection's faces, first person's depth
@@ -79,58 +79,43 @@ namespace DCLF::Direct
 		Refraction,  // the refraction normals (IndirectState::refraction)
 	};
 
-	/**
-	 * @brief A draw family's main draw this frame (Api::DrawFamilyContribution::main.record's inputs, outside ORG): its pipelines as the
-	 * frame's catalog has them (CatalogFamilyPipelines' payload, which the record callback reads as FamilyPipelines), its draw row's
-	 * address (DrawFamilyDeclare::row) and its arguments buffer (DrawFamilyDeclare::arguments[0], resolved). Null pipelines: not drawn.
-	 */
+	/** @brief A draw family's main draw this frame. Null pipelines mean it is not drawn. */
 	struct FamilyDraw
 	{
 		std::shared_ptr<const void> pipelines;
-		std::uint64_t row = 0;
+		RenderGraph::BufferRef row;
 		rhi::ResourceHandle arguments{};
 	};
 
-	/**
-	 * @brief What a site's recordings bind, from the frame's adopted state (the sites fill it once a site and frame; immutable while any
-	 * recording reads it). Handles stay valid while `main` / `shadow` hold their set versions.
-	 */
+	/** @brief What a site's recordings bind. Immutable while read. Handles stay valid while `main` and `shadow` hold their set versions. */
 	struct RecordBindings
 	{
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
 		const IndirectState* main = nullptr;          // the frame's (FrameIndirectState or the revision's catalog's)
 		const ShadowIndirectState* shadow = nullptr;  // the frame's shadow set (shadow views only)
 		rhi::ResourceHandle indexPool{};              // the index pool's indices (R16, the whole buffer)
-		// IndexPool::slotFirst as of the frame's first drawing commit (the site's per-frame copy): by geometry slot, the first index its
-		// range starts at (IndexPool::kNoRange: none, not drawn).
+		// Per geometry slot, the first index of its range as of the frame's first drawing commit. kNoRange is not drawn.
 		std::span<const std::uint32_t> poolFirsts;
-		// The main layout's frame push words (FramePushWords of the view's frame constants: MainFramePushWords for the main camera).
 		std::array<std::uint32_t, kFramePushWords> framePush{};
-		// The shadow views' layout's pass words: a shadow view's own (ShadowFrameView::push: addresses of its latched blocks, so a
-		// per-snapshot recording stays valid while the shadow shape does), the refraction's MainShadowLayoutPush.
+		// A shadow view's push words are addresses of its latched blocks, so a per-snapshot recording stays valid while the shadow shape does.
 		std::array<std::uint32_t, kShadowPushWords> shadowPush{};
-		// A shadow view's map row (Lookups::ShadowMapRow of its mode and rasterizer state, the publication's lookups): by key slot (its
-		// lanes' buckets), the ShadowIndirectState::pipelines index (Lookups::kNone: none yet, its draws skipped).
+		// Per key slot, the ShadowIndirectState::pipelines index. Lookups::kNone skips the draws.
 		std::span<const std::uint32_t> shadowMapRow;
-		// The refraction draws' second address: the frame's LodFadeFrame (LodFadeFrameAddress), in the shadow layout's material rows' words.
 		std::uint64_t lodFadeFrame = 0;
-		// The frame's copy of the animated material rows (the latch's animatedRows, kDirectDrawPushAnimatedRows; 0: the installed rows).
-		// Per frame: a per-snapshot recording's bindings keep 0.
+		// D3D12 pushes the ref instead, since no layout turns the address into a view there.
+		RenderGraph::BufferRef lodFadeFrameRef;
+		// The frame's animated material rows, 0 for the installed rows. Per frame, so a per-snapshot recording keeps 0.
 		std::uint64_t animatedRows = 0;
-		// Terrain Blending's depth offset on every draw (kZDrawPushOffsetDepth: a terrain group 1 twin's recording).
+		RenderGraph::BufferRef animatedRowsRef;
+		// Terrain Blending's depth offset on every draw, for a terrain group 1 twin's recording.
 		bool offsetDepth = false;
-		// RecordForward: the frame's placement rows (FrameValues::RowsIfDone, by object) and the view's ViewProj (row major, clip = M * p),
-		// for each draw's sort key as BuildDrawsCS's StageForwardKey makes it.
+		// For each forward draw's sort key, as BuildDrawsCS's StageForwardKey makes it.
 		std::span<const BindlessPlacement> placements;
 		std::array<float, 16> viewProj{};
-		// RecordFamilyDraws: by draw family (Extensions::kDrawFamilies).
 		std::span<const FamilyDraw> families;
 	};
 
-	/**
-	 * @brief One recording's state: the list, the set, the view and its pass, the bindings; and what BeginList bound (a pipeline bound
-	 * once per bucket change) and the draws recorded (drawn, added to counters' drawn[view] by each RecordBatch when counters is set).
-	 */
+	/** @brief One recording's state and what BeginList bound. */
 	struct RecordContext
 	{
 		rhi::CommandList& list;
@@ -138,99 +123,75 @@ namespace DCLF::Direct
 		ViewType view = ViewType::Main;
 		std::uint32_t viewIndex = 0;
 		Site site = Site::Depth;
-		bool depthPass = false;  // the main list: depth (Z pipelines) or colour; with view Decal: the decal depth pass
+		bool depthPass = false;  // with view Decal, the decal depth pass
 		const RecordBindings& bindings;
-		FrameCounters* counters = nullptr;  // drawn[view] (atomically: parallel recordings share it); null: not counted
-		// Indirect mode's list (set before BeginList): the batches' runs drawn from this buffer, and every direct draw of the list with
-		// the pulled pipelines, as the runs' are. Null: direct draws, as RecordBatch says.
+		FrameCounters* counters = nullptr;  // atomic, parallel recordings share it. Null is not counted.
+		// Indirect mode. Batches draw their runs from this buffer, and direct draws use the pulled pipelines too. Null draws directly.
 		const IndirectBuffer* indirect = nullptr;
+		// First person's colour pass has only two targets, so its draws keep their view pipelines (VUID-vkCmdDrawIndexed-colorAttachmentCount-06179).
+		bool mainTargets = true;
 
-		// Set by BeginList; RecordBatch's.
 		RecordPass pass = RecordPass::Colour;
+		rhi::PipelineLayoutHandle layout{};  // an indirect run's D3D12 signature is made for it
 		std::uint32_t boundBucket = ~0u;
 		rhi::PipelineHandle boundPipeline{};
-		std::uint64_t boundVertexLayout = 0;  // a shadow bucket's (ShadowIndirectState::vertexLayouts), pushed with each of its draws
-		// A colour or depth list's draws through the keys' own pipelines under the main layout (kExpPushedColour, kExpPushedDepth), and
-		// whether that layout is bound (a bucket without one draws its pulled pipeline under the Z-prepass's).
+		std::uint64_t boundVertexLayout = 0;
+		// Whether colour or depth draws use the keys' own pipelines under the main layout, and whether that layout is bound.
 		bool pushedColour = false;
 		bool mainLayoutBound = false;
 		std::uint32_t drawn = 0;
-		// The list's calls (FrameCounters' binds, sameBinds, pushes, flushed with drawn): pipeline binds, those that bound the pipeline
-		// already bound (another bucket of the same pipeline), and per-draw push constants.
+		// sameBinds counts binds of the pipeline already bound, by another bucket of the same pipeline.
 		std::uint32_t binds = 0, sameBinds = 0, pushes = 0, indirects = 0;
 		std::uint32_t countedBinds = 0, countedSameBinds = 0, countedPushes = 0, countedIndirects = 0;
-		std::uint64_t indices = 0, countedIndices = 0;  // the direct draws' indices (FrameCounters::indices[site])
-		// Whether the draw words pushed last are a run's (a direct draw's replace them).
+		std::uint64_t indices = 0, countedIndices = 0;
+		// Whether the last pushed draw words are a run's. A direct draw replaces them.
 		bool runWordsPushed = false;
 	};
 
-	/** @brief The pass a view type's lanes draw in at a_depthPass (RecordContext::depthPass). */
+	/** @brief The pass a view type's lanes draw in. */
 	RecordPass PassOf(ViewType a_view, bool a_depthPass);
 
 	/**
-	 * @brief Binds what the list's draws share: the descriptor heaps, the pass's layout (the Z-prepass's for main-set pipelines, the
-	 * shadow views' for shadow views and refraction), the topology, the frame (or view) push words and the index pool. In a secondary
-	 * nothing is inherited, so each secondary begins with it (RecordSecondary does). False when the pass's state is not valid (no set
-	 * version, no refraction pipeline): nothing recorded, record nothing.
+	 * @brief Binds what the list's draws share. A secondary inherits nothing, so each one begins with this.
+	 * False when the pass's state is not valid, and then nothing may be recorded.
 	 */
 	bool BeginList(RecordContext& a_context);
 
 	/**
-	 * @brief A cull job, Indirect mode: a_batch's draws written into a_buffer, and its runs (in a_arena) set on it. By part: the pass's
-	 * draws, then for main colour its terrain groups' apart (RecordTerrainGroup's), in lane order, with the pulled pipelines. Draws that
-	 * would not fit are not written: hasRuns stays false, and the recorder draws its lanes directly.
+	 * @brief Cull job, Indirect mode. Writes a_batch's draws and runs into a_buffer. Draws that do not fit are not written, and the
+	 * recorder draws those lanes directly. Returns the indices written.
 	 */
-	/** @brief (Also) the indices of the draws written. */
 	std::uint64_t WriteIndirectDraws(CulledBatch& a_batch, const ViewBatchSet& a_set, ViewType a_view, bool a_depthPass, const RecordBindings& a_bindings, const IndirectBuffer& a_buffer, CullArena& a_arena);
 
-	/**
-	 * @brief A_batch's draws in lane order: per kept lane, its sequences, the lane's bucket's pipeline bound when it changes. Main's colour
-	 * pass leaves out the terrain groups' lanes (kLaneTerrainGroup1/2: RecordTerrainGroup's, after the decals); cull-only lanes draw nothing.
-	 */
+	/** @brief Records a_batch's draws in lane order. Main colour leaves out the terrain group lanes. Cull-only lanes draw nothing. */
 	void RecordBatch(RecordContext& a_context, const CulledBatch& a_batch);
 
 	/**
-	 * @brief A_batches' draws nearest a_plane first (a view's near plane: world space, inward), by the nearest point of each lane's
-	 * sphere: in a_slabs equal slabs of their depth range, by pipeline bucket within each (few more binds than list order), or by
-	 * distance alone (a_slabs 0). The shadow views' (CS_DCLF_SHADOW_ORDER): a depth-only draw's result does not depend on its order.
+	 * @brief Records batches nearest a_plane first, in a_slabs depth slabs sorted by bucket within each, or by distance alone with 0.
+	 * Only for depth-only draws, whose result does not depend on order.
 	 */
 	void RecordSortedBatches(RecordContext& a_context, std::span<const CulledBatch* const> a_batches, const std::array<float, 4>& a_plane, std::uint32_t a_slabs);
 
-	/**
-	 * @brief A terrain group's colour draws (a_group 1 or 2: main's lanes with kLaneTerrainGroup1 or 2) from main's culled colour batches,
-	 * in list order: the site calls it at the group's main range position in the second pass (Extensions::MainRanges' order), as the GPU
-	 * path draws CS_DCLF_TERRAIN_PLAIN's buckets. Main's depth pass draws them with the rest (RecordBatch).
-	 */
+	/** @brief A terrain group's colour draws, called at the group's main range position in the second pass. */
 	void RecordTerrainGroup(RecordContext& a_context, std::uint32_t a_group, std::span<const CulledBatch* const> a_batches);
 
 	/**
-	 * @brief The forward list's draws in the engine's blended order (the refraction's are unordered, as the GPU path's: RecordBatch), merged
-	 * across a_batches into the calling thread's buffer: each kept lane's sequences' sort key as
-	 * StageForwardKey (the view depth of its bound centre, or of its BSOrderedNode's for a group's leaf), ordered as ForwardSortCS ranks
-	 * them: farther first; at one depth a plain draw before a group's; then by group, ordinal, object and first index.
+	 * @brief The forward list's draws in the engine's blended order, merged across batches. Farther first, then a plain draw before
+	 * a group's at equal depth, then by group, ordinal, object and first index, as ForwardSortCS ranks them.
 	 */
 	void RecordForward(RecordContext& a_context, std::span<const CulledBatch* const> a_batches);
 
-	/**
-	 * @brief A second pass group's draws (ViewBatchSet::decalGroupFirst's group a_group, a main range slot) in the decal list's order,
-	 * from whichever of a_batches hold its lanes: the site calls it per group at the colour pass's positions (Extensions::MainRanges'
-	 * order; with RecordContext::depthPass, the groups that draw a depth prepass, in the decal depth pass).
-	 */
+	/** @brief One decal group's draws in the decal list's order, called per group at the colour pass's positions. */
 	void RecordDecalGroup(RecordContext& a_context, std::uint32_t a_group, std::span<const CulledBatch* const> a_batches);
 
 	/**
-	 * @brief The draw families' instanced indirect draws (tree LOD's, grass's: their contribution's main.record, as the main pass records
-	 * them) from RecordBindings::families: in a depth pass their depth draw (single phase: DrawFamilyPass::Depth), in the colour pass
-	 * their colour draw under the Z-prepass layout and frame push words. Their cull is the site's pre-work. Leaves the list's pipeline
-	 * and push data the families': call BeginList again before more DCLF draws.
+	 * @brief The draw families' instanced indirect draws. Leaves the families' pipeline and push data bound, so call BeginList again
+	 * before more DCLF draws.
 	 */
 	void RecordFamilyDraws(RecordContext& a_context);
 
 	/**
-	 * @brief Parallel mode and per-snapshot views: a_batch recorded into a_secondary (recycled by the caller from its allocator): begun
-	 * with a_inheritance (the site's rendering: formats, samples, viewport), BeginList, RecordBatch, ended. A_context gives everything but
-	 * the list (its own is not recorded to) and gets the draws counted; counters' secondaries counts it. False when it could not begin or
-	 * BeginList had nothing valid (a_secondary is then ended with nothing in it: do not execute it).
+	 * @brief Records a_batch into a_secondary. False when it could not begin or had nothing valid. The secondary is then empty and must not be executed.
 	 */
 	bool RecordSecondary(RecordContext& a_context, const rhi::SecondaryInheritance& a_inheritance, const CulledBatch& a_batch, rhi::CommandList& a_secondary);
 }

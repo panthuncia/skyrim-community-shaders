@@ -1,5 +1,4 @@
-// The first-person skeleton's claims (CS_DCLF_SET_PARITY): at the view's walk of the skeleton's geometry (every 16 frames), its slots and
-// claimed phases, logged when they change. Render thread.
+// CS_DCLF_SET_PARITY: logs the first-person skeleton's slots and claimed phases when they change. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 
@@ -12,12 +11,10 @@ namespace DCLF::Features::FirstPerson
 {
 	namespace
 	{
-		// The skeleton's slots and claimed phases as last logged.
 		std::string loggedSkeleton;
 
 		void NoteFirstPersonSkeleton(const Diagnostics::FirstPersonSkeletonWalked& a_walked)
 		{
-			// Which first-person geometry the first-person view does not take, and what it takes instead.
 			const auto& tables = a_walked.tables;
 			const auto& skeleton = a_walked.skeleton;
 			const auto& claims = a_walked.claims;

@@ -1,5 +1,4 @@
-// GpuOcclusion's depth pyramid (Api/DepthPyramid.h): the HZB, its program and its downsample's counter, made with the main view's
-// resources, and the pass rebuilding it from the main depth in the depth epoch.
+// Creates the HZB with the main view's resources and rebuilds it from the main depth in the depth epoch.
 
 // Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
@@ -23,8 +22,7 @@
 
 namespace DCLF::Features::GpuOcclusion
 {
-	// The producer's state, held with the main view's resources (Resources::hzbState): the downsample's program. Its finished-group
-	// count is the pyramid's scratch (Resources::hzbScratch): zeroed by the first depth commit, then by each dispatch's last group.
+	// The SPD finished-group counter is zeroed by the first depth commit, then reset by each dispatch's last group.
 	struct HzbState
 	{
 		std::shared_ptr<const ComputeProgram> program;
@@ -43,22 +41,18 @@ namespace DCLF::Draws
 	struct HzbFrame
 	{
 		std::shared_ptr<const ComputeProgram> program;
-		// One single-pass downsample per kHzbDispatchMips levels, the first from scene depth, each next from the previous one's
-		// last level. Up to 4096 texels a side takes one.
+		// One SPD dispatch per kHzbDispatchMips levels. Up to 4096 texels a side needs only one.
 		struct Dispatch
 		{
-			Features::GpuOcclusion::HzbConstants constants{};  // its view indices the recording's (level and mips name them)
-			std::uint32_t level = 0;                            // its first target level: the source is the depth at 0, else the level before
+			Features::GpuOcclusion::HzbConstants constants{};  // View indices are filled in at recording.
+			std::uint32_t level = 0;                            // First target level. At 0 the source is scene depth.
 			std::uint32_t groupsX = 0, groupsY = 0;
 		};
 		std::vector<Dispatch> dispatches;
 	};
 
-	/**
-	 * @brief Builds the HZB in the ZPrepass segment after DCLF's depth draws, so it holds the native occluders plus DCLF's. On
-	 * AE that is before the first-person model's depth and the rooms' stencil draws: fewer occluders, never more. The chain
-	 * is one single-pass downsample (HzbCS.hlsl, FidelityFX SPD): per-level dispatches would need a full barrier each.
-	 */
+	// Runs after DCLF's depth draws, so it holds native and DCLF occluders. On AE it runs before the first-person depth and
+	// room stencil draws, which only means fewer occluders. SPD avoids a full barrier per level.
 	class HzbPass final : public org::TypedRenderGraphPass<HzbPass, HzbFrame, HzbBindings>
 	{
 	public:
@@ -77,19 +71,15 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The depth shape is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(static_cast<std::uint64_t>(segment)); }
 
 		HzbFrame Prepare(const HzbBindings&, const org::PassPrepareContext& a_preparation) const
 		{
 			using namespace Features::GpuOcclusion;
 			HzbFrame prepared{};
-			// Its epoch is the schedule's (the depth epoch's phase 2 block: the PassContext it was made with), where the depth is the
-			// world's final depth.
 			const auto now = segment;
 			if (!resources->hzb || !state->program || !resources->hzbScratch)
 				return prepared;
-			// The depth commit zeroed the group counter (hzbScratchZeroed).
 			const auto frame = CurrentFrame(a_preparation, now);
 			if (!frame)
 				return prepared;
@@ -104,7 +94,7 @@ namespace DCLF::Draws
 				dispatch.level = level;
 				auto& constants = dispatch.constants;
 				if (level == 0) {
-					// Mip 0 is half the padded domain; only the rendered area holds depth (the image can exceed the viewport).
+					// Mip 0 is half the padded domain. The image can be larger than the viewport.
 					constants.fromDepth = 1;
 					constants.domainSize[0] = resources->hzbWidth * 2;
 					constants.domainSize[1] = resources->hzbHeight * 2;
@@ -117,8 +107,7 @@ namespace DCLF::Draws
 				}
 				constants.targetSize[0] = levelSize(level, 0);
 				constants.targetSize[1] = levelSize(level, 1);
-				// A group reduces its tile through six levels; the last group continues past the sixth only when that level fits
-				// one tile (a domain of at most kHzbTile tiles a side).
+				// A group reduces its tile through six levels. The last group goes further only when level six fits in one tile.
 				const std::uint32_t domain = std::max(constants.domainSize[0], constants.domainSize[1]);
 				const std::uint32_t reach = domain / kHzbTile <= kHzbTile ? kHzbDispatchMips : 6u;
 				constants.mips = std::min(resources->hzbMips - level, reach);
@@ -168,10 +157,8 @@ namespace DCLF::Features::GpuOcclusion
 {
 	namespace
 	{
-		/**
-		 * @brief The HZB: mip 0 is half the depth's next power of two, so a mip is chosen from a screen extent by log2 alone. Padded
-		 * texels are filled with the far plane, which suppresses culling rather than causing it.
-		 */
+		// Mip 0 is half the depth's next power of two, so log2 of a screen extent picks the mip.
+		// Padding holds the far plane, which can only prevent culling, never cause it.
 		std::shared_ptr<const void> Setup(const Api::DepthPyramidSetup& a_setup, Api::DepthPyramid& a_out)
 		{
 			auto nextPowerOfTwo = [](std::uint32_t a_value) {
@@ -208,7 +195,6 @@ namespace DCLF::Features::GpuOcclusion
 			return state;
 		}
 
-		// Only while the setup gave a texture (the depth epoch's phase 2 block).
 		std::shared_ptr<org::RenderPass> MakePass(const Api::PassContext& a_context)
 		{
 			if (!a_context.PhaseTwo())

@@ -1,7 +1,7 @@
-// Particles' report lines (CS_DCLF_STATS, among the draws' async work): the particle snapshots, and with CS_DCLF_SET_PARITY the engine's
-// passes against them.
+// Particles' report lines under CS_DCLF_STATS: the snapshots, and with CS_DCLF_SET_PARITY the engine's passes against them.
 
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
+#include "Features/DrawcallLimitFix/Features/Particles/MasterParticles.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ProgramFamilySlots.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
@@ -18,8 +18,6 @@ namespace DCLF::Features::Particles
 	{
 		void Lines(std::string& a_text)
 		{
-			// The particle members in the installed tables: objects of an effect key (the Effect family's) whose pass is a particle system's
-			// (CS's EffectShaderFlags: the pass descriptor's bits).
 			std::uint32_t members = 0;
 			{
 				const auto& installedTables = Scene::FrameView::Get().GetTables();
@@ -41,15 +39,15 @@ namespace DCLF::Features::Particles
 									"published, {} records pruned\n",
 					on ? "on" : "off", members, c.followed, c.captures, c.unchanged, c.contended, c.expansions, c.expandedParticles, c.withoutSnapshot, c.frozen,
 					ParticleSnapshots::kFrozenRuns, c.aligned, c.published, c.pruned);
-			// CS_DCLF_SET_PARITY: the members' passes the engine registered (all withheld), against the snapshots the producer drew them from.
-			// Printed whenever the parity is on: a member under a stood-in root (every geometry of its reference DCLF's) is not culled by the
-			// engine at all, so 0 registrations is the expected answer there; a non-zero uncovered count is the defect.
+			// A member under a stood-in root is not culled by the engine at all, so 0 registrations is expected there. A non-zero uncovered count is the defect.
 			if (const auto p = TakePasses(); p.passes || (Diagnostics::Observe().claims && on)) {
 				const std::string first = p.first.empty() ? std::string() : fmt::format("; first {}", p.first);
 				text += fmt::format("[DCLF] particles' engine passes (CS_DCLF_SET_PARITY): {} passes of particle members the engine registered (withheld), {} of "
 									"them without a snapshot DCLF expanded in its last {} runs{}{}\n",
 					p.passes, p.uncovered, ParticleSnapshots::kCoveredRuns, p.uncovered ? " <- PARTICLES" : " <- OK", first);
 			}
+			// The master particle systems' lifetime and references (CS_DCLF_MASTER_PARTICLES).
+			MasterParticles::Lines(text);
 			a_text += text;
 		}
 	}

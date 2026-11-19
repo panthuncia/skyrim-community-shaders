@@ -1,6 +1,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -46,7 +47,9 @@ namespace DCLF::Features::Portals
 				Bindings bindings{};
 				bindings.queries = a_builder.ShaderResource(*b.queries).View();
 				bindings.results = a_builder.UnorderedAccess(*b.results).View();
-				// The programs are the frame's publication, named by the depth latch: an immutable pooled backing no pass declares.
+				// The programs are declared through their late-bound buffer, because the pass may run on the compute queue and the depth commit's
+				// upload fills the backing in this execution.
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
 				if (evaluate && b.inlineEvaluation) {
 					// One Inline dispatch: the queries and the results alone, and the trace (into the task buffer) when asked.
 					if (b.trace)
@@ -67,7 +70,6 @@ namespace DCLF::Features::Portals
 				return bindings;
 			}
 
-			// The depth shape and the batch's versions are the revision's (the ticket's host data).
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(evaluate); }
 
 			Prepared Prepare(const Bindings&, const org::PassPrepareContext& a_preparation) const
@@ -81,7 +83,6 @@ namespace DCLF::Features::Portals
 				prepared.evaluate = evaluate;
 				const auto& b = *prepared.batch;
 				auto& c = prepared.constants;
-				c.latchIndex = frame->latch->SrvIndex();
 				if (b.trace)
 					c.traceFrame = Scene::FrameView::Get().GetFrame();
 				c.queryCount = static_cast<std::uint32_t>(Draws::NamedUnitsOf(a_preparation, b.queries));
@@ -106,7 +107,7 @@ namespace DCLF::Features::Portals
 				c.indices = index(a_bindings.indices);
 				c.tasks = index(a_bindings.tasks);
 				c.dispatch = index(a_bindings.dispatch);
-				c.latchOffset = static_cast<std::uint32_t>(a_prepared.latch->Offset(a_recording.FrameSlot()));
+				Draws::SetLatchWords(c, *a_prepared.latch, a_recording.Run());
 				const auto bind = [&](std::size_t stage) {
 					const auto& program = *batch.programs[stage];
 					commands.BindLayout(program.layout->GetHandle());

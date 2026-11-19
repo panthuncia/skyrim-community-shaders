@@ -1,40 +1,13 @@
 #pragma once
 
-// The object contributor contracts (Api::InstallContext::RegisterTechnique, RegisterGeometryType, RegisterParent, RegisterObjectClass,
-// RegisterEntryClass, RegisterShading, RegisterFrameGlobals, RegisterMaterialPort and section 5's): what a feature adds to the objects DCLF draws. Three kinds, a section each
-// below:
-//
-// 1. Membership by an engine key: the objects of an engine technique or geometry type the feature ports (TechniqueContribution,
-//    GeometryTypeContribution). The key is the engine's own value, so nothing here grows with a feature.
-// 2. Membership by a Core class: objects Core recognises but rejects, or holds back, until a feature takes them - the leaves under an
-//    engine parent (EngineParent and ParentLeaves: ParentContribution), an object class Core's ports derive (ObjectClass:
-//    ObjectClassContribution), and an entry class whose records wait on a coordinator component (EntryClass: the component's
-//    entryClass.follows and takes, Api/CoordinatorComponents.h; or an owner class, by its entries' reference's form type:
-//    EntryClassContribution). A view is the same pattern for an engine view (EngineView, Api/Views.h).
-// 3. Derivations: the per-object values the Lighting port derives from a property of the feature's (ShadingContribution), and the engine
-//    globals that derivation reads, captured with the frame's (FrameGlobalsContribution).
-// 4. Material ports: an engine shader other than Lighting whose objects Core classifies, captures and draws through the feature's port
-//    (MaterialPortContribution, Api::InstallContext::RegisterMaterialPort): its property and material classes, its constant space, the rules
-//    Core's classification and builds read as data, and the callbacks Core makes per event (a capture, a classification, an evaluation, a
-//    shading sample).
-// 5. Lighting join rules: what a CS feature's hooks on the Lighting shader (kind 0: GetRenderPasses, GetPixelTechnique, SetupGeometry,
-//    SetupSkin) add to its objects' captures, descriptors, keys and record flags (ReferenceFact, DeclareGeometryExtra, PropertyBits,
-//    LightingObjectFlag, LightingKeyBits, LightingPassRules): a capture's callback per capture, a join's per join, a pass rule's per derive,
-//    and what Core reads per frame per object or pipeline resolved once at install (the record bit pair, the pixel split, the raw
-//    technique rule). The material hooks (SetupMaterial) are the material contributors' (Api/Materials.h).
-//
-// A membership is read as data where Core decides (Core/Extensions/ObjectContributors.h: Extensions::TechniqueObjectFlags,
-// PropertyFlagRules, GeometryTypeOn, GeometryTypeMoves, GeometryTypeRanged, PlannedItemClass, EntryClassOf, OwnerClassOf, ParentAdmits,
-// ObjectClassOn, CategoryRoots; Core/Extensions/CoordinatorComponents.h: EntryClassTaken), never called per object (a class's category root: per frame). A derivation
-// is called per sampled property or per frame, never per object.
-//
-// Adding a Core class for a feature (section 2) is the same three steps whichever enum it goes in:
-// - its value in the enum here, before Count, saying what Core recognises (its Ineligible reason, its trait) and which feature takes it;
-// - Core's test of it where Core decides, through the Extensions query above (Core names the value, never the feature);
-// - the feature's registration of it, under its toggle (an entry class: the component that follows it).
-// The install fails a value a second feature claims, so no value is shared. What a contribution sets that the shaders read (a technique's
-// object flags) stays compile-time: the feature declares the bits in its own header, and Features/Manifest.cpp checks them against Core's
-// and each other's; its record words go with its table family (Api/TableFamilies.h).
+// What a feature adds to the set of objects DCLF draws. There are five kinds, one section each:
+// 1. Objects picked by an engine key, such as a Lighting technique or a geometry type.
+// 2. Objects Core recognises but holds back until a feature takes their class.
+// 3. Per-object values derived from a feature's property, and the engine globals they read.
+// 4. Material ports for engine shaders other than Lighting.
+// 5. Join rules for CS features that hook the Lighting shader.
+// Core reads these registrations as data. None of the callbacks run per object per frame.
+// Each enum value in section 2 belongs to one feature, and the install fails if a second one claims it.
 
 #include "Features/DrawcallLimitFix/Api/ClassifyInputs.h"
 #include "Features/DrawcallLimitFix/Api/EntryRanges.h"
@@ -56,26 +29,20 @@ namespace RE
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/ObjectContributors.h), which the features inside DCLF include for it.
+	// Defined in Core/Extensions/ObjectContributors.h.
 	class ShadingDerivation;
 	class LightingJoinView;
-	// Defined by Core (Core/Extensions/MaterialPorts.h), likewise.
+	// Defined in Core/Extensions/MaterialPorts.h.
 	class MaterialPortCapture;
 	class MaterialPortDerivation;
 	class MaterialPortEvaluation;
 	class MaterialPortShading;
-	// Defined below (section 2) and by Api/FrameValues.h: a geometry type contribution names them (value None: 0).
 	enum class EntryClass : std::uint8_t;
 	enum class FrameValueItemClass : std::uint8_t;
 
 	// ---- 1. Membership by an engine key.
 
-	/**
-	 * @brief Core's per-object VS extras rows (the extras buffer) a technique's objects take, beside what their record holds.
-	 *
-	 * - None: none.
-	 * - LandBlend: a land block's blend rows (kObjectLandBlend: its LandBlendParams and the frame's land fade).
-	 */
+	/** @brief Extra per-object vertex shader rows a technique's objects need beyond their record. */
 	enum class ObjectExtras : std::uint8_t
 	{
 		None,
@@ -83,17 +50,10 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A technique contribution: an engine Lighting technique whose objects the feature ports. Read where the objects are classified
-	 * and joined, as data (no call per object).
+	 * @brief An engine Lighting technique whose objects the feature ports.
 	 *
-	 * - technique: the Lighting technique (SIE::ShaderCache::LightingShaderTechniques; below Extensions::kTechniqueSlots), one feature's.
-	 * - toggle: a registered toggle; the technique's objects are DCLF's while it is on (the Lighting port's eligibility).
-	 * - objectFlags: the record flags its objects carry (the joins' static flags), the feature's own bits (Records.h, kFeatureObjectFlags).
-	 * - propertyFlags, geometryType (optional): the Lighting property flags (BSShaderProperty::EShaderPropertyFlag bits) that mark its
-	 *   objects whatever technique the flags pick, and the geometry type such an object must be: an object whose property has any of them
-	 *   is DCLF's only while toggle is on and its geometry is geometryType, else Ineligible::Lod (object and terrain LOD: Features/Lod).
-	 *   Resolved once into Core's flag rules (Extensions::PropertyFlagRules), which the Lighting port's eligibility reads.
-	 * - extras (optional): Core's extras rows its objects take (read per join: Extensions::TechniqueExtras).
+	 * - propertyFlags, geometryType: objects whose property has any of these flags belong to the feature whatever technique they use.
+	 *   They are DCLF's only while the toggle is on and the geometry matches, otherwise they stay native as LOD.
 	 */
 	struct TechniqueContribution
 	{
@@ -106,14 +66,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A technique gate (Api::InstallContext::RegisterTechniqueGate): while a classify input holds, a contributed technique's objects
-	 * are DCLF's only while a further toggle is on too (a CS feature that redraws them its own way: Integrations/TerrainBlending's terrain,
-	 * which DCLF then draws as that feature does). Resolved once into the technique's contribution, read as data where the Lighting port's
-	 * eligibility reads its toggle (no call per object; the input is the scene pass's snapshot).
-	 *
-	 * - technique: a technique a feature contributed (registered before), one gate's.
-	 * - whileOn: the registered input under which the gate applies.
-	 * - needs: the registered toggle the technique needs while whileOn holds.
+	 * @brief While a classify input holds, a contributed technique also needs a second toggle.
+	 * Used when another CS feature draws those objects its own way, such as Terrain Blending.
 	 */
 	struct TechniqueGate
 	{
@@ -122,37 +76,19 @@ namespace DCLF::Api
 		ToggleId needs;
 	};
 
-	/**
-	 * @brief The mirrored node kind bits an entry class rule may test (GeometryTypeContribution::EntryRule::parentKind, the mirror's capture
-	 * kind as is; Core checks they match it). FaceGen: a BSFaceGenNiNode.
-	 */
+	/** @brief Mirrored node kind bit for a BSFaceGenNiNode, tested by an entry class rule. */
 	inline constexpr std::uint32_t kMirroredKindFaceGen = 1u << 7;
 
 	/**
-	 * @brief A geometry type contribution: an engine geometry type (RE::BSGeometry::Type) whose objects the feature ports, a class of DCLF's
-	 * while its toggle is on. Read where the objects are classified, tracked and captured (the Lighting and Effect ports' eligibility, the
-	 * walk's traits, the engine side's captures), as data (no call per object).
+	 * @brief An engine geometry type whose objects the feature ports while its toggle is on.
 	 *
-	 * - geometryType: the type (below Extensions::kGeometryTypeSlots), one feature's.
-	 * - toggle: a registered toggle (none only for a contribution that sets entry alone: its type is no class of DCLF's).
-	 * - propertyFlags (optional): its objects are only those whose Lighting property has any of these flags (BSShaderProperty::
-	 *   EShaderPropertyFlag bits), drawn as a tri-shape while toggle is on, Ineligible::Lod while off (Eligibility::Static: object LOD's
-	 *   sub-index shapes, Features/Lod); 0: every object of the type.
-	 * - itemClass (optional): the FrameValues item class (Api/FrameValues.h) its skinless objects with a palette block are. The walk sizes
-	 *   a member's block by the class's rule while toggle is on (for Core's capture of a complete particle system: its units), the class's
-	 *   geometry source is its slot's, the coordinator plans the item as the class and the frame values' parity leaves its rows to the
-	 *   class (Extensions::PlannedItemClass). None: none.
-	 * - moves: its objects change every frame invisibly to the walk while toggle is on (a particle system's bound and quads): movers in
-	 *   the walk's per-frame traits, placed by FrameValues every frame, their own updates their move events.
-	 * - entry (optional): the entry class (Api::EntryClass) its objects under a parent with any of entry.parentKind are, whatever toggle:
-	 *   resolved once per tracked entry by the walk, and read by the eligibility and the attach's prepare (Extensions::EntryClassOf).
-	 *   - perFrame: its entries' records follow what the following component publishes: classified every frame while the class is taken,
-	 *     and given the walk's per-frame entry-class trait (no root motion of their own; the light path's).
-	 *   - holdsParent: an entry's parent is held from the attach's pins as its source node (EntryWrite::source: a face shape's head).
-	 * - ranges (optional): its objects draw the index ranges this captures (Api/EntryRanges.h: object LOD's visible segments' runs,
-	 *   Features/Lod), whatever toggle: called on the capturing thread inside the engine-read window, per record capture (an attach, or the
-	 *   type's ranges update: Extensions::PushRangesUpdate), never per frame; a_out arrives empty. The coordinator keeps
-	 *   them by tracked entry from its attach (Extensions::GeometryTypeRanged), and the walk draws them as a chain of range slots.
+	 * - toggle: may be empty only when the contribution sets just the entry rule.
+	 * - propertyFlags: limits the objects to Lighting properties with any of these flags. 0 means every object of the type.
+	 * - itemClass: the FrameValues item class for its skinless objects that have a palette block.
+	 * - moves: its objects change every frame without events, such as a particle system's bounds, so they are placed every frame.
+	 * - entry: the entry class its objects get when under a parent of entry.parentKind, whatever the toggle.
+	 *   perFrame entries are classified every frame. holdsParent keeps the parent node alive as the entry's source.
+	 * - ranges: fills the index ranges to draw. Called on the capturing thread in the engine-read window, once per record capture.
 	 */
 	struct GeometryTypeContribution
 	{
@@ -173,41 +109,30 @@ namespace DCLF::Api
 		void (*ranges)(const void* a_geometry, std::vector<EntryRange>& a_out) = nullptr;
 	};
 
-	// ---- 2. Membership by a Core class (a value per class a feature takes: see the steps above).
+	// ---- 2. Membership by a Core class.
 
-	/** @brief An engine parent class Core rejects the leaves under (Eligibility's parent reasons), which a parent contribution may admit. */
+	/** @brief An engine parent class whose leaves Core rejects unless a parent contribution admits them. */
 	enum class EngineParent : std::uint8_t
 	{
-		Billboard,  // NiBillboardNode (Ineligible::Billboard): its OnVisible turns it to each culling camera
-		Switch,     // NiSwitchNode (Ineligible::Switch): its OnVisible culls the selected child alone
-		Actor,      // a node whose reference is an actor (the mirror's NodeRecord::actor; Ineligible::Actor): the actor's own 3D
+		Billboard,  // NiBillboardNode. Its OnVisible turns it to face each culling camera.
+		Switch,     // NiSwitchNode. Its OnVisible culls all but the selected child.
+		Actor,      // A node whose reference is an actor.
 		Count,
 	};
 
-	/** @brief The leaves under such a parent a parent contribution takes. */
+	/** @brief Which leaves under such a parent a parent contribution takes. */
 	enum class ParentLeaves : std::uint8_t
 	{
-		// A skinless BSEffectShaderProperty BSTriShape under exactly one such parent whose mode Core reads (a billboard's face mode, 0-5):
-		// its key carries the mode (its family's spare key bits: Records.h, kRasterEffectBillboardShift), which the vertex stage turns it
-		// by.
+		// Skinless effect tri-shapes under exactly one billboard. The billboard's face mode goes in the key so the vertex stage can turn them.
 		TurnedEffectShapes,
-		// A particle system (ParticleGeometryType) under any number of them.
 		ParticleSystems,
-		// Every leaf under any number of them, in the frames each selects the branch it lies on: the classification's chain test
-		// (Coordinator::SwitchSelects), on the selections Core follows by event for the primary cull (SwitchEvents).
+		// Every leaf, drawn only in the frames where each switch selects its branch.
 		SelectedLeaves,
-		// Every leaf under any number of them, whatever its class: the classification's chain test.
 		AllLeaves,
 		Count,
 	};
 
-	/**
-	 * @brief A parent contribution: the leaves under an engine parent class Core rejects them under that the feature ports, while its
-	 * toggle is on. Read where the objects are classified (Coordinator::ClassifyFrame, the joins' keys) and by the census, as data.
-	 *
-	 * - parent, leaves: what it admits, one feature's.
-	 * - toggle: a registered toggle.
-	 */
+	/** @brief Lets the feature port the leaves under an engine parent class that Core would otherwise reject. */
 	struct ParentContribution
 	{
 		EngineParent parent = EngineParent::Billboard;
@@ -215,67 +140,42 @@ namespace DCLF::Api
 		ToggleId toggle;
 	};
 
-	/**
-	 * @brief An object class Core's ports recognize and derive (its draw state, its range of the main pass) but leave native until a
-	 * feature takes it.
-	 */
+	/** @brief An object class Core can derive but leaves native until a feature takes it. */
 	enum class ObjectClass : std::uint8_t
 	{
-		// A decal (kDecal, kDynamicDecal: accumulation hints 2 and 3), Lighting's or the Effect port's, and the opaque effects drawn through
-		// the opaque decal group (Ineligible::Decal, kEffectVariantDecal, Ineligible::EffectOpaque).
+		// Decals (accumulation hints 2 and 3) and the opaque effects drawn through the opaque decal group.
 		Decal,
-		// A multi-index shape's layer (the additional property's passes, hint 12: the decal group 3) and the MultiIndexSparkle technique
-		// (Ineligible::MultiIndex).
+		// The layers of a multi-index shape and the MultiIndexSparkle technique.
 		Layer,
-		// Object LOD: a BSSubIndexTriShape with the LOD object flags under TES::lodLandRoot, drawn by its visible segments (the LODObjects
-		// and LODObjectHD techniques; Ineligible::Lod), and the LOD root listed as a category node (Features/Lod).
+		// Object LOD sub-index shapes under TES::lodLandRoot, drawn by their visible segments.
 		LodObjects,
-		// Terrain LOD: a land block's shape under TES::lodLandRoot (the LODLand and LODLandNoise techniques; Ineligible::Lod), and the LOD
-		// root listed as a category node (Features/Lod).
+		// Terrain LOD land block shapes under TES::lodLandRoot.
 		LodTerrain,
-		// Tree LOD: the instance groups under the LOD trees root (BSDistantTreeShaderProperty shapes), drawn from the mirrored instance
-		// records as the TreeInstances draw family (Api/DrawFamilies.h: its tables, its cull and draws in the depth segment and in a trees
-		// view's faces; its decision) instead of the engine's passes (Features/TreeLod): the class gates the family.
+		// Tree LOD instance groups, drawn from mirrored instance records as the TreeInstances draw family.
 		TreeLod,
-		// An effect: a BSEffectShaderProperty object, the Effect port's (DeriveEffectDescriptors, Effect.hlsl): a blended mesh in the forward
-		// epoch's sort, a decal in the decal groups, a skinned one through the skin palette, a particle system with its geometry type's
-		// contribution (Ineligible::NotLightingShader without the class), and the effect controllers' material captures (Features/Effects).
+		// BSEffectShaderProperty objects, drawn by the Effect port.
 		Effect,
-		// An opaque effect (hint 0: no blending alpha property, no Falloff, depth tested and written) drawn through the opaque decal group
-		// without its bias (Ineligible::EffectOpaque without the class, or while Decal is off). Read whether it is taken, whatever its toggle
-		// (Extensions::ObjectClassTaken): the Effect port is reached only while Effect is on (Features/Effects).
+		// Opaque effects drawn through the opaque decal group without its bias.
+		// Read as taken whatever its toggle, because the Effect port only runs while Effect is on.
 		OpaqueEffect,
-		// A skinned shape: a single-partition NiSkinInstance, drawn with its palette from the engine (Ineligible::Skinned without the class;
-		// the Lighting port's kSkinned, the walk's palette rows, the Effect port's skinned effects; Features/Skins).
+		// Shapes with a single-partition NiSkinInstance.
 		Skinned,
-		// A skin of several partitions, or a BSDismemberSkinInstance (LOD trees, actor bodies): one draw per partition the engine would draw
-		// (Ineligible::SkinShape without the class; needs Skinned's toggle: Features/Skins).
+		// Skins with several partitions, or a BSDismemberSkinInstance. Needs Skinned's toggle too.
 		SkinPartitions,
-		// A blended object the forward epoch draws (Lighting alpha-blended or material alpha < 1, the Effect port's meshes, a view's forward
-		// decals); the class gates the forward epoch itself (its coverage, recording and execution) and the other forward classes' toggles
-		// (Features/Forward).
+		// Blended objects. This class gates the whole forward epoch.
 		Forward,
-		// A refraction object (kRefraction, kTempRefraction): its Utility RENDER_NORMAL pass, drawn into the refraction normals by the forward
-		// epoch's refraction range (needs Forward's toggle: Features/Forward).
+		// Refraction objects, drawn into the refraction normals. Needs Forward's toggle too.
 		Refraction,
-		// Grass: the BSGrassShaderProperty instance shapes, drawn from the mirrored instance records as the Grass draw family
-		// (Api/DrawFamilies.h: its tables, its cull and draws in the depth segment and the colour pass; its decision) instead of the
-		// engine's passes (Features/Grass): the class gates the family.
+		// Grass instance shapes, drawn from mirrored instance records as the Grass draw family.
 		Grass,
 		Count,
 	};
 
 	/**
-	 * @brief An object class contribution: the class's objects are DCLF's while the toggle is on. Read where the objects are classified
-	 * (the Lighting and Effect ports' eligibility, the primary entries and membership passes, the category nodes listed, the material
-	 * captures), and by the paths that draw a class (tree LOD's decision and pipelines, a view's LOD roots), as data (no call per object).
-	 * A class standing for a load-time switch is read as taken, whatever the toggle (Extensions::ObjectClassTaken).
+	 * @brief Makes an object class DCLF's while the toggle is on.
 	 *
-	 * - objectClass: the class, one feature's.
-	 * - toggle: a registered toggle.
-	 * - categoryRoot (optional): the engine root the class's objects are under, listed as a category node while the class is on (the
-	 *   category capture: render thread, the frame's start, every frame; null: none now). Called per frame, never per object; two classes
-	 *   may list the same root (TES::lodLandRoot: Features/Lod's).
+	 * - categoryRoot: the engine root the class's objects live under, or null for none yet. Called once per frame on the render thread.
+	 *   Two classes may share a root.
 	 */
 	struct ObjectClassContribution
 	{
@@ -284,41 +184,54 @@ namespace DCLF::Api
 		RE::NiNode* (*categoryRoot)() = nullptr;
 	};
 
+	/** @brief Receives the roots listed by UnheldRootsContribution::gather. */
+	class UnheldRootSink
+	{
+	public:
+		/** @brief Adds one root. It must stay alive until leave is called. */
+		virtual void Add(RE::NiNode* a_root) = 0;
+
+	protected:
+		~UnheldRootSink() = default;
+	};
+
 	/**
-	 * @brief A class of tracked entries Core's walk classifies but whose records wait on a coordinator component: the component that
-	 * follows it (CoordinatorComponent::entryClass, Api/CoordinatorComponents.h) supplies what their writes need, and its objects are
-	 * DCLF's only while that component takes it. Read as data by the eligibility, the walk and the frame's addresses
-	 * (Extensions::EntryClassTaken).
+	 * @brief Parentless roots owned by an engine array, such as the particle manager's master particle systems.
+	 * The engine frees them on a low reference count, so DCLF never holds a reference. Every removal must arrive as an event.
+	 *
+	 * - owner: the node whose child edits add or remove roots. An edit triggers a fresh gather and diff.
+	 * - enter, leave: bracket gather and the mirror pushes, so no removal lands between listing a root and capturing it.
+	 * At most one feature contributes this.
+	 */
+	struct UnheldRootsContribution
+	{
+		RE::NiNode* (*owner)() = nullptr;
+		void (*enter)() = nullptr;
+		void (*leave)() = nullptr;
+		void (*gather)(UnheldRootSink& a_sink) = nullptr;
+	};
+
+	/**
+	 * @brief A class of tracked entries whose records wait on a coordinator component.
+	 * The objects are DCLF's only while the component that follows the class takes it.
 	 */
 	enum class EntryClass : std::uint8_t
 	{
 		None,
-		// A dynamic shape under a BSFaceGenNiNode (an NPC's head, mouth, hair, brows): its positions are its head's, published by the
-		// engine's face morphing, not its buffers'. Its record waits for its second vertex stream (Features/Faces: matched by its geometry
-		// type contribution's entry rule, classified every frame, its head held).
+		// A dynamic shape under a BSFaceGenNiNode. Its positions come from the engine's face morphing, not its buffers.
 		FaceShape,
-		// A tracked entry owned by an actor (its leaf's reference an ActorCharacter): the actor's 3D, carried items too. An owner class
-		// (EntryClassContribution: Features/Actors, whatever its toggle), apart from the type-matched class (a face shape is both).
+		// An entry owned by an actor, including carried items. An entry can be both this and FaceShape.
 		ActorOwned,
 		Count,
 	};
 
 	/**
-	 * @brief An entry class contribution: an owner class, the tracked entries whose leaf's reference (the mirror's NodeRecord::userData) is
-	 * of form type ownerFormType (RE::FormType). Resolved once per tracked entry by the walk from the mirror, whatever toggle
-	 * (Extensions::OwnerClassOf: a table by form type, built at the install), and kept apart from the type-matched entry class
-	 * (GeometryTypeContribution::entry), which an entry may also have. Read as data where Core decides, never called.
+	 * @brief An owner class: the tracked entries whose leaf's reference has form type ownerFormType.
 	 *
-	 * - entryClass: the class (not None; one contribution's, and no geometry type's entry class).
-	 * - name: what the walk's timing report calls its entries (EvaluateKind::Owned: "<name>", "<name> without a record").
-	 * - ownerFormType: the form type (one contribution's).
-	 * - everyFrame: its entries' records change with no event (an actor's equipment shown, hidden and swapped): per frame whatever their
-	 *   traits (the walk's owner class trait), their frame verdict retaken by the light path (FrameVerdictKept), a hidden verdict never
-	 *   static (Eligibility::HiddenStatic).
-	 * - ownMotion: its entries move with no controller or body on their chain (an actor's skeleton: Havok's behaviour graph): placed every
-	 *   frame (FrameValues' movers), their root motion never read, node and motion events never reclassify them. Needs everyFrame.
-	 * - published: its members are listed for the frame (SceneTables::classMembers: the members of the shading
-	 *   fields that name the class, Api/ShadingFields.h; Integrations/AdvancedSkin's wetness).
+	 * - name: what the walk's timing report calls these entries.
+	 * - everyFrame: the records change without events, such as an actor's equipment, so they are rebuilt every frame.
+	 * - ownMotion: the entries move with nothing on their chain to say so, such as an actor's skeleton. Needs everyFrame.
+	 * - published: the members are listed each frame for shading fields that name the class.
 	 */
 	struct EntryClassContribution
 	{
@@ -332,17 +245,12 @@ namespace DCLF::Api
 
 	// ---- 3. Derivations.
 
-	/**
-	 * @brief The feature block's words: the shading row's and the object record's (BindlessShading::featureBlock, BindlessObject::
-	 * featureBlock; DCLFObjects.hlsli's, frozen). One contribution claims it.
-	 */
+	/** @brief Size of the feature block in the shading row and object record. Frozen by DCLFObjects.hlsli. */
 	inline constexpr std::uint32_t kShadingBlockWords = 8;
 
 	/**
-	 * @brief A Lighting VS PerGeometry variable a block supplies per object (ShadingContribution::vsVariables): the variable
-	 * (ShaderConstants::LightingVS index), its first word in the block, the floats it takes from there (the rest of the variable the
-	 * pipeline template's), and the first `compared` of those a capture parity compares with the engine's (the rest depend on native draw
-	 * order).
+	 * @brief A Lighting VS PerGeometry variable supplied from the feature block.
+	 * Only the first `compared` floats are checked by capture parity, because the rest depend on native draw order.
 	 */
 	struct ShadingVariable
 	{
@@ -351,16 +259,11 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A shading contribution: the per-object values SetupGeometry derives for a property of the feature's (the shading rows' tree
-	 * parameters and wind timers), what a member draws with until the feature's pass has its own.
+	 * @brief Per-object values SetupGeometry derives for the feature's property, such as tree parameters and wind timers.
 	 *
-	 * - derive: FrameValues' pool (a shading sample: the slots shading events named, inside the engine-read window and the frame's
-	 *   FrameGlobals scope) or a parity's sample, for a property with any of propertyFlags: writes ShadingDerivation::block (zero-filled
-	 *   before). Called per sampled property that has the flags, never per object per frame.
-	 * - objectFlags, blockWords, vsVariables: the feature block (one contribution's; a second claimant fails the install). The shading row
-	 *   keeps the first blockWords words derive wrote (the rest zero); for an object with any of objectFlags (its technique contribution's)
-	 *   the Lighting port draws vsVariables from them, not from the pipeline template. Read as data, resolved once
-	 *   (Extensions::ShadingBlockRule); vsVariables kept as given (static storage).
+	 * - derive: writes the zero-filled block. Called once per sampled property with the flags, never per object per frame.
+	 * - objectFlags, blockWords, vsVariables: one contribution owns the feature block. Objects with any of objectFlags draw
+	 *   vsVariables from it instead of the pipeline template. vsVariables must point to static storage.
 	 */
 	struct ShadingContribution
 	{
@@ -372,7 +275,7 @@ namespace DCLF::Api
 		std::span<const ShadingVariable> vsVariables;
 	};
 
-	/** @brief A registered frame-globals contribution (RegisterFrameGlobals' result): its first float in FrameGlobals::features. */
+	/** @brief Where a frame-globals contribution's first float sits in FrameGlobals::features. */
 	struct FrameGlobalsSlot
 	{
 		std::uint32_t first = ~0u;
@@ -380,11 +283,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A frame-globals contribution: engine globals a feature's derivations read, captured with the frame's (FrameGlobals), so the
-	 * scene work and FrameValues' pool read them from the capture their frame carries, never from the engine.
-	 *
-	 * - capture: the render thread at the frame's start (FrameGlobals::Capture, the engine's update done): the frame's floats into
-	 *   a_out[0, floats), zero-filled before.
+	 * @brief Engine globals a feature's derivations read, captured once per frame so workers never read the engine.
+	 * capture runs on the render thread at the frame's start and fills a zeroed array of `floats`.
 	 */
 	struct FrameGlobalsContribution
 	{
@@ -396,10 +296,8 @@ namespace DCLF::Api
 	// ---- 4. Material ports.
 
 	/**
-	 * @brief A port's constant space for one stage: its engine shader's variables by index (as its Setup functions write them), each 4 floats
-	 * of a ConstantBlock but the `sized` ones (variable, floats) and the `scratch` ones nothing reads (one shared region: StageLayout,
-	 * Core/Extensions/MaterialPorts.h); which constant group each belongs to (PerTechnique, PerMaterial, PerGeometry: b0-b2) and each
-	 * group's first variable; the shader's member names by variable.
+	 * @brief A port's constants for one stage, indexed as the engine shader's Setup functions write them.
+	 * Each variable is 4 floats except the `sized` ones. `scratch` variables are never read and share one region.
 	 */
 	struct MaterialStageSpace
 	{
@@ -411,31 +309,25 @@ namespace DCLF::Api
 		std::span<const std::string_view> names;
 	};
 
-	/**
-	 * @brief What Core's classification, joins and material records read of a port, as data (Extensions::PortRules; Core's Lighting has its
-	 * own, kind 0).
-	 */
+	/** @brief Per-port rules that Core's classification, joins and material records read as data. */
 	struct MaterialPortRules
 	{
-		std::uint32_t passEnumBase = 0;       // the engine's pass enum less the pass descriptor (MakeRenderPass's): a member's and a decal's order key
-		std::uint32_t deferredPixelBit = 0;   // the pixel descriptor's G-buffer bit, dropped for a forward decal (Coordinator::ViewDecalForward)
-		std::uint32_t projectedPassBit = 0;   // the pass descriptor's ProjectedUV binding bit (0: none)
-		std::uint32_t frameVSVariable = ~0u;  // the VS variable a record takes from the frame (the texture transforms' TexcoordOffset)
-		bool techniqueRows = true;            // false: its keys read technique row 0 (no Lighting technique, no shadow mask)
-		bool rawPermutation = false;          // its permutation: the raw VS, the raw PS bits the lookup dropped, InWorld, no feature bits
-		bool signatureComponents = true;      // false: its records have no signature-sourced component (MaterialSources::Signature)
-		bool emissiveAlwaysListed = false;    // its property's emissive colour is listed whatever its flags (the walk's emittance events)
-		bool turnedByBillboards = false;      // ParentLeaves::TurnedEffectShapes' leaves are its properties' (Coordinator::BillboardModeOf)
-		bool particleGeometry = false;        // the particle geometry types' leaves with its property are its to classify (Eligibility::Static)
+		std::uint32_t passEnumBase = 0;       // Engine pass enum minus the pass descriptor. Gives the order key.
+		std::uint32_t deferredPixelBit = 0;   // G-buffer bit in the pixel descriptor, dropped for a forward decal
+		std::uint32_t projectedPassBit = 0;   // ProjectedUV bit in the pass descriptor, or 0
+		std::uint32_t frameVSVariable = ~0u;  // VS variable a record takes from the frame
+		bool techniqueRows = true;            // false: keys read technique row 0
+		bool rawPermutation = false;          // permutation is the raw VS and PS bits with no feature bits
+		bool signatureComponents = true;      // false: no signature-sourced components
+		bool emissiveAlwaysListed = false;    // emissive colour is listed whatever the property flags
+		bool turnedByBillboards = false;      // TurnedEffectShapes leaves belong to this port
+		bool particleGeometry = false;        // particle geometry leaves with this property belong to this port
 	};
 
-	/** @brief The most frame variables a port declares (MaterialPortContribution::frameVariables; a material row's places: grow it first). */
+	/** @brief Most frame variables a port may declare. A material row has this many places, so grow both together. */
 	inline constexpr std::size_t kMaxMaterialFrameVariables = 4;
 
-	/**
-	 * @brief A frame variable's component read (MaterialFrameVariable): the float at `source` bytes into the live material, times the float
-	 * at `scale` unless it is kNoScale (one product, or the bits copied: what the port's evaluate writes, bit for bit).
-	 */
+	/** @brief One component of a frame variable: the float at `source`, times the float at `scale` unless it is kNoScale. */
 	struct MaterialFrameComponent
 	{
 		static constexpr std::uint16_t kNoScale = 0xFFFF;
@@ -444,15 +336,9 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A variable of a port's records whose value the frame owns (MaterialPortContribution::frameVariables), as TexcoordOffset is
-	 * (MaterialPortRules::frameVSVariable): while a feature patches the frame's material variables (InstallContext::
-	 * RegisterFrameVSVariablePatch: Features/TextureTransforms), every material row placing it is written from the live material each
-	 * frame, so the record's value is never drawn and a write confined to its bytes captures nothing (no record rewrite, no publication).
-	 * Read as data (no call per row per frame).
-	 *
-	 * - pixel, variable: its stage (false: VS) and variable in the port's space; the components the record writes are the row's.
-	 * - first, end: the material bytes a write of which is the frame's: the values' sources the record reads for nothing else.
-	 * - components: the read under a pass descriptor with none of alternateBits; alternate with any of them (the port's evaluate's split).
+	 * @brief A record variable whose value comes from the live material each frame, like TexcoordOffset.
+	 * Writes that touch only bytes [first, end) then need no record rewrite.
+	 * The `alternate` components apply under a pass descriptor with any of alternateBits.
 	 */
 	struct MaterialFrameVariable
 	{
@@ -469,31 +355,15 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A material port: the objects of an engine shader (other than Lighting, which is Core's) whose property and material Core captures
-	 * and whose objects it classifies, joins and draws through the port while its class is on. Read where the objects are captured,
-	 * classified and joined, and where the material records are evaluated and packed, as data resolved once at install
-	 * (Extensions::MaterialPorts, by kind: the index records carry, PropertyRecord::port, MaterialSnapshot::port, LightingDescriptors::port,
-	 * MaterialRecord::kind); the callbacks run per event, never per object per frame.
+	 * @brief Ports an engine shader other than Lighting. Core captures, classifies and draws its objects while its class is on.
 	 *
-	 * - shaderType: its engine shader (RE::BSShader::Type), one port's; never Lighting.
-	 * - objectClass: the class whose toggle turns it on (registered before).
-	 * - propertyRtti, materialVtable: its property's RTTI and its material's vtable, called once at install.
-	 * - materialBytes, textureFields: the material bytes a snapshot keeps, and its NiSourceTexture fields (offsets).
-	 * - vs, ps: its constant space (at most 64 variables a stage).
-	 * - rules: what Core reads as data.
-	 * - frameVariables: the variables of its records the frame owns (MaterialFrameVariable, at most kMaxMaterialFrameVariables; kept as
-	 *   given: static storage).
-	 * - capture: the property's capture (SceneCapture::CaptureProperty, in the engine-read window or under the engine call that holds it):
-	 *   what the port's derive and shading read of the property and its material into the record.
-	 * - derive: per classification, join or membership pass (any thread): the object's descriptors from its records, or why it stays
-	 *   native. Pure.
-	 * - evaluate: per material evaluation (the scene work and its pool): the record of a snapshot of its material under a pass descriptor;
-	 *   false for one the port does not cover. Pure.
-	 * - shading: per shading item (FrameValues' pool, in the engine-read window): the shading row of its property. Pure but for the reads.
-	 * - variants, variantNames: the census's split of its variant reason (a bit each, named).
-	 * - name: the census's name of its objects' classes ("<name>: ..." where Lighting's read "lighting: ...").
-	 * - emissiveOf: per external emittance re-point (SetExternalEmittance's hook, any thread the engine calls it on): the colour its
-	 *   property's emissive points at now (the record's emissive, its capture's); null: its emissive is never re-pointed. Pure.
+	 * - textureFields: offsets of the NiSourceTexture fields in the material.
+	 * - vs, ps: at most 64 variables per stage.
+	 * - frameVariables: at most kMaxMaterialFrameVariables, in static storage.
+	 * - capture: copies what derive and shading need. Runs in the engine-read window or under the engine call that holds the property.
+	 * - derive, evaluate, shading: pure. evaluate returns false for a material the port does not cover.
+	 * - name: the census label for this port's objects.
+	 * - emissiveOf: the colour the emissive points at after SetExternalEmittance. Any thread. Null if it is never re-pointed.
 	 */
 	struct MaterialPortContribution
 	{
@@ -516,11 +386,9 @@ namespace DCLF::Api
 		const void* (*emissiveOf)(const RE::BSShaderProperty& a_property) = nullptr;
 	};
 
-	// ---- 5. Lighting join rules (Lighting's objects only: LightingDescriptors::port 0). The view their callbacks get (LightingJoinView,
-	// Core's) holds the object's records: its property's flags, alpha, material feature and contributor bits, its leaf's alpha property, its
-	// geometry's declared extra value and skin, its node's reference facts.
+	// ---- 5. Lighting join rules. These apply to Lighting objects only.
 
-	/** @brief A registered reference fact (RegisterReferenceFact's result): its bit in the node record's facts (LightingJoinView::Fact). */
+	/** @brief A registered reference fact's bit in the node record. */
 	struct ReferenceFactId
 	{
 		std::uint32_t index = ~0u;
@@ -528,14 +396,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A reference fact (Api::InstallContext::RegisterReferenceFact): a per-reference engine fact a feature's join rule reads, captured
-	 * with the node's record (SceneCapture::NodeRecord's facts: one bit each; a change is the record's kExtra difference, as the BSX
-	 * flags'). Called per node capture (the capturing thread, inside the engine-read window), never per frame.
-	 *
-	 * - name: the install's failures' name for it.
-	 * - none: its value for a node without a reference.
-	 * - sample: its value for the node's reference (Integrations/SubsurfaceScattering's beast race: the actor's race keyword, true
-	 *   otherwise).
+	 * @brief A per-reference engine fact a join rule reads, captured with the node's record.
+	 * sample runs per node capture in the engine-read window. `none` is the value for a node without a reference.
 	 */
 	struct ReferenceFact
 	{
@@ -545,14 +407,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A Lighting property's contributor bits (Api::InstallContext::RegisterPropertyBits): a per-property fact captured with the
-	 * property's record (SceneCapture::PropertyRecord's contributor bits; a change is its kMaterialOther difference), which a pass rule or a
-	 * join rule reads (LightingJoinView::PropertyBits). Called per Lighting property capture with a material (the capturing thread, inside
-	 * the engine-read window, or under the engine call that holds it), never per frame.
-	 *
-	 * - name: the install's failures' name for it.
-	 * - bits: the contributor bits it owns (none another registration's).
-	 * - capture: its bits of a_property (within bits; Integrations/TruePBR's glints: a PBR material's glintParameters.enabled).
+	 * @brief Per-property bits captured with a Lighting property's record, for pass and join rules to read.
+	 * capture runs per property capture and must return only bits within `bits`.
 	 */
 	struct PropertyBits
 	{
@@ -562,14 +418,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A Lighting object flag (Api::InstallContext::RegisterLightingObjectFlag): a per-object fact a feature's hook sets on the draw,
-	 * carried by the object's static flags and its record's flags (Integrations/SubsurfaceScattering's IsBeastRace: SetupSkin).
-	 *
-	 * - objectFlag: its object flag (one bit, within Records.h's kFeatureObjectFlags; the feature's compile-time constant, which
-	 *   Features/Manifest.cpp checks against Core's and the others').
-	 * - recordFlag: the record flag the object's record carries for it (one bit of BindlessObject::recordFlags, DCLFRecordFlags, which the
-	 *   shaders read; Manifest-checked likewise). Resolved once into the record flags' pair (Extensions::LightingRecordFlagsOf: data).
-	 * - applies: per join (the join pool), whether the object has it. Pure, but for the feature's live state (its loaded flag).
+	 * @brief A per-object flag a feature's Lighting hook sets, carried as an object flag and a record flag.
+	 * Both bits are compile-time constants that Features/Manifest.cpp checks for clashes. applies runs per join.
 	 */
 	struct LightingObjectFlag
 	{
@@ -579,12 +429,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief The Lighting key's spare bits (Api::InstallContext::RegisterLightingKeyBits; one claimant): Core's 3 spare bits of a Lighting
-	 * key's raster flags (Records.h, kRasterLightingSpareShift), which make a pipeline of their own, and the permutation word they give it.
-	 *
-	 * - keyBits: per join (the join pool), the object's bits (below 8). Pure, but for the feature's live state.
-	 * - permutation: per new pipeline key, the permutation's extraFeatureDescriptor for a key with a_keyBits (CS's b4 layout; Integrations/
-	 *   ExtendedTranslucency's material model). Pure.
+	 * @brief The 3 spare bits of a Lighting key, which give the object a pipeline of its own. One feature may claim them.
+	 * permutation maps those bits to the permutation's extraFeatureDescriptor.
 	 */
 	struct LightingKeyBits
 	{
@@ -593,16 +439,11 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief Lighting pass rules (Api::InstallContext::RegisterLightingPassRules): what a feature's hooks on the Lighting shader change in a
-	 * pass descriptor (Integrations/TruePBR's GetRenderPasses, GetPixelTechnique and SetupGeometry hooks). The masks are data, resolved once
-	 * into Core's (read per frame per pipeline: Extensions::LightingPassRule); derivePass is called per derive.
+	 * @brief What a feature's Lighting hooks change in the pass descriptor, as TruePBR's do.
 	 *
-	 * - pixelKeep: the bits of the engine's pixel split (Extensions::kLightingPixelSplitBits) the pixel descriptor keeps (ORed over the
-	 *   registrations).
-	 * - rawWhen, rawSet, rawFlip: SetupGeometry's raw technique: one with any of rawWhen gains rawSet, then flips rawFlip (one
-	 *   registration's; none while rawWhen is 0).
-	 * - derivePass (optional): per derive (Core's Lighting descriptors, any thread), the pass descriptor after Core's flags (a_pass) as the
-	 *   feature's GetRenderPasses hook leaves it. Pure. Called in registration order.
+	 * - pixelKeep: pixel split bits to keep. ORed across registrations.
+	 * - rawWhen, rawSet, rawFlip: a raw technique with any rawWhen bit gains rawSet, then flips rawFlip. One registration only.
+	 * - derivePass: optional and pure. Returns the pass descriptor as the feature's GetRenderPasses hook would leave it.
 	 */
 	struct LightingPassRules
 	{

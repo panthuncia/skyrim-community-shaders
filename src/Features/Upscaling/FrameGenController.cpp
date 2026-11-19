@@ -1,13 +1,12 @@
 #include "FrameGenController.h"
 
-#include <cstdlib>
-
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
 #include "DXVKInterop.h"
 #include "Streamline.h"
 
 #include "../../Globals.h"
+#include "../../RenderGraph/Switches.h"
 #include "../../Utils/Game.h"
 
 namespace FrameGen
@@ -171,13 +170,8 @@ namespace FrameGen
 			// Depth is a pacing knob as well as a throughput one: it decides how far DXVK's
 			// presenter may run ahead of FFX's paced present. Overridable for sweeping.
 			static const uint32_t s_depth = [] {
-				char buf[8] = {};
-				if (GetEnvironmentVariableA("CS_FSRFG_QDEPTH", buf, sizeof(buf)) && buf[0]) {
-					const int v = std::atoi(buf);
-					if (v >= 1 && v <= 8)
-						return static_cast<uint32_t>(v);
-				}
-				return 2u;
+				const auto v = Switches::Number("CS_FSRFG_QDEPTH", 2);
+				return v >= 1 && v <= 8 ? static_cast<uint32_t>(v) : 2u;
 			}();
 			Streamline::PushDxvkPresentQueueDepth(s_depth);
 		}

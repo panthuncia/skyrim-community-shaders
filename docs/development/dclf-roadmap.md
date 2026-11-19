@@ -32,7 +32,18 @@ views still drawn by the engine, then tooling. Outside DCLF comes last.
 ## 1. Engine work left on the render thread
 
 The census after the last round: about 110 engine-kept passes a frame, none a DCLF member's. Main about 75 (water, sky,
-grass, about 3 particle effects), reflection faces only the sky (about 21), sun cascades about 5.
+grass, about 3 particle effects), reflection faces only the sky (about 21), sun cascades about 5. Whiterun's census of
+2026-11-11 (`menus-org1.env`, before the menus open: about 69 a frame) had no shadow view's pass at all: main (water, sky,
+master particles, Lighting under billboards, one skinned effect variant), the reflection faces' sky, and four hidden
+first-person parts in main depth. The race menu adds the player's face shapes (`lighting: eligible, no record`, BSDynamicTriShape
+under `BSFaceGenNiNodeSkinned`) in main, main depth and focus shadows, about 20 passes a frame. Not yet read why; the likely cause
+is that the menu's edits reach the shapes by another writer than the head's morph job, so Features/Faces has no snapshot.
+
+The ORG residue census of the p5-all tour (2026-11-11, `1111-072658-p35-p5-all-census-w3`; p5/flush.md "DCLF's share") agrees: in
+a settled window DCLF leaves the engine about 3 particle effects a frame in Whiterun (master particle systems, 1.4) and 9 skinned
+effects in Blackreach. The skinned effects, like the one skinned effect variant above (dog eyes), were the Effect port reading the
+renderer data's vertex description instead of the shape's (fixed: `GeometryRecord::shapeVertexDesc`). Everything else DCLF leaves
+is in the window after a load. Scenarios: `p5-all-census-dclf.env`, `-take.env`, `dclf-residue-census.env`.
 
 ### 1.1 The residue without traversal: stop queuing the list jobs
 
@@ -51,19 +62,25 @@ grass, about 3 particle effects), reflection faces only the sky (about 21), sun 
     class DCLF takes over (sections 1.4, 1.5, 4) shrinks the flat pass's input.
 -   **Needs.** Nothing for the flat pass; it gets cheaper with every class ported.
 
-### 1.2 The water reflection: filter the engine's reflection-camera cull
+### 1.2 The water reflection: what the engine still culls in the cube faces
 
--   **Goal.** The engine's cull for the water reflection's two cube faces skips what DCLF draws, as the main camera's lists
-    already do.
--   **Why.** `TESWaterReflections::Update` costs 1.66 ms median, 5.3 ms worst (two `BSCubeMapCamera::RenderFace` a frame).
-    DCLF draws the faces' content, but the engine still culls the scene for both faces (0.75/4.1 ms, mostly
-    `BSFaceGenNiNode::OnVisible` re-culling heads, about 1,100 `ProcessObject` a frame), then builds and draws its batches
-    (only the sky is left in them).
--   **State.** Partly built. `Features/Reflection/ReflectionFaces.cpp` skips the LOD add-roots DCLF draws (`skipRoots`) and
-    withholds the faces' passes; the cell roots are still culled by the engine.
--   **Design.** Keep the cube camera's roots, but filter the cull below them for DCLF's owned roots, the way `PrimaryCull`
-    excludes entries from the main camera's cull. Only the sky (and any unported residue) is left to cull.
--   **Needs.** Nothing.
+-   **Goal.** The engine's cull for the water reflection's two cube faces reaches nothing DCLF draws.
+-   **Why.** `TESWaterReflections::Update` once cost 1.66 ms median, 5.3 ms worst (two `BSCubeMapCamera::RenderFace` a frame), with
+    0.75/4.1 ms of face cull (about 1,100 `ProcessObject` a frame). That was measured before the LOD add-roots were skipped.
+-   **State.** Built for every root DCLF draws. The cube camera has no cell roots: its roots array (`+0x188`) is filled only by
+    `FUN_1405275e0`, called four times, all in the update (AE `0x14052080d` LOD land `0x14315b898`, `0x140520826` LOD objects
+    `0x14315b8a0`, `0x14052083f` LOD trees `0x14315b880`, `0x140520854` the sky root `*(TES+0x100)+8`; checked in Ghidra
+    2026-11-11: the three globals are written by the terrain manager and read by `BGSTerrainChunk`, `BGSDistantObjectBlock` and
+    `BGSDistantTreeBlock`). `BSCubeMapCamera::RenderFaces` (`0x1414ed920`) culls only those roots into its accumulator. DCLF
+    skips the three LOD add-roots while it draws them (`ReflectionFaces::AddLodRoot`), adding back only the engine-only subset's
+    colour roots under them, so the faces' engine cull is the sky root alone, and the sky's draws are Features/Sky's on the ORG
+    path (`CS_ORG_SKY`, the `SkyReflections` anchor).
+-   **Measure.** One run with `CS_DCLF_CENSUS=1`: `[DCLF] census view reflection faces:` names only `Sky: BSTriShape`
+    (about 19 passes a frame in Whiterun), and `[DCLF] reflection faces (T4 ...): N updates, N without the tree root, N without
+    the LOD roots (0 engine-only roots added under them)`. Anything else in the census view is residue. A Tracy capture of
+    `TESWaterReflections::Update` would say what the sky root's cull still costs.
+-   **Left.** The sky root's cull. Removing it needs the sky's CPU work (its geometry updates and registration) off the engine,
+    which Features/Sky keeps by design.
 
 ### 1.3 The LOD roots out of the main camera's cull
 
@@ -79,33 +96,64 @@ grass, about 3 particle effects), reflection faces only the sky (about 21), sun 
 ### 1.4 The master particle systems
 
 -   **Goal.** Torches, candles and street mist (`MPSTorchFire01.nif`, `MPSCandleFlame01.nif`, `MPSMistStreet01.nif`, ...) are
-    drawn by DCLF's particle path.
+    drawn by DCLF's particle path. Blood impact particles are master particle systems too (4.3).
 -   **Why.** They are among the engine's remaining main passes, and DCLF's blended draws go before every remaining engine
     blended pass, so they are drawn in the wrong order where they lie behind a DCLF surface (dclf-open-defects.md).
--   **State.** Designed, not started. No `CS_DCLF_MASTER_PARTICLES` switch, no removal or reset thunk.
-    `Core/Engine/Capture/SceneTracker.h`'s `NoteEdit` still takes `(child, bool inWorld)`.
--   **Design.** The systems hang under parentless `BSMasterParticleSystem` roots owned by `BSParticleSystemManager`
-    (ShadowSceneNode child 5, culled through the portal graph's `alwaysRenderChildren`, registered into the main accumulator
-    only through hint 1). Each master is a category root filed under itself, **held by key only**: the engine removes a master
-    when its refcount drops below 3, so any lasting DCLF reference leaks it. Lifetime comes from events:
-    -   the manager's `AttachChild`, which is already detoured; `NoteEdit` takes `(child, parent)` in all seven detours;
-    -   a removal thunk at 0x140e2a589 that pushes `NoteEdit(master, manager)` and `PushDetached(master)` before the slot
-        clears;
-    -   a reset thunk at 0x140649254 for every child.
-
-    Steps: `NoteEdit(child, parent)`; the removal and reset thunks with counts; unheld `Root` / `AlwaysRenderRoot`; the
-    signature and gather behind `CS_DCLF_MASTER_PARTICLES`; a visual check; observers `<- MASTER SET`, `<- MASTER REFS`, and
-    `<- PARTICLES` uncovered 0.
--   **Risks.** A lasting reference; the first category root whose array owner is not its parent; a removal inside the
-    engine-read window; the interior route; a master has no fade node.
--   **Needs.** The particle path (`Features/Particles`) as built.
+-   **State.** On by default since Phase 5.5.6 (`CS_DCLF_MASTER_PARTICLES=0` turns it off) and run in game (scenarios
+    `tools/cs-ab/scenarios/master-particles-0.env` and `-1.env`): the shots match the switch off, and the idle masters held with
+    three references are the engine's (an emitter's value node names them: `<- MASTER REFS` counts them apart from DCLF's pins).
+    What exists:
+    -   `SceneTracker::PushAttached` and `PushDetached` take the node whose array holds the child, and `NoteEdit` takes
+        `(child, parent, inWorld)`. SceneWriterFramework's child events pass their parent.
+    -   `Api::UnheldRootsContribution` (`Api/ObjectContributors.h`, `InstallContext::RegisterUnheldRoots`): roots listed as
+        category nodes filed under themselves, with no `held` entry and a null `CategoryCapture::Root::root` and
+        `AlwaysRenderRoot::root` (the key is `object`). The capture pins each root only until its first application.
+        `Coordinator::OwnRoot` refuses an unheld root. A gone unheld root is not walked; its exit was an event.
+    -   The masters are not in the category signature. Their owner's child edits count `SceneTracker::UnheldEdits` (not
+        `CategoryEdits`), and an unheld root's detach forces no full capture (`Event::unheldExit`). After such an edit
+        `CaptureCategories` derives the capture from the last one with the unheld roots gathered again (`DeriveUnheldCapture`: no
+        cell or portal graph walked), and the coordinator's diff sees only the masters that came and went. A new owner is a full
+        capture. The contribution's enter and leave are taken only on a frame that gathers the roots, from the gather to
+        `PushCategoryRoots`.
+    -   `SceneCapture::SetDrawnRoots` retires a replaced set through `SceneTracker::RetireSet`; `InWorld` reads it inside a
+        `SceneTracker::SetRead`, and `RetireCategoryNodes` frees it once no read is in.
+    -   `Features/Particles/MasterParticles.cpp`: the gather (the manager's children under its `BSReadWriteLock`, the global
+        + 8), the removal hook, the counters and, with `CS_DCLF_STATS` only, the observers `<- MASTER SET` (a master left with no
+        event) and `<- MASTER REFS` (an idle master held past removal for 600 frames). `<- PARTICLES` is the particles' parity line.
+    -   Lock order: the capture's gate, then the manager's lock. `FUN_140e2a520` (the removal) runs on a job thread with no lock
+        held (its one caller `UpdateParticleSystemManagerJob`, queued per slot by `FUN_1402c75c0` / `FUN_1402c76c0` under the
+        queue's spin lock only), so the removal hook never holds the manager's lock while it waits for the gate.
+-   **What the engine does** (Ghidra, AE 1.6.1170 / SE 1.5.97, the same code at the same offsets):
+    -   The manager (`gParticleSystemManager`, AE ID 411270 / SE 524630) is ShadowSceneNode child 5. Its `AttachChild`
+        override (AE `0x140e29f90`) takes only a `BSMasterParticleSystem` whose slot (`+0x158`) is set, and stores it with
+        the array's `SetAt` under the lock at the global + 8. It never writes the master's parent.
+    -   `UpdateParticleSystemManagerJob` (AE ID 19206) runs `FUN_140e2a520` (AE ID 76601 / SE 74853) per slot on job threads:
+        `if (master+0x166 && refCount < 3 && FUN_140e2b430(master) == 0) children.SetAt(index, null)`, else the master's
+        `UpdateDownwardPass`. The `SetAt` call at +0x69 (`NiTObjectArray::SetAt`, AE ID 70322 / SE 68970) is hooked; it fires
+        no child edit. `FUN_140e2a5c0` (AE ID 76602 / SE 74854), the same test in a loop, has no caller in either runtime.
+    -   The world reset (`FUN_140648cd0` +0x584, AE ID 36601 / SE 35593 +0x475) calls the remove-all on the manager:
+        SceneWriterFramework's remove-all detour fires a detach for every master, so no reset thunk was needed.
+    -   A master's drawn content is its NiNode children (the MPS model's `NiParticleSystem`s). Emitters feed it through
+        `BSParticleSystemManager::sub` (AE `0x140e2a2f0`): the source's addon `BSValueNode` is held in the master's `+0x128`
+        array (count `+0x138`), found by `FUN_1402df8a0` when a reference's or a temporary effect's 3D attaches.
+-   **Risks.** A lasting reference (guarded: no `held`, no root reference, no root owner; `<- MASTER REFS` watches). A removal
+    through the manager's own `DetachChild` overrides does not wait for the capture's gate: none is known during play. The
+    interior route is not checked: a master listed in a portal graph's `alwaysRenderChildren` stays unheld (the gather runs
+    first). A master has no fade node. The removal hook is one more trampoline call (the plugin allocates 4 KB).
+-   **Residue.** They are the steady Effect draws in the residue census (Whiterun, about 3 a frame: `DrawDynamicTriShape (DrawData
+    copy)` from the dispatcher's +0x101, geometry type 1). `p5-all-census-dclf-take.env` runs the tour with the switch on.
+-   **Checks with it on by default:** the unheld roots diff (its count, "unheld roots diffs", is in the C2 parity line with
+    `CS_DCLF_PERSISTENT_PARITY`) reads 0, and no master stays listed after its torches are gone (`master particles ...
+    listed`).
 
 ### 1.5 The remaining residue classes: grass, water, sky
 
 -   **Goal.** DCLF draws grass, water and the sky, each as an object class with its own view bits.
 -   **Why.** They are most of the engine's remaining main passes (about 75 a frame with the particle effects), and each
     keeps an engine walk.
--   **State.** Not started.
+-   **State.** Not started. Precipitation is done apart from this: the `BSParticleShader` ENVCUBE techniques (rain, snow,
+    Blackreach's spores; residue census `Particle` vs `0x4`) drawn through the grouped alphas (AE 107673) are the precipitation
+    family's (`CS_ORG_PRECIPITATION=1`, Features/Precipitation), each draw latched at DrawTriShape and drawn at once on the graph.
 -   **Design.** Take them class by class in measured cost order. Grass interacts with Grass Collision and
     `GrassOptimizations`; water with the water reflection (1.2) and its shaders; the sky also fills the reflection faces.
 -   **Needs.** A census of each class's cost before choosing the first.
@@ -321,7 +369,8 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **State.** Done: the main, terrain, decal and forward buckets (`CS_DCLF_*_PLAIN`, on by default) draw each pipeline's range with
     one counted indirect draw and the pulled colour pipelines, which find their sequence by instance. Without device-generated
     commands with pipeline sets (AMD, Intel) they are the only colour draws (dclf-architecture.md, "Explicit DGC preprocessing
-    and pipeline set versions"). Open: the first-person forward part has no buckets, so it needs the direct forward family there.
+    and pipeline set versions"). Open: the first-person forward part has no buckets, so it needs the direct forward family there;
+    without it the first-person view is not covered and the engine draws it.
 
 ### 3.2 Early builds on the compute queue
 
@@ -357,8 +406,10 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 ### 3.5 Shadow raster state per draw
 
 -   **Goal.** A shadow view's raster state is a value per draw, chosen with an indirect execution set.
--   **Why.** Views take one state from the table entry (`Core/Render/Shadow/ShadowBuild.cpp`, `modeRasterStates`), so a view
-    whose rasterizer state no pipeline expresses stays native.
+-   **Why.** Views take one state from the table entry (`Core/Render/Shadow/ShadowBuild.cpp`, `modeRasterStates`). A view whose
+    entry turns depth clipping off draws with depth clamped (`ShadowRasterState::depthClip`, BasicRHI's
+    `RasterState::depthClip`, `CS_DCLF_SHADOW_DEPTH_CLAMP`); only a wireframe entry, or depth clip off on a device without
+    `depthClamp`, stays native (`not ready (raster-state=N)` in the `[DCLF] shadow views:` line).
 -   **State.** Not started.
 -   **Needs.** The indirect execution sets' validation errors closed first (dclf-open-defects.md).
 
@@ -372,32 +423,103 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 
 ---
 
+### 3.7 Point light selection once per object
+
+-   **Goal.** Without Light Limit Fix, a draw's point lights are selected once per object, not by every wave of its pixels.
+-   **Why.** `DCLFSelectPointLights` (`Common/DCLFPointLights.hlsli`) loops over up to 128 table rows in the pixel stage, though
+    its inputs (the object's bound, the draw's shadow mask) are the draw's (dclf-architecture.md, "Point lights without Light
+    Limit Fix").
+-   **Design.** BuildDrawsCS, which already selects the object's shadow lights from the same bound (`LocalShadowMask`), writes
+    the plain lights' table indices (seven bytes and a count: two words) into a per-object buffer of the frame, like the
+    visibility words; the pixel stage takes the shadow rows from its mask (four rows at most, first in the table) and the plain
+    ones from those words. The CPU pipeline's cull (`Direct/Cull.cpp`) writes the same words for its draws. The table goes into
+    the build's latch. Not the vertex stage: it would run the loop for every vertex and add two flat interpolants.
+-   **Needs.** The buffer's graph resource and its read by the colour draws (a pixel-stage register), and both culls.
+
 ## 4. Coverage: classes and views still the engine's
 
 ### 4.1 Effect variants not ported
 
 -   **Goal.** Every effect variant the engine draws in the main view is DCLF's.
 -   **Why.** Each unported variant stays native, keeps the list jobs (1.1) and draws after DCLF's forward epoch, out of order.
--   **State.** Not started for: the sky object, wireframe, cloud lighting (`kCloudLOD`), Lighting without Light Limit Fix,
-    projected UV, unrecognised blend pairs, Falloff without blending, membrane, strip and mesh particle systems, skins under
-    billboards, nested billboards, and Lighting leaves under billboards.
--   **Design.** Each is an `Api::ObjectClass` contribution in `Features/Effects` or `Features/Billboards`, ordered by the
-    residue census.
+-   **State.** Partly built. Cloud lighting (`CS_DCLF_EFFECT_CLOUD_LIGHT`) and Falloff without blending (`CS_DCLF_EFFECT_FALLOFF`)
+    are DCLF's (dclf-architecture.md, "The Effect shader in the forward epoch"). Not started, each with what it needs:
+    -   **Sky objects** (bit 45, hint 0x12, geometry group 13). The sky family (`Features/Sky`, `CS_ORG_SKY`) latches only the
+        `BSSkyShader` techniques' batch (`0x5C00005D`-`0x5C000064`), so an effect sky object is still drawn by the engine's
+        group 13 effect batch. Needs SetupGeometry's own cull and alpha setup (`FUN_14150bc80` with the alpha test) and a draw
+        in the sky's place (before the opaque world), so the sky family is the natural owner, not the forward epoch.
+    -   **Wireframe** (bit 48): SetupGeometry sets depth mode 3 and the rasterizer's fill mode 1. BasicRHI has
+        `rhi::FillMode::Wireframe`, but DCLF's `PipelineKey` has no fill-mode bit. No vanilla content is known to set it.
+    -   **Projected UV** (pass bit 17): SetupGeometry writes VS `MatProj` from the transpose of the pass geometry's `+0x16c`
+        matrix and binds a texture from `BSGraphics::State +0x48` (`+0x10`) with filter and address 3. Needs the writer of the
+        geometry's `+0x16c` and that texture as a frame texture.
+    -   **Unrecognised blend pairs**: `FUN_14150bc80` leaves the blend state as the previous draw left it, so the result
+        depends on the engine's draw order. Not portable as a fixed key.
+    -   **Membrane** (pass bit 15): SetupGeometry takes `BSEffectShader__sub` instead of its usual body (the TESEffectShader
+        membrane: normal and noise textures, `MembraneRimColor`, `MembraneVars`, `TexcoordOffsetMembrane`). The pass is an
+        effect pass on an actor's geometry. Needs that function's port and the actor pass.
+    -   **Rigid skins** (a skin instance whose pass has no Skinned bit): built behind `CS_DCLF_EFFECT_RIGID_SKINS` (default off),
+        not yet run in game.
+    -   **Strip and mesh particle systems**: strips are built on the CPU each frame (`FUN_140d76d80`, a triangle strip into
+        the dynamic ring); mesh particles draw an instanced mesh. Both need their own particle rows (`Features/Particles`).
+    -   **Skins under billboards, nested billboards, Lighting leaves under billboards**: the billboard row turns one node
+        from one base transform (`BillboardRow.h`); a nested chain needs a row per node, a skin needs the turn applied to
+        its palette, and a Lighting leaf needs the turn in Lighting.hlsl's vertex stages (depth, colour, shadow) and a place
+        for the mode, since a Lighting record's bits 4-7 are refraction's.
+-   **Order.** By the residue census (below), most passes first.
+-   **Census.** `CS_DCLF_CENSUS=1` (dclf-validation.md, "The registration census"). The lines to read are
+    `[DCLF] census class effect: effect-variant (<variants>)` and `[DCLF] census class effect: effect-opaque`, with their
+    passes a frame and top geometries. Run it before and after a change in the same cells, with the variant's switch on and
+    at 0 (`tools/cs-ab/scenarios/effect-variants-census.env`, `effect-variants-census-off.env`).
+-   **Design.** Each is an `Api::ObjectClass` contribution in `Features/Effects` or `Features/Billboards`, or a variant bit
+    dropped from `EffectVariantsOf` behind its own switch.
+-   **Without Light Limit Fix**, the effect Lighting variant can read the frame's point light table the Lighting draws already
+    read (dclf-architecture.md, "Point lights without Light Limit Fix"): `Effect.hlsl`'s PerGeometry lights from the table,
+    picked by the object's bound.
 
 ### 4.2 First-person refraction
 
 -   **Goal.** `HeatRefraction` in first person (Flames) is drawn by DCLF.
 -   **Why.** One engine pass a frame while Flames is drawn.
--   **State.** Not started.
+-   **State.** Not started. What the engine does: `Main::RenderFirstPersonView` (AE `0x1414cb6d0`) submits the first-person
+    accumulator, then calls `FUN_1414b4860` on it, which draws its group 5 (the refraction normals) as the main view's does.
+    The leaf is a Lighting `kRefraction` shape under an `NiBillboardNode` in the hand's NIF.
 -   **Design.** A billboard turn in the Utility refraction stage, and a refraction pass in the first-person colour epoch (the
-    first-person camera and depth range, `kPOST_ZPREPASS_COPY`, the begun/drawn flags).
--   **Needs.** Nothing.
+    first-person camera and depth range, `kPOST_ZPREPASS_COPY`, the begun/drawn flags so the main view's normals are not
+    cleared again). In the CPU forward family (`CS_DCLF_FORWARD_DIRECT`) the first-person site needs a refraction view as the
+    main one has (`Core/Render/Direct/Sites.cpp`).
+-   **Needs.** Lighting leaves under billboards (4.1): the classification admits only effect shapes
+    (`BillboardTurnedLeaf`), and the refraction record uses bits 2-7, where the Effect family keeps the billboard mode, so the
+    mode needs another place (a shading-row component refraction does not read). The first-person view's slots also exclude
+    refraction (`ViewEpoch.cpp`). First person itself is on by default (`CS_DCLF_FIRST_PERSON`), except on a GPU-driven graph
+    without device-generated commands and without the direct forward family (`GraphConditions::firstPerson`: its epochs and slots
+    are left out there).
 
 ### 4.3 Blood impact particles
 
 -   **Goal.** `pBloodSplat02`, `pBloodDrops06` and `pBloodLines` are drawn by DCLF.
--   **State.** Not started: they are temporary effects outside DCLF's categories, and their chain was never read.
--   **Needs.** Reverse engineering of where the engine attaches them.
+-   **State.** Covered by 1.4: no separate switch. These are the particle systems of master particle systems, so
+    `CS_DCLF_MASTER_PARTICLES=1` takes them (scenarios `tools/cs-ab/scenarios/blood-particles-0.env` and `-1.env`, not run
+    yet; 1.4's scenarios ran). `CS_DCLF_BLOOD_PARTICLES` was not added: a blood-only filter over the masters would be a second
+    listing rule for the same roots.
+-   **What the engine does** (Ghidra AE 1.6.1170, and the game's meshes):
+    -   A melee hit (`Actor::CalculateCurrentHitTargetForWeaponSwing`) and `BGSImpactManager::PlayImpactEffect` spawn a
+        `BSTempEffectParticle` (`BSTempEffectParticle::Spawn`, AE `0x1404a7320`) with the impact data's model, for the actor's
+        cell. The effect keeps the cell 3D's child 4 (the Dynamic category node, `+0x48`). Once its clone task is done, its
+        update (`FUN_1404a8150`) attaches the 3D (`FUN_1404a78f0`) under that node, through `AttachChild` or the task queue's
+        node attach. Both reach SceneWriterFramework, so DCLF tracks the impact's own 3D like any Dynamic member. TES pools up
+        to three clones per model (`TES+0x290`, `FUN_1401a3c90`); a reused clone is attached again. The effect's
+        `Detach` calls the parent's `DetachChild`.
+    -   Before the attach, `FUN_1402df8a0` walks the 3D. Each addon `BSValueNode` whose addon form has the master flag
+        (`+0x7a & 1`) gets its master (`FUN_140256390` loads the MPS model and attaches it to the manager) and is held as one of
+        the master's emitters (`BSParticleSystemManager::sub`).
+    -   The impact models (`meshes\effects\impacteffects\bloodspray*.nif`) hold the emitters (`pBloodLines02`,
+        `pBloodDrops08`, ...) and value nodes named after their masters (`MPSBloodSprayTiny05`, `MPSBloodSprayImpact03`,
+        `MPSMeatChunk`). The three names in the census are only in the masters' models: `pBloodSplat02` in
+        `meshes\mps\mpsbloodsplatimpact02.nif`, `pBloodDrops06` and `pBloodLines` in `meshes\mps\mpsbloodspraytiny03.nif`
+        (`pBloodLines` also in `mpsbloodspraybigdrops.nif` and the DLC1 explosion). So they are under the particle manager,
+        not "temporary effects outside DCLF's categories".
+-   **Needs.** A run of `blood-particles-1.env`.
 
 ### 4.4 Object LOD's segments in occlusion
 
@@ -412,12 +534,29 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **The near list's count cap.** Not replicated (`Features/TreeWind/TreeWindSeeds.cpp`). With more selectable trees in range
     than the cap, DCLF gusts them all where the engine gusts only the nearest.
 
-### 4.6 The precipitation mask without Skylighting
+### 4.7 Geometry the game can map (`UnstableBuffer`)
 
--   **Goal.** DCLF draws the precipitation mask whether or not Skylighting is loaded.
--   **State.** Not started. The mask is DCLF's only through Skylighting's occlusion hooks (`RenderOcclusionAtShadowMaps`, `RenderOcclusion`)
-    (`Features/OcclusionMaps/OcclusionMapsFeature.cpp`, `CS_DCLF_PRECIPITATION`); without Skylighting the engine draws it.
--   **Design.** DCLF hooks the engine's precipitation mask itself when Skylighting is absent.
+-   **Goal.** A shape whose vertex or index buffer the game can map (D3D11 `USAGE_DYNAMIC` or CPU access) is DCLF's.
+-   **Why.** DXVK renames such a buffer on every discard map, so neither `dxvkGetInteropResourceInfo` nor
+    `dxvkTrackInteropResources` imports it, and the object stays the engine's in every view (`Ineligible::UnstableBuffer`). The
+    engine's own geometry creators make `DEFAULT` buffers (p4/p4.5-buffers.md), so these come from plugins: a RaceMenu body morph
+    on test2. None appeared in the Whiterun census of this load order (2026-11-11, `menus-org1.env`: no
+    `lighting: unstable-buffer` class).
+-   **State.** Measured, not claimed. `Coordinator::NoteUnstable` counts each such object by cause (`Stats::unstableCauses`: a
+    buffer the game can map, one DXVK refused otherwise, no buffers to resolve) and logs the first 16 with their buffers' usage
+    (`[DCLF] unstable buffer: '<name>' stays the engine's: <cause> (<bytes> B usage <u> CPU access <flags>, ...)`). With
+    `CS_DCLF_STATS=1` the coordinator's line ends `(unstable: M mappable, R refused, S no source)`; the census names their passes
+    `lighting: unstable-buffer`.
+-   **Design.** Re-import through the path pinless imports already use, with no graph rebuild (geometry is drawn by device
+    address, not as a graph resource). DXVK: a tracked import of a mappable buffer (a new `DxvkOrgInteropTrackedFlagBits` bit)
+    keeps its discard renames and reports each as a relocation holding the old slice, alive until released. DCLF: the
+    relocation reaches `GpuResources`' `ImportRelocations` at the next Present (`ImportRelocations::Poll` runs at every Present on
+    the render owner since 782c888bd, loads included), its geometry slots are marked
+    (`relocatedGeometrySlots`), and `ResolveGeometrySource` acquires the new slice into the same slot (`staleGeometry`), as a
+    defragmentation move does. The draws read the slice of the publication's frame, so an edit shows a frame or more late; a
+    buffer discarded every frame refreshes its slot every frame. Gate it on the measured count: worth it only where the census
+    finds such shapes.
+-   **Needs.** The DXVK interop change and a load order that makes such buffers (RaceMenu body morphs) to test it.
 
 ---
 

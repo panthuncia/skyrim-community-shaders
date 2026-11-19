@@ -1,5 +1,4 @@
-// SceneTables' slot and column maintenance (growth, change detection, block allocation, clears). Called on the coordinator's
-// scene-work thread, on its own live tables.
+// SceneTables' slot and column maintenance. Runs on the coordinator's scene lane, on its own live tables.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 
@@ -81,7 +80,7 @@ namespace DCLF
 		std::uint32_t causes = 0;
 		const auto& x = a.object;
 		const auto& y = b.object;
-		// The placement (and the sun entry node's bound, the fade node's centre) is FrameValues': no column of the tables.
+		// Placement is FrameValues', not a column.
 		if (x.flags != y.flags || x.materialIndex != y.materialIndex || x.pipelineIndex != y.pipelineIndex || a.draw.pipelineIndex != b.draw.pipelineIndex ||
 			!same(a.fadeDistance, b.fadeDistance) || a.sceneFlags != b.sceneFlags || a.hasFadeNode != b.hasFadeNode)
 			causes |= kChangeBindings;
@@ -94,7 +93,6 @@ namespace DCLF
 		if (a.shadowTechnique != b.shadowTechnique || a.shadowReject != b.shadowReject || a.occlusionTechnique != b.occlusionTechnique || a.shadowDiffuse != b.shadowDiffuse ||
 			a.shadowMaterial != b.shadowMaterial)
 			causes |= kChangeShadow;
-		// The draw template's geometry half: everything but the pipeline index, which is the bindings'.
 		auto geometryHalf = [](DrawSequence a_draw) {
 			a_draw.pipelineIndex = 0;
 			return a_draw;
@@ -126,7 +124,7 @@ namespace DCLF
 		} else {
 			offset = boneTop;
 			boneTop += a_rows;
-			// FrameValues' palettes grow with it; no block moves.
+			// FrameValues' palettes grow with it. No block moves.
 			if (boneTop > boneCapacity)
 				boneCapacity = (boneTop + kBoneGrowRows - 1) / kBoneGrowRows * kBoneGrowRows;
 		}
@@ -177,8 +175,7 @@ namespace DCLF
 		FreeBones(a_slot);
 		objects[a_slot] = FreeObjectRecord();
 		objectGeometry[a_slot] = nullptr;
-		// Out of the frame's set with its record: the set is applied once a frame (ApplySet), and a slot freed after it must draw
-		// in no phase (the shadow builds read setPhases).
+		// The set is applied once a frame, so a slot freed after it must leave every phase now. The shadow builds read setPhases.
 		if (a_slot < setPhases.size() && setPhases[a_slot]) {
 			setPhases[a_slot] = 0;
 			NotePublished(a_slot);
@@ -202,7 +199,7 @@ namespace DCLF
 		shadowMaterial[a_slot] = nullptr;
 		objectSeen[a_slot] = 0;
 		sceneFlags[a_slot] = FreeObjectRecord().flags;
-		// The link between a layer and its base goes with either (both ends noted for the publication: the other has no note).
+		// Both ends are noted for the publication, since the other end has no note of its own.
 		if (const auto base = layerBase[a_slot]; base < layerOf.size() && layerOf[base] == a_slot) {
 			layerOf[base] = kNoObjectSlot;
 			NotePublished(base);
@@ -276,7 +273,6 @@ namespace DCLF
 			hasFadeNode.clear();
 			fadeDistance.clear();
 			residentSlot.clear();
-			// Every slot is gone: the log's readers read them all again.
 			InvalidateChangeLog();
 			for (const auto& row : streamRows)
 				if (row.object != Api::VertexStreamRow::kNoObject)
@@ -295,11 +291,10 @@ namespace DCLF
 			retiring.clear();
 			objectsRetiring = 0;
 			++slotEpoch;
-			// The main ranges' ordinals are the member objects' (Features/Decals: OrderDecals), kept with the objects.
 			rangeOrdinal.clear();
 			rangeCount = {};
 		}
-		// The per-frame lists: every walk refills them, and the slots' offsets into them are rewritten with them.
+		// Every walk refills these lists and rewrites the slots' offsets into them.
 		for (auto& members : classMembers)
 			members.objects.clear();
 		shadowTextureSet.clear();

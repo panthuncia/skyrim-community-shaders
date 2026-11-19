@@ -1,8 +1,7 @@
 #pragma once
 
-// The extension registry: what the features registered at install (Api::InstallContext), read-only after. Core reads it where each
-// extension point runs (FrameValues, the scene's GPU setup, commits and graph, the frame records, the main build, the payload's
-// publication and adoption, the primary cull's stand-in, the report). Switches and toggles register with Core/Settings, which owns them.
+// The extension registry: what features registered at install, read-only afterwards.
+// Switches and toggles register with Core/Settings, which owns them.
 
 #include "Features/DrawcallLimitFix/Api/Epochs.h"
 #include "Features/DrawcallLimitFix/Api/Feature.h"
@@ -15,49 +14,31 @@
 namespace DCLF::Extensions
 {
 	/**
-	 * @brief Main thread, at PostPostLoad, before DCLF's threads start (the shell, after DCLF's own engine hooks, before
-	 * SceneScheduler::Graph and the shell's hooks): every feature's install, in a_features' order, then every integration's (Integrations/,
-	 * written against Api/ like a feature: no early or source hooks), in a_integrations' order, then the resolutions, the frame's schedule
-	 * (a_schedule: Schedule/Frame.cpp, which Core never includes) last, against Core's passes and the registered ones. Once; a second call
-	 * fails.
+	 * @brief Main thread, once, before DCLF's threads start. Runs every feature's install, then every integration's, then the resolutions.
+	 * The frame schedule is checked last, against Core's passes and the registered ones.
 	 */
 	void InstallFeatures(std::span<const Api::Feature> a_features, std::span<const Api::Feature> a_integrations, const Api::FrameSchedule& a_schedule);
-	/**
-	 * @brief Main thread, at PostPostLoad, before DCLF's own engine hooks and observers install (the shell, before Diagnostics::Install):
-	 * every feature's early hooks (Api::Feature::earlyHooks), in a_features' order. Once, before InstallFeatures.
-	 */
+	/** @brief Main thread, once, before DCLF's own engine hooks and observers install. Every feature's early hooks. */
 	void InstallEarlyHooks(std::span<const Api::Feature> a_features);
-	/**
-	 * @brief Main thread, at PostPostLoad, before any of DCLF's hooks is written (the shell's preflight): every feature's preflight
-	 * (Api::Feature::preflight), in a_features' order. The conflicts are HookSites::Conflicts().
-	 */
+	/** @brief Main thread, before any DCLF hook is written. Every feature's preflight. Conflicts land in HookSites::Conflicts(). */
 	void PreflightFeatures(std::span<const Api::Feature> a_features);
-	/**
-	 * @brief Main thread, at PostPostLoad, where the shadow sources' hooks install (the shell, before the primary cull's): by source, in
-	 * Api::ShadowSource order, every feature's source hooks for it (Api::Feature::sourceHooks, in a_features' order; Features/LocalLights'
-	 * light selection at the Spot's: Extensions/ShadowViews.cpp). Once, before InstallFeatures.
-	 */
+	/** @brief Main thread, once, before InstallFeatures. Every feature's source hooks, source by source in Api::ShadowSource order. */
 	void InstallSourceHooks(std::span<const Api::Feature> a_features);
-	/**
-	 * @brief The frame's epoch orders, as RenderGraphRuntime::Segment values: the frame's (Api::FrameSchedule::frameOrder), the host's
-	 * async epochs (asyncOrder) and the revision-driven ones among them (its DCLF epochs with revision).
-	 */
+	/** @brief The frame's epoch orders as RenderGraphRuntime::Segment values: the frame order, the async order and its revision-driven subset. */
 	struct FrameOrders
 	{
 		std::vector<std::uint32_t> epochOrder, asyncOrder, revisionEpochs;
 	};
-	/**
-	 * @brief Main thread, after InstallFeatures (empty before): the schedule's orders, resolved with it (the schedule's executor's), which
-	 * the shell hands to RenderGraphRuntime::ConfigureFrame before the runtime initializes.
-	 */
+	/** @brief Main thread, after InstallFeatures. Passed to RenderGraphRuntime::ConfigureFrame before the runtime initializes. */
 	const FrameOrders& ScheduledFrameOrders();
 
-	/** @brief A registered frame-value pool (its descriptor, the name owned). */
+	/** @brief A registered frame-value pool, with its name owned. */
 	struct FrameValuePoolEntry
 	{
 		std::string name;
 		std::uint32_t stride = 0;
 		bool deviceAddress = false;
+		bool unorderedAccess = false;
 		decltype(Api::FrameValuePool::frameStart) frameStart = nullptr;
 		decltype(Api::FrameValuePool::kick) kick = nullptr;
 		decltype(Api::FrameValuePool::sample) sample = nullptr;
@@ -71,12 +52,9 @@ namespace DCLF::Extensions
 		decltype(Api::PayloadProduct::carried) carried = nullptr;
 		decltype(Api::PayloadProduct::install) install = nullptr;
 	};
-	/**
-	 * @brief The words the scene resources' postInputs post with the revision's inputs, all of them (each its inputWords, in registration
-	 * order: SceneResourcesEntry::firstInput; RevisionInputs' SceneResourceInputs): grow it before more are registered.
-	 */
+	/** @brief Total words all scene resources may post with the revision inputs. Grow it before registering more. */
 	inline constexpr std::uint32_t kSceneResourceInputWords = 12;
-	/** @brief Registered scene resources: its posted inputs at [firstInput, firstInput + inputWords) of the kSceneResourceInputWords. */
+	/** @brief Registered scene resources. Its posted inputs sit at [firstInput, firstInput + inputWords). */
 	struct SceneResourcesEntry
 	{
 		std::string name;
@@ -114,8 +92,9 @@ namespace DCLF::Extensions
 	{
 		std::string name;
 		std::uint32_t textureRegister = ~0u;
-		decltype(Api::FrameTexture::view) view = nullptr;
+		decltype(Api::FrameTexture::view) view = nullptr;  // null means the captured view, graph only
 		bool capturedWhenNull = false;
+		decltype(Api::FrameTexture::graphResources) graphResources{};  // static strings. Empty ones are unused.
 	};
 	/** @brief A feature's registered report lines. */
 	struct ReportLinesEntry
@@ -127,7 +106,7 @@ namespace DCLF::Extensions
 		Api::CoordinatorComponentId component;
 		decltype(Api::ReportLines::componentText) componentText = nullptr;
 	};
-	/** @brief A registered engine channel (its descriptor, the name owned). */
+	/** @brief A registered engine channel, with its name owned. */
 	struct EngineChannelEntry
 	{
 		std::string name;
@@ -159,7 +138,6 @@ namespace DCLF::Extensions
 	{
 		std::string name;
 		decltype(Api::CoordinatorComponent::make) make = nullptr;
-		// Its hook sets, as registered.
 		Api::CoordinatorComponent::Slots slots;
 		Api::CoordinatorComponent::Residency residency;
 		Api::CoordinatorComponent::Accumulate accumulate;
@@ -180,7 +158,7 @@ namespace DCLF::Extensions
 		std::uint32_t objectFlags = 0, blockWords = 0;
 		std::span<const Api::ShadingVariable> vsVariables;
 	};
-	/** @brief A registered frame-globals contribution: its floats at FrameGlobals::features[first, first + floats). */
+	/** @brief A registered frame-globals contribution. Its floats are FrameGlobals::features[first, first + floats). */
 	struct FrameGlobalsEntry
 	{
 		std::string name;
@@ -188,31 +166,22 @@ namespace DCLF::Extensions
 		decltype(Api::FrameGlobalsContribution::capture) capture = nullptr;
 	};
 
-	// Any thread, after InstallFeatures (empty before): the registrations, in order. An index is the extension's id
-	// (Api::FrameValuePoolId::index, Api::SceneResourcesId::index, Api::TableFamilyId::index, Api::CoordinatorComponentId::index,
-	// Api::EngineChannelId::index; the products' and bindings' slots). The passes are the schedule's executor's
-	// (Core/Render/Epochs/ScheduleExecutor.h). The technique contributions are by technique (Extensions/ObjectContributors.h).
-	// The material contributors are read resolved (Extensions/Materials.h: MaterialContributors), the Lighting join rules as registered
-	// (Extensions/ObjectContributors.h: RegisteredLightingJoinRules), the per-draw buffers by stage (Extensions/FrameBindings.h: PerDrawMask).
+	// Any thread, after InstallFeatures. Registrations in order, where an index is the extension's id.
 	std::span<const FrameValuePoolEntry> RegisteredPools();
 	std::span<const PayloadProductEntry> RegisteredProducts();
 	std::span<const SceneResourcesEntry> RegisteredSceneResources();
 	std::span<const CommitHookEntry> RegisteredCommitHooks();
 	std::span<const FrameBindingEntry> RegisteredFrameBindings();
-	// The frame constant rows in ascending row order; the frame textures in registration order (Extensions::FrameTextureIndices names each
-	// register's).
+	// Frame constant rows in ascending row order. Frame textures in registration order.
 	std::span<const FrameConstantRowEntry> RegisteredFrameConstantRows();
 	std::span<const FrameTextureEntry> RegisteredFrameTextures();
 	std::span<const ReportLinesEntry> RegisteredReportLines();
 	std::span<const Api::StandInObserver> RegisteredStandInObservers();
 	std::span<const EngineChannelEntry> RegisteredEngineChannels();
-	/**
-	 * @brief The show veto's cells, at a fixed address for the session (the stubs load them): the registered veto's, else open a zero
-	 * word and vetoes a function answering false (engineHid null, no hide sites). Whether one is registered: ShowVetoRegistered.
-	 */
+	/** @brief The show veto cells at a fixed address the stubs load. Defaults never open and never veto when none is registered. */
 	const Api::ShowVeto& RegisteredShowVeto();
 	bool ShowVetoRegistered();
-	/** @brief The hidden sites reserved (InstallContext::ReserveHiddenSite): from HiddenSourceSites(), this many. */
+	/** @brief How many hidden sites were reserved after HiddenSourceSites(). */
 	std::uint32_t ReservedHiddenSites();
 	std::span<const TableFamilyEntry> RegisteredTableFamilies();
 	std::span<const CoordinatorComponentEntry> RegisteredCoordinatorComponents();

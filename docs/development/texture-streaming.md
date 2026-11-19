@@ -72,8 +72,8 @@ Each texture keeps two demands, because they give up detail in different orders:
     case covers what cannot report (alpha-tested Lighting, grass, Effect shaders), which would otherwise blur on screen when distance is pulled back.
 -   **Distance only:** everything else, which is mostly surfaces out of view.
 
-First person is drawn by the engine unless `CS_DCLF_FIRST_PERSON=1`, so the arms and weapon cannot report. Native binds are their only on-screen demand, which
-is why that rule's wait is short. Their distance demand exists, but it is the third-person body's and proves nothing about what the view shows.
+With `CS_DCLF_FIRST_PERSON=0` first person is drawn by the engine, so the arms and weapon cannot report. Native binds are then their only on-screen
+demand, which is why that rule's wait is short. Their distance demand exists, but it is the third-person body's and proves nothing about what the view shows.
 
 The finest of the two wins, after the budget's pull-back. The render thread's only part is a position, a direction and two ratios per frame, in a
 commit hook.
@@ -128,6 +128,14 @@ less DXVK's allocations). The driver's figures alone do not work:
 DWM, an editor and a browser open), and Windows did not take that back from them. Dedicated memory stayed near 5.9 GB with 4 GB of windows wanted, so the
 rest was in system memory whichever way it got there. An override that made DXVK treat the heap's size as its budget gave the same frame rate within
 noise (16.5 against 16.0 fps) and hid the overflow from DXVK's figures, so it was removed.
+
+### On the render graph
+
+With `CS_ORG_TEXTURE_STREAMING=1` a scheduled window is an ORG texture instead of a D3D11 one: ORG's allocator holds its memory,
+DXVK wraps it with its mips as initial data so the shell still names it for native binds (no graph pass fills it), and Drawcall
+Limit Fix reads it by its own descriptor index. The window artifact is GPU ready once the render thread installed it at its
+next Present, and the texture gate waits for that. The policy, the controller and the switches above are unchanged. Synchronous builds (the safety net) stay
+D3D11 windows, and the two kinds mix freely. Details: [p4/texture-streaming.md](./p4/texture-streaming.md).
 
 ## What carries over from BasicRenderer
 

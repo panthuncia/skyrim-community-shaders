@@ -1,7 +1,5 @@
-// The coordinator's scene pump: the scene passes run on the scene lane, one at a time, whenever a producer wakes the pump
-// (WakeScenePass, any thread); the frame never kicks or joins them, and the render thread serves what they ask of it at the frame's
-// start. Also the pass's bookkeeping, whether a pass publishes (PublicationNeeded) and when (PublicationDue: paced by the snapshot builder's
-// take, and the frame's own pass).
+// The coordinator's scene pump. Scene passes run on the scene lane, one at a time, whenever a producer wakes the pump.
+// The frame never kicks or joins them. Also decides whether a pass publishes and when.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -28,38 +26,34 @@ namespace DCLF
 {
 	namespace
 	{
-		// The pump, once StartScenePump configured it (never destroyed: a wake may come while the process tears down).
+		// Never destroyed, since a wake may come while the process tears down.
 		std::atomic<org::async::SerializedTaskPump*> scenePump{ nullptr };
-		// The sources woken since the running pass took them at its start (a bit per SceneWake): a producer whose bit is set leaves the
-		// Notify to the one that set it, and one finding any bit set knows a pass is queued (the pump queues one pass while one runs).
+		// A producer whose bit is already set leaves the Notify to the one that set it. Any set bit means a pass is queued.
 		std::atomic<std::uint32_t> scenePassReasons{ 0 };
-		// The parities' mode (SetScenePassMode): the wakes are dropped and the frame's start runs the pass.
+		// Under the parities, wakes are dropped and the frame start runs the pass.
 		std::atomic<bool> scenePassesInline{ false };
-		// A load screen is up (SetScenePassLoading): the engine events' wakes are held (NoteLoadingScreen wakes once a Present instead).
 		std::atomic<bool> scenePassesLoading{ false };
-		// The pushes each source made inside the frame's render, not woken (a line each: the job threads count them).
+		// One cache line per source, since the job threads count them.
 		struct alignas(64) DeferredCount
 		{
 			std::atomic<std::uint64_t> count{ 0 };
 			std::byte padding[64 - sizeof(std::atomic<std::uint64_t>)]{};  // a line each, explicit (C4324)
 		};
 		std::array<DeferredCount, static_cast<std::size_t>(SceneWake::Count)> scenePassDeferred{};
-		// The executor refused the pump's task: the pump is closed for good (logged once).
+		// The pump is closed for good, logged once.
 		std::atomic<bool> scenePumpFailed{ false };
-		// The test harness's dclf:kill-scene-pump: the next pass throws past its handler, as a pass that dies for good would.
 		std::atomic<bool> throwNextPass{ false };
-		// This thread's ScenePassWakeBatch depth and the sources folded into it.
 		thread_local std::uint32_t wakeBatchDepth = 0;
 		thread_local std::uint32_t wakeBatched = 0;
 
-		/** @brief a_bits woken (the batch's or one wake's): the pump notified when no pass was queued yet. */
+		/** @brief Notifies the pump only when no pass was queued yet. */
 		void WakeScenePassBits(std::uint32_t a_bits)
 		{
 			auto* pump = scenePump.load(std::memory_order_acquire);
 			if (!pump || !a_bits || scenePassesInline.load(std::memory_order_relaxed))
 				return;
-			// The push this wake announces, before the reasons are read: with the fence ScenePass makes after taking them, either that
-			// pass's drains see the push, or this read sees the reasons taken (and this wake queues the next pass).
+			// Pairs with the fence ScenePass makes after taking the reasons. Either that pass's drains see the push, or this read sees the
+			// reasons taken and this wake queues the next pass.
 			std::atomic_thread_fence(std::memory_order_seq_cst);
 			if ((scenePassReasons.load(std::memory_order_relaxed) & a_bits) == a_bits)
 				return;
@@ -67,10 +61,8 @@ namespace DCLF
 				return;
 			(void)pump->Notify();
 		}
-		// The render thread inside RunScenePassInline: the pump's drain runs the pass inline.
 		thread_local bool passInline = false;
 
-		/** @brief The frame's globals before the first frame inputs (a pass that applies the events before any frame). */
 		const std::shared_ptr<const FrameGlobals>& NoFrameGlobals()
 		{
 			static const auto none = std::make_shared<const FrameGlobals>();
@@ -81,15 +73,12 @@ namespace DCLF
 	void WakeScenePass(SceneWake a_source)
 	{
 		static_assert(static_cast<std::uint32_t>(SceneWake::Count) <= 32, "a bit per source");
-		// While a load screen is up the engine's events are drained once a Present (NoteLoadingScreen's LoadDrain wake), not once a push:
-		// a load pushes thousands a frame.
+		// A load pushes thousands of events a frame, so during a load they drain once a Present instead.
 		const bool engineEvent = a_source >= SceneWake::Attach && a_source <= SceneWake::SwitchEvent;
 		if (engineEvent && scenePassesLoading.load(std::memory_order_relaxed))
 			return;
-		// Inside the frame's render (Main::Draw to Present: EngineReadWindow) the engine sets and undoes these for its own views - each
-		// camera's registration leaves its alpha on the property (GetRenderPasses), the reflection faces hide the water around them,
-		// Main::Draw hides the first-person skeleton - so the frame's next pass takes them (most passes they woke changed nothing). An
-		// attach, a detach or a switch still wakes.
+		// Inside the frame's render the engine sets and undoes these for its own views, so the frame's next pass takes them.
+		// An attach, a detach or a switch still wakes.
 		const bool renderToggle = a_source == SceneWake::Hidden || a_source == SceneWake::Leaf || a_source == SceneWake::PropertyUpdate ||
 		                          a_source == SceneWake::AlphaUpdate || a_source == SceneWake::PropertyEvent;
 		if (renderToggle && EngineReadWindow::IsOpen()) {
@@ -134,9 +123,7 @@ namespace DCLF::Scene
 {
 	void Coordinator::StartScenePump()
 	{
-		// Configured once, never destroyed (as the snapshot builder's pump). Its passes run on the scene lane, one at a time
-		// (level-triggered, lock-free: SerializedTaskPump); the lane is the scene work's alone, so a long pass never holds up the
-		// coordinator's jobs (the frame's builds), and it is above the engine's job threads.
+		// Never destroyed. The lane is the scene work's alone, so a long pass never holds up the frame's builds.
 		static auto* pump = SceneScheduler::MakeLanePump(
 			SceneScheduler::Executor(), SceneScheduler::SceneLaneScope(), SceneExecutor::Scene, org::async::TaskDispatch::Controlled, "DCLF scene pass",
 			[this] { ScenePass(passInline); },
@@ -144,10 +131,9 @@ namespace DCLF::Scene
 				if (!scenePumpFailed.exchange(true, std::memory_order_acq_rel))
 					logger::error("[DCLF] the scene pump stopped (its task refused by the scene lane, or a pass threw past its handler); no scene pass runs from here on");
 			});
-		// No wake on a retirement returned (a return would wake a pass whose publication's drop returns the next): the next pass
-		// with an input recycles it.
+		// A returned retirement does not wake, since that could wake a pass whose drop returns the next one.
 		scenePump.store(pump, std::memory_order_release);
-		// What was pushed before the pump existed (the session's first events).
+		// Catches what was pushed before the pump existed.
 		WakeScenePass(SceneWake::Attach);
 	}
 
@@ -179,7 +165,7 @@ namespace DCLF::Scene
 		auto* pump = scenePump.load(std::memory_order_acquire);
 		if (!pump)
 			return;
-		// The parities only: a pass the lane started (a wake from before the mode was set) ends first, then this frame's runs here.
+		// Under the parities, a pass the lane already started ends first, then this frame's runs here.
 		passInline = true;
 		while (!pump->TryRunInline()) {
 			if (scenePumpFailed.load(std::memory_order_acquire))
@@ -187,7 +173,6 @@ namespace DCLF::Scene
 			std::this_thread::yield();
 		}
 		passInline = false;
-		// What the pass held for PrimaryCull, delivered here.
 		FrameView::Get().DeliverPrimaryNotes();
 	}
 
@@ -203,39 +188,34 @@ namespace DCLF::Scene
 		DCLF_ZONE("CS.DCLF.ScenePass");
 		if (throwNextPass.exchange(false, std::memory_order_acq_rel)) [[unlikely]]
 			throw 0;  // not a std::exception: past the pass's handler, into the pump's (SerializedTaskPump::RunOwned), which stops it
-		// A wake from here on is the next pass's: the sources taken before anything is (WakeScenePassBits' fence pairs with this one).
+		// Take the sources before anything else. This pairs with WakeScenePassBits' fence.
 		const std::uint32_t sources = scenePassReasons.exchange(0, std::memory_order_acq_rel);
 		std::atomic_thread_fence(std::memory_order_seq_cst);
-		// What the pass's publication pacing reads (PublicationDue): its sources, and whether it takes new frame inputs.
 		passSources = sources;
 		passTookFrameInputs = false;
 		passDeferred = false;
 		const std::uint64_t publishedBefore = pumpStats.published;
 		const auto start = std::chrono::steady_clock::now();
 		const std::uint64_t eventsOnlyBefore = pumpStats.eventsOnly;
-		// On the lane: the scene work's thread (no frame-side access to guard; GetFrame is the coordinator's), and no engine memory
-		// without a lease (EngineReadWindow::Touch counts the rest). Inline (the parities) the render thread stays itself.
+		// On the lane no engine memory may be read without a lease. Inline the render thread stays itself.
 		if (!a_inline)
 			sceneWorkThread = true;
 		const bool marked = EngineReadWindow::sceneWork;
 		if (!a_inline)
 			EngineReadWindow::sceneWork = true;
-		// The frame's engine globals, never the engine's: the newest frame inputs', taken once for the pass (inputs posted
-		// after this are the next pass's: the post wakes it), or none before the first frame.
+		// Inputs posted after this belong to the next pass, and their post wakes it.
 		TakeFrameInputs();
 		try {
-			// Kept for the pass's evaluations on the pool (ShardScope binds the same capture there).
 			passGlobals = sceneInputs.globals ? sceneInputs.globals : NoFrameGlobals();
 			FrameGlobals::Scope scope(passGlobals);
-			// The whole pass - events, walk, joins, commit, publication - reads the toggles its frame inputs carried (ActiveToggles: the
-			// set its publication is committed under), never the frame's or the live ones; its pool chunks bind the same (ShardScope).
+			// The whole pass reads the toggles its frame inputs carried, never the frame's or the live ones.
 			ToggleSnapshotScope toggles(&passSnapshot.toggles);
 			RunSceneWork(!a_inline);
 			RunActorProbeIfAsked();
-			// The diagnostic capture's scene sections (the fade census, the growth census), on this lane, which owns their state.
+			// This lane owns the census state.
 			DCLF::Capture::RunSceneLaneWork();
 		} catch (const std::exception& e) {
-			// Never out of the drain (the pump would close for good): the pass's flags put back, the next wake runs another.
+			// Never throw out of the drain, or the pump closes for good.
 			if (pumpStats.failed++ < 4)
 				logger::error("[DCLF] a scene pass threw: {}; the tables are whatever it left, and the next wake runs another", e.what());
 			holdPrimaryNotes = false;
@@ -248,7 +228,7 @@ namespace DCLF::Scene
 		ps.passMs.push_back(ms);
 		++ps.passes;
 		ps.inlinePasses += a_inline ? 1 : 0;
-		// The passes each source woke, and those of them that published nothing (a pass counts under every source it took).
+		// A pass counts under every source it took.
 		const bool changed = ps.published != publishedBefore || passDeferred;
 		for (std::uint32_t s = 0; s < static_cast<std::uint32_t>(SceneWake::Count); ++s)
 			if ((sources >> s) & 1u) {
@@ -274,11 +254,10 @@ namespace DCLF::Scene
 		ps.maxPassesInFrame = (std::max)(ps.maxPassesInFrame, ++ps.passesThisFrame);
 		TracyPlot("CS.DCLF.ScenePassMs", ms);
 		{
-			// The pass of sceneFrame's inputs is done, its publication (if any) posted: the snapshot builder may publish for the frame now.
+			// The snapshot builder may publish for the frame now.
 			DCLF_ZONE("CS.DCLF.Scene.NoteScenePassDone");
 			IndirectDraws::Get().NoteScenePassDone(sceneFrame);
 		}
-		// The coordinator's report lines, when its frame crossed into a new window.
 		DCLF_ZONE_NAMED(passReportsZone, "CS.DCLF.Scene.PassReports", true);
 		Reports::ScenePassEnd(*this, sceneFrame);
 		ReportMoverGate();
@@ -287,7 +266,6 @@ namespace DCLF::Scene
 
 	void Coordinator::ReportPublicationPacing()
 	{
-		// Once the pass's frame is in a later report window, as the mover gate's.
 		const std::uint32_t window = sceneFrame / Reports::Interval();
 		if (window == paceWindow)
 			return;
@@ -306,7 +284,6 @@ namespace DCLF::Scene
 				p.claimsReplayed, static_cast<double>(p.claimsKeys) / static_cast<double>((std::max)(p.claimsReplayed, std::uint64_t(1))), p.claimsWhole,
 				p.claimsShared, p.restMs / publications, p.parityChecks, p.parityTables, p.parityClaims,
 				!p.parityChecks ? "" : (p.parityTables || p.parityClaims) ? " <- PACED PUBLICATION DIFFERS; first: " : " <- OK", p.parityFirst);
-			// The key's words in CurrentPublishKey's order.
 			static constexpr std::array<const char*, std::tuple_size_v<decltype(PublishKey::words)> + 2> kKeyNames{ "tables generation", "change log",
 				"geometry log", "material log", "extras log", "version counter", "constants stamp", "family stamps", "objects", "geometries", "pipelines",
 				"materials", "sun candidates", "light candidates", "light entries appeared", "commit toggles", "pipelines applied", "lookups", "catalog" };
@@ -347,10 +324,7 @@ namespace DCLF::Scene
 
 	bool Coordinator::PublicationDue(bool a_task, PublishReason& a_why) const
 	{
-		// The first publication; the parities' inline pass (once a frame, where its observers read); the frame's own pass, whose
-		// publication the builder waits for (NoteScenePassDone: PublishPayload holds a sealed snapshot until the pass of the frame that
-		// took the last one has ended); or the builder took the last one. Otherwise one posted now would only replace the last in the work
-		// slot: the pass defers, and everything it changed stays pending (the set's applications, the deltas, the logs the snapshot replays).
+		// Otherwise a publication posted now would only replace the last one in the work slot. The pass defers and its changes stay pending.
 		if (!publishedKeyValid || !publicationSequence)
 			return a_why = PublishReason::First, true;
 		if (!a_task)
@@ -364,7 +338,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ReportMoverGate()
 	{
-		// Once the pass's frame is in a later report window (the coordinator's clock may skip frame numbers).
+		// The coordinator's clock may skip frame numbers.
 		const std::uint32_t window = sceneFrame / Reports::Interval();
 		if (window == moverGateWindow)
 			return;
@@ -406,10 +380,7 @@ namespace DCLF::Scene
 
 	bool Coordinator::PublicationNeeded()
 	{
-		// A pass publishes only what changed since the last publication - the tables (their logs, stamps and sizes), the lookups and their
-		// catalog, the candidates, the claims (the commit's applications and its snapshot), the deltas the frame takes (plans, shading,
-		// seeds, switches, imports, wetness, light entries), the category nodes, the toggles its commit was made under, an input the
-		// coordinator took for the frame. A pass that changed none publishes nothing: the snapshot of the last publication stands.
+		// A pass that changed none of these publishes nothing, and the last publication's snapshot stands.
 		const PublishKey key = CurrentPublishKey();
 		const std::array<bool, 5> causes{ !publishedKeyValid || publishForced, !setApply.empty(), setSnapshotDirty || nodeSetsDirty, DeltasPending(),
 			!(key == publishedKey) };

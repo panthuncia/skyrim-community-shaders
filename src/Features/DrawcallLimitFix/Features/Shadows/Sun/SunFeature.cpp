@@ -1,5 +1,4 @@
-// Shadows/Sun: the Sun source, its hooks (the accumulation's, SunAccumulation, and the camera hook, SunViews), their report lines and
-// their parity (Diagnostics/).
+// Shadows/Sun: the Sun source, its accumulation and camera hooks, their report lines and parity.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
@@ -14,8 +13,8 @@ namespace DCLF::Features::Shadows::Sun
 	namespace
 	{
 		/**
-		 * @brief The Sun source's hooks (by source: first, before the Spot's light selection): the accumulation's (its cascade culls and
-		 * registrations, which the point lights' culls' install at the Point source requires: Features/Shadows/Local), then the camera hook.
+		 * @brief Installs the Sun source's hooks before the Spot's light selection: the accumulation's, which the point lights' culls
+		 * require, then the camera hook.
 		 */
 		void SourceHooks(Api::ShadowSourceHooks& a_hooks)
 		{
@@ -28,7 +27,7 @@ namespace DCLF::Features::Shadows::Sun
 			SunViews::Get().Install();
 		}
 
-		/** @brief After the main camera's full-frustum call site: the frame's sun state ended, and whether its exclusion applied. */
+		/** @brief Ends the frame's sun state after the full-frustum call site. */
 		bool FullFrustumWindowEnd()
 		{
 			auto& accumulation = SunAccumulation::Get();
@@ -38,22 +37,16 @@ namespace DCLF::Features::Shadows::Sun
 
 		void Install(Api::InstallContext& a_context)
 		{
-			// No switch or toggle turns the skip or the exclusion off: the engine never culls the whole scene for a sun DCLF draws (the
-			// engine-only subset is what it culls, Scene/EngineCasters.h).
-			// The directional views draw while the source is registered; its cameras are the hook's (the Sun board), which Core reads through
-			// the source's camera and the sun volume (the colour commits' cascades, the shadow inputs' full-frustum planes).
+			// No switch turns the skip or the exclusion off. The engine never culls the whole scene for a sun DCLF draws, only the engine-only subset.
 			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Sun, .camera = &SunCamera, .fullFrustumWindowEnd = &FullFrustumWindowEnd });
 			a_context.RegisterSunVolume({ .name = "sun views", .cascades = &SampleSunCascades, .entryPlanes = &SampleSunEntryPlanes });
-			// The accumulation's lines, every frame (they test their report frames and the install themselves).
 			a_context.RegisterReportLines({ .name = "sun accumulation", .point = Api::ReportPoint::RenderThread, .lines = &SunAccumulationLines });
-			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the sun views, the accumulation's cascades and the entry rule's planes
-			// against the engine's.
+			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the sun views, cascades and entry planes against the engine's.
 			if (Diagnostics::Observe().claimsOrScene) {
 				SubscribeSunViewParity();
 				SubscribeSunEntryPlanesParity();
 			}
-			// CS_DCLF_PERSISTENT_PARITY: the sun exclusion's watch, an unclaimed caster under an excluded entry on the frames the cascades
-			// skip nothing.
+			// CS_DCLF_PERSISTENT_PARITY: watch for an unclaimed caster under an excluded entry on frames that skip nothing.
 			if (Diagnostics::Observe().scene)
 				SunCasters::Install();
 		}

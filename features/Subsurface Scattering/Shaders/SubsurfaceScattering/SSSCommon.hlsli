@@ -10,7 +10,10 @@
 #define SSS_SCATTER_MODE_POST 1
 #define SSS_SCATTER_MODE_PRE_POST 2
 
-cbuffer PerFrameSSS : register(b1)
+// The pass constants. Must match SubsurfaceScattering::BlurCB. Each shader lists them as the LATCH
+// entry PerFrameSSS (b1): D3D11 binds the constant buffer, ORG loads them from the execution's latch
+// region (ORGSubsurfaceScattering.cpp).
+struct SSSConstants
 {
 	float4 Kernels[SSSS_N_SAMPLES + SSSS_N_SAMPLES];
 	float4 BaseProfile;
@@ -22,6 +25,15 @@ cbuffer PerFrameSSS : register(b1)
 	float4 MeanFreePathBase;
 	float4 MeanFreePathHuman;
 };
+
+// One kernel sample. The blur indexes the kernels by a value known only at run time. Under ORG
+// they are loaded one at a time from the latch region (Kernels is at offset 0), so the shader
+// keeps no indexed copy of the whole array.
+#if defined(CS_ORG_BINDLESS)
+#	define SSSKernel(i) OrgLatch_PerFrameSSS.Load<float4>(OrgOffset_PerFrameSSS + (i) * 16)
+#else
+#	define SSSKernel(i) PerFrameSSS.Kernels[i]
+#endif
 
 float3 SSSDecodeAlbedo(float3 encodedAlbedo)
 {

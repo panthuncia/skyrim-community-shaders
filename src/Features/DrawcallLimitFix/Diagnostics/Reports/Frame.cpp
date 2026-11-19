@@ -1,5 +1,4 @@
-// The render thread's frame report (Reports::RenderThread, from FrameDriver::EndFrame at Present): the features' render-thread lines
-// (the sun accumulation's), the primary cull lines, the leak line, GPU timings and, with CS_DCLF_STATS, the frame's statistics.
+// The render thread's frame report, written at Present. Culling, leaks and GPU timings always, full statistics with CS_DCLF_STATS.
 #include "Schedule.h"
 #include "Scene.h"
 #include "Engine.h"
@@ -34,9 +33,14 @@
 #include "Vram/VramLedger.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
+namespace DCLF::RegistrationCensus
+{
+	void TraceCrossings(std::uint32_t a_frame);
+}
+
 namespace DCLF::Reports
 {
-	/** @brief The frame's own report lines (the culling, the leaks, the GPU timings, and with CS_DCLF_STATS the full statistics). */
+	/** @brief The frame's own report lines. */
 	void Stats(std::uint32_t frame, FrameDriver::Counters& c);
 
 	void RenderThread(std::uint32_t a_frame)
@@ -53,7 +57,24 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 	auto& leaks = Leaks();
 	auto& timing = c.timing;
 	const bool due = Due(frame);
-	// CS_DCLF_CENSUS: the passes the engine kept since the last frame, classified here (Present), reported every interval.
+	DCLF::RegistrationCensus::TraceCrossings(frame);
+	// Lit passes into the main views that nobody drew, summed per frame over the window.
+	static struct
+	{
+		std::uint64_t waiting = 0, kept = 0;
+		std::uint32_t framesWith = 0, most = 0;
+		const void* first = nullptr;
+	} nobody;
+	{
+		const auto& capture = DCLF::PassCapture::Get().GetStats();
+		const std::uint32_t passes = capture.mainNobodyWaiting + capture.mainNobodyKept;
+		nobody.waiting += capture.mainNobodyWaiting;
+		nobody.kept += capture.mainNobodyKept;
+		nobody.framesWith += passes ? 1u : 0u;
+		nobody.most = (std::max)(nobody.most, passes);
+		nobody.first = nobody.first ? nobody.first : capture.mainNobodyFirst;
+	}
+	// Census of the passes the engine kept, classified at Present.
 	if (DCLF::RegistrationCensus::Enabled()) {
 		DCLF::RegistrationCensus::Collect();
 		if (due) {
@@ -62,16 +83,15 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				logger::info("{}", line);
 		}
 	}
-	// DCLF's render-thread time, by what the asynchronous scene leaves on it (RenderThreadBudget): always reported.
+	// DCLF's render-thread time. Always reported.
 	if (due)
 		if (const auto line = DCLF::RenderThreadBudget::Get().Report(); !line.empty())
 			logger::info("{}", line);
-	// The CPU-driven pipeline's line, whenever CPU frames ran in the window (always reported: it says whether its sites draw).
+	// The CPU pipeline's line whenever CPU frames ran. It says whether its sites draw.
 	if (due)
 		if (const auto line = CpuPipelineLine(); !line.empty())
 			logger::info("{}", line);
-	// The culling's counters, reported whether or not the full statistics are on: they are what says
-	// whether GPU culling is running and how much it rejects.
+	// Culling counters are always reported, since they show whether GPU culling runs and how much it rejects.
 	if (due) {
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
 		if (draws.cullDrawn || draws.cullRejected || draws.cullOccluded) {
@@ -94,8 +114,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			}
 		}
 	}
-	// The bindless record's own gate, reported whenever it is on: it says whether the table the shaders
-	// read holds what the constant buffer path would have given them, which no screenshot can say.
+	// The bindless record's own gate. It says whether the shaders' table matches the constant buffer path, which no screenshot can show.
 	if (due) {
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
 		if (draws.rowTableConflicts)
@@ -103,38 +122,37 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				draws.rowTableConflicts);
 	}
 	if (due) {
-		// The engine's side of the set: what the registrations withheld, and any native draw of a member (LEAK). The set's own lines and
-		// the claims its passes took back are the coordinator's (Coordinator::ReportCoordinator, logged from its pass).
+		// The engine's side of the set. What the registrations withheld, and any native draw of a member, which is a leak.
 		const auto& capture = DCLF::PassCapture::Get().GetStats();
 		std::string samples;
 		for (const auto& sample : leaks.samples)
 			samples += fmt::format("{}{}", samples.empty() ? "" : ", ", sample);
 		const auto leaked = leaks.leakedInDepth + leaks.leakedInOpaque;
-		// By taken draw family: its engine shapes' passes withheld (tree LOD's).
+		// Per taken draw family, its engine shapes' passes withheld.
 		std::string familiesWithheld;
 		for (std::size_t f = 0; f < DCLF::Extensions::kDrawFamilies; ++f)
 			if (const auto& family = DCLF::Extensions::DrawFamilies()[f]; family.taken)
 				familiesWithheld += fmt::format("; {} {} passes withheld", capture.familyWithheld[f], family.label);
 		logger::info("[DCLF] main camera since the last report: {} native passes drawn, {} of them set members' ({} depth, {} opaque){}{}; last frame's registrations: {} "
-					 "member passes withheld{}",
+					 "member passes withheld{}; drawn by nobody: {} lit passes in {} frames, at most {} a frame ({} waiting, {} kept by the engine with nothing to draw them){}",
 			leaks.offered, leaked, leaks.leakedInDepth, leaks.leakedInOpaque, leaked ? " <- LEAK" : " <- OK", samples.empty() ? "" : "; first: " + samples,
-			capture.mainWithheld, familiesWithheld);
+			capture.mainWithheld, familiesWithheld, nobody.waiting + nobody.kept, nobody.framesWith, nobody.most, nobody.waiting, nobody.kept,
+			nobody.first ? fmt::format(" <- NOBODY (first geometry {})", nobody.first) : std::string());
+		nobody = {};
 		leaks = {};
 	}
-	// What the GPU spent on each segment, measured by the graph itself; the menu shows the latest window.
+	// GPU time per segment, measured by the graph. The menu shows the latest window.
 	if (due)
 		RenderGraphRuntime::Get().ReportGpuTimings(Interval(), DCLF::Diagnostics::Observe().stats);
 	if (due && !FullStatistics())
 		timing = {};
 	if (FullStatistics() && due) {
-		// The scene's statistics (the walk's, the set's, the tables', the materials', the scene report's) are the coordinator's, logged
-		// from its pass as its frame crosses the interval (Coordinator::ReportCoordinator); the lines here read the frame's own state.
+		// Scene statistics are logged by the coordinator from its pass. The lines here read only the frame's own state.
 		const double frames = std::max(1u, timing.frames);
 		const auto& shaders = DCLF::ShaderPrograms::Get().GetStats();
 		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed; shadow (Utility): {} requested, {} ready, {} failed",
 			shaders.requested, shaders.ready, shaders.fromCache, shaders.failed, shaders.shadowRequested, shaders.shadowReady, shaders.shadowFailed);
 		const auto& indirect = DCLF::DrawPipelines::Get().GetStats();
-		// Each taken draw family's lane ("tree LOD (lane): ..."), in family order.
 		std::string familyLanes;
 		for (const auto& family : indirect.drawFamilies)
 			if (family.label)
@@ -147,7 +165,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			indirect.shadowRequested, indirect.shadowReady, indirect.shadowFailed,
 			indirect.setPublishes, indirect.setWaits, indirect.shadowSetPublishes, indirect.shadowSetWaits, familyLanes, indirect.forwardRequested, indirect.forwardReady,
 			indirect.forwardFailed, indirect.forwardFailed ? " <- FAILED" : "", indirect.forwardWaits);
-		// The constant tables the builds pack by are the lane's (DCLF's modules reflected); ShaderCache's are the observers'.
+		// The builds pack by the lane's constant tables. ShaderCache's are the observers'.
 		DCLF::Reports::ConstantTableLines();
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
 		std::string skipped;
@@ -155,7 +173,6 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			if (draws.skipped[i])
 				skipped += fmt::format(" {}={}", DCLF::kSkipNames[i], draws.skipped[i]);
 		}
-		// A sample of what the texture and constants skips were missing, when there were any.
 		std::string missing;
 		if (draws.skipped[static_cast<std::size_t>(DCLF::DrawSkip::Texture)])
 			missing += fmt::format(" t{} t{} t{} t{}", draws.missingTextures[0], draws.missingTextures[1], draws.missingTextures[2], draws.missingTextures[3]);
@@ -169,8 +186,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.registrySlots, textures.cleanupPending,
 			textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers, textures.importedAsync,
 			textures.requestsAnswered, textures.requestsPending);
-		// A register a pipeline reads that the commit does not supply rejects every pair of that pipeline: its members are
-		// withheld from the engine and drawn by nobody.
+		// A register a pipeline reads that the commit does not supply rejects every pair of that pipeline. Its members are then drawn by nobody.
 		if (const auto constants = draws.skipped[static_cast<std::size_t>(DCLF::DrawSkip::Constants)])
 			logger::warn("[DCLF] {} pairs read constant registers no frame slot supplies (VS b{:04X} PS b{:04X}): their members are not drawn",
 				constants, draws.missingVertexConstants, draws.missingPixelConstants);
@@ -185,8 +201,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		std::string epochParts;
 		for (std::size_t i = 0; i < draws.partMs.size(); ++i)
 			epochParts += fmt::format("{}{} {:.3f} ms", epochParts.empty() ? "" : ", ", DCLF::kEpochPartNames[i], draws.partMs[i]);
-		// The build's parts are measured where the payload was built, and "graph execute" is everything the render thread spent on
-		// the epoch.
+		// Build parts are measured where the payload was built. "graph execute" is all the render thread spent on the epoch.
 		logger::info("[DCLF] indirect epoch CPU by part (build parts where built): {}", epochParts);
 		if (draws.commitEpochs) {
 			static constexpr std::array<const char*, 7> kCommitParts{ "join", "lookups", "frame textures and patches", "frame blocks",
@@ -231,7 +246,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 					captured.shadowWithheld[0], captured.shadowWithheld[1], captured.shadowWithheld[2], captured.volumetricWithheld, captured.directWithheld, shadow.casters[0], shadow.casters[1],
 					shadow.casters[2], shadow.setWaiting, shadow.setWaiting ? " <- SET SHADOW" : "", shadow.setWaitingFirst.empty() ? "" : " (first: " + shadow.setWaitingFirst + ")", shadow.faceUploads, shadow.notReady, shadow.notReadyWithheld, shadow.notReadyWithheld ? " <- HOLES" : "");
 			}
-			// The features' lines here (Features/OcclusionMaps: the occlusion maps'), before the shadow counters' reset.
+			// Feature lines, before the shadow counters' reset.
 			DCLF::Extensions::ReportLinesAt(DCLF::Api::ReportPoint::ShadowViews, frame);
 			DCLF::IndirectDraws::Get().ResetShadowStats();
 		}
@@ -248,27 +263,23 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				!draws.terrainCpu ? std::string() :
 				fmt::format("; the CPU over the same inputs: {} tested, {} near{}", draws.terrainCpuTested, draws.terrainCpuNear,
 					(draws.terrainNearTested == draws.terrainCpuTested && draws.terrainNear == draws.terrainCpuNear) ? " <- OK" : " <- TB NEAR"));
-		// The forward epoch's class, the colour segment's culling of it, and (CS_DCLF_SET_PARITY) what the engine's registration
-		// handed in for it that frame: every blended pass of a member the engine would draw is a forward input in view (its cull has no
-		// occlusion and a tighter bound than the box the GPU tests), so fewer in view than registered is a member DCLF dropped.
+		// Every blended pass of a member the engine would draw is a forward input in view, since the engine cull is looser than the GPU's.
+		// So fewer in view than registered means DCLF dropped a member.
 		if (draws.forwardTested || draws.forwardDrawn || draws.forwardEngine)
 			logger::info("[DCLF] forward (T7d, sampled frame): {} forward inputs tested, {} in the frustum, {} occluded, {} draws sorted for the forward epoch{}",
 				draws.forwardTested, draws.forwardInView, draws.forwardOccluded, draws.forwardDrawn,
 				!draws.forwardObserved ? std::string() :
 				fmt::format("; the engine registered {} blended passes of members{}", draws.forwardEngine,
 					draws.forwardInView >= draws.forwardEngine ? " <- OK" : " <- FORWARD"));
-		// The colour draws dropped for want of a state class sub-range: none may be (each one an object not drawn), and none is ever drawn
-		// with another class's fixed-function state.
+		// Colour draws dropped for want of a state class sub-range. There must be none.
 		if (indirect.stateClasses)
 			logger::info("[DCLF] state classes (sampled frame): {} colour draws without a class sub-range, {} past their sub-range's capacity{}", draws.classUnplanned,
 				draws.classOverflow, draws.classUnplanned || draws.classOverflow ? " <- SET CLASS DROP" : " <- OK");
-		// CS_DCLF_SET_PARITY: every published set version's classes against their members (DrawPipelines' CheckClasses: class words, each
-		// member's state against its class's initial pipeline's, the handles written, each pipeline in one class, no two classes one state).
-		// Cumulative; each failure was logged when found ("<- SET CLASS").
+		// Cumulative class checks of every published set version. Each failure was logged when found.
 		if (indirect.classParityChecks)
 			logger::info("[DCLF] set classes (CPU, published versions so far): {} checks, {} failed{}", indirect.classParityChecks, indirect.classParityMismatches,
 				indirect.classParityMismatches ? " <- SET CLASS" : " <- OK");
-		// Refraction, likewise: every refraction pass (hint 4) of a member the engine registered is a refraction input in view.
+		// Same for refraction. Every hint 4 pass of a registered member is a refraction input in view.
 		if (draws.refractionTested || draws.refractionDrawn || draws.refractionEngine)
 			logger::info("[DCLF] refraction (T7d, sampled frame): {} refraction inputs tested, {} in the frustum, {} occluded or under a faded root, {} draws "
 						 "into the refraction normals{}",
@@ -286,7 +297,6 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				draws.fadeTested, draws.fadeHidden, draws.fadeRoots);
 		if (draws.shortBuffers)
 			logger::warn("[DCLF] {} draws of the last epoch reach past their vertex or index buffer slice", draws.shortBuffers);
-		// The scene work's registry and the render thread's (tree LOD's meshes), each its owner's; their counters read here.
 		const auto gpu = DCLF::GpuResources::Scene().GetStats();
 		const auto treeGpu = DCLF::GpuResources::Frame().GetStats();
 		logger::info("[DCLF] game buffers for the render graph: {} stable, {} rejected; {} resolved so far in {:.1f} ms (slowest {:.3f} ms); parity: {} prefetched "
@@ -294,7 +304,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 					 "{} rejected, {} resolved in {:.1f} ms (slowest {:.3f} ms)",
 			gpu.cached, gpu.rejected, gpu.resolvedTotal, gpu.resolveMsTotal, gpu.resolveMsMax, gpu.prefetchTaken, gpu.prefetchReleased, treeGpu.cached,
 			treeGpu.rejected, treeGpu.resolvedTotal, treeGpu.resolveMsTotal, treeGpu.resolveMsMax);
-		// Pinless imports: DXVK's moves of them, and what followed (the old storages are held until their imports' users let them go).
+		// Pinless imports and DXVK's moves of them. Old storages are held until their users let them go.
 		if (RenderGraphRuntime::Get().PinlessImports()) {
 			const auto moves = DCLF::ImportRelocations::GetStats();
 			logger::info("[DCLF] pinless imports: {} image and {} buffer moves taken, {} old storages held; textures: {} imports superseded, {} pinned "
@@ -305,29 +315,28 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		}
 		const auto& capture = DCLF::PassCapture::Get().GetStats();
 		logger::info("[DCLF] pass capture: {} registrations from {} threads ({} overflowed)", capture.captured, capture.threads, capture.overflowed);
-		// The render thread's scene time a frame (the scene passes are the coordinator's: its "scene pump" and "scene pass CPU" lines).
+		// Render thread scene time per frame. The scene passes themselves are the coordinator's.
 		logger::info("[DCLF] render thread scene CPU per frame (T6b3d): Present and the frame start's requests and captures {:.3f} ms; BeforeShadowMaps' views {:.3f} "
 					 "(max {:.3f}); EarlyPrepass's posts and material serving {:.3f} (max {:.3f})",
 			timing.eventsMs / frames, timing.sceneMs / frames, timing.sceneMaxMs, timing.buildMs / frames, timing.buildMaxMs);
-		// The joins' frame inputs: render thread (EarlyPrepass) -> the next scene pass, latest wins.
+		// The joins' frame inputs, posted for the next scene pass. Latest wins.
 		if (const auto inputs = store.TakeAccumulateInputStats(); inputs.ancestorMapsPosted || inputs.pipelineFramesPosted || inputs.pipelineBlocksMade || inputs.pipelineBlocksWaited)
 			logger::info("[DCLF] accumulate frame inputs (T6b2c step 8): room map {} posted, {} taken ({} objects' values moved; the joins' lookups: {} found, {} without a room or portal ancestor in the mirror, {} of a room the map does not name); pipeline frame {} posted, {} taken; {} new pipelines' blocks made by "
 						 "the coordinator, {} waited for a pipeline frame",
 				inputs.ancestorMapsPosted, inputs.ancestorMapsTaken, inputs.ancestorValuesMoved, inputs.ancestorFound, inputs.ancestorNoKey, inputs.ancestorNotMapped, inputs.pipelineFramesPosted, inputs.pipelineFramesTaken, inputs.pipelineBlocksMade, inputs.pipelineBlocksWaited);
 		{
 			const auto installs = DCLF::Scene::FrameView::Get().TakePublicationStats();
-			// A publication is installed with the snapshot that carries it (the snapshots' own counters: IndirectDraws' report).
+			// A publication is installed with the snapshot that carries it.
 			logger::info("[DCLF] scene publications (T6b3b: installed with their snapshot): {} installed ({} skipped past by the builder), {} frames whose snapshot brought "
 						 "no newer one",
 				installs.installed, installs.skipped, installs.kept);
 		}
-		// The graph's tracked memory (ORG's tracking world: DCLF's tables, pools and targets with the rest of the graph's).
+		// The graph's tracked memory, DCLF's included.
 		if (const auto memory = RenderGraphMemory::ReportLine(12, 16); !memory.empty())
 			logger::info("[DCLF] {}", memory);
-		// All of it, DXVK's included, by owner and reconciled against the driver's heap usage.
+		// All VRAM, DXVK's included, by owner and reconciled against the driver's heap usage.
 		if (const auto vram = Vram::ReportLine(16); !vram.empty())
 			logger::info("[DCLF] {}", vram);
-		// The features' lines here (Features/HiddenNodes: CS_DCLF_HIDDEN_WATCH's watch of the hidden bit stores).
 		DCLF::Extensions::ReportLinesAt(DCLF::Api::ReportPoint::Statistics, frame);
 		timing = {};
 	}

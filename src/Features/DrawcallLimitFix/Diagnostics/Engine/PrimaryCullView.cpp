@@ -1,4 +1,4 @@
-// PrimaryCullView's out-of-line reads of the cut (PrimaryCullView.h).
+// PrimaryCullView's out-of-line reads of the cut.
 
 #include "PrimaryCullView.h"
 

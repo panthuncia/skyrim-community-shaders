@@ -1,6 +1,6 @@
 #pragma once
 
-// Advanced Skin's owner index: the actors' wetness, one value per actor fanned out to its meshes. Render thread.
+// Advanced Skin's owner index: one wetness value per actor, copied to its meshes. Render thread.
 
 #include <algorithm>
 #include <array>
@@ -12,10 +12,8 @@
 
 namespace DCLF::Integrations::AdvancedSkin
 {
-	// Actor-owned slots grouped by actor, with one sampled value per actor fanned out to its slots. The render thread keeps one from the
-	// published membership changes (the wetness field's membership; the coordinator's tables keep membership only: SceneTables::
-	// classMembers), where values are sampled (its capture).
-	// IDs include incarnations; no engine pointers or deferred engine reads are stored here. Consume only after a writer batch.
+	// Actor-owned slots grouped by actor, with one sampled value per actor copied to its slots. Built from published membership changes.
+	// Ids include incarnations, and nothing here stores engine pointers. Consume only after a writer batch.
 	class OwnerValues
 	{
 	public:
@@ -25,10 +23,10 @@ namespace DCLF::Integrations::AdvancedSkin
 		{
 			return group && slot < slots.size() && slots[slot].group == group && slots[slot].identity == identity;
 		}
-		/** @brief Whether the slot is an actor's (in a group). */
+		/** @brief Whether the slot belongs to an actor. */
 		bool Grouped(std::uint32_t slot) const { return slot < slots.size() && slots[slot].group; }
 		void Clear() { groups.clear(); groupIndex.clear(); slots.clear(); }
-		/** @brief The diagnostic capture's sizes: the groups (actors), and the slots indexed. */
+		/** @brief Sizes for the diagnostic capture: actors and indexed slots. */
 		std::size_t GroupCount() const { return groups.size(); }
 		std::size_t SlotCount() const { return slots.size(); }
 		void Set(std::uint32_t slot, std::uint64_t group, std::uint64_t identity, bool resetValue = false)
@@ -83,8 +81,7 @@ namespace DCLF::Integrations::AdvancedSkin
 				const Value next = sample(*entry.members.begin());
 				const bool changed = !entry.valid || std::memcmp(next.data(), entry.value.data(), sizeof(Value)) != 0;
 				stats.changed += changed;
-				// Only changed actors fan out to all meshes. Joining/reinitialized
-				// meshes must receive the current output even when it did not change.
+				// Only changed actors copy to all meshes. Joining or reinitialized meshes still need the current value even if it did not change.
 				for (const auto slot : changed ? entry.members : entry.pending) {
 					apply(slot, next);
 					++stats.visited;
@@ -109,8 +106,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			bool valid = false;
 		};
 		std::vector<Binding> slots;
-		// Dense capture/fan-out storage; hash lookup and membership maintenance
-		// happen only on writer events, never in the per-actor sampling loop.
+		// Dense capture and fan-out storage. Hash lookups and membership upkeep only happen on writer events, never in the per-actor loop.
 		std::vector<Group> groups;
 		std::unordered_map<std::uint64_t, std::size_t> groupIndex;
 	};

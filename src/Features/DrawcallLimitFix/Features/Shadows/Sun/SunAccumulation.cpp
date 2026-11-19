@@ -1,10 +1,9 @@
-// SunAccumulation: the sun's entry exclusion (render thread, after the full-frustum cull), the registration-free accumulation's
-// thunks on the sun's Accumulate and its registrations (the render thread and the registration jobs), and the sun's bits for removed
-// entries.
+// The sun's entry exclusion, the registration-skip thunks on its Accumulate, and the sun bits for removed entries.
+// Runs on the render thread and on the registration jobs.
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunAccumulation.h"
 #include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#include "Features/DrawcallLimitFix/Core/Render/StartupHold.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -36,11 +35,9 @@ namespace DCLF::Features::Shadows::Sun
 {
 	namespace
 	{
-		using namespace Engine;
+		using namespace DCLF::Engine;
 
-		// Engine::Offsets (Address Library ids).
-		// CalculateAndDrawShadowCasterLights -> FUN_141511f30. AE: a CALL. SE: a tail JMP (SE 0x1412e2f32), at the end of the sun part SE
-		// keeps out of line (FUN_1412e2e10, which CalculateAndDrawShadowCasterLights calls first).
+		// CalculateAndDrawShadowCasterLights calls FUN_141511f30. AE uses a CALL, SE a tail JMP at 0x1412e2f32 inside FUN_1412e2e10.
 		constexpr DCLF::Engine::Offset kFullFrustumCallSite{ { 107132, 0x126 }, { 100418, 0x122 } };
 		constexpr DCLF::Engine::Offset kFullFrustumCull{ { 108492 }, { 101498 } };
 		constexpr DCLF::Engine::Offset kRegisterCallSites[2] = { { { 76558, 0xd3 }, { 74809, 0x73 } }, { { 76558, 0x199 }, { 74809, 0x159 } } };  // FUN_140e28af0 -> FUN_1414b2140
@@ -53,7 +50,7 @@ namespace DCLF::Features::Shadows::Sun
 		constexpr DCLF::Engine::Offset kMaskClear{ { 107128 }, { 100410 } };
 		constexpr DCLF::Engine::Offset kAppendNonAccum{ { 76772 }, { 75009 } };  // BSGeometryListCullingProcess::AppendNonAccum, vtable slot 0x19
 
-		/** @brief Whether the instruction at a_address is a JMP rel32 to a_target (CallsTo's check for a tail-call site). */
+		/** @brief Whether the instruction at a_address is a JMP rel32 to a_target. */
 		bool JumpsTo(std::uintptr_t a_address, std::uintptr_t a_target)
 		{
 			const auto* bytes = reinterpret_cast<const std::uint8_t*>(a_address);
@@ -63,20 +60,16 @@ namespace DCLF::Features::Shadows::Sun
 			std::memcpy(&displacement, bytes + 1, sizeof(displacement));
 			return a_address + 5 + static_cast<std::intptr_t>(displacement) == a_target;
 		}
-		// The engine's AppendNonAccum (Hooks::AppendNonAccum's original), for an entry the veto gives back.
 		void (*appendNonAccum)(void*, RE::NiAVObject*, std::uint64_t, std::uint64_t) = nullptr;
 		constexpr std::size_t kDescriptorAccumulator = 0x48;  // ShadowmapDescriptor::shaderAccumulator
-		// The engine indexes the inner lists by its global count. Detours of the same
-		// function also read the outer BSTArray's size, so pass the complete container.
+		// The engine indexes the inner lists by its global count. Detours of the same function also read the outer BSTArray's size.
 		using SceneList = RE::BSTArray<RE::NiPointer<RE::NiAVObject>>;
 		RE::BSTArray<SceneList> emptySceneLists;
 		SceneList emptyExtraNodes;
-		// The whole skip's extra list when the frame has engine-only casters: their roots alone (EngineCasters.h), filled and emptied
-		// around the cull.
+		// The whole skip's extra list when the frame has engine-only casters. Filled and emptied around the cull.
 		SceneList targetedExtraNodes;
 		constexpr std::uint32_t kMaxSceneLists = 32;
-		// FUN_1414f0920's fourth argument: the light's full-frustum processes, as the BSTArray<NiPointer<BSCullingProcess>> it reads (data,
-		// then the size at +0x10). The whole skip passes one of its own, of the processes holding entries.
+		// FUN_1414f0920's fourth argument, read as a BSTArray of process pointers with the size at +0x10.
 		struct ProcessList
 		{
 			RE::BSCullingProcess* const* data = nullptr;
@@ -87,7 +80,6 @@ namespace DCLF::Features::Shadows::Sun
 		};
 		static_assert(sizeof(ProcessList) == 0x18 && offsetof(ProcessList, size) == 0x10);
 
-		// BSShaderAccumulator fields the sun's Accumulate sets per cascade (FUN_1414b2140 reads them).
 		constexpr std::size_t kAccumulatorLightIndex = 0x160;  // shadow-light count + 1; 0xFFFF clears masks; 0 writes none
 		constexpr std::size_t kAccumulatorLightBit = 0x164;    // 1 << count
 		// BSGeometry (AE) and BSShaderProperty fields FUN_1414b2140 reads.
@@ -97,19 +89,16 @@ namespace DCLF::Features::Shadows::Sun
 		constexpr std::size_t kGeometryType = 0x150;
 		constexpr std::size_t kDismemberSkinReady = 0x98;
 
-		/** @brief Whether the registration skip applies this frame: the set it skips registrations by withholds casters. */
+		/** @brief Whether the registration skip applies this frame. */
 		bool M1Active()
 		{
 			return PassCapture::ShadowWithholdingEnabled() && !PassCapture::Get().Bypassed();
 		}
 
-		/**
-		 * @brief The sun's cascades skip the entries DCLF excludes on frame a_frame (else the engine accumulates them): the feature's
-		 * Policy question. Normal path: true.
-		 */
+		/** @brief Whether the sun's cascades skip DCLF's excluded entries this frame. */
 		bool ExcludeSun(std::uint32_t a_frame)
 		{
-			// The sun exclusion's check (Diagnostics/SunCasters) watches the excluded entries' registrations on its frames.
+			// Parity frames keep the engine's work so Diagnostics/SunCasters can watch it.
 			return !(Diagnostics::Observe().scene && Diagnostics::ParityDue(a_frame));
 		}
 
@@ -126,10 +115,7 @@ namespace DCLF::Features::Shadows::Sun
 			return false;
 		}
 
-		/**
-		 * @brief The sun's Accumulate in progress on this thread: its cascade accumulators and, per accumulator, the
-		 * set its registrations are skipped for (null: registered as usual).
-		 */
+		/** @brief The sun's Accumulate in progress on this thread, with the set each accumulator skips registrations for. */
 		struct SunCall
 		{
 			std::vector<const void*> accumulators;
@@ -150,14 +136,10 @@ namespace DCLF::Features::Shadows::Sun
 		};
 		thread_local SunCall* currentCall = nullptr;
 
-		// The sun's accumulators as the last Accumulate saw them, for spotting a sun registration made elsewhere: published
-		// whole when they change, read by the registration threads.
+		// The sun's accumulators from the last Accumulate, to spot a sun registration made elsewhere. Republished whole on change.
 		std::atomic<std::shared_ptr<const std::vector<const void*>>> knownAccumulators;
 
-		/**
-		 * @brief FUN_1414b2140 without the mode's registration: its early-outs (a dismemberment skin not yet set up, no
-		 * shader property, nothing to draw) and its activeLightMask write, from the accumulator's fields.
-		 */
+		/** @brief FUN_1414b2140's early-outs and activeLightMask write, without building any passes. */
 		void WriteMaskOnly(void* a_accumulator, void* a_geometry)
 		{
 			auto* skin = At<RE::NiSkinInstance*>(a_geometry, kGeometrySkinInstance);
@@ -167,7 +149,7 @@ namespace DCLF::Features::Shadows::Sun
 			if (!property)
 				return;
 			if (!At<void*>(a_geometry, kGeometryRendererData) && !skin) {
-				// vfunc 0x10 of the geometry, and the type byte 0xB: what the engine checks before giving up.
+				// The engine checks vfunc 0x10 and type byte 0xB before giving up.
 				using Vfunc = void* (*)(void*);
 				auto* vtable = *reinterpret_cast<Vfunc**>(a_geometry);
 				if (!vtable[0x10](a_geometry) && At<std::uint8_t>(a_geometry, kGeometryType) != 0xB)
@@ -210,13 +192,11 @@ namespace DCLF::Features::Shadows::Sun
 			++stats.exclusionMissing;
 			return;
 		}
-		// Not a verdict on the frame's candidates (BeginFrame takes the builder's translation at the frame's start; none then): an entry
-		// may hold a caster no epoch has drawn yet. The engine culls everything this frame.
+		// Without a verdict on this frame's candidates, an entry may hold a caster no epoch has drawn yet. The engine culls everything.
 		if (exclusion->candidates != Scene::FrameView::Get().GetSunCandidates()) {
 			++stats.exclusionStale;
 			return;
 		}
-		// The processes are the light's, made once with it; the cull's jobs append to them (each its own) only once it is armed.
 		vetoProcesses.clear();
 		for (auto& process : a_light->GetShadowDirectionalLightRuntimeData().fullFrustumCullingProcessArray)
 			if (process)
@@ -233,8 +213,7 @@ namespace DCLF::Features::Shadows::Sun
 		auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
 		if (!node || node->GetRuntimeData().sunShadowDirLight != a_light)
 			return false;
-		// Every cascade view of the sun DCLF's this frame (AddCaster, before this call site, covered them) and its casters the set's: then
-		// nothing the engine's cascades would register is drawn by them. Parity frames keep the exclusion (SunCasters watches them).
+		// The exclusion needs every sun cascade view to be DCLF's this frame. Parity frames keep it so SunCasters can watch them.
 		std::uint32_t cascades = 0;
 		bool covered = ExcludeSun(Scene::FrameView::Get().GetFrame()) && Global<std::uint32_t>(Address::kSceneListCount) <= kMaxSceneLists;
 		for (const auto& view : ShadowViews::Get().All()) {
@@ -244,22 +223,20 @@ namespace DCLF::Features::Shadows::Sun
 			covered = covered && view.covered && PassCapture::Get().CastersForBatch(view.batch);
 		}
 		if (!covered || cascades < a_light->GetRuntimeData().shadowmapDescriptors.size()) {
-			// The session's first frames (Core/Render/StartupHold.h): held black, the whole skip kept rather than the engine's whole cull.
-			// Not a parity frame's (ExcludeSun).
-			if (!StartupHold::Active() || !ExcludeSun(Scene::FrameView::Get().GetFrame())) {
+			// During a load hold the whole skip is kept rather than the engine's whole cull.
+			if (!LoadHold::Active() || !ExcludeSun(Scene::FrameView::Get().GetFrame())) {
 				++stats.wholeDeclined;
 				return false;
 			}
-			StartupHold::NoteHeld(StartupHold::View::Sun);
+			LoadHold::NoteHeld(LoadHold::View::Sun);
 			++stats.wholeHeld;
 		}
-		// A caster that stays the engine's (a skin DCLF refuses, a buffer it cannot import) has only the engine's cull to draw its shadow:
-		// the whole skip culls the engine-only subset's roots for it (FullFrustum), never the scene. The builder's exclusion is not needed: taken as ArmExclusion would, so the slot's hand-off stays the same.
+		// An engine-only caster has only the engine's cull to draw its shadow, so the whole skip culls those roots alone.
+		// The exclusion slot is still taken so its hand-off stays the same.
 		previousExclusion = Local::SunExclusionSlot::Get().Take();
 		frameState.exclusion.reset();
 		armedExclusion.reset();
 		vetoStamp = stampCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-		// No registration reads the set now (the last frame's ended at its mask clear).
 		wholeCleared.NewRound();
 		frameState.stamp = vetoStamp;
 		frameState.whole = true;
@@ -284,7 +261,7 @@ namespace DCLF::Features::Shadows::Sun
 
 	void SunAccumulation::ExcludeEntries()
 	{
-		// The cull's jobs are done (JobList::Finish): their appends and counts are visible here.
+		// JobList::Finish has run, so the jobs' appends and counts are visible here.
 		if (!vetoExclusion.exchange(nullptr, std::memory_order_acq_rel))
 			return;
 		const std::int64_t start = Now();
@@ -293,7 +270,7 @@ namespace DCLF::Features::Shadows::Sun
 		const auto& candidates = *exclusion->candidates;
 		for (auto& p : vetoProcesses) {
 			stats.entriesSeen += p.seen;
-			// A process left empty by the veto gets its first entry back: the cascade cull sets its planes up from the first.
+			// A process left empty gets its first entry back, because the cascade cull sets its planes up from the first.
 			if (p.vetoed && p.vetoed == p.seen) {
 				exclusion->removed[p.firstEntry].store(0, std::memory_order_relaxed);
 				appendNonAccum(const_cast<void*>(p.process), p.firstVetoed, 0, 0);
@@ -302,7 +279,6 @@ namespace DCLF::Features::Shadows::Sun
 			}
 			stats.entriesRemoved += p.vetoed;
 		}
-		// CS_DCLF_PERSISTENT_PARITY: no excluded entry in the arrays but one given back (the veto saw every append).
 		if (Diagnostics::Observe().scene && Diagnostics::ParityDue(stamp)) {
 			std::uint32_t left = 0, givenBack = 0;
 			for (const auto& p : vetoProcesses) {
@@ -343,8 +319,7 @@ namespace DCLF::Features::Shadows::Sun
 
 	void SunAccumulation::EndFullFrustumWindow()
 	{
-		// A frame whose full-frustum cull did not run (the sun does not draw: an interior) has no cascades and no exclusion:
-		// nothing of the last frame that ran it stays live.
+		// On a frame without the full-frustum cull, such as an interior, nothing of the last frame stays live.
 		if (!std::exchange(fullFrustumRan, false))
 			ResetFrameSun();
 	}
@@ -370,7 +345,6 @@ namespace DCLF::Features::Shadows::Sun
 		if (!lightData)
 			return;
 		const auto& state = frameState;
-		// The whole skip: every geometry the main camera registers (none was culled into a cascade), once a frame until its clearing one.
 		const bool whole = state.whole;
 		if (whole) {
 			if (ClearedThisFrame(a_geometry, a_clears))
@@ -408,7 +382,6 @@ namespace DCLF::Features::Shadows::Sun
 			static void thunk(RE::BSShadowDirectionalLight* a_light, std::uint32_t* a_count, std::uint32_t* a_arg2, RE::NiAVObject* a_arg3)
 			{
 				auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
-				// DCLF switched off: the engine's own Accumulate (no claims, no bits of DCLF's).
 				if (!node || node->GetRuntimeData().sunShadowDirLight != a_light || !ShellState::Running()) {
 					func(a_light, a_count, a_arg2, a_arg3);
 					return;
@@ -425,21 +398,18 @@ namespace DCLF::Features::Shadows::Sun
 						continue;
 					call.accumulators.push_back(accumulator);
 					call.descriptors.push_back(i);
-					// The set PassCapture would withhold this accumulator's passes by, when the renderer is a shadow view's.
 					const auto* data = active ? accumulator->GetRuntimeData() : nullptr;
 					call.claims.push_back(data ? PassCapture::Get().CastersForBatch(data->batchRenderer) : nullptr);
 					++call.count;
 				}
 				if (const auto known = knownAccumulators.load(std::memory_order_acquire); !known || *known != call.accumulators)
 					knownAccumulators.store(std::make_shared<const std::vector<const void*>>(call.accumulators), std::memory_order_release);
-				// Room for every cascade before any is captured: the registration threads read the cascades only once bitsReady
-				// is set, which the full-frustum cull cleared before this.
+				// Make room before capture. Registration threads read the cascades only after bitsReady is set, and it is clear here.
 				if (self.frameState.cascades.size() < call.count)
 					self.frameState.cascades.resize(call.count);
 				const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 				Diagnostics::Notify<Diagnostics::EnginePoint::SunAccumulateBegin>();
-				// Each cascade's volume is DCLF's (the Sun board, from the camera UpdateCamera set up). A cascade without DCLF's stays unknown,
-				// its bit unset.
+				// A cascade without a DCLF view stays unknown and its bit unset.
 				for (std::uint32_t i = 0; i < call.count; ++i) {
 					auto& cascade = self.frameState.cascades[i];
 					cascade = {};
@@ -458,8 +428,7 @@ namespace DCLF::Features::Shadows::Sun
 				func(a_light, a_count, a_arg2, a_arg3);
 				const std::int64_t ticks = Now() - start;
 				currentCall = nullptr;
-				// The captured cascades: what a removed entry's geometries are tested against when the main camera registers
-				// them. From here until the next mask clear, those registrations take DCLF's bits.
+				// From here until the next mask clear, removed entries' main registrations take DCLF's bits.
 				{
 					auto& state = self.frameState;
 					state.cascadeCount = call.count;
@@ -484,9 +453,8 @@ namespace DCLF::Features::Shadows::Sun
 		};
 
 		/**
-		 * @brief An owned geometry's activeLightMask as the engine would leave it once its main registration had read it: 0. DCLF
-		 * draws its main pass (PrimaryCull::Owned), so no main registration ever consumes the bits the shadow lights' accumulations
-		 * write, and every later registration of it (the reflections, the other views) reads 0, as with the engine's own.
+		 * @brief Leaves an owned geometry's activeLightMask at 0, as the engine would after its main registration read it.
+		 * DCLF draws its main pass, so no main registration ever consumes the shadow lights' bits.
 		 */
 		static void ClearOwnedMask(void* a_geometry)
 		{
@@ -495,7 +463,7 @@ namespace DCLF::Features::Shadows::Sun
 					At<std::uint32_t>(lightData, kLightDataActiveMask) = 0;
 		}
 
-		/** @brief FUN_140e28af0's calls of the accumulator's registration, FUN_1414b2140(accumulator, geometry, arg). */
+		/** @brief FUN_140e28af0's calls of the registration FUN_1414b2140(accumulator, geometry, arg). */
 		template <std::uint32_t Site>
 		struct Register
 		{
@@ -511,8 +479,7 @@ namespace DCLF::Features::Shadows::Sun
 							known && std::find(known->begin(), known->end(), a_accumulator) != known->end())
 							self.offThread.fetch_add(1, std::memory_order_relaxed);
 					}
-					// An owned geometry: a shadow light's accumulation (+0x160 neither 0 nor 0xFFFF) leaves its mask 0, and no
-					// registration of it takes the sun's bits (ClearOwnedMask).
+					// A shadow light's accumulation sets +0x160 to neither 0 nor 0xFFFF.
 					const std::uint32_t lightIndex = At<std::uint32_t>(a_accumulator, kAccumulatorLightIndex);
 					const bool owned = PrimaryCull::Get().Owned(*geometry);
 					if (owned) {
@@ -521,12 +488,11 @@ namespace DCLF::Features::Shadows::Sun
 							ClearOwnedMask(a_geometry);
 						return result;
 					}
-					// The main camera's registrations read the mask, then clear it (+0x160 = 0xFFFF) for the next frame.
+					// The main camera's registrations read the mask, then clear it (+0x160 = 0xFFFF).
 					if (self.bitsReady.load(std::memory_order_acquire))
 						self.ApplySunBits(geometry, At<std::uint32_t>(a_accumulator, kAccumulatorLightIndex) == 0xFFFF);
 					else if (!call && self.exclusionLive.load(std::memory_order_acquire) && self.UnderRemovedEntry(geometry))
 						self.bitStats.notReady.fetch_add(1, std::memory_order_relaxed);
-					// And the point lights' bits of a geometry their culls left out (Features/Shadows/Local's LocalLightCull: a static call).
 					if (lightIndex == 0xFFFF)
 						Local::LocalLightCull::NoteMainRegistration(geometry);
 					return func(a_accumulator, a_geometry, a_arg);
@@ -534,11 +500,10 @@ namespace DCLF::Features::Shadows::Sun
 				std::uint64_t result = 1;
 				const auto& claims = call->claims[cascade];
 				const bool claimed = claims && (claims->PhasesOf(geometry) & kSetCaster);
-				// A removed entry's geometry reaching a cascade: the entry was culled through another path (checked every 64th cull).
+				// A removed entry reaching a cascade was culled through another path. Checked every 64th cull.
 				if (self.exclusionLive.load(std::memory_order_relaxed) && (self.frameState.stamp & 63) == 0 && self.UnderRemovedEntry(geometry))
 					++self.stats.cascadeRegistrationsUnderRemoved;
 				if (claimed) {
-					// An owned geometry's mask stays 0 (ClearOwnedMask); any other takes the cascade's bit for its main registration.
 					if (PrimaryCull::Get().Owned(*geometry))
 						ClearOwnedMask(a_geometry);
 					else
@@ -547,11 +512,9 @@ namespace DCLF::Features::Shadows::Sun
 				} else {
 					const std::uint32_t passesBefore = PassCapture::PassesOnThisThread();
 					result = func(a_accumulator, a_geometry, a_arg);
-					// One that built a pass (a registration without one draws nothing).
+					// A registration that built no pass draws nothing.
 					if (PassCapture::PassesOnThisThread() != passesBefore)
 						Diagnostics::Notify(Diagnostics::SunCasterRegistered{ geometry });
-					// A caster the sun's views do not claim is registered for its native shadow; if DCLF draws its main pass, the
-					// cascade's bit has no main registration to read it (ClearOwnedMask).
 					if (PrimaryCull::Get().Owned(*geometry))
 						ClearOwnedMask(a_geometry);
 					++call->registered;
@@ -569,25 +532,19 @@ namespace DCLF::Features::Shadows::Sun
 				auto& self = SunAccumulation::Get();
 				self.ResetFrameSun();
 				self.fullFrustumRan = true;
-				// DCLF switched off: the engine's whole cull (no exclusion, no whole skip: the views' coverage is not decided while off).
+				// With DCLF off, view coverage is not decided, so the engine culls everything.
 				if (!ShellState::Running()) {
 					func(a_light, a_lists, a_nodes);
 					return;
 				}
 				if (self.ArmWhole(a_light)) {
-					// The engine's cull with no scene list in it (each empty) and an empty extra list (in place of the main camera's portal
-					// graph's alwaysRenderChildren: every loaded cell's actor and dynamic nodes, and the particle manager): its processes' setup
-					// as the engine does it, nothing appended, so the cascade culls cull nothing. With the list culls' job list null for the
-					// call, their empty culls run inline (the engine's own path without one): no jobs queued, and no wait behind the job
-					// threads' other work. Only the render thread reads the job list while the game runs (Main::Draw,
-					// CalculateAndDrawShadowCasterLights, this cull; then shutdown).
+					// Run the engine's cull over empty scene lists so the processes are set up but the cascades cull nothing.
+					// A null job list makes the empty culls run inline. Only the render thread reads the job list while the game runs.
 					emptySceneLists.resize(Global<std::uint32_t>(Address::kSceneListCount));
 					auto& jobs = Global<void*>(Address::kListCullJobs);
 					void* const held = jobs;
 					const std::int64_t start = Now();
 					jobs = nullptr;
-					// The engine-only subset's roots (Scene/EngineCasters.h), the one thing it culls: their casters register as usual, and the
-					// members under them are withheld at their cascades' registrations (Register: claimed).
 					const auto& subset = Scene::FrameView::Get().GetEngineCasters();
 					if (const auto* casters = subset ? &subset->Of(Scene::EngineOnlySubset::kCaster) : nullptr; casters && !casters->roots.empty()) {
 						for (const auto* root : casters->roots)
@@ -607,8 +564,7 @@ namespace DCLF::Features::Shadows::Sun
 					return;
 				}
 				self.ArmExclusion(a_light);
-				// A sun DCLF draws, culled whole by the engine (less the exclusion's entries when one is armed): a view it does not cover yet.
-				// Not on the parity frames (ExcludeSun), or with the shadows not DCLF's (M1Active).
+				// The engine culls the sun whole when a view is not covered yet. Not on parity frames, or when the shadows are not DCLF's.
 				if (M1Active() && ExcludeSun(Scene::FrameView::Get().GetFrame()))
 					EngineOnlyCull::NoteWholeCull(self.vetoExclusion.load(std::memory_order_relaxed) ? EngineOnlyCull::WholeCull::SunNotCovered :
 					                                                                                     EngineOnlyCull::WholeCull::SunNoExclusion);
@@ -624,11 +580,8 @@ namespace DCLF::Features::Shadows::Sun
 		};
 
 		/**
-		 * @brief BSGeometryListCullingProcess::AppendNonAccum (vtable slot 0x19, AE 0x140e30520): the only push into a full-frustum
-		 * process's objectArray (Process1 -> AppendVirtual -> here, for every entry its cull passes; the sun's processes do not recurse,
-		 * so the entry is the list's own). While the exclusion is armed, an excluded entry appended to one of the light's processes is
-		 * stamped removed and not pushed: the veto at insertion, on the cull's job threads, instead of a walk of the arrays after it.
-		 * The other processes of the class (the scene lists', precipitation's) pass through.
+		 * @brief AppendNonAccum (vtable slot 0x19, AE 0x140e30520), the only push into a full-frustum process's objectArray.
+		 * While armed, it drops excluded entries at insertion on the cull's job threads. Other processes of this class pass through.
 		 */
 		struct AppendNonAccum
 		{
@@ -657,10 +610,7 @@ namespace DCLF::Features::Shadows::Sun
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief Main::Draw's call of the activeLightMask clear, FUN_1414cb640: from its return until the sun accumulates
-		 * again, the engine's masks hold none of the sun's bits, so DCLF's are not written either.
-		 */
+		/** @brief Main::Draw's activeLightMask clear (FUN_1414cb640). Until the sun accumulates again, no sun bits are written. */
 		struct MaskClear
 		{
 			static void thunk(std::uint64_t a_1, std::uint64_t a_2, std::uint64_t a_3, std::uint64_t a_4)
@@ -671,7 +621,7 @@ namespace DCLF::Features::Shadows::Sun
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief Accumulate's call of FUN_1414f0920(light, descriptor, count, full-frustum processes, arg), once per cascade. */
+		/** @brief Accumulate's per-cascade call of FUN_1414f0920(light, descriptor, count, processes, arg). */
 		struct Cascade
 		{
 			static void thunk(void* a_light, void* a_descriptor, std::uint32_t* a_count, void* a_processes, std::uint32_t a_arg)
@@ -683,13 +633,11 @@ namespace DCLF::Features::Shadows::Sun
 					call->cascade = call->IndexOf(accumulator);
 					if (call->cascade >= 0) {
 						auto& cascade = self.frameState.cascades[call->cascade];
-						// Accumulate has just set it: 1 << the shadow-light count (the light mask's bookkeeping, not a cull's).
 						cascade.bit = At<std::uint32_t>(accumulator, kAccumulatorLightBit);
 					}
 				}
-				// The whole skip: the scene lists and the extra list were culled into nothing, so only processes holding entries (none, unless
-				// another caller appended) are culled into the cascade; an empty one would cost a cull's set-up and a registration under the
-				// context's lock (FUN_140e28af0) for nothing.
+				// In the whole skip only processes holding entries are culled. An empty one would still cost a cull's set-up and a registration
+				// under the context's lock (FUN_140e28af0).
 				if (call && self.frameState.whole && a_processes) {
 					std::array<RE::BSCullingProcess*, kMaxSceneLists> held{};
 					ProcessList kept{ held.data() };
@@ -714,10 +662,8 @@ namespace DCLF::Features::Shadows::Sun
 		};
 
 		/**
-		 * @brief BSCullingProcess::Process1 (vtable slot 0x16), for the sun's cascade culls: the objectArray holds no excluded
-		 * entry (ExcludeEntries), but one can still be reached through a node above it that stays. Skipped there too, stamped
-		 * as removed, so that a geometry of it the main camera registers takes DCLF's bits (ApplySunBits). Only inside the
-		 * sun's Accumulate on its own thread (currentCall), and only while the frame skips them (FrameState::skipExcluded).
+		 * @brief Process1 (vtable slot 0x16) for the sun's cascade culls. Skips excluded entries still reached through a node above.
+		 * Only inside the sun's Accumulate on its own thread, and only while skipExcluded is set.
 		 */
 		struct CascadeProcess1
 		{
@@ -746,8 +692,8 @@ namespace DCLF::Features::Shadows::Sun
 			static void thunk(void* a_fullProcess, RE::NiCullingProcess* a_process, std::uint64_t a_arg)
 			{
 				func(a_fullProcess, a_process, a_arg);
-				// After it: the traversal's first call (vfunc 0xB8) has set the process up from the cascade's camera. With
-				// an empty objectArray it made none, and the planes are not this cascade's.
+				// The traversal's first call (vfunc 0xB8) set the process up from the cascade's camera. With an empty objectArray it did not,
+				// and the planes are not this cascade's.
 				SunCall* call = currentCall;
 				if (!call || call->cascade < 0 || !a_process)
 					return;
@@ -768,14 +714,13 @@ namespace DCLF::Features::Shadows::Sun
 		const auto cascadeCall = base + kCascadeCallSite;
 		const auto cascadeCull = base + kCascadeCullCallSite;
 		const auto maskClear = base + kMaskClearCallSite;
-		// SE's full-frustum site is a tail JMP: patched as one (the thunk's return goes to the sun part's caller, as the engine's would).
+		// SE's full-frustum site is a tail JMP, patched as one so the thunk returns to the sun part's caller.
 		const bool fullFrustumJumps = REL::Module::IsSE();
-		// Preflight checked every site before any hook was written; the cascade cull and the mask clear chain onto whatever they call.
+		// Preflight checked every site. The cascade cull and the mask clear chain onto whatever they call.
 		if (!CallsTo(cascadeCull, base + kCascadeCull))
 			logger::info("[DCLF] sun accumulation: the cascade cull's call is hooked by {}; DCLF's thunk chains onto it", HookSites::BranchTargetModule(cascadeCull));
 		if (!CallsTo(maskClear, base + kMaskClear))
 			logger::info("[DCLF] sun accumulation: the light mask clear's call is hooked by {}; DCLF's thunk chains onto it", HookSites::BranchTargetModule(maskClear));
-		// The entry exclusion's veto, at the full-frustum processes' only push.
 		stl::write_vfunc<0x19, Hooks::AppendNonAccum>(RE::VTABLE_BSGeometryListCullingProcess[0]);
 		appendNonAccum = reinterpret_cast<decltype(appendNonAccum)>(Hooks::AppendNonAccum::func.address());
 		stl::write_vfunc<0x9, Hooks::Accumulate>(RE::VTABLE_BSShadowDirectionalLight[0]);
@@ -788,7 +733,6 @@ namespace DCLF::Features::Shadows::Sun
 		stl::write_thunk_call<Hooks::Cascade>(cascadeCall);
 		stl::write_thunk_call<Hooks::CascadeCull>(cascadeCull);
 		stl::write_thunk_call<Hooks::MaskClear>(maskClear);
-		// The cascades' skip of the excluded entries they reach anyway (the point lights' culls have their own: Shadows/Local's LocalLightCull).
 		stl::write_vfunc<0x16, Hooks::CascadeProcess1>(RE::VTABLE_BSCullingProcess[0]);
 		installed = true;
 		logger::info("[DCLF] sun accumulation installed (Accumulate, its cascades and registrations, the full-frustum cull)");
@@ -797,7 +741,6 @@ namespace DCLF::Features::Shadows::Sun
 	void SunAccumulation::Preflight()
 	{
 		const auto base = REL::Module::get().base();
-		// SE's full-frustum site is a tail JMP (patched as one).
 		if (REL::Module::IsSE())
 			HookSites::RequireJumpTo("the sun's full-frustum cull", base + kFullFrustumCallSite, base + kFullFrustumCull);
 		else

@@ -3,7 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsState.h"
 
-// The draws' build lines (constant tables, pass statistics, the colour sun test), for the render thread's report (Frame.cpp).
+// The draws' build lines for the render thread's report.
 
 namespace DCLF::Reports
 {

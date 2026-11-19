@@ -1,10 +1,7 @@
-#include "Common/FrameBuffer.hlsli"
-#include "Common/Math.hlsli"
-#include "Skylighting/Skylighting.hlsli"
-
-Texture2D<unorm float> srcOcclusionDepth : register(t0);
-Texture2DArray<float4> ShadowCascadeMap : register(t1);
-Texture2DArray<float4> ESRAMShadow : register(t3);
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS), so the shader body reads FrameBuffer and SharedData the same on both paths.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
 
 struct DirectionalShadowLightData
 {
@@ -13,14 +10,55 @@ struct DirectionalShadowLightData
 	float2 EndSplitDistances;
 	float2 StartSplitDistances;
 };
+
+// The directional shadow data, which D3D11 reads from Deferred's structured buffer at t2. The ORG build
+// reads it from a latch, stored as float4 columns so no load depends on matrix packing. FXC drops the
+// latch's cbuffer: only the ORG build reads it.
+struct UpdateProbesShadows
+{
+	float4 ShadowProj[8];   // the two cascades' columns, as DirectionalShadowLightData's column_major matrices
+	float4 SplitDistances;  // xy: end, zw: start
+};
+
+#define UPDATE_PROBES_RESOURCES(X)                           \
+	X(SHARED, ConstantBuffer, Shared, 0)                     \
+	X(SRV, Texture2D<unorm float>, srcOcclusionDepth, 0)     \
+	X(SRV, Texture2DArray<float4>, ShadowCascadeMap, 1)      \
+	X(SRV, Texture2DArray<float4>, ESRAMShadow, 3)           \
+	X(UAV, RWTexture3D<sh2>, outProbeArray, 0)               \
+	X(UAV, RWTexture3D<uint>, outAccumFramesArray, 1)        \
+	X(UAV, RWTexture3D<uint>, outShadowBitmask, 2)           \
+	X(UAV, RWTexture3D<float>, outShadowVisibility, 3)       \
+	X(SAMPLER, SamplerComparisonState, comparisonSampler, 0) \
+	X(LATCH, UpdateProbesShadows, Shadows, 0)
+ORG_PUSH_BLOCK(UPDATE_PROBES_RESOURCES(ORG_HANDLE))
+
+#include "Common/FrameBuffer.hlsli"
+#include "Common/Math.hlsli"
+#include "Skylighting/Skylighting.hlsli"
+
+UPDATE_PROBES_RESOURCES(ORG_RESOURCE)
+
+#if !defined(CS_ORG_BINDLESS)
 StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t2);
+#endif
 
-RWTexture3D<sh2> outProbeArray : register(u0);
-RWTexture3D<uint> outAccumFramesArray : register(u1);
-RWTexture3D<uint> outShadowBitmask : register(u2);
-RWTexture3D<float> outShadowVisibility : register(u3);
-
-SamplerComparisonState comparisonSampler : register(s0);
+namespace UpdateProbes
+{
+#if defined(CS_ORG_BINDLESS)
+	DirectionalShadowLightData ShadowLight()
+	{
+		DirectionalShadowLightData light = (DirectionalShadowLightData)0;
+		light.ShadowProj[0] = transpose(float4x4(Shadows.ShadowProj[0], Shadows.ShadowProj[1], Shadows.ShadowProj[2], Shadows.ShadowProj[3]));
+		light.ShadowProj[1] = transpose(float4x4(Shadows.ShadowProj[4], Shadows.ShadowProj[5], Shadows.ShadowProj[6], Shadows.ShadowProj[7]));
+		light.EndSplitDistances = Shadows.SplitDistances.xy;
+		light.StartSplitDistances = Shadows.SplitDistances.zw;
+		return light;
+	}
+#else
+	DirectionalShadowLightData ShadowLight() { return DirectionalShadowLights[0]; }
+#endif
+}
 
 static const float3 noise3D[32] = {
 	float3(0.247, -0.583, 0.891),
@@ -108,7 +146,7 @@ static const float3 noise3D[32] = {
 	bool advanceShadowHistory = false;
 	float shadowSample = 1.0;
 	if (onScreen) {
-		DirectionalShadowLightData shadowData = DirectionalShadowLights[0];
+		DirectionalShadowLightData shadowData = UpdateProbes::ShadowLight();
 
 		float3 jitteredMS = cellCentreMS + noise3D[jitterIndex] * 128;
 		float4 jitteredCS = mul(FrameBuffer::CameraViewProj, float4(jitteredMS, 1));

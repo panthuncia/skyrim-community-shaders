@@ -1,5 +1,4 @@
-// The forward sort (the colour epoch's core.forward-sort and the views' view.forward-sort), and the frame slots' addresses a draw pass
-// outside IndirectDraws' implementation pushes (DrawHelpers.h). The forward epoch's draws are Features/Forward's (ForwardPasses.cpp).
+// The forward sort for the colour epoch and the views, and the frame slot addresses that draw passes outside IndirectDraws push.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
@@ -7,10 +6,8 @@
 namespace DCLF::Draws
 {
 	/*
-	 * The forward epoch's passes (dclf-architecture.md, "The forward epoch"). The colour BuildDraws appends visible forward draws (kObjectForward) with
-	 * their view depth to their state class's staging half; ForwardSortPass (colour epoch) sorts each class's back to front into its sorted half;
-	 * Features/Forward's ForwardDrawPass draws it in the forward epoch (the engine's blended draw, FUN_1414b39d0, after the deferred
-	 * composite) on the colour pass's attachments; forward pipelines write the main target alone.
+	 * The colour BuildDraws appends visible forward draws with their view depth to their class's staging half. ForwardSortPass
+	 * sorts each class back to front into its sorted half, which Features/Forward draws after the deferred composite.
 	 */
 	namespace
 	{
@@ -19,7 +16,7 @@ namespace DCLF::Draws
 			org::DeclaredViewToken sequences, count;
 		};
 
-		// A dispatch per state class with a forward sub-range (ForwardSortSource::ranges).
+		// A dispatch per state class with a forward sub-range.
 		struct ForwardSortFrame
 		{
 			std::shared_ptr<const ComputeProgram> program;
@@ -40,7 +37,6 @@ namespace DCLF::Draws
 					counts.versioned ? a_builder.ShaderResource(*counts.versioned).View() : a_builder.ShaderResource(counts.buffer).View() };
 			}
 
-			// The source's shape is the revision's (the ticket's host data).
 			void Revision(std::vector<std::uint64_t>&) const {}
 
 			ForwardSortFrame Prepare(const ForwardSortBindings&, const org::PassPrepareContext& a_preparation) const
@@ -57,11 +53,10 @@ namespace DCLF::Draws
 					constants.stagingBase = range.stagingBase;
 					constants.capacity = range.capacity;
 					constants.sequenceStride = static_cast<std::uint32_t>(sizeof(DrawSequence));
-					// The class's count word (its classCounts word, a view's forward entry's bucket count).
 					constants.countOffset = range.countOffset;
 					constants.options = ForwardSortConstants::kCountOffset | range.options;
 					prepared.constants.push_back(constants);
-					// Full capacity; threads past the count return.
+					// Full capacity. Threads past the count return.
 					prepared.groups.push_back((range.capacity + kForwardSortGroup - 1) / kForwardSortGroup);
 				}
 				return prepared;
@@ -93,12 +88,12 @@ namespace DCLF::Draws
 		return std::make_shared<ForwardSortPass>(std::move(a_sequences), std::move(a_counts), std::move(a_source));
 	}
 
-	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants)
+	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef)
 	{
-		return FramePushWords(a_frameConstants);
+		return FramePushWords(a_frameConstants, a_frameConstantsRef);
 	}
 
-	void MainShadowLayoutPush(std::uint64_t a_frameConstants, std::uint32_t (&a_out)[kShadowPushWords])
+	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords])
 	{
 		auto split = [](std::uint32_t* a_words, std::uint64_t a_value) {
 			a_words[0] = static_cast<std::uint32_t>(a_value);
@@ -106,11 +101,33 @@ namespace DCLF::Draws
 		};
 		const std::uint64_t constants = a_frameConstants;
 		split(a_out + kShadowPushFrameRecord, constants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
+		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
+		a_out[kShadowPushFrameRecordRef] = recordRef.viewSlot;
+		a_out[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
+		RenderGraph::CheckBufferRef(recordRef, constants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes, kFrameSlotBytes, "main shadow layout frame record");
 		split(a_out + kShadowPushViewBlock, constants + FrameSlotOffset(false, 0));
 		split(a_out + kShadowPushPerFrame, constants + FrameSlotOffset(false, kPerFrameVertexRegister));
 		split(a_out + kShadowPushZeros, constants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
 		split(a_out + kShadowPushSharedData, constants + FrameSlotOffset(false, kSharedDataRegister));
 		split(a_out + kShadowPushFeatureData, constants + FrameSlotOffset(false, kFeatureDataRegister));
+	}
+
+	void MainShadowLayoutViews(RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t (&a_out)[kShadowPushWords])
+	{
+		auto ref = [&](std::uint32_t a_word, RenderGraph::BufferRef a_ref) {
+			a_out[a_word] = a_ref.viewSlot;
+			a_out[a_word + 1] = a_ref.byteOffset;
+		};
+		ref(kShadowPushViewBlock, a_frameConstantsRef + FrameSlotOffset(false, 0));
+		ref(kShadowPushPerFrame, a_frameConstantsRef + FrameSlotOffset(false, kPerFrameVertexRegister));
+		ref(kShadowPushZeros, a_frameConstantsRef + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
+		// A block's view is its ordinal in the frame push words' order.
+		auto view = [&](std::uint32_t a_word, std::uint32_t a_register) {
+			a_out[a_word] = a_blocks.indices[(FramePushWord(false, a_register) - kFramePushRegisters) / 2];
+			a_out[a_word + 1] = 0;
+		};
+		view(kShadowPushSharedData, kSharedDataRegister);
+		view(kShadowPushFeatureData, kFeatureDataRegister);
 	}
 
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants)

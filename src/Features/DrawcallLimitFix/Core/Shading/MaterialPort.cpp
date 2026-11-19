@@ -1,6 +1,5 @@
-// MaterialPort's snapshot capture (any thread where the material is alive), the capture queue's producer side and Evaluate's
-// dispatch to the vanilla port, the material contributors' chain (Extensions: Materials.h) and the material ports
-// (Extensions::MaterialPorts: the Effect port).
+// MaterialPort's snapshot capture, the capture queue's producer side, and Evaluate's dispatch to the vanilla port,
+// the material contributors' chain and the material ports.
 
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
@@ -21,13 +20,13 @@ namespace DCLF::MaterialPort
 		a_out.key = &a_material;
 		a_out.vtable = *reinterpret_cast<const void* const*>(&a_material);
 		a_out.feature = static_cast<std::uint32_t>(a_material.GetFeature());
-		// A material contributor's class (TruePBR's own classes) is Lighting's, its size and texture fields the contributor's.
+		// A material contributor's class counts as Lighting's, with the contributor's size and texture fields.
 		a_out.materialClass = Extensions::MaterialClassOf(a_out.vtable);
-		// A material port's class (its vtable, resolved at install), its size and texture fields the port's.
+		// A material port's class, with the port's size and texture fields.
 		a_out.port = a_out.materialClass ? std::uint8_t(0) : Extensions::PortOfVtable(a_out.vtable);
 		const auto& port = Extensions::MaterialPorts()[a_out.port];
 		if (a_out.port)
-			a_out.feature = 0;  // no Lighting material feature (an After contributor's covers: none of Advanced Skin's)
+			a_out.feature = 0;  // no Lighting material feature
 		a_out.size = a_out.materialClass ? Extensions::MaterialClassBytes(a_out.materialClass, a_material) : a_out.port ? port.materialBytes : VanillaClassSize(a_material);
 		a_out.textureCount = 0;
 		if (!a_out.size || a_out.size > kMaxMaterialBytes)
@@ -51,8 +50,7 @@ namespace DCLF::MaterialPort
 	{
 		if (!a_material)
 			return;
-		// BSIntrusiveRefCounted's count (+0x8), taken only from an owned material: one being built (its count 0, a writer's
-		// CopyMembers before the material manager holds it) is not captured here; its attach or a request captures it.
+		// Take a count at +0x8 only on an owned material. One still being built has count 0 and is captured later by its attach or a request.
 		auto* count = reinterpret_cast<volatile LONG*>(reinterpret_cast<std::byte*>(const_cast<RE::BSShaderMaterial*>(a_material)) + 0x8);
 		for (LONG now = *count;;) {
 			if (now <= 0)
@@ -65,7 +63,7 @@ namespace DCLF::MaterialPort
 		auto held = std::make_unique<HeldSnapshot>();
 		held->reference = const_cast<RE::BSShaderMaterial*>(a_material);
 		held->sequence = SceneCapture::NextSequence();
-		Capture(*a_material, held->snapshot);  // uncovered (no class known): the scene work keeps the material native, by its reason
+		Capture(*a_material, held->snapshot);  // uncovered, so the scene work keeps it native by its reason
 		for (std::uint32_t i = 0; i < held->snapshot.textureCount; ++i)
 			held->views[i].copy_from(held->snapshot.textures[i].view);
 		captures.Push(std::move(held));
@@ -73,8 +71,7 @@ namespace DCLF::MaterialPort
 
 	SnapshotChange SnapshotChangeOf(const MaterialSnapshot& a_held, const MaterialSnapshot& a_new)
 	{
-		// BSIntrusiveRefCounted's count (+0x8, 4 bytes), then the fields: the bytes a frame patch owns (Extensions' frame spans: BSShaderMaterial's
-		// texture-transform buffers, +0xc..+0x2c, and the port's declared frame variables') apart from the rest.
+		// The reference count at +0x8, then the fields, with the frame-owned bytes compared apart from the rest.
 		constexpr std::size_t kCount = 0x8, kFields = 0xc;
 		if (a_held.key != a_new.key || a_held.vtable != a_new.vtable || a_held.feature != a_new.feature || a_held.materialClass != a_new.materialClass ||
 			a_held.port != a_new.port || a_held.size != a_new.size || a_held.textureCount != a_new.textureCount)
@@ -96,9 +93,8 @@ namespace DCLF::MaterialPort
 
 	FrameComponentsWitness WitnessOf(const VanillaFrame& a_vanilla, const HookFrame& a_hook, const Extensions::MaterialContributorSamples& a_contributors)
 	{
-		// Each value as the port reads it: a byte tested for non-zero as a bit, a float by its bits, and a value the port writes only
-		// under a flag (the character light's params, PS 6) zero while the flag is off. The character light's target is its class (none,
-		// in the array, outside it: unbound, bound, a failed evaluation for vanilla), not its index, which alternates frame to frame.
+		// Each value as the port reads it: a byte as a bit, a float by its bits, and values written only under a flag as zero while it is off.
+		// The character light's target counts by class (unbound, bound or failed), not by index, which alternates frame to frame.
 		FrameComponentsWitness w;
 		std::size_t at = 0;
 		auto put = [&](std::uint32_t a_word) { w.words[at++] = a_word; };
@@ -120,31 +116,66 @@ namespace DCLF::MaterialPort
 			std::uint32_t(h.techniqueByte7) << 24);
 		for (const float c : h.characterLightParams)
 			put(h.characterLightEnabled ? bits(c) : 0u);
-		// Which contributors run (TruePBR's and Advanced Skin's loaded flags), then their own words: Advanced Skin's keys (its covers) are
-		// its table's identity, shared between frames while unchanged.
+		// Which contributors run, then their own words. Advanced Skin's keys are its table's identity, shared between frames while unchanged.
 		put(a_contributors.ActiveBits());
 		for (const std::uint32_t word : a_contributors.words)
 			put(word);
 		return w;
 	}
 
+	namespace
+	{
+		/** @brief Render thread. References on the frame's views. Reuses the last hold while they are the same. */
+		std::shared_ptr<const FrameViewHold> HoldFrameViews(const MaterialFrame& a_frame)
+		{
+			static std::shared_ptr<const FrameViewHold> last;
+			std::vector<ID3D11ShaderResourceView*> views;
+			auto add = [&](ID3D11ShaderResourceView* a_view) {
+				if (a_view)
+					views.push_back(a_view);
+			};
+			add(a_frame.vanilla.envMaskDefaultView);
+			for (auto* view : a_frame.vanilla.renderTargetViews)
+				add(view);
+			for (auto* view : a_frame.hook.renderTargetViews)
+				add(view);
+			add(a_frame.hook.defaultBlackView);
+			add(a_frame.hook.defaultWhiteView);
+			add(a_frame.hook.defaultNormalMapView);
+			std::vector<std::shared_ptr<const void>> contributors;
+			for (const auto& sample : a_frame.contributors.contributors)
+				if (sample.held)
+					contributors.push_back(sample.held);
+			const auto same = [](const winrt::com_ptr<ID3D11ShaderResourceView>& a_held, ID3D11ShaderResourceView* a_view) { return a_held.get() == a_view; };
+			if (last && std::equal(last->views.begin(), last->views.end(), views.begin(), views.end(), same) && last->contributors == contributors)
+				return last;
+			auto hold = std::make_shared<FrameViewHold>();
+			hold->views.resize(views.size());
+			for (std::size_t i = 0; i < views.size(); ++i)
+				hold->views[i].copy_from(views[i]);
+			hold->contributors = std::move(contributors);
+			last = std::move(hold);
+			return last;
+		}
+	}
+
 	MaterialFrame SampleFrame()
 	{
 		MaterialFrame frame{ SampleVanillaFrame(), SampleHookFrame() };
-		// The contributors after the hook frame (Advanced Skin's table resolves against its default black view).
+		// The contributors after the hook frame, since Advanced Skin's table resolves against its default black view.
 		Extensions::SampleMaterialContributors(frame.hook, frame.contributors);
 		frame.components = WitnessOf(frame.vanilla, frame.hook, frame.contributors);
+		frame.held = HoldFrameViews(frame);
 		return frame;
 	}
 
 	bool Evaluate(const MaterialSnapshot& a_snapshot, std::uint32_t a_passDescriptor, const MaterialFrame& a_frame, MaterialRecord& a_out)
 	{
-		// A material port's material is its shader's (the Effect port's: BSEffectShader's, no Community Shaders hook on its SetupMaterial).
+		// A material port's material belongs to its shader, which no Community Shaders hook touches.
 		if (a_snapshot.port)
 			return Extensions::EvaluatePort(a_snapshot.port, a_snapshot, a_passDescriptor, a_frame, a_out);
-		// The hooks' chain (installed in feature order): the After contributors (Advanced Skin) around the Replace (TruePBR) around
-		// vanilla. A Replace takes the passes it takes (and hands back to vanilla what it does not draw); an After contributor whose
-		// input is not set up yet makes the material uncovered for now (Retry).
+		// The hooks' chain: After contributors around the Replace around vanilla. A Replace hands back passes it does not draw.
+		// An After contributor whose input is not ready makes the material uncovered for now.
 		const Extensions::MaterialContributorInputs inputs{ a_snapshot, a_snapshot.materialClass, a_passDescriptor, a_frame.hook, a_frame.contributors };
 		const auto outcome = Extensions::EvaluateReplace(inputs, a_out);
 		const bool covered = outcome == Api::MaterialOutcome::Made ||

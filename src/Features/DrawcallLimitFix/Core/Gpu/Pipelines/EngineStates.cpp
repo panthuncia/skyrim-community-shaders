@@ -1,4 +1,4 @@
-// The engine's state tables and the decal depth-bias selection (see the header).
+// The engine's state tables and the decal depth-bias selection.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -29,8 +29,7 @@ namespace DCLF
 
 	std::uint32_t DecalDepthBiasMode(std::uint32_t a_decalGroup)
 	{
-		// The byte the ToggleDepthBias console command flips (Ghidra: read by FUN_1414b3bb0 at
-		// 1414b3c0a and 1414b3c7a, written by ConsoleFunc::handler::ToggleDepthBias). The same logic on SE 1.5.97.
+		// The byte the ToggleDepthBias console command flips, read by FUN_1414b3bb0. The same logic on SE 1.5.97.
 		static const REL::Relocation<std::uint8_t*> depthBiasEnabled{ REL::Offset(Engine::Address::kDepthBiasEnabled) };
 		const std::uint32_t variant = RE::DrawWorld::GetSingleton().disableSunShadows ? 1u : 0u;
 		switch (a_decalGroup) {

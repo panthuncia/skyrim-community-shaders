@@ -1,4 +1,4 @@
-// LightSelection: the CalculateActiveShadowCasterLights detour (render thread) and its port of the engine's selection.
+// The CalculateActiveShadowCasterLights detour and DCLF's port of its light selection. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalContextAtlas.h"
@@ -23,17 +23,16 @@ namespace DCLF
 		using Engine::At;
 		using Engine::Global;
 
-		// Engine::Offsets (Address Library ids).
 		constexpr Engine::Offset kCalculateActive{ { 107137 }, { 100419 } };  // CalculateActiveShadowCasterLights
 		constexpr Engine::Offset kLodFadeCutoff{ { 415264 }, { 528316 } };    // UpdateCamera's lodFade cutoff
-		constexpr Engine::Offset kFocusShadows{ { 390932 }, { 513201 } };     // the focus shadows' setting byte
-		constexpr std::size_t kPortalEntry = 0x30190;           // a culling process's portal-graph entry
-		constexpr std::size_t kShadowMapCount = 0x140;          // BSShadowLight: its descriptors in use
+		constexpr Engine::Offset kFocusShadows{ { 390932 }, { 513201 } };     // Focus shadows setting, a byte.
+		constexpr std::size_t kPortalEntry = 0x30190;           // A culling process's portal-graph entry.
+		constexpr std::size_t kShadowMapCount = 0x140;          // BSShadowLight's descriptors in use.
 		constexpr std::uint32_t kMaxLights = 4;
 
 		using Corners = std::array<std::array<float, 3>, 5>;
 
-		/** @brief FUN_14150aba0's corners of a camera's frustum: the eye, then the far rectangle's (+up+right, +up-right, -up+right, -up-right). */
+		// The eye, then the far rectangle's corners in FUN_14150aba0's order.
 		Corners FrustumCorners(const RE::NiCamera& a_camera)
 		{
 			const auto& r = a_camera.world.rotate.entry;
@@ -60,18 +59,16 @@ namespace DCLF
 			return out;
 		}
 
-		/** @brief FUN_14150aba0's test of one frustum's corners and edges against the other's six planes (all six, whatever the mask). */
+		// Tests all six planes, whatever the mask, as FUN_14150aba0 does.
 		bool CornersOrEdgesInside(const Corners& a_points, const ShadowCameras::Planes& a_planes)
 		{
 			const auto& planes = a_planes.plane;
-			// A corner strictly inside all six.
 			for (const auto& p : a_points) {
 				std::uint32_t k = 0;
 				while (0.0f < (p[0] * planes[k][0] + p[1] * planes[k][1] + p[2] * planes[k][2]) - planes[k][3])
 					if (++k > 5)
 						return true;
 			}
-			// An edge crossing a plane at a point inside the other five (or lying in it).
 			static constexpr std::uint8_t kEdges[8][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 0, 4 }, { 1, 2 }, { 1, 3 }, { 2, 4 }, { 3, 4 } };
 			const auto side = [](float a_value) -> std::uint8_t { return 0.0f <= a_value ? (0.0f < a_value ? 1 : 0) : 2; };
 			for (const auto& edge : kEdges) {
@@ -99,7 +96,7 @@ namespace DCLF
 			return false;
 		}
 
-		/** @brief FUN_14150aba0 (light, world camera, the light's camera): whether the two frusta intersect. */
+		// Port of FUN_14150aba0.
 		bool FrustaIntersect(const RE::NiCamera& a_world, const RE::NiCamera& a_light)
 		{
 			ShadowCameras::Planes worldPlanes, lightPlanes;
@@ -108,7 +105,7 @@ namespace DCLF
 			return CornersOrEdgesInside(FrustumCorners(a_world), lightPlanes) || CornersOrEdgesInside(FrustumCorners(a_light), worldPlanes);
 		}
 
-		/** @brief BSMultiBoundSphere::Func41: a sphere inside a frustum's active planes (outside when n.c - d <= -r, or unordered). */
+		// Port of BSMultiBoundSphere::Func41. NaN counts as outside.
 		bool SphereInside(const float a_centre[3], float a_radius, const ShadowCameras::Planes& a_planes)
 		{
 			for (std::uint32_t k = 0; k < 6; ++k) {
@@ -122,7 +119,7 @@ namespace DCLF
 			return true;
 		}
 
-		/** @brief vfunc 0x10's verdict (BSShadowFrustumLight 0x14151ac50, BSShadowParabolicLight 0x14151b620; a directional one's is true). */
+		// Port of vfunc 0x10 (BSShadowFrustumLight 0x14151ac50, BSShadowParabolicLight 0x14151b620). Directional lights always pass.
 		bool Visible(const RE::BSShadowLight& a_light, const RE::NiCamera& a_camera, const ShadowCameras::Planes& a_cameraPlanes)
 		{
 			auto& light = const_cast<RE::BSShadowLight&>(a_light);
@@ -149,7 +146,7 @@ namespace DCLF
 				const float dx = position.x - a_camera.world.translate.x;
 				const float dy = position.y - a_camera.world.translate.y;
 				const float dz = position.z - a_camera.world.translate.z;
-				// Each class's own order of the sum.
+				// Each class sums in its own order. Keep it, so float results match the engine.
 				const float squared = frustum ? (dy * dy + dx * dx) + dz * dz : (dx * dx + dy * dy) + dz * dz;
 				if (Global<float>(kLodFadeCutoff) <= (squared - radius * radius) * At<float>(&a_camera, 0x184))
 					visible = false;
@@ -173,8 +170,7 @@ namespace DCLF
 
 	bool LightSelection::SharesRoomWithCamera(const RE::BSShadowLight* a_light)
 	{
-		// The engine's condition first: descriptor 0's culling process and its entry exist (allocation, not a cull); then the
-		// light's rooms as DCLF walks them this frame (PortalViews::WalkLight) against the world camera's.
+		// The first check is the engine's own. Then compare the light's rooms from this frame's walk with the camera's.
 		auto* light = const_cast<RE::BSShadowLight*>(a_light);
 		const auto& descriptors = light->GetRuntimeData().shadowmapDescriptors;
 		const auto* process = descriptors.empty() ? nullptr : descriptors[0].cullingProcess;
@@ -190,9 +186,8 @@ namespace DCLF
 
 	void LightSelection::Select()
 	{
-		// The slots' board first: an early return leaves it invalid (no views this frame), as the frame below.
+		// Invalidate first, so an early return leaves no light views this frame.
 		ShadowViews::LightSlots().Invalidate();
-		// A second selection in the scene frame keeps the first's lights and atlas entries (Frame::FrameLight).
 		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
 		std::vector<FrameLight> frameLights = frame.sceneFrame == sceneFrame ? std::move(frame.frameLights) : std::vector<FrameLight>{};
 		const std::uint32_t selections = frame.sceneFrame == sceneFrame ? frame.selections + 1 : 1;
@@ -206,7 +201,7 @@ namespace DCLF
 			return;
 		auto& runtime = node->GetRuntimeData();
 		std::uint32_t kept = 0, slot = 0, mask = 0;
-		// The focus shadows: on when the setting is and there is a target; the host found so far (0x14338c912).
+		// focusFound mirrors the engine's 0x14338c912.
 		const bool focusOn = Global<std::uint8_t>(kFocusShadows) != 0 && Global<std::uint32_t>(Engine::Address::kFocusTargetCount) != 0;
 		bool focusFound = false;
 		if (!Global<std::uint8_t>(Engine::Address::kSunOff) && runtime.sunShadowDirLight) {
@@ -216,15 +211,13 @@ namespace DCLF
 			kept = 1;
 			slot = frame.sunSlots;
 			mask = 1;
-			// CalculateAndDrawShadowCasterLights sets the sun's flag to the setting; CalculateActiveShadowCasterLights makes it the host.
 			focusFlags[frame.sun] = focusOn;
 			if (focusOn) {
 				focusFound = true;
 				lastFocusHost = nullptr;
 			}
 		}
-		// No host yet: last frame's keeps it while it is a candidate - each candidate's flag is whether it is that one, and the
-		// running verdict is the last candidate's (the engine's loop, as it is).
+		// Last frame's host keeps the role while it is a candidate. This copies the engine's loop exactly, odd as it is.
 		if (focusOn && !focusFound && !runtime.activeShadowLights.empty()) {
 			for (const auto& pointer : runtime.activeShadowLights) {
 				if (const auto* light = pointer.get()) {
@@ -243,11 +236,11 @@ namespace DCLF
 				continue;
 			if (!Visible(*light, *camera, cameraPlanes) || !SharesRoomWithCamera(light))
 				continue;
-			// Kept: the engine walks it here (FUN_1414a2530), its walk's edge flags left on the shapes.
+			// The engine walks a kept light here (FUN_1414a2530) and leaves the walk's edge flags on the shapes.
 			PortalViews::Get().CommitLightWalk();
 			const auto& rooms = lightRooms.at(light);
 			frame.locals.push_back({ light, slot, mask, rooms.context, ~0u, rooms.walk });
-			// The focus host: a light with the flag, or the first that can host (vfunc 0x20: directional, spot) while none has.
+			// Without a host yet, the first directional or spot light takes the role.
 			{
 				auto& flag = focusFlags[light];
 				auto* candidate = const_cast<RE::BSShadowLight*>(light);
@@ -257,9 +250,8 @@ namespace DCLF
 					lastFocusHost = light;
 				}
 			}
-			// FUN_1414a3fb0 writes the light into one slot; its Accumulate takes one per hemisphere (BSShadowParabolicLight with two
-			// shadow maps: 2), one for a spot light, one per cascade for a directional one. The slots past the first keep what they
-			// held (not this frame's: a gap here).
+			// The engine writes the light into one slot but its Accumulate takes one per hemisphere or cascade.
+			// The extra slots keep stale contents, so they are null here.
 			auto* shadowLight = const_cast<RE::BSShadowLight*>(light);
 			const std::uint32_t maps = At<std::uint32_t>(light, kShadowMapCount);
 			const std::uint32_t taken = shadowLight->GetIsParabolicLight() ? (maps == 2 ? 2u : 1u) : shadowLight->GetIsDirectionalLight() ? maps :
@@ -270,14 +262,13 @@ namespace DCLF
 			++mask;
 			++kept;
 		}
-		// The drawn lights' focus flags: their Render draws focus views 0..count-1.
 		frame.focusCount = std::min<std::uint32_t>(Global<std::uint32_t>(Engine::Address::kFocusTargetCount), 4u);
 		if (frame.sun && focusFlags[frame.sun])
 			frame.focusHosts.push_back(frame.sun);
 		for (const auto& selected : frame.locals)
 			if (selected.light != frame.sun && focusFlags[selected.light])
 				frame.focusHosts.push_back(selected.light);
-		// Lights that are not candidates leave the map (a freed light's address may be reused).
+		// Prune lights that are gone, because a freed light's address may be reused.
 		if (focusFlags.size() > 64) {
 			std::unordered_map<const RE::BSShadowLight*, bool> live;
 			for (const auto& pointer : runtime.activeShadowLights)
@@ -294,8 +285,7 @@ namespace DCLF
 					live.insert(std::move(*it));
 			lightRooms = std::move(live);
 		}
-		// The frame's lights: this selection's join the earlier ones' (a light kept again takes this walk's context), then the atlas of the
-		// camera and every frame light's context, entries in first-kept order.
+		// A light kept again takes this walk's context.
 		for (const auto& selected : frame.locals) {
 			auto it = std::find_if(frame.frameLights.begin(), frame.frameLights.end(), [&](const auto& a_entry) { return a_entry.light == selected.light; });
 			if (it == frame.frameLights.end())
@@ -316,11 +306,11 @@ namespace DCLF
 		for (auto& selected : frame.locals)
 			if (const auto* entry = frame.LightOf(selected.light))
 				selected.portalContextIndex = entry->portalContextIndex;
-		// Render thread; identity also changes if selection runs twice in one scene frame. Zero is never an identity.
+		// Changes on every selection, even twice in one frame. Zero is never used.
 		static std::uint64_t publication = 0;
 		if (++publication == 0)
 			++publication;
-		// Inside the engine's detour: an atlas that cannot be encoded is not published (the commits then publish none).
+		// This runs inside the engine's detour, so a failed encode publishes nothing instead of throwing.
 		try {
 			frame.portalContexts = Portals::EncodeContexts(contexts, publication);
 		} catch (const std::exception& e) {
@@ -332,7 +322,7 @@ namespace DCLF
 			logger::error("[DCLF][structural-gap] point-light context atlas not encoded at frame {}: {}", frame.sceneFrame, e.what());
 		}
 		frame.valid = true;
-		// The slots and focus hosts to the shadow views (the LightSlots board: spans into frame, stable until the next Select).
+		// The board holds spans into frame, valid until the next Select.
 		ShadowViews::LightSlots().Publish(frame.sceneFrame, frame.slots, frame.focusHosts, frame.focusCount);
 		TellKeptLights(frame);
 		Diagnostics::Notify<Diagnostics::EnginePoint::LightSelectionMade>();
@@ -340,8 +330,6 @@ namespace DCLF
 
 	void LightSelection::TellKeptLights(const Frame& a_frame)
 	{
-		// Their views, from the cameras their UpdateCamera has set up: each kept spot light to the Spot source, each point light to the
-		// Point source (Api::ShadowSourceContribution::lightKept), in the selection's order.
 		const auto& spot = Extensions::ShadowSourceOf(Api::ShadowSource::Spot);
 		const auto& point = Extensions::ShadowSourceOf(Api::ShadowSource::Point);
 		for (const auto& selected : a_frame.locals) {

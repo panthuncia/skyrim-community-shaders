@@ -6,6 +6,7 @@
 #include "GrassShared/GrassFrame.h"
 
 #include "Profiler.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "TruePBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
@@ -338,8 +339,9 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 {
 	auto* ctx = globals::d3d::context;
 	const uint64_t descVal = b.asset.key.descVal;
-	auto* meshVB = b.asset.vertexBuffer.get();
-	auto* indexB = b.asset.indexBuffer.get();
+	// The engine's buffers may be tripwire handles (CS_ORG_ENGINE_BUFFERS=1): DXVK's own context is given what they wrap.
+	auto* meshVB = RenderGraph::Engine::Tripwire::Unwrap(b.asset.vertexBuffer.get());
+	auto* indexB = RenderGraph::Engine::Tripwire::Unwrap(b.asset.indexBuffer.get());
 	const UINT meshStride = VertexStrideFromDesc(descVal);
 	if (!meshVB || !indexB || !meshStride)
 		return;
@@ -364,7 +366,11 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 	if (materialTextures) {
 		const uint32_t firstTexture = std::countr_zero(materialTextures);
 		const uint32_t textureCount = std::bit_width(materialTextures) - firstTexture;
-		ctx->PSSetShaderResources(firstTexture, textureCount, reinterpret_cast<ID3D11ShaderResourceView* const*>(&shadowState.PSTexture[firstTexture]));
+		// The engine's slots can hold tripwire handles (its textures and targets): DXVK's own context is given what they wrap.
+		std::array<ID3D11ShaderResourceView*, 7> views{};
+		for (uint32_t i = 0; i < textureCount; ++i)
+			views[i] = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11ShaderResourceView*>(shadowState.PSTexture[firstTexture + i]));
+		ctx->PSSetShaderResources(firstTexture, textureCount, views.data());
 	}
 
 	// Bind complexity and canopy heights for all tiers; the vertex shader selects each record's tier.

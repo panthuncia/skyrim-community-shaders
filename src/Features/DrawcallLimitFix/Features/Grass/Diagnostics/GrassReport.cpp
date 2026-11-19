@@ -1,6 +1,4 @@
-// Grass's report lines: its draws and two-phase cull in the draws' async work (ReportPoint::AsyncWorkFamilies), and its mirror's line
-// with its parity's among the render thread's scene lines (ReportPoint::SceneFrame); and the depth commits' holes' log (always on), which
-// the draws' line counts.
+// Grass report lines for the draws, the two-phase cull and the mirror, plus an always-on log of depth commits that left a hole.
 
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
@@ -18,7 +16,7 @@ namespace DCLF::Features::Grass
 {
 	namespace
 	{
-		// The depth commits that could not draw a withheld frame (render thread, LogMissed): the draws' line's count.
+		// Render thread only.
 		std::uint32_t missedCommits = 0;
 
 		void LogMissed(const GrassMissed& a_missed)
@@ -30,7 +28,6 @@ namespace DCLF::Features::Grass
 					a_missed.bufferShapes, a_missed.meshSlots, a_missed.bufferMeshes);
 		}
 
-		/** @brief The cull's line (newline-terminated): per frame, the cull's verdicts and the draws each array executed. */
 		void CullLine(GrassCounts& a_counts, std::string& a_text)
 		{
 			const auto frames = a_counts.frames.exchange(0, std::memory_order_relaxed);
@@ -46,7 +43,6 @@ namespace DCLF::Features::Grass
 				frames, live, beyond, outside, thinned, faded, tested, phaseOne, retests, phaseTwo, drawsOne, drawsTwo, colour + pbr, colour, pbr);
 		}
 
-		// The draws' async work: the depth commits' uploads since the last report, and its two-phase cull.
 		void DrawsText(std::string& a_text)
 		{
 			const auto* impl = Diagnostics::DrawsView::Find();
@@ -55,7 +51,7 @@ namespace DCLF::Features::Grass
 				return;
 			const auto& adopted = impl->Adopted();
 			const auto missed = missedCommits;
-			// The engine's grass draws on frames DCLF owned grass (Grass Optimizations' draw hook; none without it): drawn twice.
+			// Engine grass draws seen on frames DCLF owned grass, which means grass was drawn twice.
 			const auto doubled = GrassShared::TakeNativeDrawsWhileOwned();
 			a_text += fmt::format("[DCLF] grass draws: {} ({} depth commits, {} shape slots and {} buckets sent; tables {} instance, {} shape, {} bucket and {} mesh "
 								  "slots; {} buckets waiting for a texture, {} commits past {} buckets, {} drawing the tables' last changes while they grow; {} commits "
@@ -69,7 +65,6 @@ namespace DCLF::Features::Grass
 				CullLine(*counts, a_text);
 		}
 
-		/** @brief The mirror's line (newline-terminated), its counters and its parity's reset. */
 		std::string MirrorLine(Mirror& a_mirror)
 		{
 			const auto s = a_mirror.TakeStats();
@@ -87,7 +82,6 @@ namespace DCLF::Features::Grass
 			return text;
 		}
 
-		// The render thread's scene lines: the mirror's, once it holds shapes or its sink is in.
 		void MirrorText(std::string& a_text)
 		{
 			auto& mirror = RenderMirror();
@@ -98,10 +92,10 @@ namespace DCLF::Features::Grass
 
 	void RegisterReport(Api::InstallContext& a_context)
 	{
-		// After tree LOD's (which registers before this feature) at both points.
+		// After tree LOD's lines, which register first.
 		a_context.RegisterReportLines({ .name = "grass draws", .point = Api::ReportPoint::AsyncWorkFamilies, .text = &DrawsText });
 		a_context.RegisterReportLines({ .name = "grass mirror", .point = Api::ReportPoint::SceneFrame, .text = &MirrorText });
-		// The depth commits' holes (GrassTables.cpp's commit hook), logged whatever the observers.
+		// Logged whatever the observers.
 		Diagnostics::Subscribe<GrassMissed>(&LogMissed);
 	}
 }

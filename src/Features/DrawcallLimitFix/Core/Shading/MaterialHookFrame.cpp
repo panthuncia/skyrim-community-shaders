@@ -1,4 +1,4 @@
-// MaterialPort's HookFrame sample (render thread, the frame's start): the engine globals Community Shaders' SetupMaterial hooks read.
+// MaterialPort's HookFrame sample at the frame's start: the engine globals Community Shaders' SetupMaterial hooks read.
 
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialHookFrame.h"
 

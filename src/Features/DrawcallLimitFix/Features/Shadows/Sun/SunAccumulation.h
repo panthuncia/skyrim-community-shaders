@@ -18,23 +18,12 @@ namespace DCLF::Features::Shadows::Sun
 	struct SunAccumulationView;
 
 	/**
-	 * @brief The engine's work for the sun's cascades, removed where DCLF already draws the result (skyrim-engine-notes.md, "The
-	 * sun's accumulation"). AE and SE. Render thread, plus the registration thunks on job threads.
+	 * @brief Removes the engine's sun cascade work where DCLF already draws the result. Render thread, plus job-thread thunks.
 	 *
-	 * Registration-free accumulation (always on while DCLF draws the shadows): BSShadowDirectionalLight::Accumulate culls each
-	 * cascade and hands each geometry to the accumulator's registration (FUN_1414b2140, from FUN_140e28af0), which builds shadow
-	 * passes and ORs the cascade's bit into activeLightMask (the main pass reads it). For a member the thunks replicate the early-outs
-	 * and mask write and skip the passes; anything else calls the original.
-	 *
-	 * Entry exclusion (always on; dclf-architecture.md, "The sun's cascades without DCLF's objects"):
-	 * the cascade culls walk only the full-frustum processes' objectArray, so after the full-frustum cull every entry DCLF draws
-	 * entirely is removed from it. DCLF writes the sun's mask bits at the main registration instead: the cascades the bound meets,
-	 * against the planes the engine's cascade cull used.
-	 *
-	 * Whole skip (the same toggle, while DCLF draws every sun cascade this frame: ArmWhole): the full-frustum cull runs over no scene
-	 * list, so neither it nor Accumulate culls anything; each full-frustum process keeps one empty node of DCLF's (its cascade culls set
-	 * their planes up from it). Every geometry the main camera registers takes DCLF's bits; a caster not yet a member casts no sun shadow
-	 * until it joins, never through the engine's cull (as the occlusion maps' joining occluders).
+	 * Three levels, all on while DCLF draws the shadows. Registration skip: for a DCLF member the registration thunks only write
+	 * the cascade mask bit and build no shadow passes. Entry exclusion: entries DCLF draws are removed from the full-frustum
+	 * object list, and DCLF writes their sun bits at the main registration. Whole skip: when DCLF draws every cascade, the
+	 * full-frustum cull gets an empty list. A caster that is not yet a member casts no sun shadow until it joins.
 	 */
 	class SunAccumulation
 	{
@@ -43,21 +32,20 @@ namespace DCLF::Features::Shadows::Sun
 		/** @brief Whether this is the intentionally empty scene list array for DCLF-owned sun cascades. */
 		static bool IsWholeCullInput(const void* a_lists);
 
-		/** @brief AE: the Accumulate vtable slot and the call sites; verified before patching. */
+		/** @brief Patches the Accumulate vtable slot and call sites, after verifying them. */
 		void Install();
 		/**
-		 * @brief Install's sites, before any hook is written (HookSites). The full-frustum cull, the registrations, the cascade and the two
-		 * process slots do not chain (they substitute lists, veto or skip what the engine's would get), so each needs the engine's own;
-		 * the cascade cull and the mask clear chain.
+		 * @brief Checks every site before any hook is written.
+		 * Most of these hooks replace the engine's call rather than chain, so each needs the engine's own code there.
 		 */
 		static void Preflight();
 		bool Installed() const { return installed; }
-		/** @brief Main thread, at the feature's install (before DCLF's threads start): its toggles, the registration skip's and the entry exclusion's. */
+		/** @brief Reads the toggles. Main thread, before DCLF's threads start. */
 
 
 		/** @brief Whether this frame's full-frustum cull applied the entry exclusion (or the whole skip). */
 		bool ExclusionLive() const { return exclusionLive.load(std::memory_order_acquire); }
-		/** @brief Render thread, after the full-frustum call site: on a frame it did not run, clears cascades, exclusion and sun bits. */
+		/** @brief On a frame the full-frustum cull did not run, clears cascades, exclusion and sun bits. Render thread. */
 		void EndFullFrustumWindow();
 		/** @brief Whether a_node is an entry this frame's exclusion excludes (render thread, while it is live). */
 		bool Excluded(const void* a_node) const
@@ -79,7 +67,6 @@ namespace DCLF::Features::Shadows::Sun
 			std::uint64_t offThread = 0;      // sun registrations outside Accumulate (passed to the engine)
 			std::int64_t fullFrustumTicks = 0, fullFrustumMax = 0;
 			std::int64_t accumulateTicks = 0, accumulateMax = 0;
-			// The entry exclusion.
 			std::uint32_t exclusionFrames = 0;        // full-frustum culls that applied one
 			std::uint32_t exclusionStale = 0;         // ... built for other candidates
 			std::uint32_t exclusionMissing = 0;       // ... with none published
@@ -91,20 +78,17 @@ namespace DCLF::Features::Shadows::Sun
 			std::uint64_t excluded = 0;
 			std::int64_t filterTicks = 0;             // the render thread's compaction
 			std::uint64_t cascadeRegistrationsUnderRemoved = 0;  // must be 0
-			// The whole skip (ArmWhole): frames it applied, and frames with the exclusion on that it could not (a cascade not DCLF's, the
-			// lists too many, a parity frame).
+			// Whole-skip frames, and frames with the exclusion on where it could not apply.
 			std::uint32_t wholeFrames = 0;
 			std::uint32_t wholeDeclined = 0;
-			std::uint32_t wholeHeld = 0;  // whole frames armed though not covered: the startup hold's (Core/Render/StartupHold.h)
-			// Whole frames whose cull took the engine-only casters' roots (the targeted cull), and those roots, summed.
+			std::uint32_t wholeHeld = 0;  // whole frames armed though not covered: a load's hold's (Core/Render/LoadHold.h)
 			std::uint32_t wholeTargeted = 0;
 			std::uint64_t wholeTargetedRoots = 0;
-			// Its cascade culls (Hooks::Cascade): the full-frustum processes each cascade culled (those holding the extra list's entries) and
-			// left out (empty, no cull and no registration).
+			// Full-frustum processes each whole-skip cascade culled, and those left out.
 			std::uint64_t wholeProcessesCulled = 0;
 			std::uint64_t wholeProcessesLeft = 0;
 		};
-		/** @brief Excluded entries the cascade culls still reached through a node above (Hooks::CascadeProcess1). Job threads count. */
+		/** @brief Excluded entries the cascade culls still reached through a node above. Counted on job threads. */
 		struct SkipStats
 		{
 			std::atomic<std::uint64_t> skipped{ 0 };
@@ -117,14 +101,13 @@ namespace DCLF::Features::Shadows::Sun
 			std::atomic<std::uint64_t> written{ 0 };       // removed-entry registrations that took DCLF's bits
 			std::atomic<std::uint64_t> withBits{ 0 };      // ... with at least one cascade's bit
 			std::atomic<std::uint64_t> notReady{ 0 };      // ... before the cascades were known (must be 0)
-			// The whole skip's: main registrations that took DCLF's bits, with at least one cascade's, and those the per-frame table had no
-			// room to stamp (written without the once-a-frame rule; must be 0).
+			// Whole-skip main registrations that took DCLF's bits. The overflow count must stay 0.
 			std::atomic<std::uint64_t> wholeWritten{ 0 };
 			std::atomic<std::uint64_t> wholeWithBits{ 0 };
 			std::atomic<std::uint64_t> wholeUnstamped{ 0 };
 		};
 
-		/** @brief Render thread: the counters since the last call, reset. */
+		/** @brief Returns and resets the counters. Render thread. */
 		Stats TakeStats();
 		/** @brief The entry exclusion's registration and skip counts since the last call, reset. */
 		struct ExclusionCounts
@@ -133,7 +116,7 @@ namespace DCLF::Features::Shadows::Sun
 			std::uint64_t wholeWritten = 0, wholeWithBits = 0, wholeUnstamped = 0;
 		};
 		ExclusionCounts TakeExclusionCounts();
-		/** @brief Render thread: whether this frame's full-frustum cull took the whole skip (its processes culled nothing: no planes of theirs). */
+		/** @brief Whether this frame's full-frustum cull took the whole skip. Render thread. */
 		bool WholeFrame() const { return frameState.whole; }
 
 	private:
@@ -143,31 +126,20 @@ namespace DCLF::Features::Shadows::Sun
 		friend struct Hooks;
 		friend struct SunAccumulationView;
 
-		/**
-		 * @brief Render thread, before the full-frustum cull: arms the published exclusion's veto (Hooks::AppendNonAccum), which keeps
-		 * its excluded entries out of the full-frustum processes' objectArray as the cull appends them (on the cull's job threads).
-		 */
+		/** @brief Arms the veto that keeps excluded entries out of the full-frustum object lists. Render thread, before the cull. */
 		void ArmExclusion(RE::BSShadowDirectionalLight* a_light);
 		/**
-		 * @brief Render thread, after the full-frustum cull: disarms the veto and makes its result the frame's exclusion. Each process
-		 * keeps at least one entry (the cascade cull sets its planes up from the first): one whose every append was vetoed gets its
-		 * first back.
+		 * @brief Disarms the veto and makes its result the frame's exclusion. Render thread, after the cull.
+		 * Each process keeps at least one entry, because the cascade cull sets its planes up from the first.
 		 */
 		void ExcludeEntries();
-		/**
-		 * @brief Render thread, before the full-frustum cull: whether the frame takes the whole skip (the exclusion's toggle and the
-		 * registration skip on, every sun cascade view covered and its casters claimed by the frame's set, not a parity frame), and if
-		 * so the frame's state set for it.
-		 */
+		/** @brief Whether the frame takes the whole skip, and if so sets the frame's state. Render thread, before the cull. */
 		bool ArmWhole(RE::BSShadowDirectionalLight* a_light);
-		/** @brief Render thread, after the whole skip's full-frustum cull: the frame's exclusion is live (its bits taken at registration). */
+		/** @brief Marks the frame's exclusion live after the whole skip's cull. Render thread. */
 		void WholeApplied();
-		/**
-		 * @brief Any thread, the whole skip's main registrations: whether a_geometry's first clearing registration (0xFFFF) this frame
-		 * has been seen; a_clears stamps it so (FrameAddressSet, a round per whole frame).
-		 */
+		/** @brief Whether a_geometry's first clearing registration (0xFFFF) was seen this frame. a_clears marks it. Any thread. */
 		bool ClearedThisFrame(const void* a_geometry, bool a_clears);
-		/** @brief Any thread: the candidate geometry index if under an entry this frame's cull removed (or would have), else ~0u. */
+		/** @brief The candidate geometry index if under an entry this frame removed, else ~0u. Any thread. */
 		std::uint32_t RemovedGeometryIndex(const RE::BSGeometry* a_geometry) const;
 		bool UnderRemovedEntry(const RE::BSGeometry* a_geometry) const { return RemovedGeometryIndex(a_geometry) != ~0u; }
 		/** @brief Whether a_geometry is under an entry this frame's exclusion excludes (removed or skipped). */
@@ -176,14 +148,14 @@ namespace DCLF::Features::Shadows::Sun
 			const auto* exclusion = frameState.exclusion.get();
 			if (!exclusion || !exclusion->candidates)
 				return false;
-			// Any ancestor, as CascadeProcess1 skips: a caster under an excluded entry need not be a candidate geometry.
+			// Any ancestor counts, as CascadeProcess1 skips it. A caster under an excluded entry need not be a candidate geometry.
 			const auto& entries = exclusion->candidates->entries;
 			for (const RE::NiAVObject* object = a_geometry; object; object = object->parent)
 				if (const auto it = entries.find(object); it != entries.end() && exclusion->excluded[it->second])
 					return true;
 			return false;
 		}
-		/** @brief Any thread: ORs the bits of the cascades a removed-entry geometry's bound meets into its activeLightMask. */
+		/** @brief ORs the bits of the cascades a removed-entry geometry's bound meets into its activeLightMask. Any thread. */
 		void ApplySunBits(RE::BSGeometry* a_geometry, bool a_clears);
 
 		bool installed = false;
@@ -206,9 +178,8 @@ namespace DCLF::Features::Shadows::Sun
 		{
 			std::shared_ptr<Local::SunExclusion> exclusion;  // kept alive until the next full-frustum cull
 			std::uint32_t stamp = 0;
-			// The cascade culls skip excluded entries they reach anyway (ExcludeSun, SunAccumulation.cpp).
 			bool skipExcluded = true;
-			// Grown in the sun's Accumulate while bitsReady is clear (no reader sees it move); the first cascadeCount are this frame's.
+			// Grown in the sun's Accumulate while bitsReady is clear, so no reader sees it move.
 			std::vector<Cascade> cascades;
 			std::uint32_t cascadeCount = 0;
 			std::uint32_t cascadesFrame = ~0u;        // the scene frame whose Accumulate captured them
@@ -217,8 +188,8 @@ namespace DCLF::Features::Shadows::Sun
 		};
 		std::shared_ptr<Local::SunExclusion> previousExclusion;  // the last frame's, kept alive for a straggling registration
 		/**
-		 * @brief One full-frustum process while the veto is armed. Its appends come from the one job culling it (and, after the jobs,
-		 * the render thread's), so its counts have one writer at a time; the render thread reads them after the cull.
+		 * @brief One full-frustum process while the veto is armed.
+		 * Only one job appends to it at a time, and the render thread reads the counts after the cull.
 		 */
 		struct VetoProcess
 		{
@@ -233,15 +204,14 @@ namespace DCLF::Features::Shadows::Sun
 		std::atomic<const Local::SunExclusion*> vetoExclusion{ nullptr };  // the appends' view of it (null: disarmed)
 		std::uint32_t vetoStamp = 0;                      // written before the veto is armed
 		FrameState frameState;                           // written on the render thread before bitsReady
-		// Set at the end of the sun's Accumulate, cleared when Main::Draw's mask clear returns and at the full-frustum cull: while set,
-		// a removed-entry geometry's registration takes DCLF's bits.
+		// Set at the end of the sun's Accumulate. Cleared when Main::Draw's mask clear returns and at the full-frustum cull.
 		std::atomic<bool> bitsReady{ false };
 		std::atomic<bool> exclusionLive{ false };        // frameState.exclusion is set for this frame
 		bool fullFrustumRan = false;                     // render thread: since EndFullFrustumWindow
 		void ResetFrameSun();
 		std::atomic<std::uint32_t> stampCounter{ 0 };
 		BitStats bitStats;
-		// The whole skip's once-a-frame rule (ClearedThisFrame): the geometries whose clearing registration took DCLF's bits, a round a frame.
+		// Geometries whose clearing registration took DCLF's bits this frame.
 		FrameAddressSet wholeCleared;
 	};
 }

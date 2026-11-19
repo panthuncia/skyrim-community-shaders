@@ -1,5 +1,4 @@
-// The CPU cull's AVX2 kernels (CullSimd.h), eight lanes at a time; compiled with /arch:AVX2 and without the game's PCH. Reached only where
-// Simd::Supported (Cull.cpp, built for the baseline) reports AVX2.
+// The CPU cull's AVX2 kernels, eight lanes at a time. Compiled with /arch:AVX2 without the game's PCH, and used only where the CPU supports AVX2.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/CullSimd.h"
 
@@ -34,7 +33,7 @@ namespace DCLF::Direct::Simd
 			int keep = 0xFF;
 			for (std::uint32_t p = 0; p < a_planeCount && keep; ++p) {
 				const float* plane = a_planes[p];
-				// As the SSE pass: ((a * x + b * y) + c * z) - d against -r.
+				// Same order as the SSE pass: ((a * x + b * y) + c * z) - d against -r.
 				const __m256 d = _mm256_sub_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(plane[0]), x), _mm256_mul_ps(_mm256_set1_ps(plane[1]), y)),
 												   _mm256_mul_ps(_mm256_set1_ps(plane[2]), z)),
 					_mm256_set1_ps(plane[3]));
@@ -61,7 +60,7 @@ namespace DCLF::Direct::Simd
 	std::uint32_t PlaneGroupAvx2(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		std::uint32_t a_lanes)
 	{
-		// Four vectors of eight: each only while a bound of a_lanes is in it.
+		// Four vectors of eight, each tested only while a bound of a_lanes is in it.
 		__m256 x[4], y[4], z[4], r[4], minusR[4];
 		std::uint32_t vectors = 0;
 		for (std::uint32_t v = 0; v < 4; ++v)
@@ -124,7 +123,6 @@ namespace DCLF::Direct::Simd
 	void PlaneChunksAvx2(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		const std::uint16_t* a_lanes, std::uint16_t* a_pass, std::uint32_t a_chunks)
 	{
-		// The set's active planes, broadcast once.
 		std::uint32_t mask;
 		std::memcpy(&mask, a_set + 24, 4);
 		__m256 nx[6], ny[6], nz[6], d0[6];

@@ -66,15 +66,21 @@ public:
 	/** @brief Releases and recompiles all compute shaders. */
 	virtual void ClearShaderCache() override;
 
-	/** @brief Copies and downsamples the directional shadow map, then applies Gaussian blur filtering. */
-	void CopyShadowLightData();
+	/**
+	 * @brief Copies and downsamples the directional shadow map (a_shadowMap, the shadow mask's t4: the cascades), then applies Gaussian
+	 * blur filtering. At the sun's shadow mask draw (State::OnShadowMaskDraw).
+	 */
+	void CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMap);
 
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 
-	/** @brief Installs the engine hook for binding the shared shadow map SRV. */
+	/** @brief Installs the engine hook for binding the shared shadow map SRV, and reserves the ORG path's anchor when it is on. */
 	virtual void PostPostLoad() override;
+
+	/** @brief Keeps the ORG path's (CS_ORG_VOLUMETRIC_SHADOWS=1) engine imports current, before its anchor runs. */
+	virtual void EarlyPrepass() override;
 
 private:
 	static void SetSharedShadowMapSRV(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_srv);

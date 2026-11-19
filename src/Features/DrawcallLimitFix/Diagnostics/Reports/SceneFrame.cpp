@@ -10,8 +10,7 @@
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/Diagnostics/WetnessParity.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Internal.h"
 
-// The render thread's scene lines: what it keeps of the scene (the pipeline constants, the shading and extras checks, tree LOD's mirror,
-// the frame capture), and the lines at the gate releases' point.
+// The render thread's scene lines, and the lines at the gate releases' point.
 
 namespace DCLF::Reports
 {
@@ -19,7 +18,7 @@ namespace DCLF::Reports
 
 	std::string SceneFrameLines()
 	{
-		// What the render thread keeps (its parities and captures), reported from the frame: nothing of the coordinator's.
+		// Only what the render thread keeps. Nothing of the coordinator's.
 		std::string text;
 		auto& diagnostics = Diagnostics::SceneDiagnostics();
 		if (auto& g = V::geometryStats(); g.frames) {
@@ -49,7 +48,6 @@ namespace DCLF::Reports
 				ep.objects, ep.differ, ep.maxDifference, ep.staleStatic, ep.differ || ep.staleStatic ? " <- DIFFER" : " <- OK", ep.differ ? "; first: " + ep.first : std::string());
 			ep = {};
 		}
-		// The features' scene lines here (Features/TreeLod's mirror line).
 		Extensions::ReportTextAt(Api::ReportPoint::SceneFrame, text);
 		text += MirrorWatch::TakeReport(V::frame());
 		auto& captureNs = V::captureNs();
@@ -66,7 +64,7 @@ namespace DCLF::Reports
 				categoryMirrorRecords, unscoped, unscoped ? " <- CAPTURE" : " <- OK");
 			captureNs = categoryCaptureNs = categoryCapturesMade = captureFrames = 0;
 			categoryMirrorCaptures = categoryMirrorRecords = 0;
-			// What the held captures alone keep alive (the render thread's, which holds them).
+			// What only the held captures keep alive.
 			Diagnostics::SoleHolds pins, nodes, roots;
 			for (const auto& capture : V::categoryCapturesHeld()) {
 				for (const auto& pin : capture->pins)
@@ -86,8 +84,7 @@ namespace DCLF::Reports
 
 	void GateReleases(std::uint32_t a_frame)
 	{
-		// The lines at the gate releases' point (the LOD gates' releases and engine side's first: their component's), once a report window.
-		// The frame numbers are the render thread's, each once.
+		// Gate release lines once a report window. The render thread sees each frame number once.
 		static Crossing crossing;
 		if (crossing.Due(a_frame))
 			Extensions::ReportLinesAt(Api::ReportPoint::GateReleases, a_frame);

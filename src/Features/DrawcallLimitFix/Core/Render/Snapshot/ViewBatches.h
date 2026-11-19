@@ -1,8 +1,7 @@
 #pragma once
 
-// The CPU pipeline's view batches (Direct.h; dclf-architecture.md, "The CPU-driven pipeline"): one immutable Direct::ViewBatchSet per
-// snapshot, made by the snapshot builder from its draws while the graph is built for the CPU pipeline (RevisionInputs::cpuPipeline), with
-// its resident sequences in a pooled version of their own, GPU ready before the snapshot is posted.
+// The CPU pipeline's view batches. The snapshot builder makes one immutable set per snapshot. Its resident sequences live in a
+// pooled buffer version that must be GPU ready before the snapshot is posted. See dclf-architecture.md.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 
@@ -13,6 +12,16 @@
 namespace org::runtime
 {
 	class IUploadService;
+}
+
+namespace org
+{
+	class RenderPassBuilder;
+}
+
+namespace RenderGraph
+{
+	struct DeclaredRefs;
 }
 
 namespace DCLF
@@ -34,30 +43,23 @@ namespace DCLF::Draws
 	struct MainPayload;
 	struct ShadowPayload;
 
-	/**
-	 * @brief What a snapshot's view batches are made from: its draws (the scene list: the main payload's resident region and frame inputs,
-	 * the shadow payload's frame inputs, read in place) and its payload (the row parts' versions, whose addresses the sequences embed), the
-	 * publication's tables, lookups and catalog. keep holds them for as long as the set.
-	 */
+	/** @brief What a snapshot's view batches are made from. keep holds it all alive as long as the set. */
 	struct ViewBatchInputs
 	{
 		std::shared_ptr<const void> keep;
 		const SceneTables* tables = nullptr;
 		const Lookups* lookups = nullptr;
 		const PipelineCatalog* catalog = nullptr;
-		std::uint32_t targetsGeneration = 0;  // the catalog's targets (GetIndirectState: the Z groups the main list is ordered by)
+		std::uint32_t targetsGeneration = 0;
 		const ScenePayload* payload = nullptr;
-		const MainPayload* main = nullptr;      // NewestMainPayload (null: none)
-		const ShadowPayload* shadow = nullptr;  // null: none
-		std::shared_ptr<org::runtime::IUploadService> uploads;  // the frame's dedicated uploader (the sequences' version)
-		// The forward family's lanes alone (forward, refraction, first person's forward part), a full build each set (GraphConditions::forwardDirect: the GPU-driven graph's forward draws).
+		const MainPayload* main = nullptr;
+		const ShadowPayload* shadow = nullptr;
+		std::shared_ptr<org::runtime::IUploadService> uploads;
+		// Only the forward family's lanes, rebuilt in full each set. Used by the GPU-driven graph's forward draws.
 		bool forwardOnly = false;
 	};
 
-	/**
-	 * @brief The snapshot builder's view batches (one pass at a time; the builder's alone): the set of the snapshot being made, its
-	 * sequences' version in flight, and the newest snapshot spheres FrameValues posted (Direct::SnapshotSpheres, asked for at every make).
-	 */
+	/** @brief Makes view batch sets on the snapshot builder. Builder thread only. */
 	class ViewBatchBuilder
 	{
 	public:
@@ -65,55 +67,52 @@ namespace DCLF::Draws
 		~ViewBatchBuilder();
 		ViewBatchBuilder(const ViewBatchBuilder&) = delete;
 		ViewBatchBuilder& operator=(const ViewBatchBuilder&) = delete;
-		struct Pending;  // a sequences version in flight (its outcome, the coordinator lane's)
+		struct Pending;  // a sequences version in flight
 
 		/**
-		 * @brief The set for a_in's payload is complete (its sequences GPU ready: Set()): made at the first call for that payload, its
-		 * sequences' version posted, and false until that version is ready (its readiness wakes the builder). True with no set when it
-		 * cannot be made (no uploader that copies, a refused post, a failed version: logged): the snapshot is posted without one, and its
-		 * CPU-mode epochs are not covered.
+		 * @brief Whether the set for a_in's payload is complete with its sequences GPU ready. The first call makes it.
+		 * Also true with no set when it cannot be made, and then the CPU-mode epochs are not covered.
 		 */
 		bool Ready(const ViewBatchInputs& a_in);
-		/** @brief The complete set (null: none, or not yet Ready). The builder stamps its serial and records its views (PostSnapshot). */
+		/** @brief The complete set, or null when there is none or it is not Ready yet. */
 		const std::shared_ptr<Direct::ViewBatchSet>& Set() const { return set; }
-		/** @brief The payload the set (or the one being made) is for (null: none). */
+		/** @brief The payload the set, or the one being made, is for. */
 		const void* For() const { return payload; }
-		/** @brief Forgets the set and what is in flight (new draws: the next Ready makes it again). */
+		/** @brief Forget the set and anything in flight. */
 		void Reset();
 
 	private:
 		const void* payload = nullptr;  // the payload the set or the pending one is for
-		std::uint32_t lanes = 0;        // ... and the batch lanes it is made with (BatchLanes when made)
-		bool forwardOnly = false;       // ... and whether it is the forward family alone (ViewBatchInputs::forwardOnly)
+		std::uint32_t lanes = 0;        // ... and its batch lanes
+		bool forwardOnly = false;       // ... and whether it is forward only
 		std::shared_ptr<Direct::ViewBatchSet> set, building;
 		std::shared_ptr<Pending> pending;
-		std::shared_ptr<const Direct::SnapshotSpheres> spheres;  // the newest taken
-		std::uint64_t versions = 0;  // the sequences' versions numbered
-		bool failed = false;         // this payload's set cannot be made (logged): Ready with none until another payload
-		// The incremental lists (Direct::kExpIncremental; kept across payloads), and their report and check counters.
+		std::shared_ptr<const Direct::SnapshotSpheres> spheres;
+		std::uint64_t versions = 0;
+		bool failed = false;         // Ready returns true with no set until the payload changes
+		// Kept across payloads.
 		std::unique_ptr<detail::SceneLists> lists;
 		std::uint64_t listSets = 0, checks = 0, checkedSets = 0, differingLanes = 0;
 	};
 
 	/**
-	 * @brief Builder thread, pure but for its scratch: a_in's set, every list and column filled, and its resident sequences into
-	 * a_sequences (the GPU copy, uploaded by the caller; the set's sequenceArgs are their CPU arguments). a_spheres: the newest snapshot
-	 * spheres (null: none yet, every lane a mover).
+	 * @brief Builder thread. Make a_in's full set and write its resident sequences to a_sequences for the caller to upload.
+	 * With no spheres yet, every lane is treated as moving.
 	 */
 	std::shared_ptr<Direct::ViewBatchSet> MakeViewBatches(const ViewBatchInputs& a_in, const Direct::SnapshotSpheres* a_spheres,
 		std::vector<DrawSequence>& a_sequences);
 
-	/**
-	 * @brief Any thread: the lanes the next view batch sets are made with (CS_DCLF_CPU_BATCH seeds it; default Direct::kDefaultBatchLanes).
-	 * More lanes a batch coalesce more draws into each culled batch (and, in Parallel mode, each secondary).
-	 */
+	/** @brief Any thread. Lanes per batch for the next sets. More lanes coalesce more draws into each culled batch. */
 	std::uint32_t BatchLanes();
-	/** @brief Any thread: sets them, rounded up to a multiple of 8 within [8, 65528]; the builder makes its set again at the next snapshot. */
+	/** @brief Any thread. Rounded up to a multiple of 8 within [8, 65528]. The next snapshot remakes its set. */
 	void SetBatchLanes(std::uint32_t a_lanes);
 
-	/**
-	 * @brief Render thread: a_set's sequences' backing is not reused before a_point (SubmittedRetirementPoint): wherever the installed
-	 * payload's are bound (PayloadPools::BindInstalled), for the set the frame drew with.
-	 */
+	/** @brief Render thread. Keep a_set's sequence backing from reuse until a_point. Call wherever the installed payload is bound. */
 	void BindViewBatches(const Direct::ViewBatchSet& a_set, std::uint64_t a_point);
+
+	/** @brief Render thread. Make a_set's sequences the current version of the late-bound buffer the CPU sites read. No graph build. */
+	void PublishViewBatches(const Direct::ViewBatchSet* a_set);
+
+	/** @brief Graph build. Declare the pass's read of the view batch sequences, for CheckDeclaredRefs in Prepare. */
+	void DeclareViewBatchReads(org::RenderPassBuilder& a_builder, RenderGraph::DeclaredRefs& a_out);
 }

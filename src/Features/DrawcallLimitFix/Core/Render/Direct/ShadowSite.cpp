@@ -1,10 +1,8 @@
-// The CPU-driven pipeline's shadow site (ShadowSite.h, SiteFrame.h): the shadow views and the occlusion maps at shadow-maps.after, as the
-// GPU path's shadows.view pass draws them (Features/Shadows/Engine's ShadowViewPass): each view's casters into its map's slice and
-// viewport, the slice loaded and stored (the engine's casters are already in it; the engine cleared it), under the shadow set's layout
-// with the view's push words, each lane's pipeline its key slot's in the view's map row (its mode and rasterizer state: the bias and
-// cull state are the pipeline's).
+// The CPU-driven pipeline's shadow site. It draws the shadow views and occlusion maps at shadow-maps.after, as the GPU
+// path's shadows.view pass does. Each view's casters go into its map's slice, which is loaded and stored because the
+// engine's casters are already in it. Bias and cull state come from each lane's pipeline.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h goes first because volk must come before every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
@@ -13,15 +11,19 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <Resources/Buffers/Buffer.h>
 #include <Resources/ExternalTextureResource.h>
 #include <rhi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <deque>
 #include <memory>
+#include <source_location>
 #include <vector>
 #include <Tracy/Tracy.hpp>
 #include <Tracy/TracyC.h>
@@ -31,13 +33,13 @@ namespace DCLF::Direct::detail
 	namespace
 	{
 		/**
-		 * @brief The shadow resources' maps as the site attaches them: a DSV per slice of each imported map, in a heap of DCLF's own, made once
-		 * per import set (a map imported again, or grown, makes new ones; the ones before are kept by the slot of the frame that replaced them).
+		 * @brief A DSV per slice of each imported shadow map, in DCLF's own heap. Made once per import set, and the old ones
+		 * are kept alive by the frame slot that replaced them.
 		 */
 		struct ShadowTargets
 		{
-			// The images the views are of, held as long as the views (and keyed by: an import's address can be reused by the next one).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, Draws::kShadowDepthTargets> depth{};
+			// Held as long as the views and used as their key, since an import's address can be reused by the next one.
+			std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kShadowDepthTargets> depth{};
 			std::array<std::uint32_t, Draws::kShadowDepthTargets> layers{};
 			std::array<std::uint32_t, Draws::kShadowDepthTargets> first{};  // its slice 0's DSV in the heap
 			std::array<rhi::Format, Draws::kShadowDepthTargets> formats{};
@@ -46,7 +48,7 @@ namespace DCLF::Direct::detail
 			rhi::DescriptorHeapPtr dsvHeap;
 		};
 
-		/** @brief One view's rendering (ShadowViewPass's BeginPass): its map's slice, its viewport in it. */
+		/** @brief One view's rendering: its map's slice and its viewport there. */
 		struct ShadowPass
 		{
 			SiteView* view = nullptr;
@@ -57,21 +59,21 @@ namespace DCLF::Direct::detail
 			bool occlusion = false;
 		};
 
-		/** @brief A shadow run's own state (SiteRun::shadowState): what its views' culls and recordings read, released with the run. */
+		/** @brief A shadow run's own state, released with the run. */
 		struct ShadowState
 		{
-			std::shared_ptr<const Draws::ShadowFrame> shape;  // its indirect state and views (the bindings point into it)
+			std::shared_ptr<const Draws::ShadowFrame> shape;  // the bindings point into it
 			std::shared_ptr<const Draws::ShadowResources> resources;
 			std::shared_ptr<const ShadowTargets> targets;
-			std::vector<Draws::SunEntryProcess> sunEntry;  // the sun views' full-frustum processes (CullView::sunEntry)
-			std::shared_ptr<const StrictGates> strict;     // the frame's strict gates (portal-strict point lights' views; null: none)
-			// Per view (never moved: the bindings and site views point into them): its map row, its bindings.
+			std::vector<Draws::SunEntryProcess> sunEntry;  // the sun views' full-frustum processes
+			std::shared_ptr<const StrictGates> strict;  // null for none
+			// Per view, never moved, because the bindings and site views point into them.
 			std::deque<std::vector<std::uint32_t>> mapRows;
 			std::deque<RecordBindings> bindings;
-			std::vector<ShadowPass> passes;  // in the latch's order: the placements' views, then the occlusion maps'
+			std::vector<ShadowPass> passes;  // in the latch's order, placement views then occlusion maps
 		};
 
-		/** @brief The site's own state across frames (render thread). */
+		/** @brief The site's own state across frames. Render thread. */
 		struct ShadowSiteState
 		{
 			std::shared_ptr<const ShadowTargets> targets;
@@ -84,17 +86,21 @@ namespace DCLF::Direct::detail
 			return state;
 		}
 
-		/** @brief Render thread: the shadow resources' maps' DSVs (made once per import set, ShadowTargets). */
+		/** @brief Render thread: the shadow maps' DSVs, made once per import set. */
 		std::shared_ptr<const ShadowTargets> ShadowTargetsOf(FrameSlot& a_slot, const Draws::ShadowResources& a_resources)
 		{
 			auto& own = Own();
-			if (own.targets && own.targets->depth == a_resources.depth && own.targets->layers == a_resources.depthLayers)
+			// A new version of an engine target's slot is a new image, so it gets new views.
+			std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kShadowDepthTargets> depths{};
+			for (std::size_t t = 0; t < depths.size(); ++t)
+				depths[t] = a_resources.depth[t].Current();
+			if (own.targets && own.targets->depth == depths && own.targets->layers == a_resources.depthLayers)
 				return own.targets;
 			if (own.targets)
 				a_slot.holds.push_back(std::move(own.targets));
 			auto& device = S().device;
 			auto targets = std::make_shared<ShadowTargets>();
-			targets->depth = a_resources.depth;
+			targets->depth = depths;
 			targets->layers = a_resources.depthLayers;
 			std::uint32_t dsvs = 0;
 			for (std::uint32_t t = 0; t < Draws::kShadowDepthTargets; ++t)
@@ -108,9 +114,9 @@ namespace DCLF::Direct::detail
 				const auto& depth = targets->depth[t];
 				if (!depth)
 					continue;
-				targets->formats[t] = depth->GetFormat();
+				targets->formats[t] = a_resources.depth[t].Format();
 				targets->resources[t] = depth->GetAPIResource().GetHandle();
-				// A slice each, as the graph's declared views (DepthReadWrite of org::DsvView{ ..., slice }): an array's by its layer.
+				// A DSV per array layer, matching the graph's declared views.
 				const std::uint32_t layers = std::max(1u, targets->layers[t]);
 				bool valid = true;
 				for (std::uint32_t slice = 0; valid && slice < layers; ++slice) {
@@ -131,9 +137,8 @@ namespace DCLF::Direct::detail
 		}
 
 		/**
-		 * @brief A view's map row (RecordBindings::shadowMapRow): by key slot, its pipeline under the view's mode and rasterizer state, from the
-		 * shape's row buckets the commit latched the row of (UseShadowMapRow: a key slot's bucket, the bucket's pipeline); ~0u: none (Lookups::
-		 * kNone, a pipeline past the published set: its draws skipped, as the GPU path's buckets leave them out).
+		 * @brief A view's map row: each key slot's pipeline under the view's mode and rasterizer state. ~0u for a pipeline past the
+		 * published set, whose draws are skipped as the GPU path's buckets leave them out.
 		 */
 		void MapRowOf(const Draws::RowBuckets& a_row, std::vector<std::uint32_t>& a_out)
 		{
@@ -151,7 +156,7 @@ namespace DCLF::Direct::detail
 		const auto* state = static_cast<const ShadowState*>(a_run.shadowState.get());
 		if (!state)
 			return;
-		// Each view in the latch's order, its rendering its own (the GPU path's one pass a view): the slice loaded, added to, stored.
+		// Each view gets its own rendering in the latch's order, its slice loaded and stored.
 		for (const auto& pass : state->passes) {
 			rhi::DepthAttachment depth{};
 			depth.dsv = pass.dsv;
@@ -187,8 +192,7 @@ namespace DCLF::Direct
 			return;
 		const auto& shape = *a_inputs.shape;
 		const auto& resources = *a_inputs.resources;
-		// The index pool's first indices as this commit left them: the frame's first drawing commit (UpdateIndexPool), whose ranges every
-		// site of the frame draws with (TakePoolFirsts' rule; the shadow resources' pool is the scene's, the main sites').
+		// Every site of the frame draws with the pool's first indices from the frame's first drawing commit.
 		TakePoolFirsts(*slot, resources.pool.get());
 		TracyCZoneN(sState, "CS.DCLF.Cpu.Shadow.State", true);
 		auto& run = NewBareRun(*slot, Site::Shadow);
@@ -200,13 +204,12 @@ namespace DCLF::Direct
 		if (resources.scene)
 			state->strict = FrameStrictGates(*resources.scene, slot->sceneFrame);
 		run.shadowState = state;
-		// What every view's recordings bind: the shape's heaps and shadow set (its indirect state, the GPU path's ShadowViewPass binds), the
-		// index pool's adopted version, the slot's first indices.
+		// What every view's recordings bind: the shape's heaps and shadow set, the index pool and the slot's first indices.
 		RecordBindings common{};
 		common.resourceHeap = shape.resourceHeap;
 		common.samplerHeap = shape.samplerHeap;
 		common.shadow = &shape.indirect;
-		// The run's own: its callback binds them in DXVK's buffer (SiteOut::BindHeaps).
+		// The callback binds the run's own heaps in DXVK's buffer.
 		run.bindings.resourceHeap = shape.resourceHeap;
 		run.bindings.samplerHeap = shape.samplerHeap;
 		if (resources.pool)
@@ -216,25 +219,56 @@ namespace DCLF::Direct
 			}
 		common.poolFirsts = slot->poolFirsts;
 		const auto& targets = *state->targets;
-		const bool drawable = shape.indirect.valid && common.indexPool.valid() && shape.rows;
+		bool drawable = shape.indirect.valid && common.indexPool.valid() && shape.rows;
+		// D3D12's layout holds root constants only, so a view's push words name its blocks by ref and by view.
+		// Vulkan's layout reads the shape's addresses.
+		const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+		RenderGraph::BufferRef viewBlocksRef{};
+		if (d3d12 && drawable) {
+			if (resources.viewBlocks.buffer)
+				if (auto version = a_inputs.adopted->Find(*resources.viewBlocks.buffer); version && version->buffer) {
+					viewBlocksRef = RenderGraph::MakeBufferRef(s.device, version->buffer->GetAPIResource().GetHandle(), 0, std::source_location::current());
+					slot->holds.push_back(std::move(version));
+				}
+			if (!viewBlocksRef || !resources.constantsRef || !resources.blockViews) {
+				drawable = false;
+				static std::atomic<bool> warned{ false };
+				if (!warned.exchange(true))
+					logger::error("[DCLF] D3D12 CPU shadow site: no buffer view ref of the view blocks or the constants, or no SharedData view; its views draw nothing");
+			}
+		}
 		TracyCZoneEnd(sState);
 		for (const auto& latched : a_inputs.views) {
 			if (!drawable || latched.index >= shape.views.size() || latched.index >= shape.rows->size())
 				continue;
 			const auto& view = shape.views[latched.index];
-			// As ShadowViewPass's preparation: a map the resources import, a slice of it (a target grown since has slices it cannot name).
+			// A target grown since the shape was made has slices it cannot name.
 			if (view.target >= Draws::kShadowDepthTargets || !targets.depth[view.target] || !targets.valid[view.target] ||
 				view.slice >= std::max(1u, targets.layers[view.target]))
 				continue;
-			// Nothing in its list: nothing to cull or draw.
 			if (slot->set->List(latched.type).empty())
 				continue;
 			auto& mapRow = state->mapRows.emplace_back();
 			MapRowOf((*shape.rows)[latched.index], mapRow);
 			auto& bindings = state->bindings.emplace_back(common);
-			// The view's own pass words (ShadowFrameView::push: its latched blocks' addresses), so its recording holds for as long as the shape.
+			// The view's own push words, so its recording stays valid as long as the shape.
 			static_assert(std::tuple_size_v<decltype(view.push)> == std::tuple_size_v<decltype(bindings.shadowPush)>);
 			std::copy(view.push.begin(), view.push.end(), bindings.shadowPush.begin());
+			if (d3d12) {
+				auto& push = bindings.shadowPush;
+				const auto ref = [&](std::uint32_t a_word, RenderGraph::BufferRef a_ref) {
+					push[a_word] = a_ref.viewSlot;
+					push[a_word + 1] = a_ref.byteOffset;
+				};
+				const RenderGraph::BufferRef viewBlock = viewBlocksRef + std::uint64_t(view.slot) * Draws::kShadowViewSlotBytes;
+				ref(kShadowPushViewBlock, viewBlock);
+				ref(kShadowPushPerFrame, viewBlock + Draws::kShadowPerFrameOffset);
+				ref(kShadowPushZeros, resources.constantsRef + Draws::kShadowArenaBlocksOffset);  // the zero block heads the arena
+				push[kShadowPushSharedData] = resources.blockViewIndices[0];
+				push[kShadowPushSharedData + 1] = 0;
+				push[kShadowPushFeatureData] = resources.blockViewIndices[1];
+				push[kShadowPushFeatureData + 1] = 0;
+			}
 			bindings.shadowMapRow = mapRow;
 			const bool occlusion = IsOcclusionView(latched.type);
 			CullView cull = occlusion ? OcclusionCullView(latched.type, latched.slot, latched.latch) :
@@ -242,8 +276,7 @@ namespace DCLF::Direct
 			cull.strict = state->strict.get();
 			auto& site = NewView(*slot, run, latched.type, cull, false);
 			site.bindings = &bindings;
-			// Its map's rendering (its format, its viewport), which Parallel mode's batches' secondaries and a per-snapshot recording are
-			// recorded inside.
+			// Its map's rendering, which Parallel mode's secondaries and per-snapshot recordings are recorded inside.
 			{
 				site.secondary = run.record == RecordMode::Parallel;
 				auto& inheritance = site.inheritance;
@@ -284,7 +317,6 @@ namespace DCLF::Direct
 
 	bool ShadowSiteLive()
 	{
-		// DCLF's shadows on: the site draws the shadow epoch's views and maps (its coverage, the occlusion maps' readiness).
 		return ActiveToggles().shadows;
 	}
 }

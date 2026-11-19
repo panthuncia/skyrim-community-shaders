@@ -1,5 +1,3 @@
-// Fades' growth lines for the diagnostic capture (FadeCensus.h).
-
 #include "Features/DrawcallLimitFix/Features/Fades/FadeCensus.h"
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"

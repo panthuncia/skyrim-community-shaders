@@ -293,6 +293,15 @@ void LUT::CompileRasterShaders()
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\LUT", {}, shaderInfos);
 }
 
+LUT::LUTCB LUT::Constants() const
+{
+	return {
+		.InputMin = settings.InputMin,
+		.InputMax = settings.InputMax,
+		.LutType = LutType
+	};
+}
+
 void LUT::Draw(TextureInfo& inout_tex)
 {
 	if (LutType == -1)
@@ -309,12 +318,7 @@ void LUT::Draw(TextureInfo& inout_tex)
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
 
-	LUTCB data = {
-		.InputMin = settings.InputMin,
-		.InputMax = settings.InputMax,
-		.LutType = LutType
-	};
-	lutCB->Update(data);
+	lutCB->Update(Constants());
 
 	{
 		PostProcessingRaster::RasterPass pass(context);

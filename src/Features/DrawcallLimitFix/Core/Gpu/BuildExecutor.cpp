@@ -1,4 +1,4 @@
-// The build pump and the pipeline lane (see the header).
+// The build pump and the pipeline lane.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
 
@@ -16,16 +16,15 @@ namespace DCLF
 	namespace
 	{
 		/**
-		 * @brief A width-limited pump onto the preparation pool. Lock-free: producers push and count, and take a runner slot
-		 * while fewer than the width run. A runner gives its slot back only once the count reads zero, and then looks once more,
-		 * so a push that found every slot taken is never left without a runner.
+		 * @brief A lock-free, width-limited pump onto the preparation pool. A runner gives its slot back only once the count reads zero,
+		 * then looks once more, so a push that found every slot taken is never left without a runner.
 		 */
 		struct BuildPump
 		{
 			using Task = std::function<void()>;
 
 			tbb::concurrent_queue<Task> tasks;
-			// Pushed and not yet popped. A pop may precede its push's count, so it can read below zero for a moment.
+			// A pop may precede its push's count, so this can read below zero for a moment.
 			std::atomic<std::int64_t> queued{ 0 };
 			std::atomic<unsigned> runners{ 0 };
 			const unsigned width = BuildWidth();
@@ -50,7 +49,6 @@ namespace DCLF
 			// Holds a runner slot.
 			void Dispatch()
 			{
-				// The scope is never cancelled and the executor never shut down, so the pool takes it.
 				SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF builds",
 					[this](const org::async::TaskContext&) { Run(); });
 			}
@@ -59,7 +57,7 @@ namespace DCLF
 			{
 				if (Task task; tasks.try_pop(task)) {
 					queued.fetch_sub(1);
-					// ORG's tasks report their own failures through their artifacts; nothing may stop the pump.
+					// ORG's tasks report failures through their artifacts. Nothing may stop the pump.
 					try {
 						task();
 					} catch (...) {
@@ -70,7 +68,7 @@ namespace DCLF
 					return;
 				}
 				runners.fetch_sub(1);
-				// A push that counted after the read above and found every slot taken.
+				// Catch a push that counted after the read above and found every slot taken.
 				if (queued.load() > 0 && TakeRunner())
 					Dispatch();
 			}
@@ -78,7 +76,7 @@ namespace DCLF
 
 		BuildPump& Pump()
 		{
-			// Never destroyed, as the executor it feeds: builds may still complete while the process tears down.
+			// Never destroyed, because builds may still complete while the process tears down.
 			static auto* pump = new BuildPump;
 			return *pump;
 		}
@@ -100,8 +98,7 @@ namespace DCLF
 
 		org::async::SerializedTaskPump& Lane()
 		{
-			// Configured once, before any wake can reach it (a function-local static), and never destroyed: completions may still
-			// arrive while the process tears down.
+			// Never destroyed, because completions may still arrive while the process tears down.
 			static auto* lane = SceneScheduler::MakeLanePump(
 				SceneScheduler::Executor(), SceneScheduler::Scope(), SceneExecutor::Coordinator, org::async::TaskDispatch::Cpu, "DCLF pipeline lane",
 				[] {

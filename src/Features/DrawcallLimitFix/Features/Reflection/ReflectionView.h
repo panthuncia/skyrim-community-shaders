@@ -1,10 +1,9 @@
 #pragma once
 
-// The water reflection's own frame state (ReflectionFrame): this update's captured faces, the cube they render into and the report's
-// counters, beside what Core keeps of the view's slot (IndirectDraws::ViewState: its targets, resources, coverage, slot pipelines and the
-// faces' tree LOD); and the faces' camera parity's counts. Render thread, and the report. Included by the feature's sources.
+// The water reflection's own frame state: this update's captured faces, the cube and the report counters, and the face camera parity's
+// counts. Render thread. Included by the feature's sources.
 
-// ViewEpoch.h first: volk must precede every Vulkan header of the translation unit.
+// ViewEpoch.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
 #include "Features/DrawcallLimitFix/Api/Views.h"
@@ -21,7 +20,7 @@ namespace DCLF::Features::Reflection
 {
 	inline constexpr Api::EngineView kView = Api::EngineView::Reflection;
 
-	/** @brief The view's frame state: the LOD forward programs and pipelines found, this update's captured faces, the report counters. */
+	/** @brief The view's frame state. */
 	struct ReflectionFrame
 	{
 		std::uint32_t lodSlots = 0, programsReady = 0, pipelinesReady = 0;
@@ -47,14 +46,14 @@ namespace DCLF::Features::Reflection
 		std::uint32_t executedFrame = ~0u, lateFaces = 0;
 	};
 
-	/** @brief The view's frame state (render thread; the report reads and resets its counters). */
+	/** @brief The view's frame state. Render thread. The report reads and resets its counters. */
 	inline ReflectionFrame& FrameState()
 	{
 		static ReflectionFrame frame;
 		return frame;
 	}
 
-	/** @brief The faces' camera parity (Diagnostics/FaceCameraParity.cpp): faces compared, differing (block, slice); the report takes them. */
+	/** @brief The faces' camera parity counts. The report takes them. */
 	struct FaceCameras
 	{
 		std::uint32_t faces = 0, blocks = 0, slices = 0;

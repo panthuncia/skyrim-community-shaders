@@ -1,6 +1,12 @@
 #include "HangWatchdog.h"
 
 #include "CrashDump.h"
+#include "Testing/Testing.h"
+#ifdef CS_HAS_RENDER_GRAPH
+#	include "RenderGraph/RenderGraphRuntime.h"
+#	include <OpenRenderGraph/GraphHost.h>
+#	include <rhi_interop_vulkan.h>
+#endif
 
 #include <ctime>
 #include <thread>
@@ -20,6 +26,21 @@ namespace HangWatchdog
 		std::atomic<std::uint64_t> beats{ 0 };
 		std::atomic<std::uint32_t> renderThread{ 0 };  // the thread of the last Present
 		std::uint64_t thresholdMs = kDefaultSeconds * 1000;
+		std::atomic<std::uint64_t> progressEvents{ 0 };  // loading progress: cells attached, NoteProgress calls
+
+		/** @brief Cells attaching while a load runs: progress, even when nothing presents. */
+		class CellAttachSink final : public RE::BSTEventSink<RE::TESCellAttachDetachEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESCellAttachDetachEvent*, RE::BSTEventSource<RE::TESCellAttachDetachEvent>*) override
+			{
+				progressEvents.fetch_add(1, std::memory_order_relaxed);
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+
+		/** @brief The progress count: shaders compiled and loading events. A change is a beat. */
+		std::uint64_t Progress() { return progressEvents.load(std::memory_order_relaxed) + Testing::GetCompileProgress().done; }
 
 		// CS_TEST_HANG=<seconds> (a development switch): the render thread sleeps past the threshold once, that long after the watch
 		// starts, to exercise the watchdog and the helper end to end.
@@ -64,6 +85,79 @@ namespace HangWatchdog
 				std::filesystem::remove(reports[i].path(), error);
 		}
 
+		/** @brief dxvk_d3d11's DxvkViewTraceEntry (d3d11_view_srv.cpp, DXVK_VIEW_TRACE=1). */
+		struct DestroyedView
+		{
+			std::uintptr_t view, viewEnd, stream, streamEnd;
+			std::uint32_t kind, thread;
+			std::uint64_t tick;
+			std::uint32_t frameCount;
+			void* frames[24];
+		};
+
+		std::string ModuleOffset(const void* a_address)
+		{
+			HMODULE module = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(a_address), &module))
+				return fmt::format("{}", a_address);
+			char path[MAX_PATH]{};
+			GetModuleFileNameA(module, path, MAX_PATH);
+			return fmt::format("{}+{:#x}", std::filesystem::path(path).filename().string(), reinterpret_cast<std::uintptr_t>(a_address) - reinterpret_cast<std::uintptr_t>(module));
+		}
+
+		/**
+		 * @brief With DXVK_VIEW_TRACE=1: logs the views freed while the stuck thread's registers point into them, with the stacks that
+		 * released and destroyed them. A thread spinning on a freed view's lock names who freed the view.
+		 */
+		void LogFreedViews(std::uint32_t a_thread)
+		{
+			const auto dxvk = GetModuleHandleW(L"dxvk_d3d11.dll");
+			using Find = std::uint32_t(__stdcall*)(std::uintptr_t, DestroyedView*, std::uint32_t);
+			const auto find = dxvk ? reinterpret_cast<Find>(GetProcAddress(dxvk, "dxvkFindDestroyedView")) : nullptr;
+			if (!find)
+				return;
+			const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, a_thread);
+			if (!thread)
+				return;
+			CONTEXT context{};
+			context.ContextFlags = CONTEXT_INTEGER | CONTEXT_CONTROL;
+			bool read = false;
+			if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+				read = GetThreadContext(thread, &context) != FALSE;
+				ResumeThread(thread);
+			}
+			CloseHandle(thread);
+			if (!read)
+				return;
+			// The registers, then the stack: a thread that sleeps in a spin keeps its caller's registers saved on the stack.
+			std::vector<std::pair<std::string, std::uintptr_t>> values = { { "rax", context.Rax }, { "rbx", context.Rbx }, { "rcx", context.Rcx },
+				{ "rdx", context.Rdx }, { "rsi", context.Rsi }, { "rdi", context.Rdi }, { "rbp", context.Rbp }, { "r8", context.R8 }, { "r9", context.R9 },
+				{ "r10", context.R10 }, { "r11", context.R11 }, { "r12", context.R12 }, { "r13", context.R13 }, { "r14", context.R14 }, { "r15", context.R15 } };
+			MEMORY_BASIC_INFORMATION region{};
+			if (VirtualQuery(reinterpret_cast<const void*>(context.Rsp), &region, sizeof(region)) && region.State == MEM_COMMIT) {
+				const auto end = (std::min)(reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize, static_cast<std::uintptr_t>(context.Rsp) + 0x10000);
+				for (auto at = static_cast<std::uintptr_t>(context.Rsp) & ~std::uintptr_t(7); at + 8 <= end; at += 8)
+					values.emplace_back(fmt::format("[rsp+{:#x}]", at - context.Rsp), *reinterpret_cast<const std::uintptr_t*>(at));
+			}
+			std::unordered_set<std::uintptr_t> reported;
+			for (const auto& [name, value] : values) {
+				DestroyedView entries[4]{};
+				const auto count = find(value, entries, 4);
+				for (std::uint32_t i = 0; i < count; ++i) {
+					const auto& e = entries[i];
+					if (!reported.insert(e.view ^ (std::uintptr_t(e.kind) << 63)).second)
+						continue;
+					std::string stack;
+					for (std::uint32_t f = 0; f < e.frameCount && f < 24; ++f)
+						stack += fmt::format("\n    {}", ModuleOffset(e.frames[f]));
+					logger::critical("[HANG] {} = {:#x} is in a freed view {:#x} (stream state {:#x}); its {} on thread {}, {} ms ago:{}", name, value, e.view, e.stream,
+						e.kind ? "destruction" : "last public Release", e.thread, GetTickCount64() - e.tick, stack);
+				}
+			}
+			if (reported.empty())
+				logger::info("[HANG] no register or stack value of the stuck thread points into a recently freed shader resource view");
+		}
+
 		void Report(std::uint64_t a_stalledMs)
 		{
 			const auto dir = logger::log_directory();
@@ -74,13 +168,42 @@ namespace HangWatchdog
 			const auto thread = renderThread.load(std::memory_order_relaxed);
 			logger::critical("[HANG] the render thread (thread {}) has not presented for {:.1f} s; writing every thread's stack to {}", thread,
 				a_stalledMs / 1000.0, text.filename().string());
+			LogFreedViews(thread);
+#ifdef CS_HAS_RENDER_GRAPH
+			// The render graph host's runs in flight and what each waits for (read racily): a stall waiting on the GPU names its points.
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				logger::critical("[HANG] render graph host state: {}", host->DescribeAsyncState());
+			// The order of the graph's work in DXVK's stream and on the compute and copy queues: a GPU wait cycle shows here.
+			if (RenderGraphRuntime::Get().Host())
+				logger::critical("[HANG] render graph stream order: {}", RenderGraphRuntime::Get().DescribeStreamOrder());
+			// BasicRHI's crash markers (DXVK_DEBUG=hang; DXVK's adopted device also needs BASICRHI_VK_CRASH_MARKERS=1): each command
+			// list's last begun and finished marker. A begun marker is written at the top of the pipe, so a list "in flight" at a
+			// pass's begin can still be draining the pass before it (Radeon GPU Detective tells the two apart). No lines on D3D12
+			// or with the markers off.
+			if (auto* host = RenderGraphRuntime::Get().Host()) {
+				const auto lines = rhi::vulkan::DumpCrashDiagnostics(host->Device(), false);
+				logger::critical("[HANG] render graph crash markers: {} lines logged above", lines);
+			}
+#endif
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
 			const auto begin = GetTickCount64();
-			if (CrashDump::RequestHangDump(thread, dump, text, kHelperTimeoutMs))
+			std::uint32_t error = 0;
+			switch (CrashDump::RequestHangDump(thread, dump, text, kHelperTimeoutMs, error)) {
+			case CrashDump::HangDumpResult::Written:
 				logger::critical("[HANG] wrote {} and {} in {:.1f} s", text.filename().string(), dump.filename().string(), (GetTickCount64() - begin) / 1000.0);
-			else
+				break;
+			case CrashDump::HangDumpResult::Failed:
+				logger::error("[HANG] the crash dump helper could not write {} (Win32 error {}); see {} for the stacks, if written", dump.filename().string(), error,
+					text.filename().string());
+				break;
+			case CrashDump::HangDumpResult::NoHelper:
+				logger::error("[HANG] the crash dump helper is not running: no report");
+				break;
+			case CrashDump::HangDumpResult::NoAnswer:
 				logger::error("[HANG] the crash dump helper did not answer within {} s: no report", kHelperTimeoutMs / 1000);
+				break;
+			}
 			spdlog::default_logger()->flush();
 		}
 
@@ -90,10 +213,17 @@ namespace HangWatchdog
 			bool stalled = false;  // the current stall was reported (or found, past the report limit)
 			bool rendersUnfocused = false;
 			std::uint64_t lastBeats = 0, lastMinuteLogged = 0;
+			std::uint64_t lastProgress = Progress(), lastProgressTick = 0;
 			for (;;) {
 				std::this_thread::sleep_for(std::chrono::seconds(1));
-				const auto beat = lastBeat.load(std::memory_order_acquire);
-				if (beat == 0)
+				// Shader compiles and loading progress count as beats: a cold shader cache or a long load is not a hang. A load that
+				// makes no progress and does not present still is.
+				if (const auto progress = Progress(); progress != lastProgress) {
+					lastProgress = progress;
+					lastProgressTick = GetTickCount64();
+				}
+				const auto beat = (std::max)(lastBeat.load(std::memory_order_acquire), lastProgressTick);
+				if (lastBeat.load(std::memory_order_acquire) == 0)
 					continue;
 				const auto count = beats.load(std::memory_order_relaxed);
 				const bool foreground = GameHasForeground();
@@ -130,6 +260,8 @@ namespace HangWatchdog
 				}
 				++reports;
 				Report(stalledMs);
+				// A test run ends here with the outcome hang.
+				Testing::ReportHang(stalledMs / 1000.0);
 			}
 		}
 	}
@@ -148,6 +280,10 @@ namespace HangWatchdog
 			return;
 		}
 		thresholdMs = seconds * 1000;
+		if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
+			static CellAttachSink sink;
+			events->AddEventSink<RE::TESCellAttachDetachEvent>(&sink);
+		}
 		testHangAt = ReadSeconds("CS_TEST_HANG", 0);
 		logger::info("[HANG] the render thread watchdog reports a Present stall of {} s or more", seconds);
 		if (testHangAt)

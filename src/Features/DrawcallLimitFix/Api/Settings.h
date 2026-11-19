@@ -1,14 +1,13 @@
 #pragma once
 
-// The settings contracts (Api::InstallContext::RegisterSwitch, RegisterToggle): a feature's own CS_* switches, beside Core's registry
-// (Core/Settings/Switches.h), and its live toggles, beside Core's (Core/Settings/Toggles.h).
+// A feature's own CS_* switches and live toggles, registered beside Core's.
 
 #include <cstdint>
 #include <string_view>
 
 namespace DCLF::Api
 {
-	/** @brief What a switch is for: the startup summary groups by it. */
+	/** @brief What a switch is for. The startup summary groups switches by this. */
 	enum class SwitchKind : std::uint8_t
 	{
 		Feature,
@@ -18,7 +17,7 @@ namespace DCLF::Api
 		Other,
 	};
 
-	/** @brief Which values of a feature switch narrow DCLF's featureset (the startup log names a reduced run). */
+	/** @brief Which values of a feature switch count as a reduced featureset in the startup log. */
 	enum class SwitchReduced : std::uint8_t
 	{
 		Never,      // not a feature
@@ -26,7 +25,7 @@ namespace DCLF::Api
 		Zero,       // off only with "0"
 	};
 
-	/** @brief A registered switch (RegisterSwitch's result): SwitchValue and SwitchEnabled read it by this. */
+	/** @brief A registered switch. */
 	struct SwitchId
 	{
 		std::uint32_t index = ~0u;
@@ -34,11 +33,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A switch: read once, from the environment or the switches file (Switches.h), when it is registered. Listed in the startup
-	 * summary and the reduced-featureset line right after the switch named by after, or right before the one named by before (after
-	 * the features' listed after the switch before it); empty both: last. The switch named is Core's or a feature's (registered before
-	 * this one or after: the install checks it once every feature registered), so a feature's switch listed where Core's was keeps the
-	 * features' switches listed around it. Features' switches at one place are listed in their registration order.
+	 * @brief A switch, read once from the environment or the switches file when registered.
+	 * after or before places it in the startup summary next to another switch. With neither it goes last.
 	 */
 	struct FeatureSwitch
 	{
@@ -47,10 +43,10 @@ namespace DCLF::Api
 		SwitchReduced reduced = SwitchReduced::Never;
 		std::string_view description;
 		std::string_view after;
-		std::string_view before;  // or empty (one of after and before)
+		std::string_view before;  // set at most one of after and before
 	};
 
-	/** @brief A registered toggle (RegisterToggle's result): ToggleSet::On reads it by this. */
+	/** @brief A registered toggle. */
 	struct ToggleId
 	{
 		std::uint32_t bit = ~0u;
@@ -58,24 +54,21 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A live toggle (Toggles.h): seeded from its switch, edited from the menu, in force from the next frame's start. Shown, and
-	 * named on the menu's "This frame" line, right after the toggle named by after, or right before the one named by before (after the
-	 * features' listed after the toggle before it); empty both: last. The toggle named is Core's or a feature's (registered before this
-	 * one or after: the install places the features' toggles once every feature registered), so a feature's toggle listed where Core's
-	 * was keeps the features' toggles listed around it. Features' toggles at one place are listed in their registration order.
+	 * @brief A live toggle, seeded from its switch and editable from the menu. Changes take effect at the next frame's start.
+	 * after or before places it on the menu next to another toggle. With neither it goes last.
 	 */
 	struct FeatureToggle
 	{
-		std::string_view name;     // the "This frame" line's, and the test harness's (dclf:<name>=<0|1>)
-		std::string_view label;    // the menu's
-		std::string_view tooltip;  // or empty
+		std::string_view name;     // also the test harness key, dclf:<name>=<0|1>
+		std::string_view label;
+		std::string_view tooltip;
 		std::string_view section;  // the menu heading it opens, or empty
-		SwitchId seed;             // a registered switch
-		std::string_view onValue = "1";  // the seed's value besides unset that turns it on
-		bool entersClassification = false;  // a change drops the classification caches (Coordinator::InvalidateVerdicts)
-		bool offByDefault = false;          // unset seeds it off: only onValue turns it on
+		SwitchId seed;
+		std::string_view onValue = "1";  // the seed value, besides unset, that turns it on
+		bool entersClassification = false;  // a change drops the classification caches
+		bool offByDefault = false;          // unset seeds it off
 		std::string_view after;
-		std::string_view before;    // or empty (one of after and before)
-		std::string_view needs[2];  // the toggles it needs on (their names: Core's, or a feature's, listed before it), or empty
+		std::string_view before;    // set at most one of after and before
+		std::string_view needs[2];  // toggles that must also be on, registered before this one
 	};
 }

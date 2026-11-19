@@ -1,7 +1,9 @@
-// IndirectDraws' GPU resources: the main, scene, shadow and view resources created on the render thread (Setup, EnsureSceneBuffers,
-// SetupShadow, SetupView), each versioned buffer registered with the scene's set (its extent, growth policy and contents), the
-// scene's draw bound and the main latch the revision code keeps.
+// GPU resources for the DCLF draws: the main, scene, shadow and view resources. All are created on the render thread.
+// Each versioned buffer is registered with the scene's set, which grows it.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
@@ -11,12 +13,47 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/ScheduleDump.h"
 
+#include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+
 #include <cassert>
+#include <mutex>
+#include <unordered_map>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
+		/** @brief One desc's program load. The program is written before the state turns kLoaded. */
+		struct ProgramLoad
+		{
+			static constexpr int kLoading = 0, kLoaded = 1, kFailed = 2;
+			std::atomic<int> state{ kLoading };
+			std::shared_ptr<const ComputeProgram> program;
+		};
+
+		/** @brief LoadProgram's entries by desc, for one device. A new device starts over. */
+		struct ProgramLoads
+		{
+			std::mutex mutex;
+			const void* device = nullptr;
+			std::unordered_map<std::string, std::shared_ptr<ProgramLoad>> entries;
+		};
+
+		ProgramLoads& Loads()
+		{
+			static ProgramLoads loads;
+			return loads;
+		}
+
+		/** @brief Everything in a desc that changes what Load builds. */
+		std::string ProgramKey(const ComputeProgram::Desc& a_desc)
+		{
+			std::string key = a_desc.source + '|' + Util::WStringToString(a_desc.entry) + '|' + std::to_string(a_desc.constantWords) + (a_desc.commonDefines ? "|c" : "|n");
+			for (const auto& [name, value] : a_desc.defines)
+				key += '|' + Util::WStringToString(name) + '=' + Util::WStringToString(value);
+			return key;
+		}
+
 		/** @brief A device-local buffer the shaders read by device address. */
 		std::shared_ptr<org::Buffer> DeviceBuffer(std::uint64_t a_bytes, const char* a_name)
 		{
@@ -25,7 +62,7 @@ namespace DCLF::Draws
 			return created;
 		}
 
-		/** @brief A structured buffer the shaders read through its SRV; a_index is the SRV's descriptor slot. */
+		/** @brief A structured buffer the shaders read through its SRV. a_index receives the SRV's descriptor slot. */
 		std::shared_ptr<org::Buffer> StructuredBuffer(std::uint32_t a_elements, std::uint32_t a_stride, const char* a_name, std::uint32_t& a_index, bool a_unorderedAccess = false)
 		{
 			auto created = org::Buffer::CreateUnmaterializedStructuredBuffer(a_elements, a_stride, a_unorderedAccess);
@@ -35,10 +72,7 @@ namespace DCLF::Draws
 			return created;
 		}
 
-		/**
-		 * @brief A view with frame constants of its own (its frame record's): its copies of the main frame buffers (a_main's shape), made
-		 * again only when that shape changes, replaced whole (the revision producer reads them).
-		 */
+		/** @brief Gives a view with its own frame constants copies of the main frame buffers. They are remade only when the main shape changes. */
 		void MatchViewFrameBuffers(ViewResources& a_view, const std::vector<FrameBuffer>& a_main)
 		{
 			if (!a_view.frameConstants)
@@ -56,7 +90,7 @@ namespace DCLF::Draws
 			a_view.frameBuffers.store(std::move(copies), std::memory_order_release);
 		}
 
-		/** @brief A D3D11 view of a word buffer's first a_bytes, for immediate-context readbacks; words past it read as zero. */
+		/** @brief A D3D11 view of a word buffer's first a_bytes, for readbacks. Words past it read as zero. */
 		auto WrapWords(org::Buffer& a_buffer, std::uint64_t a_bytes)
 		{
 			D3D11_BUFFER_DESC desc{};
@@ -70,14 +104,13 @@ namespace DCLF::Draws
 
 		std::uint64_t AddressOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
-			// A whole buffer: BasicRHI places buffers at 256 or more. The rows' and blocks' offsets keep 16 on top (DrawPipelines.h), which
-			// the descriptor-buffer model's pointer loads assume.
+			// BasicRHI places whole buffers at 256 or more. The descriptor-buffer model's pointer loads assume at least 16.
 			const auto address = a_device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 });
 			assert(address % 16 == 0);
 			return address;
 		}
 
-		/** @brief A per-object buffer's first units (CS_DCLF_TABLE_START=small: a few, to test growth); RequireSceneTables grows it. */
+		/** @brief A per-object buffer's first size. CS_DCLF_TABLE_START=small starts tiny to test growth. */
 		std::uint32_t InitialObjectUnits()
 		{
 			return SwitchValue(Switch::TableStart) == "small" ? 64u : kInitialObjects;
@@ -118,11 +151,8 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		/**
-		 * @brief One object slot's share of the scene draw bound (one per object, or per skin partition; any epoch's draws fit in
-		 * it): its draws and the pipeline slot whose Z-prepass bucket they count toward. Decals count toward none: the depth
-		 * segment gets no decals.
-		 */
+		/** @brief One object slot's share of the scene draw bound, and the pipeline slot whose Z-prepass bucket it counts toward.
+		 * Decals count toward none, since the depth segment draws no decals. */
 		std::pair<std::uint32_t, std::uint32_t> DrawShareOf(const SceneTables& a_tables, std::size_t a_slot, bool a_partitioned)
 		{
 			const auto& object = a_tables.objects[a_slot];
@@ -132,7 +162,7 @@ namespace DCLF::Draws
 			return { produced, (object.flags & kObjectDecal) ? DrawBoundStore::kNoPipeline : object.pipelineIndex };
 		}
 
-		/** @brief What a_slot casts with (DrawBoundStore::ShadowShare), given its draws. */
+		/** @brief What a_slot casts with, given its draws. */
 		DrawBoundStore::ShadowShare ShadowShareOf(const SceneTables& a_tables, std::size_t a_slot, std::uint32_t a_produced)
 		{
 			DrawBoundStore::ShadowShare out;
@@ -149,7 +179,7 @@ namespace DCLF::Draws
 			return out;
 		}
 
-		/** @brief The caster rows a_share takes (ShadowResources::casterRows): its draws in each view family it has a key in. */
+		/** @brief The caster rows a_share takes, its draws in each view family it has a key in. */
 		std::uint64_t CasterRowsOf(const DrawBoundStore::ShadowShare& a_share)
 		{
 			ShadowPipelineKey key;
@@ -183,16 +213,13 @@ namespace DCLF::Draws
 			}
 		}
 
-		/**
-		 * @brief Adds shadow view slot buffers up to a_slots at the sizes the revision code asked for (their requirements grow them with
-		 * the other slots'). Render thread: the passes declare them (a graph build).
-		 */
+		/** @brief Adds shadow view slot buffers up to a_slots. Render thread only, since the passes declare them in a graph build. */
 		void AddShadowViewSlots(ShadowResources& a_state, std::uint32_t a_slots, std::uint32_t a_draws, std::uint32_t a_words)
 		{
 			const std::uint32_t draws = a_draws;
 			for (auto s = static_cast<std::uint32_t>(a_state.drawArgs.size()); s < a_slots; ++s) {
-				// A unit: a draw (ShadowSlotSequences). Every slot holds the scene's casting bound, so they grow a quarter past it,
-				// not to a power of two (32 slots in a large list's interiors).
+				// Every slot holds the scene's casting bound, so they grow a quarter past it rather than to a power of two.
+				// A large list's interiors can use 32 slots.
 				static_assert(kShadowDrawBytes * 3 / 2 <= kShadowDrawUnitBytes && kShadowDrawUnitBytes % 4 == 0);
 				if (s < a_state.drawArgsOwner.size() && a_state.drawArgsOwner[s] < s)
 					a_state.drawArgs.push_back(a_state.drawArgs[a_state.drawArgsOwner[s]]);
@@ -201,17 +228,17 @@ namespace DCLF::Draws
 																  fmt::format("cs.dclf.shadow.draw-args{}", s).c_str()),
 						{ .extent = { 0, kShadowDrawUnitBytes, 4 }, .policy = org::services::GrowthPolicy::Headroom(25, 64) }));
 				a_state.count.push_back(CreateWords(kCountWords, true, fmt::format("cs.dclf.shadow.draw-count{}", s).c_str()));
-				// A word per key slot: the latch layout's key slots exactly (doubled there).
+				// One word per key slot, matching the latch layout.
 				a_state.bucketCounts.push_back(MakeVersioned(CreateWords(std::max(a_words, 64u), true, fmt::format("cs.dclf.shadow.bucket-counts{}", s).c_str()),
 					{ .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Headroom(0) }));
 			}
 		}
 
-		/** @brief The pipeline statistics query pool and its per-slot readbacks (PassStats::Enabled); none without the pool. */
-		void CreatePassStats(Resources& a_state, org::GraphHost& a_host, rhi::Device a_device)
+		/** @brief The pipeline statistics query pool and its per-range readbacks. None without the pool. */
+		void CreatePassStats(Resources& a_state, rhi::Device a_device)
 		{
 			auto passStats = std::make_shared<PassStats>();
-			const std::uint32_t slots = a_host.FrameSlots();
+			const std::uint32_t slots = PassStats::kRanges;
 			rhi::QueryPoolDesc desc{};
 			desc.type = rhi::QueryType::PipelineStatistics;
 			desc.count = slots * PassStats::kKinds;
@@ -227,12 +254,12 @@ namespace DCLF::Draws
 				}
 				passStats->written.resize(slots);
 				a_state.passStats = std::move(passStats);
-				logger::info("[DCLF] pass statistics on: {} frame slots", slots);
+				logger::info("[DCLF] pass statistics on: {} run ranges", slots);
 			}
 		}
 
-		/** @brief The foliage pixel record at the target's size (Policy::RecordFoliagePixels). */
-		void CreateFoliageRecord(Resources& a_state, org::GraphHost& a_host, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target)
+		/** @brief The foliage pixel record at the target's size. */
+		void CreateFoliageRecord(Resources& a_state, [[maybe_unused]] org::GraphHost& a_host, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target)
 		{
 			auto foliage = std::make_shared<Resources::FoliageRecord>();
 			foliage->width = a_target.Width;
@@ -241,24 +268,23 @@ namespace DCLF::Draws
 			for (std::uint32_t h = 0; h < 2; ++h) {
 				foliage->ids[h] = CreateWords(pixels, true, fmt::format("cs.dclf.foliage-ids{}", h).c_str());
 				foliage->colours[h] = CreateWords(pixels * kFoliageColourWords, true, fmt::format("cs.dclf.foliage-colours{}", h).c_str());
-				foliage->idsAddress[h] = AddressOf(a_device, *foliage->ids[h]);
-				foliage->coloursAddress[h] = AddressOf(a_device, *foliage->colours[h]);
+				foliage->idsRef[h] = RenderGraph::DeclaredRefOf(a_device, *foliage->ids[h]);
+				foliage->coloursRef[h] = RenderGraph::DeclaredRefOf(a_device, *foliage->colours[h]);
 			}
 			foliage->results = CreateWords(kFoliageResultWords, true, "cs.dclf.foliage-results");
 			foliage->owners = CreateWords(pixels * 2, true, "cs.dclf.foliage-owners");
 			foliage->ownersIndex = foliage->owners->GetUAVShaderVisibleInfo(0).slot.index;
-			foliage->resultsAddress = AddressOf(a_device, *foliage->results);
-			// The record stands only with the observers' compare pass.
+			foliage->resultsRef = RenderGraph::DeclaredRefOf(a_device, *foliage->results);
+			// The record only stands if the observers' compare pass accepts it.
 			bool ready = false;
-			Diagnostics::Notify(Diagnostics::FoliageRecordMade{ *foliage, a_device, a_host.FrameSlots(), ready });
+			// One readback range per run lease index the colour epoch records at.
+			Diagnostics::Notify(Diagnostics::FoliageRecordMade{ *foliage, a_device, 16u, ready });
 			if (ready)
 				a_state.foliage = std::move(foliage);
 		}
 
-		/**
-		 * @brief The engine's refraction normals (kREFRACTION_NORMALS): FUN_1414b4860 binds them as RT0 for group 5, ISRefraction samples
-		 * them (Src1Tex). Imported in the engine RTV's format; without them DCLF draws no refraction.
-		 */
+		/** @brief Imports the engine's refraction normals (kREFRACTION_NORMALS), bound as RT0 for group 5 by FUN_1414b4860.
+		 * Without them DCLF draws no refraction. */
 		void ImportRefractionNormals(Resources& a_state, rhi::Device a_device)
 		{
 			if (auto* renderer = globals::game::renderer) {
@@ -275,7 +301,7 @@ namespace DCLF::Draws
 					normalsDesc.channels = 4;
 					normalsDesc.hasRTV = true;
 					normalsDesc.rtvFormat = normalsDesc.format;
-					a_state.refractionNormals = ImportImage(a_device, normalsInfo.image, normalsDesc, "DCLF refraction normals");
+					a_state.refractionNormals = ImportImage(a_device, normals.texture, normalsInfo.image, normalsDesc, "DCLF refraction normals");
 					a_state.refractionFormat = a_state.refractionNormals ? rtvDesc.Format : DXGI_FORMAT_UNKNOWN;
 				}
 				if (!a_state.refractionNormals)
@@ -283,11 +309,8 @@ namespace DCLF::Draws
 			}
 		}
 
-		/**
-		 * @brief The engine's screen-space shadow mask (kSHADOW_MASK), which the colour draws read (their rows' t14) and MainOpaquePass
-		 * declares. The engine draws it whole (Main::RenderShadowmasks: a full-screen pass per shadow light from the depth), DCLF's
-		 * pixels included.
-		 */
+		/** @brief Imports the engine's screen-space shadow mask (kSHADOW_MASK), which the colour draws read as t14.
+		 * The engine draws it whole, DCLF's pixels included. */
 		void ImportShadowMask(Resources& a_state, rhi::Device a_device)
 		{
 			auto* renderer = globals::game::renderer;
@@ -307,16 +330,13 @@ namespace DCLF::Draws
 			maskDesc.imageDimensions.push_back({ textureDesc.Width, textureDesc.Height, 0, 0 });
 			maskDesc.format = rhi::Format::R8G8B8A8_UNorm;
 			maskDesc.channels = 4;
-			// The colour draws read it through the engine's view (their rows' t14); declared for the barrier after the engine's mask draws.
+			// Declared so there is a barrier after the engine's mask draws.
 			maskDesc.hasSRV = true;
 			maskDesc.srvFormat = maskDesc.format;
-			a_state.shadowMask = ImportImage(a_device, info.image, maskDesc, "DCLF shadow mask");
+			a_state.shadowMask = ImportImage(a_device, mask.texture, info.image, maskDesc, "DCLF shadow mask");
 		}
 
-		/**
-		 * @brief The HZB, from the depth pyramid's producer (Api/DepthPyramid.h: its setup's texture, extent, levels and scratch, and its
-		 * state). Without one, or without its texture, none: culling stays frustum-only, with no phase 2 passes.
-		 */
+		/** @brief The HZB, from the depth pyramid's producer. Without one, culling stays frustum-only with no phase 2 passes. */
 		void SetUpHzb(Resources& a_state, rhi::Device a_device)
 		{
 			Api::DepthPyramid pyramid{};
@@ -338,7 +358,7 @@ namespace DCLF
 		if (!host)
 			return NotReady(0, "no render graph");
 		if (a_depthOnly) {
-			// The native depth pass binds no colour targets: the Z-prepass reuses the main pass's resources (none on the first frame).
+			// The native depth pass binds no colour targets, so the Z-prepass reuses the main pass's resources.
 			return resources != nullptr;
 		}
 		if (a_capture.targetCount == 0)
@@ -346,7 +366,7 @@ namespace DCLF
 		D3D11_TEXTURE2D_DESC target{};
 		a_capture.targets[0]->GetDesc(&target);
 		const auto& targets = DrawPipelines::Get().Targets();
-		// The frame graph buffers on the graph now (Api::FrameGraphBuffers: Integrations/LightLimitFix's), a bit per registration.
+		// One bit per frame graph buffer registered on the graph.
 		std::uint32_t graphBuffers = 0;
 		for (std::size_t b = 0; b < Extensions::RegisteredFrameGraphBuffers().size(); ++b) {
 			std::array<std::uint32_t, Extensions::kFrameGraphBufferRegisters> indices;
@@ -362,7 +382,7 @@ namespace DCLF
 
 		auto device = host->Device();
 		auto state = std::make_shared<Resources>();
-		// The targets first: a setup retried every frame until they can be imported does not make its buffers and programs each time.
+		// Targets first, so a setup retried each frame until they import does not remake its buffers and programs.
 		if (!ImportMainTargets(*state, a_capture, device, target, targets))
 			return false;
 		if (!EnsureSceneBuffers(device)) {
@@ -396,9 +416,7 @@ namespace DCLF
 		formats = targets;
 		width = target.Width;
 		height = target.Height;
-		// The views draw from the main resources: rebuilt at their next import, before the graph is built (on the render thread). A view with
-		// frame constants of its own copies the main frame buffers at their shape. A main epoch hosting a view's epoch makes its passes from
-		// the main resources' view (Resources::views).
+		// The views draw from the main resources, so they are rebuilt at their next import, before the graph is built.
 		for (const auto& slot : kViewSlots)
 			if (const auto& view = View(slot.view).resources) {
 				view->main = state;
@@ -407,44 +425,61 @@ namespace DCLF
 				state->views[ViewIndex(slot.view)] = view;
 			}
 		PostRevisionInputs();
-		// The graph is rebuilt with the new resources on its next epoch.
-		host->AddExtension(kExtensionId, [state] { return Diagnostics::ScheduleDumped(kExtensionId, MakeMainOpaqueExtension(state)); });
+		// The main epochs' graphs pick up the new resources at their next build.
+		host->AddExtension(kExtensionId, [] { return Diagnostics::ScheduleDumped(kExtensionId, MakeMainOpaqueExtension(BuildingState(kExtensionId))); }, ExtensionEpochs(Api::EpochShape::Main));
 		logger::info("[DCLF] Main-pass graph resources: {} targets {}x{}, depth format {}", targets.colorCount, width, height, static_cast<int>(targets.depth));
 		return true;
 	}
 
-	bool IndirectDraws::Impl::CreateMainBuffers(Resources& a_state, org::GraphHost& a_host, rhi::Device a_device)
+	bool IndirectDraws::Impl::CreateMainBuffers(Resources& a_state, [[maybe_unused]] org::GraphHost& a_host, rhi::Device a_device)
 	{
-		// The sequence ranges (SequenceSlots) at the first layout's sizes, required to every draw the scene can produce (RequireMain);
-		// sized to the layout exactly (its ranges grow by doubling).
+		// Programs compile off the render thread. Until they finish nothing is made and DCLF stays off.
+		// Every BuildDraws variant is requested here, so they compile together and the other setups find them ready.
+		bool programsPending = false;
+		auto load = [&](const ComputeProgram::Desc& a_desc) {
+			bool loading = false;
+			auto program = LoadProgram(a_device, a_desc, loading);
+			programsPending = programsPending || loading;
+			return program;
+		};
+		auto buildDraws = load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(2) });
+		auto clearPortalQueries = load({ .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });
+		auto preparePortalQueries = load({ .source = kBuildDrawsShader, .entry = L"PreparePortalQueries", .constantWords = kBuildDrawsConstantWords });
+		auto forwardSort = load({ .source = kForwardSortShader, .constantWords = kForwardSortConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+		// Compiled ahead so DrawSort::Create finds it cached.
+		(void)load({ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
+		if (programsPending)
+			return NotReady(8, "its compute programs are compiling off the render thread");
+		// The sequence ranges start at the first layout's sizes. RequireMain grows them to the scene's draw bound.
 		const bool smallTables = SwitchValue(Switch::TableStart) == "small";
 		const MainLayout firstLayout = InitialMainLayout();
 		a_state.sequences = MakeVersioned(CreateWords(SequenceSlots(firstLayout.sequenceDraws, firstLayout.sequenceDecals, firstLayout.decalRanges) * sizeof(DrawSequence) / 4,
 											  true, "cs.dclf.sequences"),
 			{ .extent = { 0, sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Headroom(0) });
 		a_state.count = CreateWords(kCountWords, true, "cs.dclf.draw-count");
-		// The state class sub-ranges' count words, required to the class plan's (RequireMainClasses).
 		a_state.classCounts = MakeVersioned(CreateWords(64, true, "cs.dclf.class-counts"), { .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Doubling(64) });
-		// One word per object: the depth segment's culling verdict, so the colour segment draws exactly the same set. The per-object
-		// buffers start at the scene's objects (and grow with them: RequireSceneTables).
+		// The depth segment's culling verdict, one word per object, so the colour segment draws exactly the same set.
 		const std::uint32_t objects = InitialObjectUnits();
 		a_state.visibility = MakeVersioned(CreateWords(objects, true, "cs.dclf.visibility"), { .extent = { 0, 4, 4 } });
 		a_state.frustum = MakeVersioned(CreateWords(objects, true, "cs.dclf.frustum"), { .extent = { 0, 4, 4 } });
-		// Phase 1's retest list (an object slot a word, grown with the others) and phase 2's dispatch from it.
+		// Phase 1's retest list, one word per object slot.
 		a_state.retests = MakeVersioned(CreateWords(objects, true, "cs.dclf.retests"), { .extent = { 0, 4, 4 } });
 		if (SwitchEnabled(Switch::SetParity))
 			a_state.writers = MakeVersioned(CreateWords(objects * 8, true, "cs.dclf.writers"), { .extent = { 0, 32, 4 } });
 		a_state.retestDispatch = CreateWords(4, true, "cs.dclf.retest-dispatch");
 		if (PassStats::Enabled())
-			CreatePassStats(a_state, a_host, a_device);
-		a_state.preprocessMain = PreprocessStates::Create(a_device, a_host.FrameSlots(), "the main segment");
-		// The forward epoch records in its own epoch, so it needs its own state list.
-		a_state.preprocessForward = PreprocessStates::Create(a_device, a_host.FrameSlots(), "the forward epoch");
-		a_state.buildDraws = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+			CreatePassStats(a_state, a_device);
+		a_state.preprocessMain = PreprocessStates::Create(a_device, "the main segment");
+		// The forward epoch records in its own epoch, so it needs its own state lists.
+		a_state.preprocessForward = PreprocessStates::Create(a_device, "the forward epoch");
+		a_state.buildDraws = std::move(buildDraws);
 		if (!a_state.buildDraws)
 			return NotReady(7, "the BuildDraws program could not be created");
-		a_state.clearPortalQueries = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });
-		a_state.preparePortalQueries = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .entry = L"PreparePortalQueries", .constantWords = kBuildDrawsConstantWords });
+		a_state.clearPortalQueries = std::move(clearPortalQueries);
+		a_state.preparePortalQueries = std::move(preparePortalQueries);
 		if (!a_state.clearPortalQueries || !a_state.preparePortalQueries)
 			return NotReady(7, "the main member portal query programs could not be created");
 		a_state.portalQuerySignature = CreateDispatchSignature(a_device, a_state.preparePortalQueries->layout->GetHandle());
@@ -452,30 +487,28 @@ namespace DCLF
 			return NotReady(7, "the main member portal query signature could not be created");
 
 		// Without the forward sort the forward epoch draws nothing.
-		a_state.forwardSort = ComputeProgram::Load(a_device, { .source = kForwardSortShader, .constantWords = kForwardSortConstantWords });
+		a_state.forwardSort = std::move(forwardSort);
 		if (!a_state.forwardSort)
 			logger::warn("[DCLF] the forward sort program could not be created: the forward epoch draws nothing");
 		a_state.dispatchSignature = CreateDispatchSignature(a_device, a_state.buildDraws->layout->GetHandle());
 		if (!a_state.dispatchSignature)
 			return NotReady(7, "the BuildDraws dispatch signature could not be created");
-		// The latch is the revision producer's. Sorting by pipeline: BuildDraws appends in thread order, so unsorted nearly every
-		// sequence would switch pipeline.
+		// BuildDraws appends in thread order, so without a sort by pipeline nearly every sequence would switch pipeline.
 		a_state.sort = DrawSort::Create(a_device, firstLayout.sequenceDraws);
-		// The Z-prepass's bucket count words (required to the layout's buckets) and the scene's index pool.
 		const GrowableSpec bucketWords{ .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Doubling(64) };
 		a_state.zBucketCounts[0] = MakeVersioned(CreateWords(64, true, "cs.dclf.z.bucket-counts"), bucketWords);
 		a_state.zBucketCounts[1] = MakeVersioned(CreateWords(64, true, "cs.dclf.z.bucket-counts2"), bucketWords);
 		a_state.pool = EnsureIndexPool(*scene, a_device, smallTables);
 		if (!a_state.pool)
 			return NotReady(7, "the index pool's copy program could not be created");
-		// The draw-count buffer is read back for the culling counters, parity or not; the view covers every word (a short view
-		// would read zeros that look clean).
+		// The view covers every count word. A short view would read zeros that look clean.
 		a_state.countD3D11 = WrapWords(*a_state.count, kCountWords * sizeof(std::uint32_t));
 		a_state.frameConstants = DeviceBuffer(kFrameConstantBytes, "cs.dclf.frame-constants");
 		a_state.frameConstantsAddress = AddressOf(a_device, *a_state.frameConstants);
+		a_state.frameConstantsRef = RenderGraph::DeclaredRefOf(a_device, *a_state.frameConstants);
 
-		if (!a_state.frameConstantsAddress) {
-			logger::error("[DCLF] Draw data buffers have no device address");
+		if (!a_state.frameConstantsAddress || !a_state.frameConstantsRef) {
+			logger::error("[DCLF] Draw data buffers have no device address or buffer view ref");
 			return false;
 		}
 		a_state.frameBlocks = FrameBlockViews::Create(a_device, a_state.frameConstants);
@@ -487,7 +520,6 @@ namespace DCLF
 	bool IndirectDraws::Impl::ImportMainTargets(Resources& a_state, const Capture& a_capture, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target,
 		const TargetFormats& a_targets)
 	{
-		// The main pass's targets and depth, imported.
 		a_state.targetCount = a_targets.colorCount;
 		for (std::uint32_t i = 0; i < a_targets.colorCount; ++i) {
 			DxvkOrgInteropResourceInfo info{};
@@ -498,15 +530,15 @@ namespace DCLF
 			desc.channels = 4;
 			desc.hasRTV = true;
 			desc.rtvFormat = desc.format;
-			a_state.native[i] = ImportImage(a_device, info.image, desc, "DCLF native target");
+			a_state.native[i] = ImportImage(a_device, a_capture.targets[i].get(), info.image, desc, "DCLF native target");
 			if (!a_state.native[i])
 				return NotReady(6, "a main-pass target could not be imported");
 		}
 		DxvkOrgInteropResourceInfo info{};
 		if (!a_capture.depth || !RenderGraphRuntime::Get().DescribeResource(a_capture.depth.get(), info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 			return NotReady(10, "the main-pass depth cannot be described");
-		// Attachable and readable from one import: two imports would be unrelated resources to the graph, with no barrier
-		// between the depth draws and the HZB read (which would then reduce the cleared far plane).
+		// One import that is both attachable and readable. Two imports would be unrelated to the graph, so there would be
+		// no barrier between the depth draws and the HZB read.
 		org::TextureDescription depthDesc{};
 		depthDesc.imageDimensions.push_back({ a_target.Width, a_target.Height, 0, 0 });
 		depthDesc.format = rhi::helpers::ToRHI(a_targets.depth);
@@ -515,17 +547,19 @@ namespace DCLF
 		depthDesc.dsvFormat = depthDesc.format;
 		depthDesc.hasSRV = true;
 		depthDesc.srvFormat = DepthReadFormat(depthDesc.format);
-		a_state.nativeDepth = ImportImage(a_device, info.image, depthDesc, "DCLF native depth");
+		a_state.nativeDepth = ImportImage(a_device, a_capture.depth.get(), info.image, depthDesc, "DCLF native depth");
 		if (!a_state.nativeDepth)
 			return NotReady(11, "the main-pass depth could not be imported");
-		// The near twin's target (Api::NearTwinContribution: Integrations/TerrainBlending's terrain depth) shares the main depth's
-		// description; the Z-prepass draws Appended0's near objects into it as that feature's depth hook does.
+		// The near twin target (Terrain Blending's terrain depth) shares the main depth's description. A graph-owned twin
+		// is declared as itself, so its clear and the blend are ordered with these draws.
 		const auto& nearTwin = Extensions::NearTwin();
-		if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
+		if (auto owned = nearTwin.graph ? nearTwin.graph() : nullptr) {
+			a_state.terrainDepth = std::move(owned);
+		} else if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
 			DxvkOrgInteropResourceInfo terrainInfo{};
 			if (!RenderGraphRuntime::Get().DescribeResource(twinTarget, terrainInfo) || terrainInfo.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 				return NotReady(12, nearTwin.cannotDescribe.c_str());
-			a_state.terrainDepth = ImportImage(a_device, terrainInfo.image, depthDesc, nearTwin.debugName.c_str());
+			a_state.terrainDepth = ImportImage(a_device, twinTarget, terrainInfo.image, depthDesc, nearTwin.debugName.c_str());
 			if (!a_state.terrainDepth)
 				return NotReady(12, nearTwin.cannotImport.c_str());
 		}
@@ -555,11 +589,11 @@ namespace DCLF
 		auto& s = producer.drawBound;
 		const std::size_t count = a_tables.objects.size();
 		const bool partitioned = a_tables.skinPartitions.size() >= count;
-		const std::uint32_t generation = a_generation;  // the tables' own
+		const std::uint32_t generation = a_generation;
 		constexpr auto kNoPipeline = DrawBoundStore::kNoPipeline;
 		auto set = [&](std::size_t a_slot) {
 			const auto [produced, pipeline] = DrawShareOf(a_tables, a_slot, partitioned);
-			// The casting share is unchanged by most logged changes (placement, shading).
+			// Most logged changes, such as placement or shading, leave the casting share unchanged.
 			if (auto share = ShadowShareOf(a_tables, a_slot, produced); !(share == s.shadow[a_slot])) {
 				CountShadowShare(s.modeKeyDraws, s.shadow[a_slot], false);
 				CountShadowShare(s.modeKeyDraws, share, true);
@@ -580,7 +614,7 @@ namespace DCLF
 			}
 		};
 		++s.updates;
-		// Every slot again on new tables, a lost log, fewer slots, or the partition column coming or going (unlogged).
+		// Recount every slot on new tables, a lost log, fewer slots, or the partition column coming or going, which is not logged.
 		if (!s.cursor.Continues(a_tables.changeLog, generation) || s.produced.size() > count || s.partitioned != partitioned) {
 			s.produced.assign(count, 0u);
 			s.pipeline.assign(count, kNoPipeline);
@@ -597,7 +631,6 @@ namespace DCLF
 			++s.resyncs;
 			++s.shadowVersion;
 		} else {
-			// Slots the tables grew by.
 			if (const std::size_t first = s.produced.size(); first < count) {
 				s.produced.resize(count, 0u);
 				s.pipeline.resize(count, kNoPipeline);
@@ -605,7 +638,7 @@ namespace DCLF
 				for (std::size_t o = first; o < count; ++o)
 					set(o);
 			}
-			// Any change kind: re-counting an unchanged share costs nothing.
+			// Recounting an unchanged share costs nothing, so any change kind triggers it.
 			for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
 				if (change.slot >= count)
 					continue;
@@ -625,23 +658,17 @@ namespace DCLF
 		const bool smallStart = SwitchValue(Switch::TableStart) == "small";
 		using org::services::GrowableContents;
 		const std::uint32_t objects = InitialObjectUnits();
-		// Every table grows by doubling (RequireSceneTables). The object records, extras and geometry table are the payload's
-		// (PayloadVersions).
+		// Every table grows by doubling. The object records, extras and geometry table belong to the payload.
 		std::uint32_t unused = 0;
-		// The features' scene resources (Api::SceneResources::setup: their programs and buffers, registered with the set in this order),
-		// the vertex stream's first: its buffer is the second vertex stream, whose address and capacity are the sealed set's. Without it
-		// (its setup gave none: no device address) the tables are not made.
+		// The features' scene resources. The vertex stream comes first, since the sealed set owns its address and capacity.
+		// Without a vertex stream the tables are not made.
 		buffers->sceneResources = Extensions::SetUpSceneResources(a_device, smallStart);
 		buffers->vertexStream = Extensions::SelectVertexStream(buffers->sceneResources);
 		if (Extensions::VertexStream().registered && !buffers->vertexStream)
 			return false;
-		// The root states' buffers are their producer's scene resources, made above (Features/Fades'). The visibility readback reads their
-		// rows (the cull binding RootRows): without them it is not made.
+		// The visibility readback reads the root states' rows, so it is not made without them.
 		if (Extensions::CullBindingBuffer(Api::CullBindingSlot::RootRows, *buffers)) {
-			// By root slot, as the root states' buffers start.
 			const std::uint32_t roots = smallStart ? 4u : kInitialVisibilityRoots;
-			// The visibility readback (the normal path writes the listed roots' kAccumulated from it): events, each root's and object's
-			// reported verdict, and a staging set.
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				buffers->visibilityEventsProgram = ComputeProgram::Load(a_device, { .source = kVisibilityEventsShader, .constantWords = kVisibilityEventsConstantWords });
 				if (buffers->visibilityEventsProgram) {
@@ -653,8 +680,7 @@ namespace DCLF
 					buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", unused, true),
 						{ .extent = { 0, 4, 4 }, .contents = GrowableContents::Zero });
 					auto readback = std::make_shared<VisibilityReadback>();
-					readback->frameSlots = host->FrameSlots();
-					readback->armed.resize(readback->frameSlots);
+					readback->armed.resize(readback->ranges.Count());
 					readback->AddSet(events);
 					buffers->visibilityReadback = std::move(readback);
 				} else {
@@ -662,8 +688,7 @@ namespace DCLF
 				}
 			}
 		}
-		// The passes' setups (Api::PassDef::setup: their programs; a null state keeps a pass out of the graph), after every table: a pass
-		// may take its feature's scene resources (Features/TreeLod's cull and counts take its tables').
+		// Pass setups run after every table, since a pass may take its feature's scene resources. A null state keeps a pass out of the graph.
 		buffers->passStates = Draws::SetUpPassStates(a_device, *buffers);
 		scene = std::move(buffers);
 		return true;
@@ -702,14 +727,13 @@ namespace DCLF
 			logger::info("[DCLF] local shadow light volumes in the main latch: {} grown to {}", layout.shadowVolumes, grown);
 			layout.shadowVolumes = grown;
 		}
-		// A new layout: the next seal makes a new block (RequireLatches). Every execution writes its frame slot's region whole; frames in
-		// flight keep the block their set names.
+		// A new layout makes a new block at the next seal. Frames in flight keep the block their set names.
 	}
 
 	void ShareDrawArgs(ShadowResources& a_state, std::span<const ShadowViewLayout> a_placements)
 	{
-		// A light's map slice holds one light a frame: its full-slice views and a paraboloid's first half never draw together, and only
-		// a pair of halves does. Cascades and their volumetric copies do draw together, as do the occlusion maps: they keep their own.
+		// A light's map slice holds one light a frame, so its views can share draw arguments. Only a pair of paraboloid halves
+		// draws together. Cascades, their volumetric copies and the occlusion maps draw together, so they keep their own.
 		std::map<std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>, std::uint32_t> owners;
 		for (const auto& placement : a_placements) {
 			if (a_state.drawArgsOwner.size() <= placement.slot) {
@@ -727,6 +751,39 @@ namespace DCLF
 		}
 	}
 
+	std::shared_ptr<const ComputeProgram> Draws::LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending)
+	{
+		auto& loads = Loads();
+		std::shared_ptr<ProgramLoad> entry;
+		bool start = false;
+		{
+			std::lock_guard lock(loads.mutex);
+			if (loads.device != a_device.impl) {
+				loads.entries.clear();
+				loads.device = a_device.impl;
+			}
+			auto& slot = loads.entries[ProgramKey(a_desc)];
+			if (!slot) {
+				slot = std::make_shared<ProgramLoad>();
+				start = true;
+			}
+			entry = slot;
+		}
+		if (start) {
+			// The compile can block in DXC for seconds after a shader change, so it runs on the build executor.
+			// It runs inline only when the executor refuses the task.
+			auto task = [entry, a_device, desc = a_desc] {
+				entry->program = ComputeProgram::Load(a_device, desc);
+				entry->state.store(entry->program ? ProgramLoad::kLoaded : ProgramLoad::kFailed, std::memory_order_release);
+			};
+			if (!BuildSubmitter()(task))
+				task();
+		}
+		const int state = entry->state.load(std::memory_order_acquire);
+		a_pending = state == ProgramLoad::kLoading;
+		return state == ProgramLoad::kLoaded ? entry->program : nullptr;
+	}
+
 	bool ShadowEngine::SetupShadow()
 	{
 		if (shadow)
@@ -737,9 +794,15 @@ namespace DCLF
 		if (!host)
 			return ShadowNotReady(0, "no render graph");
 		auto device = host->Device();
+		// Programs first. While they compile nothing is made and the views stay native.
+		bool pending = false, rowsPending = false;
+		auto assignCasterRows = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords }, rowsPending);
+		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords }, pending);
+		if (pending || rowsPending)
+			return ShadowNotReady(0, "the compute programs are compiling off the render thread");
 		auto state = std::make_shared<ShadowResources>();
 		state->constants = DeviceBuffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
-		// The shadow commit latches into the constants alone, known before any graph declares the pass.
+		// The shadow commit latches into the constants alone, so this is known before any graph declares the pass.
 		state->latchedTargets.store(std::make_shared<const std::vector<const void*>>(1, state->constants.get()), std::memory_order_release);
 		auto scene = shadowHost.ShadowSceneBuffers(device);
 		if (!scene) {
@@ -747,25 +810,22 @@ namespace DCLF
 			return ShadowNotReady(2, "no device address for the face positions");
 		}
 		state->scene = std::move(scene);
-		// The first view slots, as many as the initial latch layout (the latch is the producer's).
 		const bool smallSlots = SwitchValue(Switch::TableStart) == "small";
 		const auto firstLayout = InitialShadowLatchLayout();
 		AddShadowViewSlots(*state, firstLayout.viewSlots, 64u, 64u);
-		// A row per view slot: the latch layout's slots exactly (doubled there).
+		// One row per view slot, matching the latch layout.
 		if (!state->viewBlocks.Create(static_cast<std::uint32_t>(kShadowViewSlotBytes), firstLayout.viewSlots, "cs.dclf.shadow.view-blocks",
 				org::services::GrowthPolicy::Headroom(0))) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(2, "no device address for the shadow view blocks");
 		}
-		// At the scene's objects; they grow with them (RequireSceneTables).
 		const std::uint32_t objects = InitialObjectUnits();
 		state->visibility = MakeVersioned(CreateWords(objects, true, "cs.dclf.shadow.visibility"), { .extent = { 0, 4, 4 } });
-		// The caster rows: a unit a row, at the scene's casting bound (RequireShadowSequences); each object's first, as the objects.
 		state->casterRows = MakeVersioned(CreateWords(64u * sizeof(DrawSequence) / 4, true, "cs.dclf.shadow.caster-rows"),
 			{ .extent = { 0, sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Headroom(25, 64) });
 		state->casterFirsts = MakeVersioned(CreateWords(objects, true, "cs.dclf.shadow.caster-firsts"), { .extent = { 0, 4, 4 } });
 		state->casterRowsUsed = CreateWords(4u, true, "cs.dclf.shadow.caster-rows-used");
-		state->assignCasterRows = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords });
+		state->assignCasterRows = std::move(assignCasterRows);
 		if (!state->assignCasterRows) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the caster rows' compute program could not be created");
@@ -775,8 +835,8 @@ namespace DCLF
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the caster rows' dispatch signature could not be created");
 		}
-		// Every view of an epoch in one dispatch (BuildDrawsCS's ShadowViews: ShadowBuildDrawsPass).
-		state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords });
+		// One dispatch covers every view of an epoch.
+		state->buildDraws = std::move(buildDraws);
 		if (!state->buildDraws) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the BuildDraws compute program could not be created");
@@ -792,13 +852,29 @@ namespace DCLF
 			return ShadowNotReady(1, "the index pool's copy program could not be created");
 		}
 		state->constantsAddress = AddressOf(device, *state->constants);
-		if (!state->constantsAddress) {
+		state->constantsRef = RenderGraph::DeclaredRefOf(device, *state->constants);
+		if (!state->constantsAddress || !state->constantsRef) {
 			shadowSetupFailed = true;
-			return ShadowNotReady(2, "no device address for the shadow buffers");
+			return ShadowNotReady(2, "no device address or buffer view ref for the shadow buffers");
+		}
+		// D3D12 reaches SharedData and FeatureData through constant buffer views. A view covers whole 256-byte rows, at most 64 KiB.
+		if (::RenderGraph::Backend::IsD3D12()) {
+			const auto arena = ShadowArenaBlocksOf();
+			const auto rows = [](std::uint32_t a_bytes) {
+				return static_cast<std::uint32_t>(std::min<std::uint64_t>((std::max<std::uint64_t>(a_bytes, 1) + kConstantAlignment - 1) & ~(kConstantAlignment - 1), 65536));
+			};
+			const std::array<FrameBlockViews::Block, 2> blocks{ { { arena.sharedData, rows(arena.sharedBytes ? arena.sharedBytes : static_cast<std::uint32_t>(kShadowZeroBlockBytes)) },
+				{ arena.featureData, rows(arena.featureBytes ? arena.featureBytes : static_cast<std::uint32_t>(kShadowZeroBlockBytes)) } } };
+			state->blockViews = FrameBlockViews::CreateFor(device, state->constants, blocks, "shadow block");
+			if (!state->blockViews) {
+				shadowSetupFailed = true;
+				return ShadowNotReady(1, "the shadow views' SharedData and FeatureData views could not be made");
+			}
+			state->blockViewIndices = { state->blockViews->indices[0], state->blockViews->indices[1] };
 		}
 		shadow = state;
 		shadowHost.ShadowResourcesMade(state);
-		host->AddExtension(kShadowExtensionId, [state] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); });
+		host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
 		logger::info("[DCLF] shadow view graph resources created");
 		shadowHost.PostRevisionInputs();
 		return true;
@@ -806,19 +882,19 @@ namespace DCLF
 
 	void IndirectDraws::Impl::ServeRevisionRequests()
 	{
-		// Makes the shadow view slots the revision code asked for (render thread) and rebuilds the graph; the revision code waits.
+		// Makes the requested shadow view slots on the render thread and rebuilds the graph. The revision code waits for it.
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto& shadow = shadowEngine->shadow;
 		if (const auto request = shadowSlotsSlot.Take(); request && host && shadow && request->slots > shadow->drawArgs.size()) {
 			AddShadowViewSlots(*shadow, request->slots, request->sequenceDraws, request->bucketCountWords);
-			host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); });
+			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
 			PostRevisionInputs();
 		}
 	}
 
 	bool IndirectDraws::Impl::SetupView(ViewKind a_kind)
 	{
-		// A view's buffers, once the main resources and index pool exist; its latch, zeros and growth are the revision code's.
+		// A view's buffers, once the main resources and index pool exist.
 		auto& v = View(a_kind);
 		if (v.resources)
 			return true;
@@ -835,25 +911,28 @@ namespace DCLF
 			logger::warn("[DCLF] the {} view's {}; it stays native", traits.name, a_what);
 			return false;
 		};
+		// While the program compiles the view stays native, without failing.
+		bool programsPending = false;
+		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords }, programsPending);
+		if (programsPending)
+			return false;
 		auto state = std::make_shared<ViewResources>();
 		state->traits = &traits;
 		state->main = resources;
-		state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+		state->buildDraws = std::move(buildDraws);
 		if (state->buildDraws)
 			state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
 		if (!state->dispatchSignature)
 			return fail("BuildDraws program could not be created");
 		state->count = CreateWords(kCountWords, true, name("draw-count").c_str());
-		// At their first sizes: the revision producer requires them to hold the view's plan (RequireView). Bucket count words: the latch
-		// layout's buckets exactly (doubled there); a face's range of the sequences by doubling, from 64 draws.
+		// First sizes. RequireView grows them to hold the view's plan.
 		const std::uint32_t buckets = org::services::GrowthPolicy::Doubling(16).NextAs(0u, ViewLatchLayout::Initial(traits).buckets);
 		for (std::uint32_t f = 0; f < traits.faces; ++f)
 			state->bucketCounts[f] = MakeVersioned(CreateWords(buckets, true, name(traits.faces > 1 ? fmt::format("bucket-counts{}", f) : "bucket-counts").c_str()),
 				{ .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Headroom(0) });
 		state->sequences = MakeVersioned(CreateWords(std::uint64_t(traits.faces) * 64u * sizeof(DrawSequence) / 4, true, name("sequences").c_str()),
 			{ .extent = { 0, traits.faces * sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Doubling(64) });
-		// The faces' draw families' rows and lists (each family with faces: its rowName and listName, the face's index appended), at the
-		// family's units (its faces.lists: tree LOD's shape slots): the lists grow with its tables (RequireSceneTables).
+		// The faces' draw family rows and lists, one per face. The lists grow with the scene tables.
 		for (std::size_t d = 0; d < Extensions::kDrawFamilies && traits.trees; ++d) {
 			const auto family = static_cast<Api::DrawFamily>(d);
 			if (!Extensions::DrawFamilyHasFaces(family))
@@ -863,9 +942,9 @@ namespace DCLF
 			const std::uint32_t headerWords = faces.headerBytes / 4;
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
 				state->faceRows[d][f] = CreateWords(faces.rowBytes / 4, false, name(fmt::format("{}{}", entry.rowName, f)).c_str());
-				state->faceRowsAddress[d][f] = AddressOf(device, *state->faceRows[d][f]);
-				if (!state->faceRowsAddress[d][f])
-					return fail(fmt::format("{} rows have no device address", entry.label).c_str());
+				state->faceRowsRef[d][f] = RenderGraph::DeclaredRefOf(device, *state->faceRows[d][f]);
+				if (!state->faceRowsRef[d][f])
+					return fail(fmt::format("{} rows have no buffer view ref", entry.label).c_str());
 				if (faces.lists && FamilySetUp(*scene, family)) {
 					Api::DrawFamilyLists lists{ *scene };
 					faces.lists(lists);
@@ -879,21 +958,27 @@ namespace DCLF
 		state->blocksAddress = AddressOf(device, *state->blocks);
 		if (!state->blocksAddress)
 			return fail("blocks have no device address");
-		// A view drawing with frame constants of its own (the faces'): laid out as the main ones, written by its commit, with its copies of
-		// the main frame buffers.
+		// A view with its own frame constants, laid out like the main ones and written by its commit.
 		if (OwnsFrameConstants(traits)) {
 			state->frameConstants = DeviceBuffer(kFrameConstantBytes, name("frame-constants").c_str());
 			state->frameConstantsAddress = AddressOf(device, *state->frameConstants);
-			if (!state->frameConstantsAddress)
-				return fail("frame constants have no device address");
+			state->frameConstantsRef = RenderGraph::DeclaredRefOf(device, *state->frameConstants);
+			if (!state->frameConstantsAddress || !state->frameConstantsRef)
+				return fail("frame constants have no device address or buffer view ref");
 			state->frameBlocks = FrameBlockViews::Create(device, state->frameConstants);
 			if (!state->frameBlocks)
 				return fail("the frame blocks' views could not be made");
+			std::vector<FrameBlockViews::Block> faceBlocks;
+			for (std::uint32_t f = 0; f < traits.faces; ++f)
+				faceBlocks.push_back({ std::uint64_t(f) * kViewBlockBytes, kViewBlockBytes });
+			state->faceBlocks = FrameBlockViews::CreateFor(device, state->blocks, faceBlocks, "the faces' camera blocks");
+			if (!state->faceBlocks)
+				return fail("the faces' camera blocks' views could not be made");
 			MatchViewFrameBuffers(*state, resources->frameBuffers);
 		}
-		// The forward part draws through the main set's state classes' colour signatures with an explicit preprocess, as ForwardDrawPass.
+		// The forward part draws through the main set's colour signatures with an explicit preprocess, like ForwardDrawPass.
 		if (traits.forwardPart)
-			state->preprocessForward = PreprocessStates::Create(device, host->FrameSlots(), fmt::format("the {} forward part", traits.name).c_str());
+			state->preprocessForward = PreprocessStates::Create(device, fmt::format("the {} forward part", traits.name).c_str());
 		resources->views[ViewIndex(a_kind)] = state;
 		v.resources = std::move(state);
 		logger::info("[DCLF] {} graph resources created", traits.name);
@@ -903,8 +988,7 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::ImportViewColourTarget(ViewKind a_kind, ID3D11Texture2D* a_texture)
 	{
-		// A ColourWithOwnDepth view's (the reflection's: the engine's cube target, its faces the epoch's); its labels and log lines are its
-		// shape's name and target.
+		// A ColourWithOwnDepth view, such as the reflection's cube target.
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto& view = View(a_kind);
 		if (!view.resources || !host || !a_texture)
@@ -921,14 +1005,14 @@ namespace DCLF
 		desc.channels = 4;
 		desc.hasRTV = true;
 		desc.rtvFormat = desc.format;
-		auto cube = ImportImage(host->Device(), info.image, desc, fmt::format("DCLF {} {}", traits.name, traits.target).c_str());
+		auto cube = ImportImage(host->Device(), a_texture, info.image, desc, fmt::format("DCLF {} {}", traits.name, traits.target).c_str());
 		if (!cube) {
 			static std::uint32_t logged = 0;
 			if (logged++ < 4)
 				logger::warn("[DCLF] the {} {} could not be imported (not in the general layout?); the faces stay native", traits.name, traits.target);
 			return false;
 		}
-		// DCLF's own depth for the faces, at the engine's precision (its depth target 6 is R24G8).
+		// DCLF's own depth for the faces, at the engine's precision. Its depth target 6 is R24G8.
 		org::TextureDescription depthDesc{};
 		depthDesc.imageDimensions.push_back({ info.image.extent.width, info.image.extent.height, 0, 0 });
 		depthDesc.format = rhi::helpers::ToRHI(view.targets.depth);
@@ -941,7 +1025,7 @@ namespace DCLF
 		r.targetTexture = a_texture;
 		r.width = info.image.extent.width;
 		r.height = info.image.extent.height;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [state = view.resources, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(state)); });
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		logger::info("[DCLF] {} {} imported: {}x{}, {} faces, format {}", traits.name, traits.target, r.width, r.height, info.image.arrayLayers, static_cast<int>(view.targets.colour));
 		PostRevisionInputs();
 		return true;
@@ -949,9 +1033,7 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::ImportViewDepthTarget(ViewKind a_kind)
 	{
-		// A DepthTarget view's: kPOST_ZPREPASS_COPY (the first person's: its colour pass's depth, FUN_1414cb6d0: FUN_140e4fe00(manager, 7,
-		// ...)), imported in its DSV's format; the extension is added with it and again when the main resources change. Its labels and log
-		// lines are its shape's name and its slot's key group name.
+		// A DepthTarget view, such as first person's kPOST_ZPREPASS_COPY (FUN_1414cb6d0), imported in its DSV's format.
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto* renderer = globals::game::renderer;
 		auto& view = View(a_kind);
@@ -976,7 +1058,7 @@ namespace DCLF
 			desc.hasDSV = true;
 			desc.dsvFormat = desc.format;
 			const auto& traits = TraitsOf(a_kind);
-			auto imported = ImportImage(host->Device(), info.image, desc, fmt::format("DCLF {} depth (kPOST_ZPREPASS_COPY)", traits.name).c_str());
+			auto imported = ImportImage(host->Device(), copy.texture, info.image, desc, fmt::format("DCLF {} depth (kPOST_ZPREPASS_COPY)", traits.name).c_str());
 			if (!imported) {
 				static std::uint32_t logged = 0;
 				if (logged++ < 4)
@@ -989,7 +1071,7 @@ namespace DCLF
 			logger::info("[DCLF] {} depth imported: {}x{}, format {}", traits.name, info.image.extent.width, info.image.extent.height, static_cast<int>(dsvDesc.Format));
 		}
 		r.rebuildPending = false;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [state = view.resources, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(state)); });
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		PostRevisionInputs();
 		return true;
 	}
@@ -1003,7 +1085,8 @@ namespace DCLF
 		return ImportDepthTexture(a_index, data.texture, data.views[0], a_target);
 	}
 
-	bool ShadowEngine::ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label)
+	bool ShadowEngine::ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label,
+		std::shared_ptr<org::ExternalTextureResource> a_graph)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !shadow || a_index >= kShadowDepthTargets)
@@ -1012,6 +1095,19 @@ namespace DCLF
 			return ShadowNotReady(3, "the shadow map has no texture");
 		if (shadow->depth[a_index] && shadow->depthTexture[a_index] == a_texture)
 			return true;
+		const auto adopt = [&](FrameAnchors::Texture a_resource, std::uint32_t a_layers) {
+			shadow->depth[a_index] = std::move(a_resource);
+			shadow->depthTexture[a_index] = a_texture;
+			shadow->depthLayers[a_index] = a_layers;
+			// The passes need to bind a new resource, so the shadow epochs' graphs rebuild at their next build.
+			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
+		};
+		// A graph-owned target, such as an occlusion map's twin, is one 2D slice.
+		if (a_graph) {
+			adopt(std::move(a_graph), 1);
+			logger::info("[DCLF] shadow map {} is a graph texture: declared as itself, not imported", a_label);
+			return true;
+		}
 		DxvkOrgInteropResourceInfo info{};
 		if (!RenderGraphRuntime::Get().DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 			return ShadowNotReady(4, "the shadow map cannot be described");
@@ -1022,20 +1118,15 @@ namespace DCLF
 		desc.channels = 1;
 		desc.hasDSV = true;
 		desc.dsvFormat = desc.format;
-		// Readable too, as the engine's views of the maps are (an occlusion map's readers sample it).
+		// Readable too, since an occlusion map's readers sample it.
 		desc.hasSRV = true;
 		desc.srvFormat = DepthReadFormat(desc.format);
-		// The shadow maps', then each occlusion map's (its entry's target label).
 		static constexpr const char* kNames[kFirstOcclusionTarget] = { "DCLF shadow maps (ESRAM)", "DCLF shadow maps", "DCLF volumetric shadow maps (ESRAM)" };
 		const char* name = IsOcclusionTarget(a_index) ? Extensions::OcclusionMapOf(a_index - kFirstOcclusionTarget).targetName.c_str() : kNames[a_index];
-		auto imported = ImportImage(host->Device(), info.image, desc, name);
+		auto imported = ImportImage(host->Device(), a_texture, info.image, desc, name);
 		if (!imported)
 			return ShadowNotReady(5, "the shadow map could not be imported (not in the general layout?)");
-		shadow->depth[a_index] = std::move(imported);
-		shadow->depthTexture[a_index] = a_texture;
-		shadow->depthLayers[a_index] = info.image.arrayLayers;
-		// A new resource for the passes to bind: the graph is rebuilt on the next epoch.
-		host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); });
+		adopt(std::move(imported), info.image.arrayLayers);
 		logger::info("[DCLF] shadow map {} imported: {}x{}, {} slices, format {}", a_label, info.image.extent.width, info.image.extent.height,
 			info.image.arrayLayers, static_cast<int>(dsvDesc.Format));
 		return true;

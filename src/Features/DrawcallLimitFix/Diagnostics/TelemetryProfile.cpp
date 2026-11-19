@@ -1,7 +1,5 @@
-// A test run's phases as BasicTelemetry sessions. CS links BasicTelemetry for the graph's scopes, but nothing else starts a
-// session, so those scopes record nothing without this. Each phase writes three files to <log directory>/dclf-telemetry:
-// <label>.frames.csv, one row per Present; <label>.scopes.csv, each scope's totals; <label>.stalls.csv, scopes off the CPU for 2 ms
-// or more. The log gets the phase's frame time summary from BasicTelemetry's sampler.
+// A test run's phases as BasicTelemetry sessions. Nothing else starts a session, so the graph's scopes record nothing without this.
+// Each phase writes <label>.frames.csv, .scopes.csv and .stalls.csv to <log directory>/dclf-telemetry, and logs a frame time summary.
 
 #include "TelemetryProfile.h"
 #include "Zones.h"
@@ -84,7 +82,7 @@ namespace DCLF::Diagnostics
 				logger::warn("[DCLF] telemetry {}: dropped {} stall events and {} contended scope samples", phase, a_snapshot.droppedEvents, a_snapshot.droppedContendedScopeSamples);
 		}
 
-		/** @brief DCLF's zones by thread (Zones.h): <label>.threads.csv, and each thread's DCLF time in the log. */
+		/** @brief DCLF's zones by thread, to <label>.threads.csv and the log. */
 		void WriteThreads(const std::filesystem::path& a_dir)
 		{
 			auto rows = Zones::TakeThreadRows();

@@ -1,4 +1,4 @@
-// The point lights' culls' parity (LightCulls.h): counted on the registration threads, taken by the render thread's report.
+// Point-light cull parity (LightCulls.h). Counted on the registration threads, taken by the render thread's report.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Diagnostics/LightCulls.h"
 
@@ -30,7 +30,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 			std::atomic<std::uint64_t> compared{ 0 }, agree{ 0 }, engineOnly{ 0 }, dclfOnly{ 0 }, unhandled{ 0 };
 			// The empty culls' bits (every light's sphere) against the engine's, at each geometry's first clearing main registration.
 			std::atomic<std::uint64_t> sphereCompared{ 0 }, sphereAgree{ 0 }, sphereEngineOnly{ 0 }, sphereDclfOnly{ 0 };
-			// By the reach of the light that differs (the last: it did not reach the entry).
+			// By the reach of the differing light. The last bucket means it did not reach the entry.
 			std::array<std::atomic<std::uint64_t>, kReachKindCount + 1> engineOnlyBy{}, dclfOnlyBy{};
 		};
 		Atomics counts;
@@ -79,8 +79,8 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 		}
 
 		/**
-		 * @brief Whether a_object is under an excluded entry: any of its ancestors, as the skip takes it out (Process1 returns there). A
-		 * caster of one need not be a candidate geometry: an entry is excluded by its candidates alone (an effect under a cell entry, for one).
+		 * @brief Whether any ancestor of a_object is an excluded entry, as the skip takes it out.
+		 * A caster under one need not be a candidate geometry, since an entry is excluded by its candidates alone.
 		 */
 		bool UnderExcluded(const SunExclusion& a_exclusion, const RE::NiAVObject* a_object)
 		{
@@ -90,10 +90,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 			return underExcluded;
 		}
 
-		/**
-		 * @brief The category filter: a caster under a filtered category node must hang from a child it keeps, withheld or not (the
-		 * registration also writes the engine's geometry's light masks).
-		 */
+		/** @brief Checks that a caster under a filtered category node hangs from a child the filter keeps. */
 		void CheckFilter(const SunExclusion& a_exclusion, const RE::BSRenderPass* a_pass)
 		{
 			bool through = false;
@@ -101,7 +98,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 				counts.filterMissed.fetch_add(1, std::memory_order_relaxed);
 				std::string chain;
 				for (const RE::NiAVObject* object = a_pass->geometry; object; object = object->parent)
-					chain += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", Engine::IsHidden(object) ? " hidden" : "",
+					chain += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", DCLF::Engine::IsHidden(object) ? " hidden" : "",
 						a_exclusion.candidates->entries.contains(object) ? (View::Excluded(a_exclusion, object) ? " [excluded entry]" : " [entry]") : "");
 				std::scoped_lock lock(firstMutex);
 				if (filterFirstMissed.empty())
@@ -133,7 +130,6 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 			a_what += it == candidates.geometries.end() ? std::string(" not a candidate geometry") :
 			                                              fmt::format(" candidate of entry {} (excluded {})", candidates.geometryEntry[it->second],
 															  View::Excluded(a_exclusion, candidates.entryNodes[candidates.geometryEntry[it->second]]));
-			// The exclusion's build, and each candidate geometry of the entry now (object, flags, claimed).
 			a_what += fmt::format(" [exclusion built frame {}{}, selected at {}]", a_exclusion.builtFrame, a_exclusion.reused ? " (reused)" : "", Scene::Coordinator::Get().GetFrame());
 			if (it != candidates.geometries.end()) {
 				const auto entry = candidates.geometryEntry[it->second];
@@ -155,15 +151,15 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 		{
 			const RE::NiAVObject* below = nullptr;
 			for (const RE::NiAVObject* object = a_pass->geometry; object; below = object, object = object->parent) {
-				a_what += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", Engine::IsHidden(object) ? " hidden" : "",
+				a_what += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", DCLF::Engine::IsHidden(object) ? " hidden" : "",
 					a_exclusion.candidates->entries.contains(object) ? (View::Excluded(a_exclusion, object) ? " [excluded entry]" : " [entry]") : "");
 				if (const auto* switchNode = below ? const_cast<RE::NiAVObject*>(object)->AsSwitchNode() : nullptr) {
-					const auto state = Engine::ReadSwitch(*switchNode);
+					const auto state = DCLF::Engine::ReadSwitch(*switchNode);
 					std::int32_t path = -1;
 					const auto& children = switchNode->GetChildren();
 					for (std::uint16_t c = 0; c < children.free_idx(); ++c)
 						path = children[c].get() == below ? static_cast<std::int32_t>(c) : path;
-					a_what += fmt::format(" [index {}, path child {}, selects it {}]", state.index, path, Engine::SwitchSelects(*switchNode, below));
+					a_what += fmt::format(" [index {}, path child {}, selects it {}]", state.index, path, DCLF::Engine::SwitchSelects(*switchNode, below));
 				}
 			}
 		}
@@ -203,10 +199,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 				NoteLost(*exclusion, a_pass, a_source);
 		}
 
-		/**
-		 * @brief A frame the culls keep whole cuts nothing: where a cut would have taken the geometry out (an excluded ancestor, or a filtered
-		 * node's child it does not keep), the engine's bits are compared with DCLF's.
-		 */
+		/** @brief On a parity frame nothing is cut. Where a cut would have removed the geometry, compares the engine's bits with DCLF's. */
 		void Bits(const Diagnostics::PointLightBits& a_event)
 		{
 			const auto* a_geometry = a_event.geometry;
@@ -214,7 +207,6 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 			const auto& reach = a_event.reach;
 			if (a_event.first)
 				CompareSphere(a_event);
-			// A parity frame without an exclusion (no point lights' cut entries): the empty culls' comparison alone.
 			const auto* exclusion = View::FrameExclusion();
 			if (!exclusion)
 				return;
@@ -229,7 +221,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 				}
 				if (!cut || !engine)
 					return;
-				// Cut, but not as a geometry of an excluded entry: its bits would be lost.
+				// Cut, but not as a geometry of an excluded entry, so its bits would be lost.
 				counts.unhandled.fetch_add(1, std::memory_order_relaxed);
 				std::scoped_lock lock(firstMutex);
 				if (bitsLogged++ < 8) {

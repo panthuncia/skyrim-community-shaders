@@ -1,8 +1,7 @@
 #pragma once
 
-// The active trigger (Api::TriggerDef): the engine point whose hook's DCLF work the render thread is in. Each trigger point marks itself
-// with a TriggerScope around that work; the revision submission (IndirectDraws::Impl::SubmitRevisionRecording) compares it with its
-// epoch's trigger. One render-thread integer: scopes nest (each restores the one it found), with no allocation and no lock.
+// The active trigger: the engine point whose DCLF work the render thread is in. Each point wraps that work in a TriggerScope.
+// Revision submission compares it with its epoch's trigger. Scopes nest, with no allocation and no lock.
 
 #include "Features/DrawcallLimitFix/Api/Epochs.h"
 
@@ -11,19 +10,19 @@
 
 namespace DCLF::Extensions
 {
-	/** @brief No trigger point's DCLF work is running (Api::TriggerId's index while none is). */
+	/** @brief No trigger is active. */
 	inline constexpr std::uint32_t kNoTrigger = ~0u;
 
 	namespace Detail
 	{
-		// Render thread only: written by TriggerScope, read by the submission's check.
+		// Render thread only.
 		inline std::uint32_t activeTrigger = kNoTrigger;
 	}
 
-	/** @brief Render thread: the active trigger's row in the schedule's triggers (kNoTrigger: none). */
+	/** @brief Render thread. The active trigger's row, or kNoTrigger. */
 	inline std::uint32_t ActiveTrigger() { return Detail::activeTrigger; }
 
-	/** @brief Render thread: a_trigger active for the scope's life, then the one it found again. */
+	/** @brief Render thread. Makes a_trigger active for the scope's life, then restores the previous one. */
 	class TriggerScope
 	{
 	public:

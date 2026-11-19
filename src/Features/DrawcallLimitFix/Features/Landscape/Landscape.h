@@ -1,26 +1,17 @@
 #pragma once
 
-// Landscape (CS_DCLF_MTLAND): the terrain, the MTLand and MTLandLODBlend Lighting techniques (8, 19), DCLF's while the terrain toggle is
-// on. The feature registers its switch and live toggle and the two techniques' contributions (Api::TechniqueContribution: the Lighting
-// port's eligibility reads the toggle through them, as data; their objects take Core's land-blend extras, Api::ObjectExtras::LandBlend).
-// While Terrain Blending holds the terrain, Integrations/TerrainBlending gates both techniques on its own toggle too (Api::TechniqueGate).
-//
-// Core keeps what every land quad and its draw share: the MTLand material handling (the Lighting port's SetupMaterial replica, the
-// Landscape and LODLandscape vtables, the source signature's landscape bit, the PS names), LandSetupProperties, the landscape lights
-// (kObjectLandscapeLights) and the land-blend extras (kObjectLandBlend, its rows shared with the projected UV, the LandBlendParams hook, the
-// capture and its parity). LOD terrain is Features/Lod's (LODLand, LODLandNoise); its flag rule runs before these techniques' eligibility.
-// Included by the feature's sources only.
+// Landscape (CS_DCLF_MTLAND): DCLF draws terrain, the MTLand and MTLandLODBlend Lighting techniques (8, 19).
+// While Terrain Blending holds the terrain, its integration also gates both techniques on its own toggle.
+// Core owns the shared land material handling. LOD terrain belongs to Features/Lod.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 namespace DCLF::Features::Landscape
 {
-	// LandscapeFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 	/** @brief Registers per-quad landscape seam resources for the batched terrain shaders. */
 	void InstallSeams(Api::InstallContext& a_context);
 
-	// Diagnostics/LandTrace.cpp: CS_DCLF_LAND_TRACE=1, main thread at the scene frame's start (FrameBegin), with or without DCLF: every
-	// loaded land quad's engine state (node, geometry, property, material, texture paths), logged when first seen and when it changes.
+	// CS_DCLF_LAND_TRACE=1. Main thread, at the scene frame's start, with or without DCLF.
 	void SubscribeLandTrace();
 }

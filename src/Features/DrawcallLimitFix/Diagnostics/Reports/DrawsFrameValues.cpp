@@ -6,7 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/LatePoses/LatePoseOverrides.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
-// The frame values' and the frame data's report lines.
+// Frame values and frame data report lines.
 
 namespace DCLF::Reports
 {
@@ -24,10 +24,10 @@ namespace DCLF::Reports
 			c.frames, c.sampled / n, c.settled / n, c.seeded / n, c.rowsChanged / n, c.skins / n, c.paletteRowsChanged / n, c.shadingSampled / n, c.shadingChanged / n,
 			c.wetnessChanged / n, c.runs / n, c.bytes / n / 1024.0, c.sampleUs / n, c.uploadUs / n, c.maxTotalUs, c.refused, c.defects,
 			c.failures, c.reusedInFlight, PooledBackings::SceneCopies());
-		// The late poses (Core/LatePoses): the hidden nodes found, the plans and the rows they shrank.
+		// Late poses. Hidden nodes found, and the plans and rows they shrank.
 		if (const auto late = LatePoses::TakeReport(); !late.empty())
 			line += "; " + late;
-		// The placement plans (deltas) the producers applied onto their kept set.
+		// The placement deltas the producers applied onto their kept set.
 		if (c.plans)
 			line += fmt::format("; {} placement plans applied ({} resets, {:.1f} items a plan)", c.plans, c.planResets, static_cast<double>(c.planItems) / static_cast<double>(c.plans));
 		if (auto& s = Diagnostics::DrawsState::Get().frameValues; s.checks) {
@@ -46,15 +46,13 @@ namespace DCLF::Reports
 			s.first.clear();
 			s.paletteFirst.clear();
 		}
-		// CS_DCLF_SET_PARITY (CheckShadingSampled).
 		if (auto& s = Diagnostics::DrawsState::Get().frameValues; s.shadingChecks) {
 			line += fmt::format("; {} resident shading rows checked, {} never sampled{}{}", s.shadingChecks, s.shadingUnsampled,
 				s.shadingUnsampled ? " <- UNSAMPLED; first: " : " <- OK", s.shadingUnsampled ? s.shadingFirst : std::string());
 			s.shadingChecks = s.shadingUnsampled = 0;
 			s.shadingFirst.clear();
 		}
-		// The row sets' pools (D6; the built-in parts', then the features' registered pools): a frame's acquires and catch-up, the backings
-		// made, the census and the journal floor; under CS_DCLF_PERSISTENT_PARITY, the leased count against the lease-leak bound.
+		// Row set pools, built-in then registered. With the persistent parity, the leased count is checked against the leak bound.
 		const bool watch = Diagnostics::Observe().scene;
 		auto& watches = Diagnostics::DrawsState::Get().frameValuesPools;
 		line += "\n[DCLF] frame values' pools (D6):";

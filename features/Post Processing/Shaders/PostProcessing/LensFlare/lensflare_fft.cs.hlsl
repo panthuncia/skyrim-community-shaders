@@ -11,6 +11,7 @@
 //   CSFFTThreshold   — Convert half-res threshold to N×N RG32F for FFT input
 //   CSFFTGhostCompose — IFFT result → multi-scale ghost sampling + halo + tint
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/common.hlsli"
 
 static const float PI = 3.14159265358979323846;
@@ -18,63 +19,29 @@ static const float EPSILON = 1e-6;
 static const int NUM_GHOSTS = 8;
 
 // ============================================================
-// Resources
+// Resources (dual-target: Common/OrgResources.hlsli)
 // ============================================================
 
-Texture2D<float4> InputTexture : register(t0);  // Context-dependent (bokeh texture, threshold, FFT result)
-Texture2D<float4> FlareTexture : register(t1);  // Secondary input (threshold texture for compose)
-SamplerState BokehSampler : register(s0);
-SamplerState BorderSampler : register(s1);
-
-// Complex textures (RG32F: R=real, G=imaginary)
-Texture2D<float2> TexComplexA : register(t0);  // FFT input A (for multiply: scene FFT)
-Texture2D<float2> TexComplexB : register(t1);  // FFT input B (for multiply: bokeh FFT)
-
-RWTexture2D<float2> RWTexComplex : register(u0);  // Complex output (RG32F)
-RWTexture2D<float4> RWTexColor : register(u0);    // Color output (RGBA16F, for compose)
+// InputTexture: context-dependent (bokeh texture, threshold, FFT result). FlareTexture: secondary input (threshold texture
+// for compose). TexComplexA/B (RG32F: R=real, G=imaginary): FFT input A (for multiply: scene FFT) and B (bokeh FFT).
+// RWTexComplex: complex output (RG32F). RWTexColor: color output (RGBA16F, for compose).
+#define LENS_FLARE_FFT_RESOURCES(X)                \
+	X(SRV, Texture2D<float4>, InputTexture, 0)     \
+	X(SRV, Texture2D<float4>, FlareTexture, 1)     \
+	X(SAMPLER, SamplerState, BokehSampler, 0)      \
+	X(SAMPLER, SamplerState, BorderSampler, 1)     \
+	X(SRV, Texture2D<float2>, TexComplexA, 0)      \
+	X(SRV, Texture2D<float2>, TexComplexB, 1)      \
+	X(UAV, RWTexture2D<float2>, RWTexComplex, 0)   \
+	X(UAV, RWTexture2D<float4>, RWTexColor, 0)
+ORG_PUSH_BLOCK(LENS_FLARE_FFT_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, LensFlareConstants, LensFlareFrame, 1))
+LENS_FLARE_FFT_RESOURCES(ORG_RESOURCE)
 
 // ============================================================
 // Constant Buffer — matches LensFlareConstants in LensFlare.h
 // ============================================================
 
-cbuffer LensFlareConstants : register(b1)
-{
-	float OutputWidth;
-	float OutputHeight;
-	float InputWidth;
-	float InputHeight;
-
-	float ThresholdLevel;
-	float ThresholdRange;
-	float GhostStrength;
-	float GhostChromaShift;
-
-	float HaloStrength;
-	float HaloRadius;
-	float HaloWidth;
-	float HaloCompression;
-
-	float HaloChromaShift;
-	float Intensity;
-	uint FFTResolution;
-	int GLocalMask;
-
-	float3 Tint;
-	float KernelScale;
-
-	float AspectRatio;
-	int ApertureBlades;
-	float ApertureRotation;
-	float PadScale;
-
-	uint ActiveGhostMask;
-	float ApertureSize;
-	float2 _pad0;
-
-	float4 GhostColors[NUM_GHOSTS];
-	float4 GhostScalesPacked[2];
-	float4 GhostKernelScalesPacked[2];
-}
+#include "PostProcessing/LensFlare/lensflare_constants.hlsli"
 
 float GetGhostScale(int i)
 {

@@ -1,6 +1,6 @@
-// The vertex stream's entry, the scene resources' order and the stream's select and upload (see the header).
+// The vertex stream's entry, the scene resources' order and the stream's select and upload.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
@@ -11,7 +11,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveVertexStream (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		struct Resolved
 		{
 			VertexStreamEntry entry;

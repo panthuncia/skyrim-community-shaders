@@ -1,8 +1,5 @@
-// The engine's shadow-light selection, hooked (render thread): NiCamera::CalculateAndDrawShadowCasterLights' call from Main::Draw, and its
-// light-keeping calls (FUN_1414a3fb0, the sun's and each kept light's), which reach Core's FrameDriver: the frame's shadow views begun and
-// their coverage decided (the epochs' beforeShadowCasters) before the engine keeps a light, each light's views before its Accumulate
-// registers into them, and the list once the selection is done (skyrim-engine-notes.md, "The shadow lights' selection"). Installed from
-// the feature's install.
+// Hooks on the engine's shadow-light selection, on the render thread. They begin the frame's shadow views and decide their coverage
+// before the engine keeps a light, hand each light's views over before its Accumulate, and list them once the selection is done.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/ShadowEngineAddresses.h"
@@ -18,13 +15,10 @@ namespace DCLF::Features::Shadows::Engine
 {
 	namespace
 	{
-		// Render thread: DCLF runs this frame's selection (the shell's Running, sampled at its start, so that the three points agree).
+		// Sampled once at the selection's start so the three points agree.
 		bool castersRunning = false;
 
-		/**
-		 * @brief Main::Draw's call of NiCamera::CalculateAndDrawShadowCasterLights (AE 0x140644674): the whole selection, every shadow light's
-		 * UpdateCamera and Accumulate (the registrations into its views) inside it. The views begun before, listed after.
-		 */
+		/** @brief Main::Draw's call of CalculateAndDrawShadowCasterLights (AE 0x140644674). The views are begun before and listed after. */
 		struct CalculateAndDrawShadowCasterLights
 		{
 			static void thunk(void* a_camera)
@@ -41,9 +35,26 @@ namespace DCLF::Features::Shadows::Engine
 		};
 
 		/**
-		 * @brief FUN_1414a3fb0(shadow scene node, light, first slot, slots): the light written into its slots of shadowLightsAccum, once the
-		 * engine kept it - its UpdateCamera run and its focus flag set - and right before its Accumulate. Site 0 is the sun's (AE 0x1414cbc66,
-		 * its cascades' slots), site 1 each kept light's (AE 0x1414cc7e1, one slot).
+		 * @brief The focus accumulation. The host's focus views are listed and covered before it registers into them.
+		 * For a spot light host that is before the light is kept.
+		 */
+		struct FocusAccumulation
+		{
+			static void thunk(RE::BSShadowLight* a_light)
+			{
+				const bool running = castersRunning;
+				if (running)
+					FrameDriver::Get().ShadowFocusAccumulating(a_light, true);
+				func(a_light);
+				if (running)
+					FrameDriver::Get().ShadowFocusAccumulating(a_light, false);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief FUN_1414a3fb0, which writes a kept light into its shadowLightsAccum slots right before its Accumulate.
+		 * Site 0 is the sun's (AE 0x1414cbc66), site 1 each kept light's (AE 0x1414cc7e1).
 		 */
 		template <std::uint32_t Site>
 		struct KeepLight
@@ -60,7 +71,7 @@ namespace DCLF::Features::Shadows::Engine
 
 	void InstallCasterHooks()
 	{
-		// Chained onto whatever the calls hold (PreflightCasterHooks required CALLs).
+		// Chained onto whatever the calls hold. PreflightCasterHooks required CALLs.
 		const auto base = REL::Module::get().base();
 		const auto keep = base + Address::kKeepLight;
 		const auto chained = [](std::uintptr_t a_site, std::uintptr_t a_engine, const char* a_what) {
@@ -73,7 +84,13 @@ namespace DCLF::Features::Shadows::Engine
 		stl::write_thunk_call<CalculateAndDrawShadowCasterLights>(base + Address::kCastersCallSite);
 		stl::write_thunk_call<KeepLight<0>>(base + Address::kKeepSunCallSite);
 		stl::write_thunk_call<KeepLight<1>>(base + Address::kKeepLightCallSite);
-		logger::info("[DCLF] shadow casters: the shadow lights' selection hooked (its call, and each light kept)");
+		if (Address::kFocusAccumulation.Known()) {
+			stl::detour_thunk<FocusAccumulation>(REL::Offset(Address::kFocusAccumulation.Get()).address());
+			HookSites::NoteDetour("the focus accumulation detour", FocusAccumulation::func.address());
+		} else {
+			logger::warn("[DCLF] shadow casters: the focus accumulation is not known for this runtime; a spot light's focus views reach the engine");
+		}
+		logger::info("[DCLF] shadow casters: the shadow lights' selection hooked (its call, each light kept, the focus accumulation)");
 	}
 
 	void PreflightCasterHooks()

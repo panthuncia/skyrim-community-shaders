@@ -8,8 +8,7 @@ namespace DCLF::Features::Shadows::Engine
 	{
 		void Install(Api::InstallContext& a_context)
 		{
-			// The passes the schedule names (no setup: a Shadow epoch's pass may have none, so their place among the registrations changes no
-			// order), then the epoch's frame points and the shadow-light selection's hooks that reach them.
+			// No setup, so their place among the registrations changes no order.
 			RegisterPasses(a_context);
 			RegisterShadowEpochs(a_context);
 			InstallCasterHooks();

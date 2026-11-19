@@ -1,16 +1,16 @@
-// The draw families' frame decisions (IndirectDraws::DecideDrawFamilies): each taken family's decide, published as the frame's ownership
-// (the depth commit's, a trees view's, PassCapture's), and the pipeline lane its decide asks for its slot's pipelines
-// (Api::DrawFamilyFrame::Pipelines). Render thread.
+// The draw families' frame decisions on the render thread. Each taken family decides, the result is published as the
+// frame's ownership, and the pipeline lane is asked for the slot's pipelines.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
+
+#include <algorithm>
 
 namespace DCLF::Api
 {
 	bool DrawFamilyFrame::Pipelines(bool a_drawable) const
 	{
-		// The lane builds the slot's pipelines from the family's program source (TreeInstances': the DistantTree shader); until the
-		// frame's catalog has them the engine draws the family.
+		// Until the frame's catalog has the family's pipelines, the family waits and nobody draws it.
 		auto& drawPipelines = DrawPipelines::Get();
 		if (auto* shader = static_cast<RE::BSShader*>(const_cast<void*>(Extensions::DrawFamilyOf(family).contribution.frame.programSource()))) {
 			drawPipelines.SetFamilyInputs(family, *shader);  // the lane only reads it
@@ -19,8 +19,7 @@ namespace DCLF::Api
 		const auto* catalog = FrameCatalog();
 		FamilyPipelines pipelines;
 		const bool built = CatalogFamilyPipelines(catalog, family, pipelines);
-		// The adopted revision's recordings draw the family with these pipelines (its shapes', PassFrame::families): until a revision made
-		// from a catalog that has them is adopted, the engine draws the family, so no frame withholds it with nothing recorded to draw it.
+		// Until a revision made from a catalog with these pipelines is adopted, the family waits, so no frame claims it with nothing to draw it.
 		const auto adopted = IndirectDraws::Get().AdoptedFamilyPipelines(family);
 		const bool recorded = adopted && Draws::SameHandle(adopted->depth, pipelines.depth) && Draws::SameHandle(adopted->colour, pipelines.colour) &&
 		                      Draws::SameHandle(adopted->colour2, pipelines.colour2);
@@ -32,7 +31,11 @@ namespace DCLF::Api
 				!Draws::SameHandle(current->colour2, pipelines.colour2))
 				published.store(std::make_shared<const FamilyPipelines>(pipelines), std::memory_order_release);
 		}
-		drawPipelines.NoteFamilyWait(family, !built && !(catalog && catalog->families[static_cast<std::size_t>(family)].failed));
+		const bool failed = catalog && catalog->families[static_cast<std::size_t>(family)].failed;
+		drawPipelines.NoteFamilyWait(family, !built && !failed);
+		// Drawable but not ready, and nothing failed, so the family waits. A failed build leaves it to the engine.
+		if (waits)
+			*waits = a_drawable && !owned && !failed;
 		return owned;
 	}
 }
@@ -48,15 +51,16 @@ namespace DCLF
 			if (!entry.taken)
 				continue;
 			const auto family = static_cast<Api::DrawFamily>(f);
-			// A frame without claims is the engine's whole, the family's draws included; so is one whose family is not set up or off.
-			bool owned = false;
-			// The CPU pipeline draws a family through its main.direct (its main draw's row and arguments outside ORG); one without it is
-			// the engine's there.
+			// A frame without claims is entirely the engine's, and so is a family that is off or not set up.
+			bool owned = false, waits = false;
+			// The CPU pipeline draws a family only through its main.direct. One without it is the engine's there.
 			if (scene && Draws::FamilySetUp(*scene, family) && Extensions::DrawFamilyOn(toggles, family) && !Scene::FrameView::Get().NotDrawingYet() &&
 				(!Direct::CpuFrame() || entry.contribution.main.direct))
-				owned = entry.contribution.frame.decide({ a_frame, scene, family });
+				owned = entry.contribution.frame.decide({ a_frame, scene, family, &waits });
 			impl->familyOwned[f] = owned;
-			PassCapture::Get().SetFamilyOwned(family, owned);
+			impl->familyWaiting[f] = !owned && waits;
+			// The engine passes the family replaces are withheld whether it is owned or still waiting.
+			PassCapture::Get().SetFamilyWithheld(family, owned || waits);
 			if (entry.contribution.frame.owned)
 				entry.contribution.frame.owned(owned);
 		}
@@ -65,5 +69,10 @@ namespace DCLF
 	bool IndirectDraws::DrawFamilyOwned(Api::DrawFamily a_family) const
 	{
 		return impl && impl->familyOwned[static_cast<std::size_t>(a_family)];
+	}
+
+	std::uint32_t IndirectDraws::DrawFamiliesWaiting() const
+	{
+		return impl ? static_cast<std::uint32_t>(std::ranges::count(impl->familyWaiting, true)) : 0u;
 	}
 }

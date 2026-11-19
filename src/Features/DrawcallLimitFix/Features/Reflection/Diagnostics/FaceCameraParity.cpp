@@ -1,6 +1,5 @@
-// The water reflection's face cameras (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the face the engine has just drawn, as its
-// accumulator render left it - the bound colour target's face and VS_PerFrame (b12) from the mirror - against DCLF's (FaceOriented).
-// Render thread; the reflection report takes the counts (FaceCameraCounts).
+// The water reflection's face cameras (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the bound face and VS_PerFrame (b12) after
+// the engine's draw, against DCLF's. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionView.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
@@ -8,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 namespace DCLF::Features::Reflection
 {
@@ -38,7 +38,8 @@ namespace DCLF::Features::Reflection
 					resource->QueryInterface(IID_PPV_ARGS(texture.put()));
 				bound->Release();
 			}
-			if (targetFace != f || texture.get() != reflection.cube.get()) {
+			// The bound view is DXVK's; the face's texture can be a tripwire handle that wraps it.
+			if (targetFace != f || texture.get() != RenderGraph::Engine::Tripwire::Unwrap(reflection.cube.get())) {
 				if (parity.slices++ == 0 && parity.first.empty())
 					parity.first = fmt::format("face {}: the engine drew into face {}", f, targetFace);
 			}

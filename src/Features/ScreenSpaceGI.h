@@ -38,6 +38,10 @@ public:
 	virtual void PostPostLoad() override;
 	/** @brief Creates GPU textures, samplers, constant buffers, and compiles compute shaders. */
 	virtual void SetupResources() override;
+	/** @brief Creates the D3D11 path's textures, sized as kMAIN (SetupResources, or the first D3D11 frame after the graph path failed). */
+	void CreateTextures();
+	/** @brief Before the DeferredPasses anchor: keeps the graph path's programs, textures and inputs current (CS_ORG_SCREEN_SPACE_GI=1). */
+	virtual void Prepass() override;
 	/** @brief Releases and recompiles all SSGI compute shaders. */
 	virtual void ClearShaderCache() override;
 	/** @brief Compiles all SSGI compute shaders with current resolution and feature defines. */
@@ -49,6 +53,13 @@ public:
 	void DrawSSGI();
 	/** @brief Updates the SSGI constant buffer with current camera, resolution, and settings data. */
 	void UpdateSB();
+
+	/** @brief The dispatch sizes: the dynamic render size, and the size the chain works at (half or quarter of it). */
+	struct DispatchSizes
+	{
+		std::array<uint, 2> full, internal;
+	};
+	DispatchSizes GetDispatchSizes() const;
 
 	//////////////////////////////////////////////////////////////////////////////////
 
@@ -143,6 +154,13 @@ public:
 	STATIC_ASSERT_ALIGNAS_16(SSGICB);
 	eastl::unique_ptr<ConstantBuffer> ssgiCB;
 
+	/**
+	 * @brief This frame's constants for textures of a_texDim, once per frame on either path: it also keeps the camera for the
+	 * next frame's reprojection.
+	 */
+	SSGICB BuildConstants(float2 a_texDim);
+	float4x4 prevInvView = {};
+
 	eastl::unique_ptr<Texture2D> texNoise = nullptr;
 	eastl::unique_ptr<Texture2D> texWorkingDepth = nullptr;
 	winrt::com_ptr<ID3D11UnorderedAccessView> uavWorkingDepth[5] = { nullptr };
@@ -159,16 +177,7 @@ public:
 	eastl::unique_ptr<Texture2D> texGiSpecular[2] = { nullptr };
 
 	/** @brief Returns the current output SRVs for AO, indirect lighting Y/CoCg, and specular GI (or nullptrs if disabled). */
-	inline auto GetOutputTextures()
-	{
-		return (loaded && settings.Enabled) ?
-		           std::make_tuple(
-					   texAo[outputAoIdx]->srv.get(),
-					   texIlY[outputIlIdx]->srv.get(),
-					   texIlCoCg[outputIlIdx]->srv.get(),
-					   texGiSpecular[outputAoIdx]->srv.get()) :
-		           std::make_tuple(nullptr, nullptr, nullptr, nullptr);
-	}
+	std::tuple<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> GetOutputTextures();
 
 	winrt::com_ptr<ID3D11SamplerState> linearClampSampler = nullptr;
 	winrt::com_ptr<ID3D11SamplerState> pointClampSampler = nullptr;

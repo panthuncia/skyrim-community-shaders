@@ -1,4 +1,4 @@
-// The shadow epochs' entry (see the header).
+// The shadow epochs' entry.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowEpochs.h"
 
@@ -8,7 +8,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveShadowEpochs (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		Api::ShadowEpochsContribution resolved;
 		bool registered = false;
 	}

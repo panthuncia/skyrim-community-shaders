@@ -1,5 +1,5 @@
-// FrameView's Prepass constants: the pipelines' PerGeometry blocks from the frame's sample (posted to the coordinator when a
-// bindless-read value changes), the frame lighting and fog, the character light's view and the projected textures. Render thread.
+// FrameView's Prepass constants: the pipelines' PerGeometry blocks from the frame's sample, the frame lighting and fog,
+// the character light's view and the projected textures. Render thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -20,18 +20,14 @@ namespace DCLF::Scene
 	{
 		const Tables& view = View();
 		DCLF_ZONE_NAMED(frameConstantsZone, "CS.DCLF.FrameConstants", true);
-		// The material records' frame components are the scene work's (RefreshMaterialSignatures); the frame keeps the
-		// character light's view, from its sample.
 		RefreshCharacterLightView();
+		// Every frame. Once a ProjectedUV object waits for them the engine draws none, so they cannot come from a native draw alone.
+		NoteProjectedTextures();
 		Diagnostics::Notify<Diagnostics::ScenePoint::PrepassConstantsBegin>();
 		if (!EngineShaders::Lighting())
 			return;
-		// The frame's pipeline inputs (GeometryPort::PipelineFrame), sampled once, here: the eye is the current accumulator's
-		// less the shadow state's posAdjust, the main camera's only from Prepass (LatchAccumulator's point; at EarlyPrepass both are
-		// still the shadow-map camera's), and the engine's evaluation the port replaces ran here. The held blocks were made from
-		// geometryPortFrame (the last sample with a sun), so the pipeline inputs moved when this sample's differ from it. A sample
-		// without a sun makes nothing and is not kept. A sample with one is posted to the coordinator too, which makes
-		// its new pipelines' blocks from the newest (MakeNewPipelineConstants); a slot new to the frame's tables is made whole below.
+		// Sampled here because only from Prepass is the eye the main camera's. At EarlyPrepass it is still the shadow-map camera's.
+		// A sample without a sun makes nothing and is not kept.
 		const GeometryPort::PipelineFrame portFrame = GeometryPort::SamplePipelineFrame();
 		++geometryStats.samples;
 		const bool pipelineInputsMoved = portFrame.sun && (!geometryPortFrame || !portFrame.SamePipelineInputs(*geometryPortFrame));
@@ -40,14 +36,11 @@ namespace DCLF::Scene
 			geometryPortFrameNumber = frame;
 			PostPipelineFrame(portFrame);
 		}
-		// The frame lighting, the frame's (GeometryPort::MergeFrameLighting: the rows every pipeline that writes them shares) over what
-		// was last published (nothing without a sun: it keeps its value); versioned only when it differs.
+		// Versioned only when it differs.
 		FrameLighting frameLighting;
 		std::memcpy(frameLighting.data(), frameCapture.lighting.data(), sizeof(frameLighting));
 		std::uint32_t lightingWritten = 0;
 		GeometryPort::MergeFrameLighting(portFrame, frameLighting, lightingWritten);
-		// The frame's fog (FrameFog, what the DCLF_BINDLESS vertex stage reads from VS b13): the frame's sample's, as every technique
-		// writes it alike (EvaluateTechnique's fog block depends on no pass descriptor), over the last frame's where it writes none.
 		// The technique rows keep the fog they were made with, so the time of day versions none of them. No engine read.
 		FrameFog frameFog = frameCapture.fog;
 		std::uint32_t fogWritten = 0;
@@ -66,15 +59,8 @@ namespace DCLF::Scene
 				if (i >= view.pipelines.size())
 					continue;
 				++pipelinesVisited;
-				// A pipeline's PerGeometry block is the port's (GeometryPort::PipelineGeometryConstants) from the frame's sample,
-				// no engine code run. Made whole when the slot is new (or keyed again), at the first refresh, or when the pipeline inputs
-				// moved (PipelineFrame::SamePipelineInputs: SSRParams.xyz, the world map rows); otherwise what moves every frame is
-				// written in place (GeometryPort::RefreshFrameValues: the sun, the ambient, the ambient specular, and EyePosition by the
-				// port's rule, True PBR's passes included). Those are kept in the block for the constant-buffer path and the checks, but
-				// no DCLF_BINDLESS draw reads them there (DCLFFrameLighting; kPSBindlessGeometryUnread), so only what such a draw reads
-				// versions and posts the pipeline (SameBindlessGeometry). No template member or pass is needed: a pipeline whose
-				// template pass is missing is covered too. Without a sun nothing is made (the engine had no template pass then either):
-				// the held block is kept.
+				// Made whole when the slot is new, at the first refresh, or when the pipeline inputs moved. Otherwise only per-frame values are
+				// written in place. Only what a DCLF_BINDLESS draw reads versions and posts the pipeline. Without a sun the held block is kept.
 				if (!portFrame.sun)
 					continue;
 				const std::uint32_t passDescriptor = view.pipelines[i].passDescriptor;
@@ -85,7 +71,6 @@ namespace DCLF::Scene
 					if (!GeometryPort::PipelineGeometryConstants(passDescriptor, GeometryPort::kMainPassRenderFlags, portFrame, constants))
 						continue;
 					++geometryStats.full;
-					// Its own values: what a bindless draw reads from the block (PackGeometryTemplate's mask).
 					ownChanged = !frameTables.geometryConstantsValid[i] || !SameBindlessGeometry(constants, held);
 					held = constants;
 				} else {
@@ -101,8 +86,7 @@ namespace DCLF::Scene
 		}
 		TracyCZoneEnd(pipelinesZone);
 		TracyPlot("CS.DCLF.FrameConstants.Pipelines", pipelinesVisited);
-		// The pipeline inputs moved: a slot no member names this frame (not visited) holds a block of the older inputs; it is made
-		// again (and posted) at the first Prepass that visits it, so every held block is of the inputs it is refreshed with.
+		// A slot not visited this frame holds an older block. It is made again at the first Prepass that visits it.
 		if (pipelineInputsMoved)
 			for (std::size_t p = 0; p < frameTables.geometryConstantsValid.size(); ++p)
 				if (p / 64 >= view.usedPipelineBits.size() || !((view.usedPipelineBits[p / 64] >> (p % 64)) & 1))
@@ -115,9 +99,6 @@ namespace DCLF::Scene
 		}
 		++geometryStats.frames;
 
-		// The objects' shading is FrameValues' (BindlessShading), sampled at the frame's start for the slots the walk names by their
-		// events (NameShadingEvents), and their extras' static rows are written by the same events: nothing of either is sampled here.
-		// Every pipeline was made whole once: from the next frame, the frame values in place unless the pipeline inputs move.
 		constantsRefreshed = true;
 		++shadingFrames;
 		Diagnostics::Notify<Diagnostics::ScenePoint::PrepassConstantsEnd>();
@@ -125,18 +106,25 @@ namespace DCLF::Scene
 
 	void FrameView::RefreshCharacterLightView()
 	{
-		// The frame record's t11 (kCharacterLightRegister) for character-light passes: the frame's sample (no engine read); the last one
-		// kept while the sample has none (its target is -1 while a cell loads).
+		// Kept while the sample has none, since its target is -1 while a cell loads.
 		if (auto* view = MaterialSources::FrameCharacterLightView(FrameGlobals::Current().material))
 			frameCapture.characterLightView = view;
 	}
 
 	void FrameView::NoteProjectedTextures()
 	{
-		auto& state = globals::game::shadowState->GetRuntimeData();
+		// What BSLightingShader::SetupGeometry binds for a ProjectedUV pass (SE 0x1412f2bb0, AE 0x1414dd040), read from the start of
+		// BSGraphics::State (SE 0x14302c890, AE 0x14328cc20). DCLF takes all four even when projected normals are off.
+		static_assert(ProjectedTextures::kSlots[0] == 3 && ProjectedTextures::kSlots[1] == 8 && ProjectedTextures::kSlots[2] == 10 && ProjectedTextures::kSlots[3] == 11);
+		const auto* engineState = reinterpret_cast<RE::NiSourceTexture* const*>(RE::BSGraphics::State::GetSingleton());
+		if (!engineState)
+			return;
+		constexpr std::array<std::size_t, 4> kStateIndex{ 1, 2, 3, 0 };
 		ProjectedTextures seen{};
 		for (std::size_t i = 0; i < ProjectedTextures::kSlots.size(); ++i) {
-			seen.views[i] = reinterpret_cast<ID3D11ShaderResourceView*>(state.PSTexture[ProjectedTextures::kSlots[i]]);
+			const auto* texture = engineState[kStateIndex[i]];
+			const auto* renderer = texture ? texture->rendererTexture : nullptr;
+			seen.views[i] = renderer ? reinterpret_cast<ID3D11ShaderResourceView*>(renderer->resourceView) : nullptr;
 			if (!seen.views[i])
 				return;
 		}
@@ -144,8 +132,7 @@ namespace DCLF::Scene
 		if (projectedTextures.valid && projectedTextures.views == seen.views)
 			return;
 		projectedTextures = seen;
-		// To the scene work, which asks for their bindings (SharedBindings): each view referenced here, where the engine has it
-		// bound, so it outlives the scene work's request. The newest capture wins.
+		// Each view is referenced here, where the engine has it bound, so it outlives the scene work's request.
 		auto capture = std::make_shared<SharedBindings::ProjectedCapture>();
 		for (std::size_t i = 0; i < seen.views.size(); ++i)
 			capture->views[i].copy_from(seen.views[i]);
@@ -154,7 +141,6 @@ namespace DCLF::Scene
 
 	void FrameView::PostPipelineConstants(std::uint32_t a_slot)
 	{
-		// To the coordinator through a lock-free queue (no hand-over at the frame's start): its next scene pass applies it.
 		auto post = std::make_unique<PipelineConstantsPost>();
 		post->slot = a_slot;
 		post->key = frameTables.pipelineKeys[a_slot];

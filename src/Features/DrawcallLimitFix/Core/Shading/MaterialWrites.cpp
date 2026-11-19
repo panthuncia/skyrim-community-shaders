@@ -1,5 +1,5 @@
-// MaterialWrites: the controller and material writes (SceneWriterFramework's call hooks, on whichever thread runs the engine's update) and their lock-free queues, which
-// the features' hooks reach through the material-write sink (Api/MaterialWrites.h, defined here).
+// MaterialWrites: hooks on controller and material writes, which run on the engine's update thread, and their lock-free queues.
+// Also defines the material-write sink in Api/MaterialWrites.h.
 
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialWrites.h"
 
@@ -21,8 +21,7 @@ namespace DCLF::MaterialWrites
 {
 	namespace
 	{
-		// ---- The write queue (EventQueue): CS_DCLF_CAPTURE_PARITY's diagnostics alone, drained by the render thread once a frame; a
-		// producer never blocks. The records follow the writes' captures (MaterialPort::PushCapture), not this queue.
+		// ---- The write queue, only for CS_DCLF_CAPTURE_PARITY diagnostics. The render thread drains it once a frame and producers never block.
 		EventQueue<const RE::BSShaderMaterial*, 8192>& GetQueue()
 		{
 			static EventQueue<const RE::BSShaderMaterial*, 8192> queue;
@@ -34,20 +33,18 @@ namespace DCLF::MaterialWrites
 		}
 		EventQueue<const void*, 8192>& ShadingQueue()
 		{
-			// The scene pass drains it (NameShadingEvents) for the next frame's shading sample: per-frame, so it wakes no pass (the next
-			// frame input's takes it).
+			// The scene pass drains this for the next frame's shading sample. It is per frame, so it wakes no pass.
 			static EventQueue<const void*, 8192> queue;
 			return queue;
 		}
-		// The transform moves (Extensions::DrainTransformMoves): the kept shadow build's (ShadowKept), whatever patches the records'.
+		// The transform moves, for the kept shadow build.
 		EventQueue<const RE::BSShaderMaterial*, 8192>& TransformMoves()
 		{
 			static EventQueue<const RE::BSShaderMaterial*, 8192> queue;
 			return queue;
 		}
-		// The kept shadow build runs only while DCLF draws shadows. While it does not, nothing drains the queue, and a full queue
-		// allocates for each push, so pushes stop once it has not drained for kTransformConsumerIdle. The next drain is then told
-		// that moves were lost (DrainTransformMoves).
+		// The kept shadow build only runs while DCLF draws shadows. Without a drain a full queue allocates on every push,
+		// so pushes stop after kTransformConsumerIdle and the next drain is told moves were lost.
 		constexpr auto kTransformConsumerIdle = std::chrono::seconds(2);
 		std::atomic<std::int64_t> transformConsumerSeen{ 0 };  // steady_clock ticks of the last drain, 0 before the first
 		std::atomic<bool> transformMovesLost{ false };
@@ -66,7 +63,7 @@ namespace DCLF::MaterialWrites
 		}
 
 		// ---- Hooks.
-		// A controller's own type field (+0x50): which member of the property or material it writes.
+		// A controller's type field at +0x50: which member of the property or material it writes.
 		std::uint32_t ControllerType(const RE::NiTimeController* a_controller)
 		{
 			return *reinterpret_cast<const std::uint32_t*>(reinterpret_cast<const std::byte*>(a_controller) + 0x50);
@@ -74,16 +71,14 @@ namespace DCLF::MaterialWrites
 
 		void NoteTarget(const RE::NiTimeController* a_controller)
 		{
-			// NiTimeController::target; these controllers attach to a BSLightingShaderProperty only (Func60), and
-			// write through BSShaderProperty::material (+0x78).
+			// NiTimeController::target. These controllers only attach to a BSLightingShaderProperty and write through its material at +0x78.
 			auto* property = static_cast<const RE::BSShaderProperty*>(a_controller->target);
 			if (property && property->material)
 				NoteWritten(property->material);
 		}
 
-		// The controller destination tables of AE 1.6.1170 and SE 1.5.97 (Ghidra: float Update 0x14150DDE0,
-		// colour Update 0x14150EA50; SE 0x141321310, 0x141321d90, the same tables). The float table contains float
-		// indices; the colour table contains byte offsets. Other runtimes retain the conservative notification.
+		// Controller destination tables for AE 1.6.1170 and SE 1.5.97: float Update 0x14150DDE0 and colour Update 0x14150EA50,
+		// SE 0x141321310 and 0x141321d90. Float tables hold indices, colour tables byte offsets. Other runtimes keep the conservative notification.
 		const std::uint32_t* FloatDestinations()
 		{
 			return reinterpret_cast<const std::uint32_t*>(REL::Offset(Engine::Address::kFloatControllerTargets).address());
@@ -100,9 +95,8 @@ namespace DCLF::MaterialWrites
 			return reinterpret_cast<const std::uint32_t*>(REL::Offset(Engine::Address::kColorControllerTargets).address());
 		}
 
-		// The controllers' and materials' writes are SceneWriterFramework's call hooks (SWF_EVENT_CALL): each controller handler records
-		// on PRE which of its cases the update is and the values it compares (scratch[0] the case, [6] the type, [7] the property), and
-		// finishes that case on POST.
+		// The writes are SceneWriterFramework call hooks. Each controller handler records its case on PRE, with scratch[0] the case,
+		// [6] the type and [7] the property, and finishes that case on POST.
 		enum ControllerCase : std::uintptr_t
 		{
 			kEmissive = 1,  // the property's emissive multiplier or colour (per-object shading)
@@ -111,12 +105,10 @@ namespace DCLF::MaterialWrites
 			kOther,         // anything else: the conservative notification
 		};
 
-		// BSLightingShaderPropertyFloatController::Update (AE 14150dde0, vtable slot 0x27). Type 0xb writes the
-		// property's emissive multiplier (per-object shading, resampled every frame at Prepass) and types above
-		// 0x13 the texture-transform buffers; every other type a material field.
-		// While a feature patches the frame VS variable (InstallContext::RegisterFrameVSVariablePatch), the texture transforms are no
-		// record's: the GPU patches every material row's TexcoordOffset from the buffer the frame reads, so a write that moved only them
-		// captures nothing; the kept shadow build still hears of it (TransformMoves: its rows read the transform themselves).
+		// BSLightingShaderPropertyFloatController::Update (AE 14150dde0, vtable slot 0x27). Type 0xb writes the emissive multiplier,
+		// types above 0x13 the texture-transform buffers, every other type a material field.
+		// While a feature patches the frame VS variable, a write that moved only the transforms captures nothing.
+		// The kept shadow build still hears of it, because its rows read the transform themselves.
 		void OnFloatController(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			auto* controller = SceneWriter::Arg<RE::NiTimeController*>(a_event, 0);
@@ -155,13 +147,13 @@ namespace DCLF::MaterialWrites
 			case kTransforms:
 				{
 					auto* material = reinterpret_cast<RE::BSLightingShaderMaterialBase*>(a_scratch[1]);
-					// A swap during the update is the property's: its current material (alive, the property holding it) is captured.
+					// A swap during the update belongs to the property, so capture its current material, which the property keeps alive.
 					if (property->material != material && property->material)
 						MaterialPort::PushCapture(property->material);
 					const bool moved = property->material != material ||
 					                   std::memcmp(&a_scratch[2], material->texCoordOffset, sizeof(material->texCoordOffset)) != 0 ||
 					                   std::memcmp(&a_scratch[4], material->texCoordScale, sizeof(material->texCoordScale)) != 0;
-					// Unless a feature patches the frame's (InstallContext::RegisterFrameVSVariablePatch), the transforms are the records': captured.
+					// Unless a feature patches the frame's variable, the transforms belong to the records, so capture.
 					if (moved && property->material == material && !Extensions::FrameVSVariablePatched())
 						NoteWritten(material);
 					if (moved)
@@ -172,7 +164,7 @@ namespace DCLF::MaterialWrites
 				{
 					auto* material = reinterpret_cast<RE::BSShaderMaterial*>(a_scratch[1]);
 					const auto offset = std::size_t(FloatDestinations()[type]) * sizeof(float);
-					// A member's shading takes the material's alpha (MakeShading): its dependents are resampled too.
+					// A member's shading takes the material's alpha, so resample its dependents too.
 					if (property->material != material ||
 						std::memcmp(&a_scratch[2], reinterpret_cast<const std::byte*>(material) + offset, sizeof(std::uint32_t)) != 0) {
 						NoteWritten(material);
@@ -190,8 +182,7 @@ namespace DCLF::MaterialWrites
 			}
 		}
 
-		// BSLightingShaderPropertyColorController::Update (AE 14150ea50, slot 0x27). Type 1 writes the property's
-		// emissive colour (per-object shading); every other type a material colour.
+		// BSLightingShaderPropertyColorController::Update (AE 14150ea50, slot 0x27). Type 1 writes the emissive colour, every other type a material colour.
 		void OnColorController(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			constexpr std::size_t kColour = 12;
@@ -235,7 +226,7 @@ namespace DCLF::MaterialWrites
 			}
 		}
 
-		// The material's in-place rewrites (BSShaderMaterial 02, BSLightingShaderMaterialBase 08-0A) on the 14 Lighting material classes.
+		// The material's in-place rewrites on the 14 Lighting material classes: BSShaderMaterial 02 and BSLightingShaderMaterialBase 08-0A.
 		void OnMaterialRewrite(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			NoteWritten(SceneWriter::Arg<RE::BSShaderMaterial*>(a_event, 0));
@@ -244,7 +235,7 @@ namespace DCLF::MaterialWrites
 
 	void Install()
 	{
-		// SceneWriterFramework's material call family, which DrawcallLimitFix::PostPostLoad required (SceneWriter::kRequiredCaps).
+		// SceneWriterFramework's material call family, which PostPostLoad requires.
 		bool subscribed = SceneWriter::SubscribeCall(SWF_HOOK_FLOAT_CONTROLLER_UPDATE, &OnFloatController) &&
 		                  SceneWriter::SubscribeCall(SWF_HOOK_COLOR_CONTROLLER_UPDATE, &OnColorController);
 		for (const std::uint32_t hook : { SWF_HOOK_MATERIAL_COPY_MEMBERS, SWF_HOOK_MATERIAL_LOAD_TEXTURE_SET, SWF_HOOK_MATERIAL_CLEAR_TEXTURES,
@@ -252,7 +243,6 @@ namespace DCLF::MaterialWrites
 			subscribed = subscribed && SceneWriter::SubscribeCall(hook, &OnMaterialRewrite, SWF_PHASE_POST);
 		if (!subscribed)
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the material write hooks after reporting them installed");
-		// The Effect port's controllers and material rewrite are Features/Effects' (EffectWrites.cpp, at its install), through Api/MaterialWrites.h.
 		logger::info("[DCLF] material write hooks subscribed: float and colour controllers, 14 material classes");
 	}
 
@@ -262,7 +252,6 @@ namespace DCLF::MaterialWrites
 			return;
 		if (WritesQueued())
 			GetQueue().Push(a_material);
-		// The material as written, for the scene work's records.
 		MaterialPort::PushCapture(a_material);
 	}
 
@@ -274,7 +263,7 @@ namespace DCLF::MaterialWrites
 
 	bool Drain(ankerl::unordered_dense::set<const RE::BSShaderMaterial*>& a_out)
 	{
-		// The queue loses nothing (it spills when full), so a drain is always complete.
+		// The queue spills when full and loses nothing, so a drain is always complete.
 		GetQueue().Drain([&](const RE::BSShaderMaterial* a_material) { a_out.insert(a_material); });
 		return true;
 	}
@@ -287,11 +276,11 @@ namespace DCLF::MaterialWrites
 
 namespace DCLF::Extensions
 {
-	// The transform moves' consumer side (Core/Extensions/MaterialWrites.h); the queue is the hooks'.
+	// The transform moves' consumer side.
 	bool DrainTransformMoves(std::vector<const RE::BSShaderMaterial*>& a_out)
 	{
 		using namespace MaterialWrites;
-		// Seen first, then the flag: a push that found the consumer idle has set the flag before this drain reads it, or pushes after it.
+		// Store seen first, then read the flag. A push that found the consumer idle has set the flag before this read, or pushes after it.
 		transformConsumerSeen.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
 		const bool lost = transformMovesLost.exchange(false, std::memory_order_acq_rel);
 		TransformMoves().Drain([&](const RE::BSShaderMaterial* a_material) { a_out.push_back(a_material); });
@@ -307,7 +296,7 @@ namespace DCLF::Extensions
 
 namespace DCLF::Api
 {
-	// The material-write sink (Api/MaterialWrites.h): a feature's hooks reach the write queues through it.
+	// The material-write sink a feature's hooks reach the write queues through.
 	void NoteMaterialWritten(const RE::BSShaderMaterial* a_material)
 	{
 		MaterialWrites::NoteWritten(a_material);

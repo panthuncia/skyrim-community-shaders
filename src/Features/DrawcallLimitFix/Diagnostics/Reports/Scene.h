@@ -13,18 +13,11 @@ namespace DCLF
 
 namespace DCLF::Reports
 {
-	/**
-	 * @brief The scene area's report lines (Diagnostics/Reports/Scene*.cpp): each formats what Coordinator and the scene observers counted
-	 * since the last call and resets it, at the report schedule's moments (Schedule.h).
-	 */
 
-	/** @brief The coordinator, at a pass's end: its own lines, when its frame a_sceneFrame crossed into a new window (a pass may skip frames). */
+	/** @brief The coordinator's own lines when a_sceneFrame crossed into a new window. Coordinator, at a pass's end. */
 	void ScenePassEnd(Scene::Coordinator& a_store, std::uint32_t a_sceneFrame);
-	/** @brief Render thread, the frame's report: the lines of what the render thread keeps (newline-terminated). */
+	/** @brief The lines of what the render thread keeps, newline-terminated. Render thread. */
 	std::string SceneFrameLines();
-	/**
-	 * @brief Render thread, the frame's start (before the components' adoption): the lines at Api::ReportPoint::GateReleases (the LOD gates'
-	 * releases' and engine side's), when frame a_frame crossed into a new window.
-	 */
+	/** @brief The GateReleases report point's lines when a_frame crossed into a new window. Render thread, frame start. */
 	void GateReleases(std::uint32_t a_frame);
 }

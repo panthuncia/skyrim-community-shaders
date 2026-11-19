@@ -1,6 +1,5 @@
-// CS_DCLF_PERSISTENT_PARITY: the sun and light candidate tables (kept by changes) against the candidate sets and the dependents as they
-// are, every 60 passes, after each table's update. Also each table's last snapshot (caught up by the table's log) against the table
-// index by index, and the indices its published log names since the snapshot of the last check against a comparison of the two.
+// Candidate parity. Every 60 passes, after each table's update, the sun and light candidate tables against the candidate sets and
+// dependents. Also each table's last snapshot against the table, and its published log against a comparison of two snapshots.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -13,10 +12,10 @@ namespace DCLF::Diagnostics
 	{
 		using V = SceneView;
 
-		/** @brief a_table against a_set and the dependents now; the first difference, or empty. */
+		/** @brief a_table against a_set and the dependents now. Returns the first difference, or empty. */
 		std::string CheckCandidateTable(const Scene::Coordinator& a_store, const V::EntrySpaceTable& a_table, const ankerl::unordered_dense::set<const RE::NiAVObject*>& a_set, bool a_sun)
 		{
-			// The table against the set and the dependents as they are (what a snapshot made whole would hold).
+			// What a snapshot made whole would hold.
 			const auto& rootDependents = V::rootDependents(a_store);
 			const auto& tracked = V::tracked(a_store);
 			if (a_table.index.size() != a_set.size())
@@ -33,7 +32,7 @@ namespace DCLF::Diagnostics
 					if (g == a_table.geometryIndex.end())
 						return fmt::format("a dependent of {} with no geometry row", static_cast<const void*>(root));
 					if (a_table.geometryEntry[g->second] != it->second)
-						continue;  // another entry's (listed there first)
+						continue;  // another entry's, listed there first
 					++owned;
 					if (a_table.geometrySlot[g->second] != a_store.FindObject(geometry))
 						return fmt::format("a geometry of {} with object {}, now {}", static_cast<const void*>(root), a_table.geometrySlot[g->second], a_store.FindObject(geometry));
@@ -51,8 +50,8 @@ namespace DCLF::Diagnostics
 		}
 
 		/**
-		 * @brief An earlier snapshot of a table, by reference and generation: pooled snapshots are reused, so it is read only while it
-		 * still is that generation (never held: the pool reuses what only it holds, and a held one would outlive the session).
+		 * @brief An earlier table snapshot, by reference and generation. Pooled snapshots are reused, so it is read only while still that
+		 * generation. Never held, since a held one would outlive the session.
 		 */
 		struct EarlierSnapshot
 		{
@@ -72,10 +71,10 @@ namespace DCLF::Diagnostics
 		};
 		struct EarlierSnapshots
 		{
-			EarlierSnapshot event, check;  // the last pass's (one publication back at most), the last check's
+			EarlierSnapshot event, check;  // the last pass's, at most one publication back, and the last check's
 		};
 
-		/** @brief The indices a_to's log names since a_from against a comparison of the two; the first difference, or empty. */
+		/** @brief The indices a_to's log names since a_from, against a comparison of the two. Returns the first difference, or empty. */
 		std::string CheckCandidateLog(const std::shared_ptr<const EntrySpace>& a_from, const EntrySpace& a_to)
 		{
 			if (!a_from || a_from.get() == &a_to)
@@ -103,7 +102,7 @@ namespace DCLF::Diagnostics
 			++parity.checks;
 			auto why = a_event.sun ? CheckCandidateTable(store, V::sunTable(store), V::sunCandidateSet(store), true) :
 			                         CheckCandidateTable(store, V::lightTable(store), V::lightCandidateSet(store), false);
-			// The last snapshot (caught up by the log) against the table, and its log against comparisons with earlier snapshots.
+			// The last snapshot against the table, and its log against earlier snapshots.
 			if (why.empty() && snapshot && !table.changed)
 				if (auto differ = table.CheckSnapshot(*snapshot); !differ.empty())
 					why = "snapshot: " + differ;

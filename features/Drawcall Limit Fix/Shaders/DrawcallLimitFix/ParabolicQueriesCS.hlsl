@@ -1,6 +1,6 @@
 #include "DrawcallLimitFix/ParabolicPrograms.hlsli"
 
-// Reference/replay kernel. Production consumer migration also requires the persistent hierarchy and ordered hemisphere state.
+// Reference and replay kernel.
 struct ParabolicQuery
 {
 	float4 Bound;

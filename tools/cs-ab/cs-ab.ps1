@@ -12,12 +12,17 @@
       cs-ab.ps1 restore                       Puts back the mod and state from before the first "use".
       cs-ab.ps1 status                        What is live, and what is stashed.
       cs-ab.ps1 run <name> <scenario> [-Label x] [-Env A=1,B=2] [-TimeoutSeconds n] [-Until regex]
-                    [-DumpAtFrame n -DumpPath file [-Procdump exe]]
+                    [-DumpAtFrame n -DumpPath file [-Procdump exe]] [-DisableMod name[,name]]
                                               "use", one game run of the scenario, then collects its files. -DumpAtFrame takes a
                                               full process dump once the scenario's command at that frame has run (dump\*.py read it).
+                                              -DisableMod turns those MO2 mods off for this run only.
+                                              A run stops as soon as CS's hang watchdog writes its report (stop=hang);
+                                              the report and its dump are moved into the run folder.
 
-    Scenarios are scenarios\*.env beside this script: the CommunityShaders.env for the run. Results land in
-    <Root>\runs\<time>-<name>-<scenario>[-<label>]. compare.py reads those folders.
+    Scenarios are scenarios\*.env beside this script: the CommunityShaders.env for the run. A scenario line
+    "# cs-ab: disable-mod=<mod name>" turns that mod off for the run, like -DisableMod. Only that mod's line in modlist.txt
+    changes, and it is put back when the run ends. Results land in <Root>\runs\<time>-<name>-<scenario>[-<label>].
+    compare.py reads those folders.
 #>
 param(
     [Parameter(Position = 0, Mandatory)][ValidateSet('stage', 'use', 'restore', 'status', 'run')][string]$Action,
@@ -31,6 +36,7 @@ param(
     [int]$DumpAtFrame = 0,
     [string]$DumpPath = '',
     [string]$Procdump = 'procdump64.exe',
+    [string[]]$DisableMod = @(),
     [string]$Mo2 = 'C:\Modding\MO2',
     [string]$Root = 'C:\Modding\CS-AB',
     [string]$Profile2 = 'Default'
@@ -41,6 +47,9 @@ $modList = Join-Path $Mo2 "profiles\$Profile2\modlist.txt"
 $overwrite = Join-Path $Mo2 'overwrite'
 $skse = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'My Games\Skyrim Special Edition\SKSE'
 $statePath = Join-Path $Root 'state.json'
+# The mods a run turned off, until it turns them back on: a run killed before its finally leaves them here for the next run or
+# restore to put back.
+$modsOffPath = Join-Path $Root 'mods-off.txt'
 # What a build writes that the other build must not see: moved, not copied, so a swap is instant. Settings stay shared,
 # so every variant runs the same ones (what a build does not know, it ignores).
 $liveState = @(
@@ -98,6 +107,43 @@ function Set-EnabledMod([string]$mod) {
     } else { throw "No enabled CS mod in $modList to take the place of" }
     Set-Content $modList $lines -Encoding utf8
 }
+# Turns each named mod's "+name" line into "-name" and returns the names it changed. Only those lines are touched, so a
+# restore (Set-ModsEnabled) cannot undo a "use" or anything else written to the list meanwhile.
+function Disable-Mods([string[]]$mods) {
+    if (-not $mods) { return @() }
+    $lines = Get-Content $modList
+    $changed = @()
+    for ($i = 0; $i -lt $lines.Count; ++$i) {
+        if ($lines[$i].StartsWith('+') -and $mods -contains $lines[$i].Substring(1)) {
+            $changed += $lines[$i].Substring(1)
+            $lines[$i] = '-' + $lines[$i].Substring(1)
+        }
+    }
+    foreach ($mod in $mods) { if ($changed -notcontains $mod) { Write-Warning "No enabled mod '$mod' in $modList" } }
+    if ($changed) {
+        Set-Content $modList $lines -Encoding utf8
+        Add-Content $modsOffPath $changed -Encoding utf8
+    }
+    return $changed
+}
+# Turns each named mod's "-name" line back into "+name".
+function Set-ModsEnabled([string[]]$mods) {
+    if (-not $mods) { return }
+    $lines = Get-Content $modList
+    for ($i = 0; $i -lt $lines.Count; ++$i) {
+        if ($lines[$i].StartsWith('-') -and $mods -contains $lines[$i].Substring(1)) { $lines[$i] = '+' + $lines[$i].Substring(1) }
+    }
+    Set-Content $modList $lines -Encoding utf8
+    Remove-Item $modsOffPath -ErrorAction SilentlyContinue
+}
+# Turns back on what an earlier run turned off and never restored (it was killed).
+function Restore-LeftoverMods {
+    if (Test-Path $modsOffPath) {
+        $left = @(Get-Content $modsOffPath | Where-Object { $_ } | Select-Object -Unique)
+        Write-Warning "Turning back on mods an earlier run left off: $($left -join ', ')"
+        Set-ModsEnabled $left
+    }
+}
 function Enabled-CsMod {
     Get-Content $modList | Where-Object { $_ -match '^\+(CS AB .+|CommunityShaders_AIO|CommunityShaders_AIO_native|CommunityShaders_ORG_Staging|Community Shaders DXVK ORG|CS ORG DXVK Optimized)$' } | ForEach-Object { $_.Substring(1) } | Select-Object -First 1
 }
@@ -143,6 +189,7 @@ switch ($Action) {
     'use' { Use-Variant $Name; "Live: $Name" }
     'restore' {
         Assert-NotRunning
+        Restore-LeftoverMods
         $state = Get-State
         if (-not $state.originalMod) { 'Nothing to restore'; return }
         if ($state.live -ne '_original') {
@@ -162,6 +209,7 @@ switch ($Action) {
     }
     'run' {
         Use-Variant $Name
+        Restore-LeftoverMods
         $scenario = Join-Path $PSScriptRoot "scenarios\$Argument.env"
         if (-not (Test-Path $scenario)) { throw "No scenario $scenario" }
         if ($DumpAtFrame -and (-not $DumpPath -or (Test-Path $DumpPath))) { throw "-DumpAtFrame needs a -DumpPath that does not exist yet" }
@@ -169,41 +217,57 @@ switch ($Action) {
         $envFile = Join-Path $skse 'CommunityShaders.env'
         $lines = @('CS_AB_PROBE=1') + (Get-Content $scenario) + ($Env | ForEach-Object { $_ -split ',(?=[A-Z_0-9]+=)' })
         Set-Content $envFile $lines -Encoding ascii
+        $modsOff = @($DisableMod | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) +
+                   @(Get-Content $scenario | Select-String -Pattern '^#\s*cs-ab:\s*disable-mod=(.+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })
         $start = Get-Date
         $startUtc = $start.ToUniversalTime()
-        Start-Process -FilePath (Join-Path $Mo2 'ModOrganizer.exe') -ArgumentList '-p', $Profile2, '"moshortcut://:SKSE"' -WorkingDirectory $Mo2 | Out-Null
-        $seen = $false; $stop = 'timeout'; $focused = $false; $dumped = $false
-        # The displays must stay on: with them off, Present throttles to a few frames a second.
-        Add-Type -Namespace CsAb -Name Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f); [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e); [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr w, bool a);'
-        [void][CsAb.Native]::SetThreadExecutionState([uint32]2147483651)
-        [CsAb.Native]::mouse_event(1, 0, 0, 0, [UIntPtr]::Zero)
-        while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
-            Start-Sleep -Seconds 2
-            $game = Get-Process SkyrimSE -ErrorAction SilentlyContinue
-            if ($game) { $seen = $true }
-            if ($game -and -not $focused -and $game.MainWindowHandle -ne [IntPtr]::Zero) { [CsAb.Native]::SwitchToThisWindow($game.MainWindowHandle, $true); $focused = $true }
-            if ($seen -and -not $game) { $stop = 'exited'; break }
-            if ($DumpAtFrame -and -not $dumped -and $game -and (Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue | Select-String -Pattern "test command at frame $DumpAtFrame\b" -Quiet)) {
-                & $Procdump -accepteula -ma $game.Id $DumpPath | Select-Object -Last 2
-                $dumped = $true
+        $disabled = Disable-Mods ($modsOff | Select-Object -Unique)
+        try {
+            # The log checks below must not match the previous run's log before the game rewrites it.
+            Move-Item (Join-Path $skse 'CommunityShaders.log') (Join-Path $skse 'CommunityShaders.previous.log') -Force -ErrorAction SilentlyContinue
+            Start-Process -FilePath (Join-Path $Mo2 'ModOrganizer.exe') -ArgumentList '-p', $Profile2, '"moshortcut://:SKSE"' -WorkingDirectory $Mo2 | Out-Null
+            $seen = $false; $stop = 'timeout'; $focused = $false; $dumped = $false
+            # The displays must stay on: with them off, Present throttles to a few frames a second.
+            Add-Type -Namespace CsAb -Name Native -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f); [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, UIntPtr e); [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr w, bool a);'
+            [void][CsAb.Native]::SetThreadExecutionState([uint32]2147483651)
+            [CsAb.Native]::mouse_event(1, 0, 0, 0, [UIntPtr]::Zero)
+            while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
+                Start-Sleep -Seconds 2
+                $game = Get-Process SkyrimSE -ErrorAction SilentlyContinue
+                if ($game) { $seen = $true }
+                if ($game -and -not $focused -and $game.MainWindowHandle -ne [IntPtr]::Zero) { [CsAb.Native]::SwitchToThisWindow($game.MainWindowHandle, $true); $focused = $true }
+                if ($seen -and -not $game) { $stop = 'exited'; break }
+                if ($DumpAtFrame -and -not $dumped -and $game -and (Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue | Select-String -Pattern "test command at frame $DumpAtFrame\b" -Quiet)) {
+                    & $Procdump -accepteula -ma $game.Id $DumpPath | Select-Object -Last 2
+                    $dumped = $true
+                }
+                $log = if ($seen) { Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue } else { $null }
+                if ($Until -and $log -and ($log | Select-String -Pattern $Until -Quiet)) { $stop = 'until'; Start-Sleep -Seconds 3; break }
+                # The hang watchdog has written its report (stacks and dump): the run is over.
+                if ($log -and ($log | Select-String -Pattern '\[HANG\] wrote CommunityShaders-Hang-' -Quiet)) { $stop = 'hang'; break }
             }
-            if ($Until -and $seen -and (Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue | Select-String -Pattern $Until -Quiet)) { $stop = 'until'; Start-Sleep -Seconds 3; break }
+            [void][CsAb.Native]::SetThreadExecutionState([uint32]2147483648)
+            Get-Process SkyrimSE -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            $m = Get-Process ModOrganizer -ErrorAction SilentlyContinue
+            if ($m) { $m | ForEach-Object { [void]$_.CloseMainWindow() }; Start-Sleep -Seconds 6; Get-Process ModOrganizer -ErrorAction SilentlyContinue | Stop-Process -Force }
+        } finally {
+            # After MO2 has closed: it writes the list on exit.
+            Set-ModsEnabled $disabled
         }
-        [void][CsAb.Native]::SetThreadExecutionState([uint32]2147483648)
-        Get-Process SkyrimSE -ErrorAction SilentlyContinue | Stop-Process -Force
-        Start-Sleep -Seconds 2
-        $m = Get-Process ModOrganizer -ErrorAction SilentlyContinue
-        if ($m) { $m | ForEach-Object { [void]$_.CloseMainWindow() }; Start-Sleep -Seconds 6; Get-Process ModOrganizer -ErrorAction SilentlyContinue | Stop-Process -Force }
         Remove-Item $envFile -ErrorAction SilentlyContinue
 
         $id = "$($start.ToString('MMdd-HHmmss'))-$Name-$Argument" + $(if ($Label) { "-$Label" } else { '' })
         $out = Join-Path $Root "runs\$id"
         New-Item -ItemType Directory -Force $out | Out-Null
         foreach ($log in 'CommunityShaders.log', 'SkyrimSE_d3d11.log') { Copy-Item (Join-Path $skse $log) $out -ErrorAction SilentlyContinue }
-        Get-ChildItem $skse -File | Where-Object { $_.LastWriteTimeUtc -ge $startUtc -and $_.Name -match '^(CS-AB-memory\.csv|CommunityShaders-VRAM-\d+\.json)$' } | ForEach-Object {
-            if ($_.Name -like '*.json') { Move-Item $_.FullName $out } else { Copy-Item $_.FullName $out }
+        # dclf:shot's screenshots of this run (<log directory>\dclf-shots), into the run folder's shots.
+        $shots = Get-ChildItem (Join-Path $skse 'dclf-shots') -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -ge $startUtc }
+        if ($shots) { $shotDir = Join-Path $out 'shots'; New-Item -ItemType Directory -Force $shotDir | Out-Null; $shots | Copy-Item -Destination $shotDir }
+        Get-ChildItem $skse -File | Where-Object { $_.LastWriteTimeUtc -ge $startUtc -and $_.Name -match '^(CS-AB-memory\.csv|CommunityShaders-VRAM-\d+\.json|CommunityShaders-Hang-[\d-]+\.(txt|dmp))$' } | ForEach-Object {
+            if ($_.Name -match '\.(json|txt|dmp)$') { Move-Item $_.FullName $out } else { Copy-Item $_.FullName $out }
         }
-        @{ variant = $Name; scenario = $Argument; label = $Label; env = $Env; stop = $stop; seconds = [int]((Get-Date) - $start).TotalSeconds } | ConvertTo-Json | Set-Content (Join-Path $out 'run.json') -Encoding utf8
+        @{ variant = $Name; scenario = $Argument; label = $Label; env = $Env; modsOff = $disabled; stop = $stop; seconds = [int]((Get-Date) - $start).TotalSeconds } | ConvertTo-Json | Set-Content (Join-Path $out 'run.json') -Encoding utf8
         "$id stop=$stop"
     }
 }

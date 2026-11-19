@@ -1,6 +1,7 @@
 #include "DxvkLoader.h"
 
 #include "Aftermath.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Vram/Debug.h"
 
@@ -108,6 +109,12 @@ namespace DxvkLoader
 
 		if (NativeModeRequested()) {
 			logger::info("[DXVK] CS_NATIVE_D3D11=1 -- skipping DXVK, using the system D3D11 runtime");
+			return false;
+		}
+
+		// Native mode: CS makes its own Vulkan device and the engine's D3D11 objects are tripwire handles over it.
+		if (RenderGraph::Engine::Native::Requested()) {
+			logger::info("[DXVK] CS_ORG_NATIVE=1 -- DXVK is not loaded; the render graph owns the device and Present");
 			return false;
 		}
 

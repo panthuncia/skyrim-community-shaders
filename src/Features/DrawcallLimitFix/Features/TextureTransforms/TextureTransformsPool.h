@@ -1,8 +1,6 @@
 #pragma once
 
-// The frame-value pool's parts its diagnostics share: the engine read of an entry's value (its sampling's and its parity's),
-// and the parity and stats line it calls (Diagnostics/TextureTransformsParity.cpp). Included by TextureTransformsPool.cpp and the
-// parity only.
+// Parts of the frame-value pool that its diagnostics share. Included by TextureTransformsPool.cpp and the parity only.
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
@@ -16,12 +14,9 @@
 
 namespace DCLF::Features::TextureTransforms
 {
-	// A read only while this producer's Kick is the newest: its list's materials are held by the publication its frame installed, which
-	// is let go no earlier than the next frame's start (released at that frame's Present, after the window closed).
+	// Read only while this producer's Kick is the newest. Its materials are held by the publication its frame installed, released no earlier than the next frame's Present.
 	inline bool Readable(const Api::FrameValuePoolProducer& a_producer, EngineReadWindow::Lease& a_lease) { return a_lease && a_producer.Newest(); }
 
-	// TexcoordOffset from the frame's buffer; a declared frame variable through its components' read (the port's evaluate, bit for bit:
-	// one product, or the bits copied), as data.
 	inline void Read(const TextureTransformList::Entry& a_entry, std::size_t a_buffer, float (&a_values)[4])
 	{
 		const auto* material = a_entry.material;
@@ -44,8 +39,7 @@ namespace DCLF::Features::TextureTransforms
 		a_values[3] = material->texCoordScale[a_buffer].y;
 	}
 
-	// Diagnostics/TextureTransformsParity.cpp, the frame's producer (one at a time in frame order) at its sample's end: the parity on its
-	// parity frames, against the rows it sends and the materials each entry was last read from; the line's counts every frame.
+	// The parity on parity frames and the line's counts every frame, at the end of the producer's sample.
 	void CheckPoolParity(const Api::FrameValuePoolProducer& a_producer, const TextureTransformList* a_list, std::size_t a_count, std::size_t a_buffer,
 		const std::vector<TextureTransformRow>& a_out, const std::vector<const RE::BSShaderMaterial*>& a_materials);
 	void CountPoolLine(std::size_t a_count, std::uint64_t a_changed, std::uint64_t a_refused, std::size_t a_variables, std::uint64_t a_variablesChanged);

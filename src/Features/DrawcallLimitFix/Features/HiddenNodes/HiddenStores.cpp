@@ -1,7 +1,5 @@
-// The hidden events' source: SceneWriterFramework's kHidden stores (SWF_EVENT_HIDDEN: every engine store that can change
-// NiAVObject::flags' bit 0, patched by the elected SWF provider), each pushing the node's mirror update on the storing thread when the
-// bit changed (Core's channel: Scene::PushHiddenUpdate). The LOD show stores take the show veto (Api::ShowVeto, through Core's cells)
-// as SWF's show filter (SWF_FILTER_SHOW). Subscribed on the render thread, at the feature's early hooks.
+// Turns SceneWriterFramework's kHidden stores into mirror updates, pushed on the storing thread when the bit changes.
+// The LOD show stores go through the show veto as SWF's show filter.
 
 #include "Features/DrawcallLimitFix/Features/HiddenNodes/HiddenNodes.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
@@ -13,23 +11,20 @@ namespace DCLF::Features::HiddenNodes
 {
 	namespace
 	{
-		// The show veto's cells (Extensions::RegisteredShowVeto: Core's, at a fixed address for the session), set at InstallStores before
-		// any event arrives.
+		// Fixed for the session. Set before any event arrives.
 		const Api::ShowVeto* showVeto = nullptr;
-		// The hidden site of the plugins' writes through SWF (SWF_WRITE_HIDDEN): the first after SWF's stores.
+		// The site id for plugins' writes through SWF. It comes right after SWF's own stores.
 		std::uint32_t writeSite = 0;
 
 		void OnHidden(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_HiddenEvent*>(a_event);
-			// The show veto's engine hide observer (the LOD gates' coverage observer: the engine's own LOD hides, object update and terrain
-			// block nodes, after a flip).
+			// Tells the LOD gates when the engine hides a node itself.
 			if (event.hidden && showVeto->engineHid && std::ranges::find(showVeto->hideSites, event.siteOffset) != showVeto->hideSites.end())
 				showVeto->engineHid(event.object, event.siteOffset);
 			Scene::PushHiddenUpdate(event.object, event.site);
 		}
 
-		// A plugin's hidden write through SWF's Write (CS's features': DrawcallLimitFix::WriteHidden), after its store.
 		void OnSceneWrite(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& write = *reinterpret_cast<const SWF_SceneWriteEvent*>(a_event);
@@ -37,8 +32,8 @@ namespace DCLF::Features::HiddenNodes
 				Scene::PushHiddenUpdate(write.object, writeSite);
 		}
 
-		// SWF's show stubs call the filter while one is registered; the veto's open word keeps a closed gate to one load. A vetoed store
-		// is left unrun, without an event, so the object stays hidden until the flip.
+		// A vetoed store does not run and sends no event, so the object stays hidden.
+		// The open word keeps the common case to a single load.
 		std::int32_t VetoShow(const SWF_EventHeader* a_event, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_ShowFilterEvent*>(a_event);
@@ -70,11 +65,9 @@ namespace DCLF::Features::HiddenNodes
 
 	void InstallStores()
 	{
-		// Core's channel: the reserved sites (a feature's own stores, InstallContext::ReserveHiddenSite) follow SWF's; the walk gates its
-		// verdicts on the events once installed. The show veto's cells before the first event (the filter loads them).
+		// The cells must be set before the first event, because the filter reads them.
 		showVeto = &Extensions::RegisteredShowVeto();
 		const auto* api = SceneWriter::Api();
-		// SWF's stores, then the plugins' writes through SWF as one more site.
 		writeSite = api ? api->SiteCount(SWF_EVENT_HIDDEN) : 0;
 		Extensions::NoteHiddenSourceSites(writeSite + 1);
 		Scene::hiddenEventsInstalled = Subscribe();

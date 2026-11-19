@@ -1,13 +1,13 @@
 #pragma once
 
-// The CPU-driven pipeline's shadow site (Sites.h, SiteFrame.h): the shadow views (the sun's cascades, the spot and point lights' views)
-// and the occlusion maps (the sky occluder, the precipitation occluder), drawn at shadow-maps.after from the shadow epoch's commit
-// (IndirectDraws::ExecuteShadowFrame, run in Direct::ExecuteEpoch), which latched them as in the GPU path. Each latched view is culled on
-// DCLF's pool from its latch (ShadowCullView, OcclusionCullView) and drawn into its map's slice and viewport with direct draws, after the
-// site's pre-work (the shape's latched copies and the index pool's copies, which the frame's other sites' draws read too).
+// The CPU-driven pipeline's shadow site. It draws the shadow views and occlusion maps at shadow-maps.after from the shadow
+// epoch's commit. Each latched view is culled on DCLF's pool and drawn into its map's slice with direct draws, after the
+// site's pre-work. The pre-work's copies are read by the frame's other sites too.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
+
+#include <Render/RunRef.h>
 
 #include <cstdint>
 #include <memory>
@@ -26,29 +26,29 @@ namespace DCLF::Draws
 
 namespace DCLF::Direct
 {
-	/** @brief One view the shadow commit latched (LatchShadowViews, LatchOcclusionViews): its list, its slot, its view in the shape, its latch. */
+	/** @brief One view the shadow commit latched: its list, slot, view in the shape and latch. */
 	struct ShadowSiteView
 	{
 		ViewType type = ViewType::Sun;
-		std::uint32_t slot = 0;   // its view slot (the CullView's viewIndex)
-		std::uint32_t index = 0;  // into ShadowFrame::views (its target, slice, viewport, push words and map row)
+		std::uint32_t slot = 0;  // the CullView's viewIndex
+		std::uint32_t index = 0;  // into ShadowFrame::views
 		Draws::BuildDrawsLatch latch{};
 	};
 
-	/** @brief The shadow commit's inputs to its site (ExecuteShadowFrame's body, where the GPU path submits its recording). */
+	/** @brief The shadow commit's inputs to its site. */
 	struct ShadowCommitInputs
 	{
-		std::shared_ptr<const Draws::ShadowFrame> shape;  // the revision's shadow shape the commit wrote against (its full variant)
+		std::shared_ptr<const Draws::ShadowFrame> shape;  // the shadow shape the commit wrote against
 		std::shared_ptr<Draws::ShadowResources> resources;
-		const org::services::NamedVersions* adopted = nullptr;  // the frame's adopted set (held by the execution's owner)
+		const org::services::NamedVersions* adopted = nullptr;  // held by the execution's owner
 		std::span<const ShadowSiteView> views;
-		std::span<const Draws::SunEntryProcess> sunEntry;  // the sun's full-frustum processes the commit latched (clamped)
-		std::uint32_t latchSlot = 0;                       // the latch regions it wrote (the external frame slot)
+		std::span<const Draws::SunEntryProcess> sunEntry;  // clamped
+		org::RunRef latchRun{};  // a published copy's, or the external run
 	};
 
 	/**
-	 * @brief Render thread, inside the shadow epoch's commit (CPU mode): the shadow site: its pre-work, a view of its list per latched view
-	 * whose map the shadow resources import, culled once the frame's cull frame is in; its callback queued after the commit (ExecuteEpoch).
+	 * @brief Render thread, inside the shadow epoch's commit: opens the shadow site with a view per latched map the shadow
+	 * resources import. The views are culled once the frame's cull frame is in.
 	 */
 	void ShadowCommitted(const ShadowCommitInputs& a_inputs);
 

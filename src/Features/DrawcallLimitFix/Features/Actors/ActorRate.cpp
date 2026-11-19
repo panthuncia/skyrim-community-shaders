@@ -1,17 +1,9 @@
-// The actors' animation stamp from DCLF's shadow views (main thread, Main::Update's entry, after the accumulated and fade writes: the
-// stand-in observer's afterWrites) and its report line among the accumulated writes' (ReportPoint::AccumulatedWrites).
-//
-// The actors' animation rate (skyrim-engine-notes.md, "the fade nodes' OnVisible stores and the actors' animation stamp"). A high actor
-// whose 3D the actor pre-cull left kNotVisible (bit 20; the race's flag bit 7 clear) animates at full rate in a frame only when its skin
-// property (MiddleHighProcessData +0x178) carries that frame's gFrameCounter at +0x80 (Actor::ModifyAnimationUpdateData, 0x1406a37ef: the
-// difference must be under fMaxFrameCounterDifferenceToConsiderVisible, so 0). Only the depth and shadow registrations stamp it
-// (FUN_1414b2a60 and its siblings, before the batch renderer's RegisterPass), so it is lost once the culls stop, and for an actor the sun's
-// entry exclusion keeps out of the cascade culls.
-//
-// Main thread at Main::Update's entry (no job runs; gFrameCounter is this frame's until Renderer::End): DCLF's verdict per high actor is
-// its 3D's world bound inside any of the last scene frame's shadow views (the Sun board's cascade culls, the Lights board's local views:
-// Features/Shadows/Sun's and Features/Shadows/Local's, DEPENDS) - the views DCLF draws, from the cameras the engine set up, no cull result
-// read. The property of every actor with that verdict is stamped.
+// Keeps off-screen actors animating at full rate when they cast a shadow.
+// A high actor the pre-cull left kNotVisible animates at full rate only if its skin property holds this frame's gFrameCounter
+// (Actor::ModifyAnimationUpdateData, 0x1406a37ef). Only the engine's depth and shadow registrations write that stamp,
+// so it is lost once DCLF replaces those culls. We stamp every high actor whose bound lies in one of the last scene
+// frame's shadow views. Runs on the main thread at Main::Update's entry, when no job runs.
+// See skyrim-engine-notes.md, "the fade nodes' OnVisible stores and the actors' animation stamp".
 
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
 
@@ -32,11 +24,11 @@ namespace DCLF::Features::Actors
 {
 	namespace
 	{
-		// AE 1.6.1170 and SE 1.5.97: the actors' animation rate (UpdateActorRate). The field offsets are the same on both.
+		// The same on AE 1.6.1170 and SE 1.5.97.
 		constexpr std::size_t kMiddleHighSkinProperty = 0x178;  // MiddleHighProcessData: the property Actor::ModifyAnimationUpdateData reads
 		constexpr std::size_t kPropertyStamp = 0x80;            // BSShaderProperty::lastAccumulatedFrameCount
 
-		/** @brief The actor rate's counts since the last report (main thread; the report reads them on the render thread between frames). */
+		// Written on the main thread. The report reads them on the render thread between frames.
 		struct ActorRate
 		{
 			std::uint64_t entries = 0, actors = 0, noProperty = 0, stamped = 0, inSun = 0, inLocal = 0;
@@ -65,7 +57,6 @@ namespace DCLF::Features::Actors
 			auto& c = actorRate;
 			++c.entries;
 			const std::uint32_t counter = Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
-			// The last scene frame's shadow views (the frame whose stamps the engine left): the sun's cascade culls, the local lights' views.
 			const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
 			const auto& sun = Shadows::Sun::SunBoard();
 			const bool sunViews = sun.valid && sun.sceneFrame == sceneFrame;
@@ -82,10 +73,9 @@ namespace DCLF::Features::Actors
 					++c.noProperty;
 					continue;
 				}
-				// DCLF's verdict: the 3D's bound inside a shadow view of the last scene frame.
 				const auto& bound = root->worldBound;
 				bool inSun = false, inLocal = false;
-				// The sun: the cascade culls walk what the full-frustum cull kept (Shadows::Sun::SunFrame::fullFrusta), then test their own planes.
+				// The cascade culls only see what the full-frustum cull kept, so test both.
 				bool inFull = sun.fullFrusta.empty();
 				for (const auto& planes : sun.fullFrusta)
 					inFull = inFull || SphereInside(planes, bound.center, bound.radius);
@@ -94,7 +84,7 @@ namespace DCLF::Features::Actors
 						inSun = sun.cascades[i].valid && SphereInside(sun.cascades[i].cull, bound.center, bound.radius);
 				if (!inSun)
 					Shadows::Local::LightsBoard().ForEachView(sceneFrame, [&](const ShadowCameras::Camera& a_view, const std::array<float, 4>& a_sphere) {
-						// A spot light's view: its cull planes; a point light's (no planes): the bound within the light's radius.
+						// Point lights have no cull planes, so test against the light's radius.
 						if (inLocal)
 							return;
 						if (a_view.cull.mask) {
@@ -108,7 +98,6 @@ namespace DCLF::Features::Actors
 				const bool dclf = inSun || inLocal;
 				c.inSun += inSun ? 1 : 0;
 				c.inLocal += inLocal ? 1 : 0;
-				// This frame's stamp, for every actor DCLF's shadow views hold (the engine reads it only for a kNotVisible one).
 				if (dclf) {
 					std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(property, kPropertyStamp)).store(counter, std::memory_order_relaxed);
 					++c.stamped;
@@ -116,7 +105,6 @@ namespace DCLF::Features::Actors
 			}
 		}
 
-		// The actors' animation stamp (newline-terminated); nothing when it did not run.
 		void ActorRateText(std::string& a_text)
 		{
 			const auto c = std::exchange(actorRate, {});
@@ -132,10 +120,8 @@ namespace DCLF::Features::Actors
 
 	void RegisterActorRate(Api::InstallContext& a_context)
 	{
-		// Where PrimaryCull::AtUpdateEntry called it: last at Main::Update's entry, after the fade writes. Without the primary cull nothing
-		// calls it (and it did not run before either).
+		// Runs last at Main::Update's entry, after the fade writes. Nothing calls it without the primary cull.
 		a_context.RegisterStandInObserver({ .afterWrites = &UpdateActorRate });
-		// Inside the accumulated writes' text, after its every-listed-root lines, as before.
 		a_context.RegisterReportLines({ .name = "actor rate", .point = Api::ReportPoint::AccumulatedWrites, .text = &ActorRateText });
 	}
 }

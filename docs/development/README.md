@@ -4,6 +4,7 @@
 
 - **[VSCode Setup](./vscode-setup.md)** - IDE configuration, extensions, and auto-deploy
 - **[Shader Workflow](./shader-workflow.md)** - Fast shader iteration and deployment
+- **[Build speed](./build-speed.md)** - Why incremental builds are fast (unity batches, the render-graph PCH, narrow headers) and the rules that keep them fast
 - **[Nsight Perf](./nsight-perf.md)** - GPU hardware counters per render pass, D3D11 and DXVK/Vulkan backends (Developer Tools, `NVPERF_SUPPORT`, `CS_NVPERF_*`)
 - **[OpenRenderGraph on DXVK](./render-graph.md)** - How features run render-graph work on DXVK's Vulkan device
 - **[Render graph schedule](./render-graph-schedule.md)** - The persistent schedule inspector window and the `communityshaders.schedule` DevBench tool: batches per queue, barriers, cross-queue waits and their causes

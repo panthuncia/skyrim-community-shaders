@@ -1,4 +1,4 @@
-// The cameras (see the header): the ports of the engine's camera, plane and viewport arithmetic.
+// Ports of the engine's camera, plane and viewport math. Keep the engine's operation order so results match bit for bit.
 
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 
@@ -13,13 +13,13 @@ namespace DCLF::ShadowCameras
 {
 	void FrustumPlanes(const RE::NiFrustum& a_frustum, const RE::NiTransform& a_world, Planes& a_out)
 	{
-		// FUN_140d32cc0 (AE): the camera looks down its rotation's first column, up its second, right its third.
+		// Port of FUN_140d32cc0 (AE). The view direction is rotation column 0, up is column 1 and right is column 2.
 		const auto& r = a_world.rotate.entry;
 		const float dir[3] = { r[0][0], r[1][0], r[2][0] };
 		const float up[3] = { r[0][1], r[1][1], r[2][1] };
 		const float right[3] = { r[0][2], r[1][2], r[2][2] };
 		const float eye[3] = { a_world.translate.x, a_world.translate.y, a_world.translate.z };
-		// FUN_140d32a60: the plane through a point, d = (p.y * n.y + n.x * p.x) + p.z * n.z.
+		// Port of FUN_140d32a60. It sums in this order: d = (p.y * n.y + n.x * p.x) + p.z * n.z.
 		auto plane = [&](std::uint32_t a_index, const float (&a_n)[3], const float (&a_p)[3]) {
 			auto& p = a_out.plane[a_index];
 			p[0] = a_n[0];
@@ -39,14 +39,14 @@ namespace DCLF::ShadowCameras
 				a_out3[i] = -a_v[i];
 		};
 		float point[3], normal[3];
-		// Near: the view direction, through the eye moved to the near distance; far: its opposite at the far distance.
+		// The near plane faces along the view direction. The far plane faces against it.
 		along(dir, a_frustum.fNear, point);
 		plane(0, dir, point);
 		along(dir, a_frustum.fFar, point);
 		negate(dir, normal);
 		plane(1, normal, point);
 		if (!a_frustum.bOrtho) {
-			// The side planes through the eye: each normal a sum of the side axis and the view direction, scaled by 1 / sqrt(t*t + 1).
+			// Side planes pass through the eye. Each normal is the side axis plus the view direction, scaled by 1 / sqrt(t*t + 1).
 			auto side = [&](std::uint32_t a_index, const float (&a_axis)[3], float a_axisScale, float a_dirScale) {
 				for (std::uint32_t i = 0; i < 3; ++i)
 					normal[i] = a_axis[i] * a_axisScale + dir[i] * a_dirScale;
@@ -61,7 +61,7 @@ namespace DCLF::ShadowCameras
 			s = 1.0f / std::sqrt(a_frustum.fBottom * a_frustum.fBottom + 1.0f);
 			side(5, up, s, -(a_frustum.fBottom * s));
 		} else {
-			// Orthographic: the side planes face inward through the eye moved along their axis to the frustum's edge.
+			// Orthographic side planes face inward, through the eye moved along their axis to the frustum edge.
 			along(right, a_frustum.fLeft, point);
 			plane(2, right, point);
 			along(right, a_frustum.fRight, point);
@@ -78,7 +78,7 @@ namespace DCLF::ShadowCameras
 
 	void CullPlanes(const RE::NiCullingProcess* a_process, const RE::NiCamera& a_camera, Planes& a_out)
 	{
-		// Process2: SetFrustum through the camera, then the custom planes copied over all of it (the six planes and the active mask).
+		// As in Process2, custom cull planes replace all six planes and the active mask.
 		if (a_process && a_process->doCustomCullPlanes) {
 			const auto& planes = a_process->customCullPlanes;
 			for (std::uint32_t p = 0; p < 6; ++p)
@@ -91,7 +91,7 @@ namespace DCLF::ShadowCameras
 
 	void CameraMatrices(const RE::NiCamera& a_camera, Camera& a_out)
 	{
-		// FUN_140e57ae0 (AE), from FUN_140e58b80's arguments: the camera's rotation columns (direction, up, right) and its frustum.
+		// Port of FUN_140e57ae0 (AE), with the arguments FUN_140e58b80 passes.
 		const auto& r = a_camera.world.rotate.entry;
 		auto& v = a_out.view;
 		v = { r[0][2], r[0][1], r[0][0], 0.0f, r[1][2], r[1][1], r[1][0], 0.0f, r[2][2], r[2][1], r[2][0], 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
@@ -121,7 +121,7 @@ namespace DCLF::ShadowCameras
 			p[11] = 0.0f;
 			p[15] = one;
 		}
-		// FUN_1404a6ed0: each row of the product is (x * P0 + z * P2) + (y * P1 + w * P3), four lanes at once.
+		// Port of FUN_1404a6ed0. Each row is (x * P0 + z * P2) + (y * P1 + w * P3), in that order.
 		for (std::uint32_t row = 0; row < 4; ++row) {
 			const float* a = v.data() + row * 4;
 			for (std::uint32_t c = 0; c < 4; ++c) {
@@ -131,7 +131,7 @@ namespace DCLF::ShadowCameras
 			}
 		}
 		a_out.eye = { a_camera.world.translate.x, a_camera.world.translate.y, a_camera.world.translate.z };
-		// NiRect<float> (its members protected): left, right, top, bottom.
+		// NiRect<float> members are protected. The order is left, right, top, bottom.
 		const auto& port = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().port;
 		static_assert(sizeof(port) == sizeof(float) * 4);
 		std::memcpy(a_out.port.data(), &port, sizeof(float) * 4);
@@ -157,8 +157,8 @@ namespace DCLF::ShadowCameras
 
 	std::array<std::uint32_t, 4> Viewport(const std::array<float, 4>& a_port, std::uint32_t a_width, std::uint32_t a_height)
 	{
-		// Renderer::UpdateViewPort with the target's size: x = left * W, y = (1 - top) * H, width = (right - left) * W, height =
-		// (top - bottom) * H; the capture truncates each to an integer as the viewport's floats.
+		// As Renderer::UpdateViewPort: x = left * W, y = (1 - top) * H, width = (right - left) * W, height = (top - bottom) * H.
+		// The capture truncates each value to an integer.
 		const float w = static_cast<float>(a_width), h = static_cast<float>(a_height);
 		const float x = a_port[0] * w;
 		const float y = (1.0f - a_port[2]) * h;

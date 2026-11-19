@@ -1,4 +1,4 @@
-// Coordinator::UpdateMaterialBindings and its helpers (MaterialBindings.h), scene lane.
+// Coordinator::UpdateMaterialBindings and its helpers. Scene lane.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -7,11 +7,9 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		// A character-light pass's t11 is the frame's (MaterialSources::FrameCharacterLight): its record holds the modes, no view.
+		// A character-light pass's t11 comes from the frame, so its record holds the modes but no view.
 		constexpr std::uint32_t kCharacterLightTexture = 11;
-		// GpuTextures' diagnostic source tags: a material's t0-t15 as themselves, its feature textures from 16.
-		constexpr std::uint32_t kFeatureSourceTag = 16;
-		// The lookups' material log's bound (VersionMaterialBindings): a publication's changes fit many times over.
+		constexpr std::uint32_t kFeatureSourceTag = GpuTextures::Tag(GpuTextures::Source::Feature);
 		constexpr std::size_t kMaterialLogEntries = std::size_t(1) << 15;
 	}
 
@@ -23,9 +21,7 @@ namespace DCLF::Scene
 			lookups.materials.resize(tables.materials.size());
 		if (mb.held.size() < tables.materials.size())
 			mb.held.resize(tables.materials.size(), 0);
-		// The answers since the last pass: each view's waiting slots written from it (a rejection too: that texture unresolvable). An
-		// answer nobody waits on any more lets its owner go here: the last release of an import, or of its descriptor, runs on the cleanup
-		// queue (ResourceCleanupQueue::Make), never on this thread.
+		// A rejection is written too. An owner's last release runs on the cleanup queue, never on this thread.
 		std::vector<std::uint32_t> waiting;
 		mb.replies.Drain([&](GpuTextures::Reply&& a_reply) {
 			if (a_reply.cookie != mb.cookie) {
@@ -39,7 +35,7 @@ namespace DCLF::Scene
 				waiting.insert(waiting.end(), it->second.begin(), it->second.end());
 				mb.inFlight.erase(it);
 			}
-			// Answered with an import a move superseded meanwhile: the waiting slots ask again (the new storage's import).
+			// The import was superseded by a move meanwhile, so the waiting slots ask again.
 			if (a_reply.view && GpuTextures::Superseded(a_reply.binding.owner.get())) {
 				++mb.stats.superseded;
 				return;
@@ -48,7 +44,7 @@ namespace DCLF::Scene
 				auto& cached = mb.cache[a_reply.view];
 				cached.owner = a_reply.binding.owner;
 				cached.index = a_reply.binding.index;
-				// Amortized: each answer cached looks at two other entries and drops one whose import nobody holds any more.
+				// Amortized cleanup of entries whose import nobody holds.
 				for (std::uint32_t i = 0; i < 2 && !mb.cache.empty(); ++i) {
 					mb.cacheSweep = (mb.cacheSweep + 1) % mb.cache.size();
 					if (const auto swept = mb.cache.begin() + static_cast<std::ptrdiff_t>(mb.cacheSweep); swept->second.owner.expired())
@@ -63,8 +59,7 @@ namespace DCLF::Scene
 			ResolveMaterialBinding(slot);
 		mb.arrived.clear();
 		FollowRelocatedTextures();
-		// The records written since the last pass: the joins' new slots and the posts' records (the tables' material log; a cursor
-		// behind it resolves every used slot).
+		// A cursor behind the log resolves every used slot.
 		const auto& log = tables.materialLog;
 		if (!mb.cursor.Continues(log, 0)) {
 			Tables::ForEachBit(tables.usedMaterialBits, [&](std::uint32_t a_slot) { ResolveMaterialBinding(a_slot); });
@@ -74,7 +69,6 @@ namespace DCLF::Scene
 				ResolveMaterialBinding(slot);
 		}
 		mb.cursor.Advance(log);
-		// The slots used since the last pass (a member joined on a slot whose record is older, KeepResidentsAlive marking it again).
 		const auto& used = tables.usedMaterialBits;
 		mb.usedSeen.resize(used.size(), 0);
 		for (std::size_t word = 0; word < used.size(); ++word) {
@@ -84,7 +78,6 @@ namespace DCLF::Scene
 		}
 	}
 
-	/** @brief ResolveMaterialBinding's textures: each bound or cleared against the entry's held owner block, the changes collected. */
 	struct Coordinator::MaterialTextureBinder
 	{
 		Coordinator& self;
@@ -97,12 +90,11 @@ namespace DCLF::Scene
 		Lookups::MaterialOwners next;  // the owners that change, sealed into a new block after
 		std::uint32_t texturesMoved = 0, featuresMoved = 0;
 
-		// One texture: kept while its view and binding stand; held while a resolved entry's new view is asked for; else what is known.
 		void Bind(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, std::uint32_t& a_index, bool a_feature, std::uint32_t a_at,
 			ID3D11ShaderResourceView*& a_seen)
 		{
 			const void* owner = owners ? (a_feature ? owners->features[a_at] : owners->textures[a_at]).get() : nullptr;
-			// Kept unless a move superseded its import (pinless): then asked anew, the superseded one held meanwhile.
+			// Asked anew if a move superseded its import, holding the old one meanwhile.
 			if (sameGeneration && a_seen == a_view && owner && a_index != Lookups::kNone && !(a_view && GpuTextures::Superseded(owner)))
 				return;
 			auto binding = self.MaterialViewBinding(a_view, a_sourceTag, slot);
@@ -142,7 +134,7 @@ namespace DCLF::Scene
 		const bool complete = GpuTextures::Get().RelocatedViews(mb.relocationCursor, moved);
 		if (complete && moved.empty())
 			return;
-		// The log overran (moves missed): every slot, whose bindings each check theirs.
+		// The log overran, so every slot checks its bindings.
 		const ankerl::unordered_dense::set<ID3D11ShaderResourceView*> views(moved.begin(), moved.end());
 		for (std::uint32_t slot = 0; slot < lookups.materials.size(); ++slot) {
 			const auto& entry = lookups.materials[slot];
@@ -153,7 +145,7 @@ namespace DCLF::Scene
 				names = names || (view && views.contains(view));
 			for (auto* view : entry.featureViews)
 				names = names || (view && views.contains(view));
-			// A view's owner only: a null view's is the null descriptor's, not an import.
+			// A null view's owner is the null descriptor, not an import.
 			if (!complete && entry.bindingBlock) {
 				const auto& block = *entry.bindingBlock;
 				for (std::size_t t = 0; t < std::min(block.textures.size(), entry.views.size()); ++t)
@@ -164,8 +156,7 @@ namespace DCLF::Scene
 			if (!names)
 				continue;
 			++mb.stats.followed;
-			// A used slot takes the new storage's imports (the superseded ones held meanwhile); an unused one, which nothing draws, lets
-			// its bindings go (the old storage with them): it resolves anew once used again.
+			// An unused slot draws nothing, so it lets its bindings and the old storage go until used again.
 			if (slot < tables.materials.size() && tables.materialSlots.Alive(slot) && tables.MaterialUsed(slot))
 				ResolveMaterialBinding(slot, true);
 			else
@@ -176,8 +167,7 @@ namespace DCLF::Scene
 	void Coordinator::ResolveMaterialBinding(std::uint32_t a_slot, bool a_force)
 	{
 		auto& mb = materialBindings;
-		// Only a used slot: the used set certifies the views a record holds (Tables, "The three shared tables"). A slot freed keeps its
-		// entry until its retirement comes back (RetireMaterialBinding).
+		// Only a used slot, since the used set certifies the views a record holds. A freed slot keeps its entry until its retirement comes back.
 		if (a_slot >= tables.materials.size() || a_slot >= tables.materialSlotKey.size() || a_slot >= tables.materialVersion.size() ||
 			!tables.materialSlots.Alive(a_slot) || !tables.MaterialUsed(a_slot))
 			return;
@@ -190,14 +180,11 @@ namespace DCLF::Scene
 			mb.held.resize(tables.materials.size(), 0);
 		const auto& material = tables.materials[a_slot];
 		const std::uint32_t textureGeneration = GpuTextures::Get().Generation();
-		// An unchanged record keeps its bindings (no periodic restamp); a held view waits for its answer, which resolves the slot again.
-		// Read before the entry is written: a write copies its chunk when a publication shares it (SharedChunks).
+		// Read before the entry is written, since a write copies its chunk when a publication shares it.
 		if (const auto& current = lookups.materials[a_slot]; !a_force && current.key == key && current.resolved && !mb.held[a_slot] &&
 															 current.recordVersion == tables.materialVersion[a_slot] && current.written == material.textureWritten &&
 															 current.texturesGeneration == textureGeneration)
 			return;
-		// The entry is the lookups', written straight in; its version and log entry come before the next commit or
-		// publication (VersionMaterialBindings).
 		auto& entry = lookups.materials.Mutable(a_slot);
 		bool changed = false;
 		if (entry.key != key) {
@@ -209,10 +196,8 @@ namespace DCLF::Scene
 			changed = true;
 		}
 		const bool sameGeneration = entry.texturesGeneration == textureGeneration;
-		// Readiness is held (the DCLF set: a member joined because its material resolved, and the engine no longer draws it): a resolved
-		// entry whose view changed keeps drawing with the previous view, whose import its owner still holds, until the new one is answered.
+		// A member joined because its material resolved, so the engine no longer draws it. Keep drawing with the previous view until the new one is answered.
 		const bool wasResolved = entry.resolved && sameGeneration;
-		// The owners held now (the entry's block, immutable); those that change are collected and sealed into a new block after.
 		MaterialTextureBinder binder{ *this, a_slot, sameGeneration, wasResolved, entry.bindingBlock.get(), changed };
 		const std::uint32_t textureWritten = material.textureWritten & ~(MaterialSources::FrameCharacterLight(key.second) ? 1u << kCharacterLightTexture : 0u);
 		for (std::uint32_t t = 0; t < kPixelTextureSlots; ++t) {
@@ -227,7 +212,7 @@ namespace DCLF::Scene
 			else
 				binder.Clear(entry.featureIndex[f], true, f, entry.featureViews[f]);
 		}
-		// A texture still asked for leaves the slot unresolved: its draws defer (they stay the engine's) until the answer resolves it.
+		// Its draws stay the engine's until the answer resolves it.
 		const bool pending = binder.pending;
 		if (entry.resolved == pending) {
 			changed = true;
@@ -249,7 +234,6 @@ namespace DCLF::Scene
 		Lookups::MaterialOwners& a_next, std::uint32_t a_texturesMoved, std::uint32_t a_featuresMoved)
 	{
 		auto& mb = materialBindings;
-		// The unmoved owners kept from the held block; none at all holds nothing.
 		bool any = false;
 		for (std::uint32_t t = 0; t < a_next.textures.size(); ++t) {
 			if (!((a_texturesMoved >> t) & 1) && a_held)
@@ -263,7 +247,7 @@ namespace DCLF::Scene
 		}
 		if (!any)
 			return nullptr;
-		// Another slot of the material sealed the same owners (its other passes name the same textures): one block for both.
+		// A material's passes often name the same textures, so its slots share one block.
 		auto& shared = mb.sealed[a_material];
 		if (auto block = shared.lock(); block && block->textures == a_next.textures && block->features == a_next.features) {
 			++mb.work.sealShared;
@@ -277,7 +261,7 @@ namespace DCLF::Scene
 		auto block = std::make_shared<const Lookups::MaterialOwners>(std::move(a_next));
 		shared = block;
 		++mb.work.sealed;
-		// Amortized: each block sealed looks at two other materials' and drops one nobody holds any more.
+		// Amortized cleanup of blocks nobody holds.
 		for (std::uint32_t i = 0; i < 2 && !mb.sealed.empty(); ++i) {
 			mb.sealedSweep = (mb.sealedSweep + 1) % mb.sealed.size();
 			if (const auto swept = mb.sealed.begin() + static_cast<std::ptrdiff_t>(mb.sealedSweep); swept->second.expired())
@@ -292,21 +276,18 @@ namespace DCLF::Scene
 		if (const auto it = mb.arrived.find(a_view); it != mb.arrived.end())
 			return it->second;
 		if (const auto it = mb.cache.find(a_view); it != mb.cache.end()) {
-			// Not an import a move superseded (pinless): its view imports anew.
 			if (auto owner = it->second.owner.lock(); owner && !(a_view && GpuTextures::Superseded(owner.get()))) {
 				++mb.stats.cached;
 				return { it->second.index, std::move(owner) };
 			}
 			mb.cache.erase(it);
 		}
-		// Asked once per view in flight: the record holds the view, alive (its material's slot holds the material, which holds its
-		// textures), and the request takes its own reference on it at once.
+		// The material does not keep its textures' views alive, so the slot pins each view. The request takes its own reference at once.
 		auto [waiters, asked] = mb.inFlight.try_emplace(a_view);
 		if (asked) {
 			GpuTextures::Get().Request(a_view, a_sourceTag, mb.replies, mb.cookie);
 			++mb.stats.requested;
 		}
-		// Once per (view, slot): a slot resolved again while it waits (a held view, a record rewritten meanwhile) is listed already.
 		if (mb.waiting.emplace(a_view, a_slot).second)
 			waiters->second.push_back(a_slot);
 		else
@@ -319,8 +300,7 @@ namespace DCLF::Scene
 		auto& mb = materialBindings;
 		if (a_slot >= lookups.materials.size())
 			return;
-		// The lookups' entry emptied: its owners let go here, their last release on the cleanup queue (whichever holder of a publication
-		// naming them lets go last). Versioned with the other changes (VersionMaterialBindings).
+		// The owners' last release runs on the cleanup queue, whichever publication holder lets go last.
 		lookups.materials.Mutable(a_slot) = {};
 		if (a_slot < mb.held.size())
 			mb.held[a_slot] = 0;
@@ -330,7 +310,6 @@ namespace DCLF::Scene
 
 	void Coordinator::ResetMaterialBindings()
 	{
-		// The lookups are made new with the tables (ResetSlotTables), and these entries with them.
 		auto& mb = materialBindings;
 		mb.held.clear();
 		mb.changed.clear();
@@ -349,8 +328,6 @@ namespace DCLF::Scene
 	void Coordinator::VersionMaterialBindings()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.VersionMaterialBindings");
-		// The scene lane, before a commit or a publication (ResolveLookups): the entries written since the last time (resolved, re-keyed,
-		// retired) each take a new version and a log entry.
 		auto& mb = materialBindings;
 		if (lookups.materialVersions.size() < lookups.materials.size())
 			lookups.materialVersions.resize(lookups.materials.size(), 0);
@@ -360,7 +337,7 @@ namespace DCLF::Scene
 			mb.changedMark[slot] = 0;
 			if (slot >= lookups.materials.size())
 				continue;
-			// A new version for every change (the kept bindings key on it); a retired slot's empty entry has none, as before it resolved.
+			// A retired slot's empty entry has no version, as before it resolved.
 			const std::uint32_t version = lookups.materials[slot].key.first ? lookups.NextVersion() : 0u;
 			lookups.materials.Mutable(slot).version = version;
 			lookups.materialVersions[slot] = version;
@@ -368,9 +345,9 @@ namespace DCLF::Scene
 		}
 		mb.stats.versioned += mb.changed.size();
 		mb.changed.clear();
-		// Each publication copies the log (Lookups::Snapshot): its older half goes past this, and a reader behind it reads every pair again.
+		// A reader behind the trim reads every pair again.
 		lookups.materialLog.Trim(kMaterialLogEntries);
-		// A build made against the entries before may have deferred draws they now resolve, or read an index they let go of.
+		// A build against the old entries may have deferred draws they now resolve, or read an index they let go of.
 		++lookups.generation;
 	}
 }

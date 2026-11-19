@@ -1,8 +1,6 @@
 #pragma once
 
-// Fades' records beside Core's root-state rows (Core/Scene/Model/Records.h: FadeNodeState, FadeRootStatic, FadeFrame, the kFadeVerdict* and
-// kFadeRoot* bits, which the cull reads): the animation job's inputs the fade writers record, the parity's log entry and the write-back's
-// events.
+// Records only Fades uses. The root-state rows the cull also reads are in Core/Scene/Model/Records.h.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 
@@ -10,7 +8,7 @@
 
 namespace DCLF
 {
-	/** @brief One animation update's inputs, as the fade writers record them (FadeWriters.cpp; FadeFrame anim*). */
+	/** @brief One animation update's inputs, as the fade writers record them. */
 	struct AnimatedFadeInputs
 	{
 		float eye[3]{};
@@ -18,10 +16,10 @@ namespace DCLF
 		std::int32_t counter = 0;
 		float deltaTime = 0.0f;
 		std::uint32_t valid = 0;
-		std::uint32_t varied = 0;  // a later update of the batch had other inputs (the first's stand for all)
+		std::uint32_t varied = 0;  // a later update in the batch had other inputs, but the first update's are used for all
 	};
 
-	/** @brief CS_DCLF_FADE_PARITY: one root's update as FadeStateCS made it, for the C++ port to make again. */
+	/** @brief One root's update from FadeStateCS, which the parity check replays in C++. */
 	struct FadeLogEntry
 	{
 		FadeNodeState before;
@@ -33,18 +31,17 @@ namespace DCLF
 	inline constexpr std::uint32_t kFadeLogEntries = 64;
 
 	/**
-	 * @brief The fade write-back (dclf-architecture.md, "The fade write-back"): a stood-in root whose fade crossed a milestone
-	 * (faded out, fading, faded in) or whose leaf LOD level or transition changed. Appended after a header (count, the depth
-	 * commit's scene frame - always written - and two of padding); the host writes them onto the nodes in frame order.
+	 * @brief A root whose fade crossed a milestone or whose leaf LOD changed. The host writes these onto the nodes in frame order.
+	 * The list starts with a header of count, scene frame and two padding words. The scene frame is always written.
 	 */
 	struct FadeEvent
 	{
-		std::uint32_t root = 0;        // the root slot
-		std::uint32_t generation = 0;  // its static row's: a slot listed again since is not the event's
-		std::uint32_t flags = 0;       // the state's (kFadeFlagMask)
+		std::uint32_t root = 0;
+		std::uint32_t generation = 0;  // a slot reused since has a new generation, so the event is stale
+		std::uint32_t flags = 0;       // kFadeFlagMask bits
 		float currentFade = 0.0f;
-		std::uint32_t levels = 0;      // the state's +0x152 | +0x153 << 8 (FadeNodeState::levels)
-		float blend = 0.0f;            // +0x14C, the LOD cross-fade
+		std::uint32_t levels = 0;      // node +0x152 | +0x153 << 8
+		float blend = 0.0f;            // node +0x14C, the LOD cross-fade
 		std::uint32_t padding[2]{};
 	};
 	static_assert(sizeof(FadeEvent) == 32);

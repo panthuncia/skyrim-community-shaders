@@ -1,0 +1,2 @@
+# DXVK guest, each upscale method (upscalers.toml): the reference for the native runs.
+extends = ["guest", "upscalers"]

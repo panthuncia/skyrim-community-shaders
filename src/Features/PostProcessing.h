@@ -2,6 +2,11 @@
 
 #include "PostProcessing/PostProcessFeature.h"
 
+namespace RenderGraph::Engine
+{
+	struct TonemapTargets;
+}
+
 #include "PostProcessing/BokehResources.h"
 #include "PostProcessing/Border.h"
 #include "PostProcessing/CODBloom.h"
@@ -108,11 +113,20 @@ struct PostProcessing : Feature
 	void EnsureResources(PostProcessFeature& feature);
 
 	/**
-	 * @brief Sets up every active sub-feature and frees inactive ones, so disabled effects hold no GPU memory.
-	 * An inactive sub-feature with resources is replaced by a fresh instance carrying its settings and enabled state.
-	 * Call after the auto-enabled update and before the pipeline draws.
+	 * @brief Frees inactive sub-features, so disabled effects hold no GPU memory. An inactive sub-feature with resources is
+	 * replaced by a fresh instance carrying its settings and enabled state. Active ones are set up where the D3D11 path draws
+	 * them (DrawFeature), so none are made while the render graph runs the chain. Call after the auto-enabled update.
 	 */
 	void SyncPipelineResources();
+
+	/** @brief Updates the auto-enabled sub-features, then SyncPipelineResources: every draw of the pipeline starts with it. */
+	void UpdatePipeline();
+
+	/**
+	 * @brief The sub-features the tonemap chain (PreProcess) draws this frame, in draw order: the pipeline's order, those drawn
+	 * after Color Grading last. Empty while bypassed. Call after UpdatePipeline.
+	 */
+	std::vector<FeaturePipelineIndex> ChainOrder() const;
 
 	/// shared_ptr, not unique_ptr: see PostProcessFeature's weak_ptr callback contract.
 	std::array<std::shared_ptr<PostProcessFeature>, static_cast<size_t>(FeaturePipelineIndex::COUNT)> pipeline;
@@ -141,6 +155,15 @@ struct PostProcessing : Feature
 
 	virtual void PostPostLoad() override;
 	virtual void Prepass() override;
+
+	/**
+	 * @brief At the tonemap hook, before the Tonemap anchor runs: lets the render graph take the chain this frame
+	 * (ORGPostProcessing, CS_ORG_POST_PROCESSING=1). PreProcess then draws nothing.
+	 */
+	void BeforeTonemapAnchor(const RenderGraph::Engine::TonemapTargets& a_targets);
+
+	/** @brief Whether the scene is in kMAIN_COPY at the tonemap (its input, or refraction routed it there), else in kMAIN. */
+	bool ReadsMainCopy(RE::RENDER_TARGET a_input) const;
 
 	void PreProcess(RE::RENDER_TARGET a_input);
 	void DrawBeforeUpscaling();
@@ -179,6 +202,12 @@ struct PostProcessing : Feature
 		ID3D11Texture2D* srcTex,
 		ID3D11ShaderResourceView* srcSRV, const CopyCB& conversion);
 	void BeginLinearProcessing(PostProcessFeature::TextureInfo& texture);
+
+	/**
+	 * @brief The conversion PreProcess applies when it copies the chain's output into the main target.
+	 * @param a_colorGraded Whether Color Grading drew this frame: its output is in the display's gamut.
+	 */
+	CopyCB OutputConversion(bool a_colorGraded) const;
 
 	/////////////////////////////////////////////////////////////////////////////////
 

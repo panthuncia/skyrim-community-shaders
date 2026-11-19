@@ -52,6 +52,8 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5.13 (the flush and the shader binds as tripwires)                                                              | Census and latch built (`CS_ORG_RESIDUE_CENSUS`, `CS_ORG_ENGINE_FLUSH_LATCH`); not flipped | CS `org-port/p5`                                         |
 | P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
 | Phase 5.5 (no engine fall-through): the gate before Phase 6                                                        | Started 2026-11-11; 5.5.0's compile-stall fixes merged                              | CS `org-port/p5`                                         |
+| Guest frames without slots: shared command pools, run leases, one frame arena, only published recordings kept    | Shared pools merged (4.30 GB settled, from 9.75); leases and the arena built, not run yet | CS `org-port/frame-contexts`, ORG and BasicRHI `org-port/frame-contexts` |
+| P6.0-P6.3: native mode (`CS_ORG_NATIVE=1`): BasicRHI device, native handles, native host, ORG present, startup errors | Built, not run (render-graph.md, "Native mode"; `native.env`) | CS `org-port/native-vk` |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
@@ -63,8 +65,9 @@ the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 ru
 
 - **P5.7 constants:** every engine constant-buffer use is captured into graph memory; a read-back check found 0 differences.
 - **P5.1 skeleton:** the engine's nine clear and depth-copy sites run on the graph; no tripwire line from them is left.
-- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers stay the
-  engine's by default (`CS_ORG_SKY_CLOUDS`, off until a run confirms them; p5/sky.md, "Cloud layers").
+- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers were the
+  engine's by default in wave 1; they are always on the graph since 91b722642, and the `CS_ORG_SKY_CLOUDS` switch is gone
+  (p5/sky.md, "Cloud layers").
 - **P5.11 Bink:** a main-thread movie draws on the graph (165 of 166 frames), decoded frames identical. The startup logo
   plays on its own thread; with P5.12's `CS_ORG_LOADING_THREAD=1` it draws on the graph too (164 or 165 of 166 frames).
 - **P5.10 Scaleform:** about half the displays drew on the graph in wave 1, shots match. The rest were loading-screen
@@ -213,8 +216,9 @@ geometry group 10 batch (AE 106584 +0x143) is vouched, not taken.
 
 - In the guest phase each anchor is its own epoch in DXVK's stream, with a fixed ring of frame slots. An anchor run more
   than the ring holds in one frame (the skeleton's shadow clears) waited on work DXVK had not submitted: a deadlock. ORG's
-  host now grows a listed epoch's ring (`GraphHost::Desc::epochRuns`, sized per anchor in FrameAnchors). This goes away once
-  ORG owns the frame and these are passes in one graph.
+  host first grew a listed epoch's ring (`GraphHost::Desc::epochRuns`); run leases (`org-port/frame-contexts`) replaced the
+  rings: each run holds a lease of its own and waits for nothing. This goes away once ORG owns the frame and these are passes
+  in one graph.
 - A client registered while its anchor has no active client never joined the graph: the host builds a graph only when
   it is submitted, and Drawcall Limit Fix makes builds explicit at its per-world-frame build point. A joining client now
   runs the epoch, `FrameAnchors::InBuiltGraph` tells a client when it is in, and a blocking movie builds between frames.
@@ -256,6 +260,13 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
+- Green streaks on near geometry (Whiterun bridge railings at noon) came from transients of different epochs sharing
+  alias memory. `CS_ORG_SSGI_DEBUG=<n>` (render-graph.md, "Switches") narrowed it down: gone with no aliasing (1), at
+  full resolution (8), and with SSGI in a pool of its own (17). Every epoch's graph packed its transients from offset 0
+  of one shared arena, and Volumetric Lighting's volume (epoch 34) covered SSGI's working depth, radiance and normals
+  (epoch 15). Nothing orders two epochs' GPU work against each other: the alias ledger adds no wait on the same queue.
+  Each epoch now has pools of its own (ORG). Also fixed on the way: an aliased texture's first-use barrier waited for
+  nothing (TOP_OF_PIPE; now sync All, and a Vulkan discard keeps a before sync).
 - ORG's descriptor manager made 2D views of 3D textures, so Skylighting's probe update wrote almost nothing readers saw.
   3D textures now get Texture3D views.
 - A texture array's default view is its first slice: ports that read `Texture2DArray` (Skylighting's cascades, LLF's
@@ -359,7 +370,7 @@ Switch names (suggested):
 
 - `CS_ORG_OWNED_FRAME`: the inversion.
 - `CS_ORG_NATIVE`: no DXVK, Vulkan.
-- `CS_ORG_BACKEND=vulkan|d3d12`.
+- `CS_ORG_NATIVE_BACKEND=vulkan|d3d12`.
 
 The default stays DXVK as host until the user says otherwise.
 
@@ -752,12 +763,12 @@ reasons are deleted as their items land, and no new ones are added.
 | 5.5.2 | Sky cloud layers | Run `sky-river-org1-clouds{,-main,-faces}.env` with weather forced; fix the texture fault and the weather-blend difference; `CS_ORG_SKY_CLOUDS` on by default. | `sky: cloud layers`, `sky: left to the engine` |
 | 5.5.3 | Volumetric Lighting on ORG | `ORGVolumetricLighting.{h,cpp}`: generate, raymarch and both blurs as compute passes, with 3D and 1D graph textures, the shadow cascades and Terrain/Cloud Shadows' published ids. Replaces the 107023 detour's scope and the `Hooks.cpp` shader swap. | `imagespace: volumetric lighting compute` |
 | 5.5.4 | ImageSpace remainder | VL apply (3D/1D imports in `FrameAnchors`, reading 5.5.3's volume); the SAO composite (dual-target `IBL.hlsli` and `ExponentialHeightFog.hlsli`, their outputs by published id); `Main::RenderWaterEffects`' copies (a bindless source in the latch); refraction's late shape registered at Setup; the distant blur confirmed at 0. | `imagespace: effect not on the graph`, `shape refused`, `shape not in the manifest`, `failed on the graph` |
-| 5.5.5 | Sun occlusion query | An rhi occlusion pool mirroring the engine's ring (75565/77366, Begin/End 75567-8 / 77368-9); an ORG pass replays SunOcclude between them; `GetQueryData` (75569/77370) answers once the frame retires. The second user (35563, read by 29262) the same way. Design in `p4/p4.6-shaders-states.md`. | `sky: sun occlusion query` |
+| 5.5.5 | Sun occlusion query | An rhi occlusion pool mirroring the engine's ring (75565/77366, Begin/End 75567-8 / 77368-9); an ORG pass replays SunOcclude between them; `GetQueryData` (75569/77370) answers once the frame retires. The second user (35563, read by 29262) the same way. Design in `p4/p4.6-shaders-states.md`. Done (`p5/occlusion-queries.md`): the sun at `EngineQueries` (d89148df8), the decal test at its own `DecalQueries` anchor (DCLF's decal occlusion family); both under `CS_ORG_OCCLUSION_QUERIES`, which 5.5.11 turns on. | `sky: sun occlusion query` (deleted) |
 | 5.5.6 | DCLF residue | Refraction normals (name them with `p5-all-census-dclf.env`, then claim them); master particles (parity checks, then `CS_DCLF_MASTER_PARTICLES` on by default); precipitation (a family for the grouped-alphas particle draws, AE 107673); first person behind menus (RE RenderDepth's first-person block, take it in `Features/FirstPerson`); water's group-10 batch (the water family spans it). | `precipitation: no port`, `water: geometry group 10 batch`, the families' `left to the engine` reasons |
-| 5.5.7 | Menus (P5.8/P5.9 stages 2-3, `p5/menus.md`) | A Menu3D view on Core's view contract (menu lighting, the stencil key, a frame for freeze-frame menus), with the loading-screen model; a local map view with the Utility `LOCALMAP_FOGOFWAR` family into `kLOCAL_MAP_SWAP`. | `menu views: menu 3D left to the engine`, `menu views: local map left to the engine` |
+| 5.5.7 | Menus (P5.8/P5.9, `p5/menus.md`) | The menu scenes as an engine draw family, not DCLF views (a load has no DCLF members for the loading-screen model): the local map's two batches (`CS_ORG_MAP=1`) and a menu model's depth and colour batches (`CS_ORG_MENU3D=1`), drawn with ORG builds of Utility (base texture, fog of war, depth, shadow maps), Lighting and Effect, the world's CS features off in the last two. Written 2026-11-12. | `menu views: local map left to the engine`, `menu views: menu 3D left to the engine` |
 | 5.5.8 | Scaleform remainder | GFx render targets as graph resources; the blur filter family (offset table transcribed); 3D draws, line strips, 32-bit indices, XY32f, gouraud 4-5, YUV textures. `CS_ORG_SCALEFORM_D3D11_PARTS` removed. | `scaleform: display not taken`, `D3D11 part`, `segment replayed` |
 | 5.5.9 | Bink remainder | Mode-2 movies at the `DrawTiles` point; HDR output into HDR Display's UI texture; movies over 2048x1152; ticks between a resize and the next build; the logo's frame 1. | `bink: tick not taken` |
-| 5.5.10 | D3D11 state readers | `EngineDrawFamily.cpp` `ResolveHeader` reads `RSS.PSTexture[]`; diagnostics read the latch or are listed as DXVK-only. | |
+| 5.5.10 | D3D11 state readers | `EngineDrawFamily.cpp` `ResolveHeader` reads `RSS.PSTexture[]`; diagnostics read the latch or are listed as DXVK-only. Done on `org-port/state-readers` (p5/flush.md "Readers of the D3D11 state" and "DXVK's hazard rules under the latch"): every `Get*` reader classified; `ResolveHeader` reads only CS's registers (t16 and up), Water, ImageSpace and Scaleform read the shadow state, the diagnostics are DXVK-only. Under the latch DXVK keeps stale targets and drops CS's binds of their views (its hazard rules): traced with the census (`[ORG] state readers:`), and `CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1` unbinds DXVK's targets at a latched flush that changes them. A likely cause of the green streaks on near geometry with the latch on; `latch-census-short-unbind.env` against `latch-census-short.env` decides. | |
 | 5.5.11 | On by default | Every port switch the census tours use becomes the default, and the latch is on by default in ORG builds, so the gate runs on the shipping configuration. | |
 
 **Order:** 5.5.0, then 5.5.1 (the largest, and structural), then 5.5.2-5.5.6, then 5.5.7-5.5.9, then 5.5.10-5.5.11.
@@ -816,11 +827,159 @@ cold-cache run reaches the world without a DCLF watchdog failure.
 
 | #    | Task                                                                                                                                                                                                                                                                                                                                             |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| P7.1 | Turn on `BASICRHI_ENABLE_D3D12` in `cmake/RenderGraph.cmake`; add `CS_ORG_BACKEND=d3d12` device creation (BasicRenderer's `DeviceManager` pattern).                                                                                                                                                                                              |
+| P7.1 | Turn on `BASICRHI_ENABLE_D3D12` in `cmake/RenderGraph.cmake`; add `CS_ORG_NATIVE_BACKEND=d3d12` device creation (BasicRenderer's `DeviceManager` pattern).                                                                                                                                                                                              |
 | P7.2 | DXIL targets in the shader store with the D3D12 binding ABI (SM6.6 `ResourceDescriptorHeap`, root constants instead of push constants); `ShaderCache`'s reflection reads DXIL.                                                                                                                                                                   |
 | P7.3 | Streamline on D3D12: DLSS/DLSS-G/Reflex natively; D3D12 builds of CS's `sl.fsr`, `sl.fsr_g`, `sl.xess` plugins (`extern/Streamline/source/plugins`, which are Vulkan-only today: `fsrEntry.cpp:291`, `xessEntry.cpp:275`, `fsrGEntry.cpp:910`); FSR-FG with a DXGI swap chain. BasicRenderer's `UpscalingManager`/`FfxBackendDX12` show the way. |
 | P7.4 | HDR (`SetColorSpace1`), latency (waitable object), DRED.                                                                                                                                                                                                                                                                                         |
 | P7.5 | Parity gate: the P6.4 tour on D3D12 matches Vulkan in screenshots, and both match the DXVK build. Multi-RHI peer work stays deferred.                                                                                                                                                                                                            |
+
+## Phase 7 status (2026-11-12, branch `org-port/dx12`)
+
+D3D12 runs only in the native mode (`CS_ORG_NATIVE=1`, Phase 6): DXVK translates the game's D3D11 into Vulkan, so there is
+no D3D12 device to share with it. Select it with `CS_ORG_NATIVE_BACKEND=d3d12`.
+
+- **P7.1:** `CS_ORG_D3D12` (default on) builds BasicRHI's D3D12 backend, with the DirectX-Headers 1.722 overlay port
+  (`cmake/ports/directx-headers`, as BasicRHI pins). `RenderGraph::Backend` (`src/RenderGraph/Backend.h`) reads
+  `CS_ORG_NATIVE_BACKEND` and records the active backend. `RenderGraph::Engine::CreateD3D12Device`
+  (`src/RenderGraph/Engine/D3D12Device.h`) is what the native mode's device creation calls for D3D12. It creates the
+  graphics, compute and copy queues and shader-visible heaps of 1,000,000 resources and 2048 samplers. It loads an Agility
+  SDK through `ID3D12SDKConfiguration1::CreateDeviceFactory` when `CS_ORG_D3D12_SDK` names one, since only an executable
+  can export `D3D12SDKVersion` (BasicRHI `DeviceCreateInfo::d3d12DeviceFactory`). A device without Shader Model 6.6,
+  resource binding tier 3 or enhanced barriers is refused by name.
+- **P7.2:** `RenderGraph::ShaderTarget` (`src/RenderGraph/ShaderTarget.h`) picks DXIL on D3D12 for ProgramBuild
+  (ComputeProgram, RasterProgram) and for Drawcall Limit Fix's stages. The HLSL is unchanged: its bindless
+  declarations index `ResourceDescriptorHeap`/`SamplerDescriptorHeap`, and the `OrgBindings` push block at `b0` is root
+  constants on D3D12 (BasicRHI maps a push range's `set`/`binding` to the register space and register). SPIR-V-only DXC
+  arguments are left out. `Util::ReflectShader` reads DXIL containers through DXC's `IDxcUtils::CreateReflection`. The
+  DXC game shaders (`CS_SHADER_DXC`) are SPIR-V for DXVK and stay off on D3D12.
+- **P7.3:** CS's `sl.fsr`, `sl.fsr_g` and `sl.xess` plugins turn themselves off on a non-Vulkan device and log why
+  (Streamline `org-port/dx12`). CS's Streamline integration is off on D3D12 by name: it hands Streamline DXVK's device
+  and Vulkan resources. DLSS, DLSS-G and Reflex on D3D12 need `slSetD3DDevice` on the native device and D3D12 tags.
+- **P7.4:** BasicRHI's D3D12 swap chain already has HDR colour spaces (`SetColorSpace1`), frame latency and its waitable
+  object. `Engine::ConfigureSwapchain` applies them, on the D3D12 self-test's swap chain and on native mode's (at creation, and
+  for HDR Display's colour space through `Native::SetSwapChainColorSpace`). DRED is on with the debug layer or with crash
+  markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
+
+**Native mode on D3D12** (2026-11-12): `CS_ORG_NATIVE=1 CS_ORG_NATIVE_BACKEND=d3d12`, scenario
+`tools/cs-ab/scenarios/native-d3d12.env` (and `native-d3d12-validation.env`). What differs from native Vulkan is in
+render-graph.md, "Native mode on D3D12". `CS_ORG_D3D12_SELFTEST=1` (optionally `CS_ORG_D3D12_DEBUG=1`,
+`CS_ORG_D3D12_SELFTEST_HDR=1`) still runs device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device
+beside a DXVK game (`src/RenderGraph/Engine/D3D12SelfTest.cpp`).
+
+### DCLF on D3D12: the port's plan (2026-11-12)
+
+DCLF is forced off on D3D12, so the world's geometry is not drawn there. Here is what stands in the way, from a survey of
+the code, with the work for each piece. The pieces build on each other in this order.
+
+1. **Buffers in shaders (the foundation): buffer view refs.** DXIL has no buffer pointers, so no shader reads a buffer
+   through a 64-bit device address, on either backend. It reads through a buffer view ref (`Common/DeviceRef.hlsli`):
+   two words, the heap slot of the buffer's raw SRV (its raw UAV is the slot after it) and a byte offset. `DeviceLoad(T, ref)`
+   is that `ByteAddressBuffer`'s `Load<T>` at the offset, `DeviceStore` the UAV's `Store`, `DeviceRefAdd` the offset math; the
+   same code on SPIR-V and DXIL. A ref takes an address's 8 bytes in every record, row and push block, so no layout moved.
+   - BasicRHI makes the views (`Device::GetBufferViewRef`, ABI in `rhi_shader_abi.h`, `BUFFER_VIEW_REF_*`): a buffer's raw
+     SRV/UAV pair goes into a reserved region of every shader-visible resource heap of the device's full capacity, past the slots
+     the client indexes, the first time its ref is asked for, and is freed with the buffer (deferred destruction). On Vulkan the
+     pair is two storage buffer descriptors over the buffer's address range, in VK_EXT_descriptor_heap's heap or the
+     descriptor-buffer model's universal set alike; the device reports that many fewer descriptors. View slot 0 is no buffer.
+   - Game buffers are not BasicRHI's: `GpuResources` imports a described buffer's VkBuffer (native D3D12: its ID3D12Resource)
+     once, shared by every range of it, and its leases hold the import (`RenderGraph::ImportBufferRef`).
+   - Words a pipeline layout or the GPU front end reads stay device addresses: the draw sequences' row and block addresses
+     (VK_EXT_descriptor_heap's push and indirect address mappings), the frame record's address and its block addresses, the shadow
+     views' pushed blocks, the refraction's LodFadeFrame word, every index buffer view. A stage that also reads through one of them
+     turns it into a ref with the frame record's backings (`DrawBindings::backings`: per buffer such an address points into, its
+     ref, address and bytes; `DCLFRefFromBacking`): the pipeline rows, the material rows or the frame's animated copy (told apart by
+     range), the shadow rows, the frame constants. The record's own ref is pushed beside its address (`kFramePushRecordRef`,
+     `kShadowPushFrameRecordRef`).
+2. **Bindings through records (`LayoutRangeSource::IndirectIndex`, `IndirectAddress`, `PushAddress`).** DCLF's colour draws
+   use the engine's shaders with register bindings. On Vulkan, `VK_EXT_descriptor_heap` maps each register per draw to:
+   - a heap slot named in the frame, pipeline or material row (textures t0-t15 and samplers from the material row);
+   - a block at an address in a record, or pushed per draw (b0/b1/b2/b4 from the pipeline, material and geometry rows).
+   D3D12 has no such mapping. ExecuteIndirect can change root constants and root CBVs per draw, but not a texture's
+   descriptor table. So the D3D12 build reads its rows itself, as the Z-prepass's pulled builds already do (`DCLF_PULLED`,
+   `DCLF_PULLED_ROWS`): the textures from `ResourceDescriptorHeap` by the material row's indices, and the blocks through
+   item 1's loads. That means "pulled" colour builds of Lighting, Effect and the other families. Today a pulled build
+   compiles away everything after the alpha test, so this is the largest shader piece: every PerTechnique, PerMaterial,
+   PerGeometry and frame-block member a colour stage reads must come from its row (the constant tables, `ConstantTableOf`).
+3. **Reflection.** `SpirvReflection` checks each stage's bindings and builds the constant tables from its blocks' members.
+   The D3D12 build reflects DXIL instead (`ID3D12ShaderReflection` through `IDxcUtils::CreateReflection`, as
+   `Util::ReflectShader` now does), which gives the same block members and register bindings.
+4. **Draw submission.** Device-generated commands with pipeline sets do not exist on D3D12 (BasicRHI reports
+   `pipelineSets` false). DCLF already has the path without them: one counted ExecuteIndirect per pipeline bucket, with the
+   draw's words as root-constant arguments. BasicRHI's D3D12 command signatures take these (constant and index-buffer
+   arguments, counted draws). It needs the layouts of items 1 and 2, nothing more.
+5. **CPU pipeline sites** (the forward family, decals, first person on the CPU path): they record Vulkan command buffers
+   through `EmitExternalCommands`, in secondary lists that set viewports (D3D12 bundles cannot). On D3D12 they would record
+   into BasicRHI primary lists submitted in order (the native External would take a BasicRHI list instead of a
+   `VkCommandBuffer`). `SiteStats`' raw Vulkan queries become BasicRHI query pools. Until then the forward family needs the
+   GPU path.
+   **Done (2026-11-14, lane `par-dclf-cpu`, `parity/dclf-cpu.md`):** in native mode the sites record inline into their epochs'
+   primary lists (ORG's inline at-execution passes), with no secondaries; waits and signals are BasicRHI timeline points;
+   `SiteStats` uses BasicRHI query pools.
+6. **Texture imports** (`GpuTextures`: `rhi::vulkan::import_buffer` of buffer-backed views) use
+   `rhi::dx12::import_resource` on the ID3D12Resource that native mode's descriptions already carry.
+
+**Item 1 (2026-11-12, lane `org-port/device-refs`):** buffer view refs replace the first slice's D3D12 device address table (a page
+table from addresses to raw views, looked up by every load). Every `DeviceLoad`/`DeviceStore` site reads through a ref on both
+backends, and no `vk::RawBufferLoad` is left. `CS_ORG_D3D12_SELFTEST=1` checks the view pairs end to end
+(`RenderGraph/D3D12DeviceRefTest.hlsl`).
+
+The first piece that can be built and run alone is item 1 on DCLF's compute shaders (BuildDraws, IndexPool, PixelRows,
+TextureTransforms, FoliageParity). Their layouts are CS's own, so the GPU cull and draw building could be checked on D3D12
+before any colour draw.
+
+**Slice 1, the main view's Lighting (2026-11-12, lane `org-port/dclf-d3d12`).** DCLF is on in native D3D12. It draws only the way
+RDNA2 already draws on Vulkan without device-generated commands: pulled builds and plain counted draws, the Z-prepass's buckets and
+the colour pass's main, terrain and decal buckets (`CS_DCLF_MAIN_PLAIN` and the others). What it took:
+
+- **Shaders.** Every `vk::RawBufferLoad`/`Store` left went through `DeviceLoad`/`DeviceStore` (then the address table's; buffer view
+  refs since, item 1). DXIL-only: `VS_PerFrame` is b12 in space 1 (DXIL refuses two blocks at b12;
+  FrameBuffer's PerFrame is one), and the pulled draws' instance (below).
+- **The pass's bindings (item 2's rest).** A D3D12 pulled build (`DCLF_D3D12_FRAME`) is preprocessed with
+  `Common/DCLFFrameRecord.hlsli` first, then `FrameSource::Rewrite` turns every register declaration but the push blocks (b190,
+  b191) into reads of the pass's frame record: textures and samplers from the heap at the record's index, constant buffers as the
+  pass's view of the block (`frameBlocks`), each member a static of its own name. `DxilStages::PrepareFrameSource` does it on the build
+  executor before the compile. All 538 pulled Lighting stages of a stage dump build to DXIL binding only b190 and b191
+  (`tools/shader-compare/dclf-shadertool d3d12`).
+- **Reflection (item 3).** `SpirvReflection::Parse` reads a DXIL container through DXC's reflection (`DxilStages::Reflect`), in the
+  SPIR-V builds' binding numbers; `FragmentDefersDepth`/`FragmentExports` read the disassembly and output signature. The unpulled
+  builds still compile on D3D12, only for their reflection (constant tables, register usage): no D3D12 pipeline is made of them.
+- **Layouts and draws (item 4).** On D3D12 every DCLF layout is its root constants (b190: 24 words, b191: the pass's). D3D12's
+  `SV_InstanceID` does not count the first instance, so the plain draws' signature is Constant (draw push word 23,
+  `kDrawPushInstance`) then DrawIndexed, starting one word early: BuildDrawsCS and ForwardSortCS store the instance in the
+  sequence's word before its arguments (the index buffer view's format, which no D3D12 draw reads), and the pulled stages add it
+  (`DCLFInstanceWord`).
+- **What stays off on D3D12**, by its own switch, which native mode's stage 1 sets (`Native::ApplySwitches`, logged as `[ORG
+  native] D3D12: Drawcall Limit Fix switches set`, and in DCLF's `[DCLF] D3D12: on` line): the CPU pipeline
+  (`CS_DCLF_PIPELINE=gpu`, `CS_DCLF_FORWARD_DIRECT=0`), the forward epoch, refraction, the Effect family, particles, grass, tree
+  LOD, first person, water reflections. A value set in the environment is kept. The shadow views and Skylighting's and the
+  precipitation's occlusion views draw on D3D12 since the parity wave (`docs/development/parity/dclf-d3d12.md`).
+
+**Slice 1 draws (2026-11-12, `test/refs-sweep`, RX 6600).** Native D3D12 draws the main view's Lighting, textured and lit, like
+Vulkan. Three fixes got it there:
+- **Index buffer views.** BasicRHI's D3D12 index and vertex buffer views of size 0 were empty, so the plain draws read every
+  index as 0 and every triangle was degenerate (vertex stages ran, nothing rasterized). A view of size 0 now covers the rest of
+  the buffer, as Vulkan's does.
+- **The texture transforms' copy.** Its pool (`animated-material-rows`) now has UAV access (`Api::FrameValuePool::unorderedAccess`).
+  Without it, the buffer view ref's UAV is a null view on D3D12, so every store was dropped and every animated draw read zeros
+  (black objects).
+- **The AMD early-return miscompile** in TextureTransformsCS (see AGENTS.md), which broke the copy on Vulkan and D3D12 alike.
+
+The ref trace (`CS_DCLF_REF_TRACE`) works on D3D12 too: its table is a committed buffer in host-cached system memory.
+
+Next slices, each on what slice 1 leaves: the shadow views (done in the parity wave: Utility's pulled builds read their blocks
+through the view's push words, and the shadow draws' 24-byte records carry the instance word; `docs/development/parity/dclf-d3d12.md`),
+then the forward epoch, then the families (Effect's pulled builds already take the frame rewrite; DistantTree and RunGrass read their
+own tables).
+
+Named off on D3D12 until ported:
+
+- Drawcall Limit Fix's parts above.
+- Drawcall Limit Fix's direct sites (secondary lists with viewports): D3D12 bundles cannot set viewports or scissors
+  (`FixedFunctionFeatureInfo::secondaryViewportScissor` is false).
+- Everything that talks to DXVK or raw Vulkan: the adoption path in `RenderGraphRuntime::Initialize`, the owned frame,
+  `DXVKInterop`, Nsight Perf's and GPA's Vulkan backends, `VkDriverTrace`, VRAM attribution's Vulkan hooks. (Native Vulkan
+  registers Nsight Perf on its own device: [parity/hdr-tooling.md](./parity/hdr-tooling.md).)
+- Debug labels: BasicRHI's D3D12 lists label passes with PIX events (`BeginEvent` with a UTF-16 name) since the parity wave.
 
 ---
 

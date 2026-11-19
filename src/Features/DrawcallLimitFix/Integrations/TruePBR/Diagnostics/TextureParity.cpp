@@ -1,4 +1,4 @@
-// TruePBR's texture parity (see the header), CaptureParity's. Render thread.
+// TruePBR's texture parity, under the capture parity. Render thread.
 
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/Diagnostics/TextureParity.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -23,7 +23,7 @@ namespace DCLF::Integrations::TruePBR
 		const auto& object = a_tables.objects[a_objectIndex];
 		if ((object.flags & kObjectNoBindings) || object.materialIndex >= a_tables.materials.size())
 			return;
-		// t80-t91, bound by State::Draw from TruePBR's landscape hook (other materials leave the previous draw's: not compared).
+		// t80-t91, bound by State::Draw from TruePBR's landscape hook. Other materials leave the previous draw's, so they are not compared.
 		const auto& features = a_tables.materials[object.materialIndex].featureTextures;
 		const auto first = features.begin() + Extensions::FeatureTextureSlotOf(kTextureRegisters.front());
 		const auto last = first + kTextureRegisters.size();

@@ -1,5 +1,4 @@
-// SunViews: the UpdateCamera hook (render thread), which writes the sun's board (SunBoard) from the cameras it set up, and what Core
-// reads of the board: the Sun source's camera and the sun volume (the cascades, the full-frustum planes).
+// SunViews: the UpdateCamera hook that writes the sun's board, and what Core reads of it. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
 
@@ -33,12 +32,11 @@ namespace DCLF::Features::Shadows::Sun
 	{
 		auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
 		const auto* sun = node ? node->GetRuntimeData().sunShadowDirLight : nullptr;
-		// The sun alone: the shadow scene node's caster list holds a second directional light whose descriptors are never drawn.
+		// The shadow scene node's caster list holds a second directional light whose descriptors are never drawn. Take the sun alone.
 		if (!sun || a_light != sun)
 			return;
 		auto& light = *const_cast<RE::BSShadowDirectionalLight*>(sun);
-		// In place (the full-frusta's storage is reused): written and read on this thread; the registration threads read the cascades
-		// only after SunAccumulation's bitsReady release, later in the frame.
+		// Written in place on this thread. Registration threads read the cascades only after SunAccumulation's bitsReady release.
 		SunFrame& next = SunBoard();
 		next.sceneFrame = Scene::FrameView::Get().GetFrame();
 		next.valid = false;
@@ -53,14 +51,12 @@ namespace DCLF::Features::Shadows::Sun
 			auto& cascade = next.cascades[d];
 			ShadowCameras::CameraMatrices(*camera, cascade);
 			ShadowCameras::FrustumPlanes(const_cast<RE::NiCamera*>(camera)->GetRuntimeData2().viewFrustum, camera->world, cascade.frustum);
-			// The caster volume UpdateCamera has just written to the cascade's culling process (FUN_141514c10): its output, not a cull's.
 			const auto* process = static_cast<const RE::NiCullingProcess*>(descriptor.cullingProcess);
 			if (process && process->doCustomCullPlanes)
 				ShadowCameras::CullPlanes(process, *camera, cascade.caster);
 			ShadowCameras::CullPlanes(process, *camera, cascade.cull);
 			cascade.valid = true;
 		}
-		// Each process of the full-frustum cull culls through the full-frustum camera (FUN_141511f30 sets it as theirs).
 		auto& runtime = light.GetShadowDirectionalLightRuntimeData();
 		next.fullFrusta.clear();
 		if (const auto* camera = runtime.fullFrustumCamera.get())
@@ -78,11 +74,8 @@ namespace DCLF::Features::Shadows::Sun
 
 	void SampleSunCascades(Api::SunCascadeSink& a_sink)
 	{
-		// This frame's cascades, whether or not the entry exclusion ran: the colour pass's sun test needs them every frame (without them
-		// every pass with the sun's bits would miss, and draw unshadowed). From DCLF's own views (the Sun board, from the cameras UpdateCamera
-		// set up for the sun this frame), so the test does not depend on the engine's Accumulate running. None when UpdateCamera did not
-		// run for the sun this frame (the sun does not draw: an interior), when the engine gives no pass the sun's bits either. Each
-		// cascade's planes are those Accumulate's hook copies from the same views (the bits' cascades), in descriptor order.
+		// Every frame's cascades, whether or not the exclusion ran. Without them every pass with the sun's bits would draw unshadowed.
+		// None when UpdateCamera did not run for the sun, as in an interior, where no pass has the sun's bits either.
 		const auto& views = SunBoard();
 		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 		if (!views.valid || views.sceneFrame != frame)
@@ -94,8 +87,7 @@ namespace DCLF::Features::Shadows::Sun
 
 	bool SampleSunEntryPlanes(Api::SunEntryPlanesSink& a_sink, std::uint32_t a_frame)
 	{
-		// DCLF's full-frustum planes as UpdateCamera set up each process: a_frame's at the shadow epoch, the frame before's for the build
-		// ahead (posted before this frame's UpdateCamera), as the engine held them there.
+		// a_frame's planes at the shadow epoch, or the frame before's for the build ahead, posted before this frame's UpdateCamera.
 		const auto& views = SunBoard();
 		if (!views.valid || (views.sceneFrame != a_frame && views.sceneFrame + 1 != a_frame) || views.fullFrusta.empty())
 			return false;

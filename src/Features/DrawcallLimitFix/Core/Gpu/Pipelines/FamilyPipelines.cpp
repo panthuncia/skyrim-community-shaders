@@ -1,5 +1,4 @@
-// DrawPipelines' draw family pipelines (FamilyPipelines): each draw family's depth and colour pipelines (one per colour program), rebuilt
-// with the main set, and the lane's admission of the draw family, refraction and forward builds.
+// Draw family pipelines, rebuilt with the main set, and the lane's admission of family, refraction and forward builds.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -93,14 +92,13 @@ namespace DCLF
 		if (!t.asked || t.requested || t.built || t.failed)
 			return;
 		const auto& family = Extensions::DrawFamilyOf(a_family);
-		// What it lacks arrives with the frame's inputs or its program (Finished::drawFamily); DrainLane retries each pass.
+		// Missing inputs arrive later, and DrainLane retries each pass.
 		const auto* input = lane.input.get();
 		if (!input || !input->drawFamilySource[f] || input->targets.colorCount == 0 || input->targets.depth == DXGI_FORMAT_UNKNOWN || !input->frontCCW || !input->states ||
-			!zLayout || !familySignatures[f])
+			!zLayout || !FamilySignature(a_family))
 			return;
-		// The colour pipelines blend as the engine's write mode the program names (tree LOD's 1, the opaque mode, read unasked by
-		// CaptureEngineStates); another is asked of the render thread once, and the family tried again each pass until it is read. If
-		// inexpressible, the family stays native.
+		// Colour blends as the engine's write mode the program names. Another mode is asked of the render thread once. If inexpressible,
+		// the family stays native.
 		const auto& program = family.contribution.program;
 		const std::uint32_t stateBits = std::uint32_t(program.writeMode) << kRasterWriteModeShift;
 		const auto state = input->states->find(stateBits);
@@ -130,8 +128,7 @@ namespace DCLF
 		const auto blend = state->second.blend;
 		org::services::PipelineRecipe recipe;
 		recipe.id = fmt::format("dclf.{}", family.keyName);
-		// The depth vertex stage is left out of the key, as it always was (the pipeline cache's keys stay the same); the second colour
-		// program's stages are mixed in only when there are (a family of one colour program keeps its key).
+		// The depth vertex stage is left out so existing pipeline cache keys stay valid. The second colour program is mixed in only when present.
 		recipe.shaderKey = ModuleHash(drawProgram->vertex) ^ ModuleHash(drawProgram->pixel) * 0x9E3779B97F4A7C15ull ^ ModuleHash(drawProgram->depthPixel);
 		if (!drawProgram->vertex2.empty())
 			recipe.shaderKey ^= (ModuleHash(drawProgram->vertex2) ^ ModuleHash(drawProgram->pixel2) * 0x9E3779B97F4A7C15ull) * 0xC2B2AE3D27D4EB4Full;
@@ -163,7 +160,7 @@ namespace DCLF
 			const auto& family = Extensions::DrawFamilies()[d];
 			completions->family[d].Drain([&](FamilyDone&& a_done) {
 				if (a_done.generation != lane.generation)
-					return;  // from before a target change (RecreateMainSet)
+					return;  // from before a target change
 				lane.dirty = true;
 				if (!a_done.artifact) {
 					t.failed = true;
@@ -180,7 +177,7 @@ namespace DCLF
 		auto& r = lane.refraction;
 		completions->refraction.Drain([&](RefractionDone&& a_done) {
 			if (a_done.generation != lane.generation || a_done.format != r.format || !r.requested || r.built)
-				return;  // from before a target or format change (RecreateMainSet, Refraction::Reset)
+				return;  // from before a target or format change
 			lane.dirty = true;
 			if (!a_done.artifact) {
 				r.failed = true;
@@ -196,7 +193,7 @@ namespace DCLF
 		auto& f = lane.forward;
 		completions->forward.Drain([&](ForwardDone&& a_done) {
 			if (a_done.generation != f.generation)
-				return;  // from before a forward targets change (RecreateForward)
+				return;  // from before a forward targets change
 			const auto found = f.entries.find(a_done.key);
 			if (found == f.entries.end())
 				return;
@@ -219,7 +216,6 @@ namespace DCLF
 	org::services::PipelinePayload DrawPipelines::Impl::BuildDrawFamily(rhi::Device a_device, rhi::PipelineLayoutHandle a_zLayout, const ShaderPrograms::DrawProgram* a_program,
 		std::uint8_t a_colours, TargetFormats a_targets, rhi::BlendState a_blend, bool a_frontCCW, std::string_view a_label)
 	{
-		// Its stages: colour and depth, then with two colour programs the second's (DrawProgram: emptied with one).
 		const bool second = a_colours == 2;
 		if (second != !a_program->vertex2.empty() || second != !a_program->pixel2.empty())
 			throw std::runtime_error(fmt::format("its program's second colour stages do not match its {} colour programs", a_colours));
@@ -231,7 +227,6 @@ namespace DCLF
 			CheckPulledBindings(stages2[0], false);
 			CheckPulledBindings(stages2[1], true);
 		}
-		// The depth pipeline, then each colour program's alike (EQUAL against it, the write mode's blend).
 		struct Made
 		{
 			const std::vector<std::byte>& vertex;
@@ -245,7 +240,7 @@ namespace DCLF
 		for (std::size_t p = 0; p < (second ? 3u : 2u); ++p) {
 			const bool colour = p > 0;
 			PipelineDesc desc(a_zLayout, made[p].vertex, made[p].pixel, a_targets.depth);
-			desc.raster.rs.cull = rhi::CullMode::None;  // the engine draws tree LOD with culling off (cull mode 0) in both passes
+			desc.raster.rs.cull = rhi::CullMode::None;  // the engine draws tree LOD with culling off in both passes
 			desc.raster.rs.frontCCW = a_frontCCW;
 			desc.depth.ds.depthEnable = true;
 			desc.depth.ds.depthWrite = !colour;
@@ -266,12 +261,14 @@ namespace DCLF
 			auto& drawPipelines = DrawPipelines::Get();
 			const auto& impl = *drawPipelines.impl;
 			const auto f = static_cast<std::size_t>(a_family);
-			// None once the targets changed after the catalog was built (as GetIndirectState).
-			if (!a_catalog || !a_catalog->families[f].pipelines || a_catalog->targetsGeneration != a_targetsGeneration || !impl.familySignatures[f])
+			// None once the targets changed after the catalog was built.
+			const auto& signature = impl.FamilySignature(a_family);
+			if (!a_catalog || !a_catalog->families[f].pipelines || a_catalog->targetsGeneration != a_targetsGeneration || !signature)
 				return false;
 			const auto* built = static_cast<const DrawPipelines::Impl::FamilyBuilt*>(a_catalog->families[f].pipelines.get());
+			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
 			a_out = FamilyPipelines{ built->depth->GetHandle(), built->colours[0]->GetHandle(), built->colours[1] ? built->colours[1]->GetHandle() : rhi::PipelineHandle{},
-				impl.familySignatures[f]->GetHandle() };
+				signature->GetHandle(), instanceWord && !impl.d3d12 ? 4u : 0u };
 			return true;
 		}
 	};

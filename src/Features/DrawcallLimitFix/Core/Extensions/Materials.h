@@ -1,11 +1,8 @@
 #pragma once
 
-// The material contributor contract's Core side (Api/Materials.h): the contributors in their resolved order (ResolveMaterialContributors,
-// at InstallFeatures), what their callbacks are handed (MaterialContributorFrame, MaterialContributorEvaluation), the feature texture
-// slots assigned to their registers, and the calls Core's Lighting port makes per event: the frame's sample (SampleMaterialContributors),
-// a material class's capture (MaterialClassOf and its bytes and fields) and SetupMaterial's chain (EvaluateReplace, MaterialRetryable,
-// EvaluateAfter). Where Core decides per frame per object or pipeline it reads resolved data (FeatureTextureRegister, FeatureTextureSlotOf,
-// MaterialSignatureBits), never calling a contributor.
+// Core's side of Api/Materials.h: the material contributors in resolved order, what their callbacks receive,
+// the feature texture slots assigned to them, and the calls the Lighting port makes per event.
+// Per-frame and per-object paths read only resolved data and never call a contributor.
 
 #include "Features/DrawcallLimitFix/Api/Materials.h"
 
@@ -26,7 +23,6 @@ namespace RE
 
 namespace DCLF
 {
-	// Core's record and the port's inputs (Core/Shading: ConstantEvaluator.h, MaterialPort.h, the hook frame's header).
 	struct MaterialRecord;
 	namespace MaterialPort
 	{
@@ -37,37 +33,32 @@ namespace DCLF
 
 namespace DCLF::Extensions
 {
-	/** @brief The most material contributors there may be (MaterialContributorSamples holds one sample each): grow it before more register. */
+	/** @brief Most material contributors. Grow it before registering more. */
 	inline constexpr std::size_t kMaterialContributorSlots = 4;
 	/**
-	 * @brief MaterialRecord::featureTextures' slots: the row header's feature words, frozen with DCLFObjects.hlsli's decode
-	 * (DCLFMaterialTextureIndex: 71 to slot 32, 74 to 33, 80 and up to 34 and up). The contributors' registers, in ascending order, fill
-	 * them from 0; one past them fails the install.
+	 * @brief Number of MaterialRecord::featureTextures slots, frozen by DCLFObjects.hlsli's DCLFMaterialTextureIndex decode.
+	 * Contributors' registers fill them in ascending order from slot 0.
 	 */
 	inline constexpr std::uint32_t kFeatureTextureSlots = 14;
-	/** @brief The frame witness words the contributors' samples write, all of them (each its witnessWords, in resolved order). */
+	/** @brief Total frame witness words across all contributors. */
 	inline constexpr std::uint32_t kMaterialContributorWitnessWords = 4;
-	/** @brief A snapshot of no contributor's class (MaterialSnapshot's class; a class is its contributor's resolved index + 1). */
+	/** @brief A snapshot not of any contributor's class. A class is its contributor's resolved index plus 1. */
 	inline constexpr std::uint8_t kNoMaterialClass = 0;
-	/** @brief A slot no contributor's register has (FeatureTextureRegister), a register no slot has (FeatureTextureSlotOf: -1). */
+	/** @brief Marks a slot with no register. */
 	inline constexpr std::uint32_t kNoFeatureTextureRegister = ~0u;
 
-	/** @brief One contributor's frame sample (MaterialContributorFrame's writes). */
+	/** @brief One contributor's frame sample. */
 	struct MaterialContributorSample
 	{
 		bool active = false;
-		std::shared_ptr<const void> held;  // shared between frames while unchanged (its identity is the sample's witness words' business)
+		std::shared_ptr<const void> held;  // shared between frames while unchanged
 	};
-	/**
-	 * @brief Every contributor's frame sample, by resolved index, and their witness words: MaterialPort::MaterialFrame's (sampled with it
-	 * at the frame's start), read by the evaluations of that frame. The witness (MaterialPort::WitnessOf) takes ActiveBits and words.
-	 */
+	/** @brief Every contributor's frame sample by resolved index, plus the witness words. Sampled at the frame's start with the material frame. */
 	struct MaterialContributorSamples
 	{
 		std::array<MaterialContributorSample, kMaterialContributorSlots> contributors{};
 		std::array<std::uint32_t, kMaterialContributorWitnessWords> words{};
 
-		/** @brief Bit c: contributor c is active. */
 		std::uint32_t ActiveBits() const
 		{
 			std::uint32_t bits = 0;
@@ -77,10 +68,7 @@ namespace DCLF::Extensions
 		}
 	};
 
-	/**
-	 * @brief What one evaluation hands the contributors (the Lighting port's Evaluate, the retry test): the material's snapshot and its class
-	 * (MaterialSnapshot's, from MaterialClassOf at its capture), the pass descriptor, and the frame's hook frame and samples (MaterialFrame's).
-	 */
+	/** @brief What one evaluation hands the contributors: the material snapshot and class, the pass, and the frame's hook frame and samples. */
 	struct MaterialContributorInputs
 	{
 		const MaterialPort::MaterialSnapshot& snapshot;
@@ -94,9 +82,8 @@ namespace DCLF::Extensions
 namespace DCLF::Api
 {
 	/**
-	 * @brief A contributor's sample (render thread, the frame's start): the engine globals Core's hook frame sampled before it (hook), and
-	 * its writes: its active bit (inactive: takesPass, covers and evaluate are not called this frame), a table it holds for the frame's
-	 * evaluations (MaterialContributorEvaluation::Held), and its witness words (word a_index < its witnessWords: equal words, equal records).
+	 * @brief What a contributor's sample gets on the render thread at the frame's start.
+	 * An inactive contributor is not called this frame. Equal witness words must mean equal records.
 	 */
 	class MaterialContributorFrame
 	{
@@ -116,14 +103,12 @@ namespace DCLF::Api
 
 	private:
 		Extensions::MaterialContributorSample& sample;
-		std::span<std::uint32_t> words;  // its witnessWords of MaterialContributorSamples::words
+		std::span<std::uint32_t> words;
 	};
 
 	/**
-	 * @brief A contributor's takesPass, covers or evaluate: the material's snapshot (its reads below, or snapshot's own: MaterialPort.h),
-	 * the pass, the hook frame (its engine globals: the technique bytes, the texture-transform buffer, the character light, the render targets,
-	 * the default textures), its own sample, and for evaluate the record it writes, in MaterialRecord's terms (as MaterialPortEvaluation's).
-	 * takesPass and covers have no record: their writes are not called.
+	 * @brief What takesPass, covers and evaluate get: the snapshot, the pass, the hook frame and the contributor's own sample.
+	 * Only evaluate has a record to write.
 	 */
 	class MaterialContributorEvaluation
 	{
@@ -133,8 +118,7 @@ namespace DCLF::Api
 		const MaterialPort::MaterialSnapshot& snapshot;
 		const MaterialPort::HookFrame& hook;
 
-		// The pass descriptor (the technique and flags BSLightingShader+0x94 would hold); its sample's active bit and held table (null: none,
-		// or another type than it held).
+		// The pass descriptor, as BSLightingShader+0x94 would hold it. Held returns null if the held table has a different type.
 		std::uint32_t Pass() const { return inputs.pass; }
 		bool Active() const;
 		template <class T>
@@ -142,9 +126,7 @@ namespace DCLF::Api
 		{
 			return static_cast<const T*>(HeldPointer());
 		}
-		// The snapshot: its material feature (BSShaderMaterial::GetFeature), bytes taken, class (kNoMaterialClass: none), whether it is of
-		// this contributor's own class, the value at a_offset (zero past the bytes), whether the texture field at a_offset holds a texture,
-		// the view resolved for it (null: none).
+		// Snapshot reads. At returns zero past the snapshot's bytes.
 		std::uint32_t Feature() const;
 		std::uint32_t Size() const;
 		std::uint8_t MaterialClass() const { return inputs.materialClass; }
@@ -159,10 +141,7 @@ namespace DCLF::Api
 		bool HasTexture(std::uint16_t a_offset) const { return At<const void*>(a_offset) != nullptr; }
 		ID3D11ShaderResourceView* View(std::uint16_t a_offset) const;
 
-		// The record (evaluate only): cleared (constants unwritten, no textures, address modes 0, filter modes unwritten, no feature
-		// textures; its kind left as it is: Lighting's); each stage's floats (Lighting's StageLayout order: LightingVSLayout,
-		// LightingPSLayout); a pixel slot's filter mode, and its texture with its address mode (written); a feature texture of its own, by
-		// local index (its textureRegisters' position; one past them is dropped).
+		// Record writes, evaluate only. Stage floats use Lighting's StageLayout order. Feature textures go by local index, and extras are dropped.
 		void ResetRecord();
 		float* VSFloats();
 		float* PSFloats();
@@ -172,22 +151,18 @@ namespace DCLF::Api
 
 	private:
 		const Extensions::MaterialContributorInputs& inputs;
-		std::size_t contributor;  // its resolved index
+		std::size_t contributor;  // resolved index
 		MaterialRecord* out;      // null for takesPass and covers
 
 		const void* HeldPointer() const;
-		// a_bytes at a_offset into a_out when the snapshot has them (MaterialSnapshot::At's test), a_out left as it is otherwise.
+		// Copies a_bytes at a_offset into a_out if the snapshot has them, otherwise leaves a_out as it is.
 		void Read(std::size_t a_offset, void* a_out, std::size_t a_bytes) const;
 	};
 }
 
 namespace DCLF::Extensions
 {
-	/**
-	 * @brief A contributor as registered and resolved (its descriptor, the name owned): its feature texture registers and first slot
-	 * (assigned at resolve: its registers take slots [firstSlot, firstSlot + registers.size())), its witness words at
-	 * MaterialContributorSamples::words[firstWord, firstWord + witnessWords), its class (kNoMaterialClass without materialClass).
-	 */
+	/** @brief A contributor as registered and resolved, with its assigned feature texture slots, witness words and class. */
 	struct MaterialContributorEntry
 	{
 		std::string name;
@@ -205,47 +180,41 @@ namespace DCLF::Extensions
 		decltype(Api::MaterialContributor::evaluate) evaluate = nullptr;
 	};
 
-	/** @brief The resolved contributors and what Core reads of them as data. */
 	struct MaterialContributorTable
 	{
 		std::array<MaterialContributorEntry, kMaterialContributorSlots> entries{};  // by resolved index: stage, then order, then registration
 		std::size_t count = 0;
-		// By slot: its register (kNoFeatureTextureRegister past featureTextures), ascending.
+		// Each slot's register, ascending. kNoFeatureTextureRegister past featureTextures.
 		std::array<std::uint32_t, kFeatureTextureSlots> featureTextureRegisters = [] {
 			std::array<std::uint32_t, kFeatureTextureSlots> registers{};
 			registers.fill(kNoFeatureTextureRegister);
 			return registers;
 		}();
 		std::uint32_t featureTextures = 0;
-		std::uint32_t signatureBits = 0;  // every contributor's
-		std::uint32_t witnessWords = 0;   // every contributor's
-		bool classes = false;             // any contributor has a material class
+		std::uint32_t signatureBits = 0;
+		std::uint32_t witnessWords = 0;
+		bool classes = false;
 	};
 
-	/**
-	 * @brief Main thread, the end of InstallFeatures: a_registered (in registration order, validated by the registry) ordered by stage,
-	 * then order, then registration; their slots assigned (every register ascending, from slot 0) and their witness words and classes.
-	 */
+	/** @brief Main thread, at the end of InstallFeatures. Orders the contributors and assigns their slots, witness words and classes. */
 	void ResolveMaterialContributors(std::span<const MaterialContributorEntry> a_registered);
-	/** @brief Any thread, after InstallFeatures (empty before): the resolved table. */
+	/** @brief Any thread, after InstallFeatures. */
 	const MaterialContributorTable& MaterialContributors();
-	/** @brief The resolved contributors, in order. */
 	inline std::span<const MaterialContributorEntry> MaterialContributorList()
 	{
 		const auto& table = MaterialContributors();
 		return std::span(table.entries).first(table.count);
 	}
 
-	// Data, any thread after InstallFeatures (the pipeline layouts, the material bindings, the main build's missing-texture report, the
-	// capture parity, the signature).
-	/** @brief The feature texture slots assigned (the registers' count): slots past it are never written. */
+	// Resolved data, readable from any thread after InstallFeatures.
+	/** @brief The number of feature texture slots in use. Later slots are never written. */
 	inline std::uint32_t FeatureTextureCount() { return MaterialContributors().featureTextures; }
-	/** @brief Slot a_slot's PS texture register (kNoFeatureTextureRegister past FeatureTextureCount). */
+	/** @brief Slot a_slot's PS texture register. */
 	inline std::uint32_t FeatureTextureRegister(std::uint32_t a_slot)
 	{
 		return a_slot < kFeatureTextureSlots ? MaterialContributors().featureTextureRegisters[a_slot] : kNoFeatureTextureRegister;
 	}
-	/** @brief The slot of PS texture register a_register (MaterialRecord::featureTextures' entry), or -1 for none. */
+	/** @brief The slot for PS texture register a_register, or -1. */
 	inline int FeatureTextureSlotOf(std::uint32_t a_register)
 	{
 		const auto& table = MaterialContributors();
@@ -254,35 +223,27 @@ namespace DCLF::Extensions
 				return static_cast<int>(slot);
 		return -1;
 	}
-	/** @brief The pass bits the contributors branch on (MaterialSources::Signature ORs them into Core's). */
+	/** @brief Pass bits the contributors branch on, ORed into the material signature. */
 	inline std::uint32_t MaterialSignatureBits() { return MaterialContributors().signatureBits; }
 
-	// The capture (MaterialPort::Capture, per material capture: any thread the material is alive on).
-	/** @brief The class of a material of vtable a_vtable (a contributor's whose owns answers true, in resolved order), or kNoMaterialClass. */
+	// Material capture. Any thread the material is alive on.
+	/** @brief The class of a material with vtable a_vtable, or kNoMaterialClass. */
 	std::uint8_t MaterialClassOf(const void* a_vtable);
-	/** @brief Class a_class's bytes of a_material (0 for kNoMaterialClass). */
 	std::uint32_t MaterialClassBytes(std::uint8_t a_class, const RE::BSShaderMaterial& a_material);
-	/** @brief Class a_class's texture fields of a_material into a_out (a_count set; 0 for kNoMaterialClass). */
+	/** @brief Writes class a_class's texture fields of a_material and sets a_count. */
 	void MaterialClassTextureFields(std::uint8_t a_class, const RE::BSShaderMaterial& a_material, std::uint16_t* a_out, std::uint32_t& a_count);
-	/** @brief Whether vanilla runs on class a_class's material as BSLightingShaderMaterialBase (false for kNoMaterialClass). */
 	bool MaterialClassVanillaAsBase(std::uint8_t a_class);
 
-	/**
-	 * @brief Render thread, the frame's start (MaterialPort::SampleFrame, after the hook frame): every contributor's sample into a_out
-	 * (each reset first: inactive, nothing held, its words zero), in resolved order.
-	 */
+	/** @brief Render thread, at the frame's start. Resets and fills every contributor's sample in resolved order. */
 	void SampleMaterialContributors(const MaterialPort::HookFrame& a_hook, MaterialContributorSamples& a_out);
 
-	// SetupMaterial's chain (the Lighting port's Evaluate, pure; the scene lane or the join pool), in its order:
+	// SetupMaterial's chain. All pure, run on the scene lane or the join pool:
 	//   o = EvaluateReplace(in, out); covered = o == Made || (o == HandBack && vanilla's evaluation);
 	//   if (!covered || MaterialRetryable(in)) uncovered; else EvaluateAfter(in, out).
-	/**
-	 * @brief The first active Replace contributor whose takesPass takes a_inputs' pass: its evaluate's outcome into a_out; HandBack when none
-	 * takes it (vanilla's).
-	 */
+	/** @brief Evaluates with the first active Replace contributor that takes the pass. Returns HandBack when none does. */
 	Api::MaterialOutcome EvaluateReplace(const MaterialContributorInputs& a_inputs, MaterialRecord& a_out);
-	/** @brief Whether an active After contributor's covers is false for a_inputs (its input is not set up yet: evaluate again later). */
+	/** @brief Whether an active After contributor is not ready yet, so the material must be evaluated again later. */
 	bool MaterialRetryable(const MaterialContributorInputs& a_inputs);
-	/** @brief Every active After contributor's evaluate into a_out (covered, and no retry), in order. */
+	/** @brief Runs every active After contributor's evaluate, in order. */
 	void EvaluateAfter(const MaterialContributorInputs& a_inputs, MaterialRecord& a_out);
 }

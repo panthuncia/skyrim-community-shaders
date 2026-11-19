@@ -1,5 +1,9 @@
 #include "Globals.h"
 #include "GpuEventTimers.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "CSEditor/SceneManager/SceneManager.h"
 #include "CSEditor/SceneManager/SceneSettingsManager.h"
@@ -7,6 +11,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/DeveloperTools.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
@@ -109,6 +114,7 @@ namespace globals
 		HDRDisplay hdrDisplay{};
 		Effects11 effects11{};
 		DeveloperTools developerTools{};
+		GraphicsAPI graphicsAPI{};
 		RenderDoc renderDoc{};
 		RemoteControl remoteControl{};
 		ScreenshotFeature screenshotFeature{};
@@ -242,8 +248,16 @@ namespace globals
 			BSMultiStreamInstanceTriShapeRTTI = { RE::BSMultiStreamInstanceTriShape::Ni_RTTI };
 		}
 
-		d3d::device = reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder);
-		d3d::context = reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context);
+		// DXVK's own objects, also when the engine's pointers hold the guest handles (CS_ORG_TRIPWIRE_GUEST, P4.1). In native mode
+		// (CS_ORG_NATIVE=1) there is nothing under the handles: CS uses the native handles, so each of its D3D11 calls is a native
+		// service or a tripwire that names its call site.
+		if (RenderGraph::Engine::Native::Requested()) {
+			d3d::device = reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder);
+			d3d::context = reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context);
+		} else {
+			d3d::device = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder));
+			d3d::context = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context));
+		}
 		d3d::swapChain = reinterpret_cast<IDXGISwapChain*>(game::renderer->GetRuntimeData().renderWindows->swapChain);
 	}
 
@@ -266,6 +280,8 @@ namespace globals
 	void OnGameWindowClose()
 	{
 		game::quitGame = true;
+		RenderGraph::Engine::Tripwire::Stop();
+		RenderGraph::Engine::Native::Shutdown();
 		if (shaderCache)
 			shaderCache->StopCompilation();
 	}
@@ -293,6 +309,22 @@ namespace globals
 		mappedFrameBuffer = nullptr;
 	}
 
+	void OnContextMap(ID3D11Resource* a_resource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_mapped)
+	{
+		if (*globals::game::perFrame.get() == a_resource)
+			globals::game::mappedFrameBuffer = a_mapped;
+		DrawcallLimitFix::OnMap(a_resource, a_mapped->pData);
+		RenderGraph::Engine::Constants::OnMap(a_resource, a_type, a_mapped->pData);
+	}
+
+	void OnContextUnmap(ID3D11Resource* a_resource)
+	{
+		if (*globals::game::perFrame.get() == a_resource && globals::game::mappedFrameBuffer)
+			CacheFramebuffer();
+		DrawcallLimitFix::OnUnmap(a_resource);
+		RenderGraph::Engine::Constants::OnUnmap(a_resource);
+	}
+
 	/**
  * @brief Hooks the ID3D11DeviceContext::Map method to track mapping of the per-frame resource.
  *
@@ -305,11 +337,8 @@ namespace globals
 		static HRESULT thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 		{
 			HRESULT hr = func(This, pResource, Subresource, MapType, MapFlags, pMappedResource);
-			if (hr == S_OK) {
-				if (*globals::game::perFrame.get() == pResource)
-					globals::game::mappedFrameBuffer = pMappedResource;
-				DrawcallLimitFix::OnMap(pResource, pMappedResource->pData);
-			}
+			if (hr == S_OK)
+				OnContextMap(pResource, MapType, pMappedResource);
 			return hr;
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -324,10 +353,7 @@ namespace globals
 	{
 		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource)
 		{
-			if (*globals::game::perFrame.get() == pResource && globals::game::mappedFrameBuffer) {
-				CacheFramebuffer();
-			}
-			DrawcallLimitFix::OnUnmap(pResource);
+			OnContextUnmap(pResource);
 			func(This, pResource, Subresource);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -340,6 +366,7 @@ namespace globals
 			UINT SrcDepthPitch)
 		{
 			DrawcallLimitFix::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			RenderGraph::Engine::Constants::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
 			func(This, pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -855,6 +882,10 @@ namespace globals
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
 		stl::detour_vfunc<48, ID3D11DeviceContext_UpdateSubresource>(a_context);
+		// CS_ORG_ENGINE_CONSTANTS=1: the constant-buffer binds behind the per-use capture.
+		RenderGraph::Engine::Constants::InstallD3DHooks(a_context);
+		// CS_ORG_RESIDUE_CENSUS=1: the state readers' trace (binds DXVK drops, the readers that read them).
+		RenderGraph::Engine::Flush::InstallStateTrace(a_context);
 		// CS_DCLF_DRAW_TRACE / CS_DCLF_DEPTH_TRACE (Drawcall Limit Fix's diagnostics).
 		const bool depthTrace = Util::SwitchFile::Enabled("CS_DCLF_DEPTH_TRACE");
 		if (Util::SwitchFile::Enabled("CS_DCLF_DRAW_TRACE") && !depthTrace)

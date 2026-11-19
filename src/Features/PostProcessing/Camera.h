@@ -57,4 +57,10 @@ struct Camera : public PostProcessFeature
 	virtual void DrawSettings() override;
 
 	virtual void Draw(TextureInfo&) override;
+
+	/**
+	 * @brief This frame's constants for a pass of a_res pixels: the settings, with the fisheye FOV from Cinematic Camera while
+	 * it drives the lens. Shared by the D3D11 draw and the ORG chain.
+	 */
+	CameraCB Constants(float2 a_res) const;
 };

@@ -1,9 +1,7 @@
-// Tree LOD drawn per face by a trees view (Api::ViewShape::trees: the TreeInstances family's faces): the per-face cull (TreeLodCullCS's
-// phase 1 into each face's list), the faces' draw pass's declarations and draw, each epoch commit's row, and the units the faces' lists
-// hold with the tables. The lists, rows and latch are Core's view machinery's (ViewResources' faceRows and faceLists at the family's
-// slot, ViewLatchLayout), sized by the faces' data.
+// Tree LOD drawn per face by a trees view: the per-face cull, the faces' draw pass, each epoch commit's row, and the lists' units.
+// The lists, rows and latch belong to Core's view machinery and are sized by the faces' data.
 
-// ViewEpoch.h first: volk must precede every Vulkan header of the translation unit.
+// ViewEpoch.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
@@ -35,7 +33,6 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		// The family's slot in a view's resources and shape (ViewResources::faceRows, faceLists; ViewFrame::faces).
 		constexpr std::size_t kFamily = static_cast<std::size_t>(Api::DrawFamily::TreeInstances);
 
 		std::shared_ptr<const ViewFrame> CurrentViewFrame(const org::PassPrepareContext& a_preparation, ViewKind a_kind)
@@ -60,10 +57,7 @@ namespace DCLF::Draws
 			std::uint32_t groups = 0;
 		};
 
-		/**
-		 * @brief A view's tree LOD: TreeLodCullCS's phase 1 per face, against the face's latch entry (cull mode 1: no occlusion), into
-		 * the face's list; a face's row names no shape slot when it is not drawn.
-		 */
+		/** @brief A view's tree LOD: phase 1 culling per face, with no occlusion, into the face's list. */
 		class TreeCullPass final : public org::TypedRenderGraphPass<TreeCullPass, TreePrepared, TreeBindings>
 		{
 		public:
@@ -83,7 +77,6 @@ namespace DCLF::Draws
 				return bindings;
 			}
 
-			// The view's shape and the tables' and lists' versions are the revision's (the ticket's host data).
 			void Revision(std::vector<std::uint64_t>&) const {}
 
 			TreePrepared Prepare(const TreeBindings&, const org::PassPrepareContext& a_preparation) const
@@ -97,13 +90,11 @@ namespace DCLF::Draws
 				prepared.groups = frame->faces[kFamily].groups;
 				prepared.faces = resources->traits->faces;
 				auto& constants = prepared.constants;
-				constants.latchIndex = frame->latch->SrvIndex();
 				constants.phase = 1;
 				constants.retestOffset = static_cast<std::uint32_t>(sizeof(TreeInstances::VisibleHeader));  // never written: no occlusion test
 				return prepared;
 			}
 
-			// A dispatch per face, from the latch's region of the frame slot.
 			static void Record(const TreeBindings& a_bindings, const TreePrepared& a_prepared, org::PassRecordContext& a_recording)
 			{
 				if (!a_prepared.program || !a_prepared.groups || !a_prepared.latch)
@@ -114,9 +105,11 @@ namespace DCLF::Draws
 				auto& commands = a_recording.Commands();
 				commands.BindLayout(a_prepared.program->layout->GetHandle());
 				commands.BindPipeline(a_prepared.program->Pipeline());
-				const auto region = static_cast<std::uint32_t>(a_prepared.latch->Offset(a_recording.FrameSlot()));
+				const auto at = a_prepared.latch->At(a_recording.Run());
+				const auto region = static_cast<std::uint32_t>(at.offset);
 				for (std::uint32_t f = 0; f < a_prepared.faces; ++f) {
 					auto constants = viewed;
+					constants.latchIndex = at.srvIndex;
 					constants.latchOffset = region + f * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch));
 					constants.drawIndex = a_recording.Index(a_bindings.rows[f]);
 					constants.visibleIndex = a_recording.Index(a_bindings.visible[f]);
@@ -136,8 +129,7 @@ namespace DCLF::Features::TreeLod
 {
 	namespace
 	{
-		// Phase 1 per face into the face's list (its cull pass, in the view's depth or only epoch: the reflection's, hosted by the depth
-		// epoch): only a trees view's, with the faces' lists.
+		// Only a trees view with the faces' lists gets this cull.
 		std::shared_ptr<org::RenderPass> FacesCull(const Api::PassContext& a_context)
 		{
 			if (a_context.Interior())  // no tree LOD in an interior: its passes are left out
@@ -146,13 +138,12 @@ namespace DCLF::Features::TreeLod
 			constexpr std::size_t family = static_cast<std::size_t>(Api::DrawFamily::TreeInstances);
 			if (!resources->traits->trees || !resources->faceLists[family][0])
 				return nullptr;
-			auto tables = SharedTablesOf(*resources->main->scene);
+			auto tables = SharedTablesOf(*a_context.Main()->scene);  // the build state's main resources (the view's live main may be replaced)
 			if (!tables)
 				return nullptr;
 			return std::make_shared<Draws::TreeCullPass>(resources, std::move(tables));
 		}
 
-		// The tables and the faces' rows and lists.
 		void FacesDeclare(Api::DrawFamilyDeclare& a_declare)
 		{
 			const auto* tables = TablesOf(a_declare.scene);
@@ -171,18 +162,16 @@ namespace DCLF::Features::TreeLod
 			}
 		}
 
-		// One instanced draw of the face's list, its row the face's (phase 1's arguments, its instances from the list's start).
 		void FacesRecord(const Api::DrawFamilyRecord& a_record)
 		{
-			std::uint32_t words[kDrawPushWords]{ static_cast<std::uint32_t>(a_record.row), static_cast<std::uint32_t>(a_record.row >> 32), 0u };
+			std::uint32_t words[kDrawPushWords]{ a_record.row.viewSlot, a_record.row.byteOffset, 0u };
 			a_record.commands.BindPipeline(a_record.pipeline);
 			a_record.commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
 			a_record.commands.ExecuteIndirect(a_record.signature, a_record.arguments, offsetof(TreeInstances::VisibleHeader, phaseOne), {}, 0, 1);
 		}
 
-		// Its row as the last depth commit uploaded it, its texture bound again for this execution, when the view draws it (the
-		// revision's faces have tree LOD: their lists hold the scene's shape slots, one unit group) and its pipelines and tables are in.
-		// Without owners (the faces' decision): only whether that row names shape slots, its pipelines and tables in.
+		// The row as the last depth commit uploaded it, its texture bound again for this execution.
+		// Without owners, only answer whether the row names shape slots and its pipelines and tables are in.
 		bool FacesRow(Api::DrawFamilyFaceRow& a_row)
 		{
 			const auto& scene = a_row.scene;
@@ -195,7 +184,7 @@ namespace DCLF::Features::TreeLod
 				std::memcpy(a_row.row.data(), &row, sizeof(row));
 				return trees && row.shapeSlots;
 			}
-			// The view latches its own copy, which only its execution reads: the row's owners are the execution's.
+			// Only the view's execution reads its own latched copy, so the row's owners are the execution's.
 			if (!(trees && row.shapeSlots && TreeLodTextureBinding(owned)))
 				row.shapeSlots = 0;
 			a_row.owners->insert(a_row.owners->end(), owned.Owners().begin(), owned.Owners().end());
@@ -203,8 +192,6 @@ namespace DCLF::Features::TreeLod
 			return row.shapeSlots != 0;
 		}
 
-		// A face's list holds a unit per shape slot of the tables (the shape rows, the records and the main view's list, one unit group),
-		// required at the mirror's posted shape slots.
 		void FacesLists(Api::DrawFamilyLists& a_lists)
 		{
 			const auto* tables = TablesOf(a_lists.scene);
@@ -218,16 +205,14 @@ namespace DCLF::Features::TreeLod
 			a_lists.current = buffer ? static_cast<std::uint32_t>(std::min<std::uint64_t>(buffer->GetSize() / sizeof(TreeInstances::ShapeRow), UINT32_MAX)) : 0u;
 		}
 
-		// The face's row (its own list), naming no slot when the face is not drawn, and its list's header: the draws' vertex count, the
-		// meshes' largest index count (at least 1), with no instances.
 		void FacesFace(Api::DrawFamilyFaceWrite& a_face)
 		{
 			TreeInstances::DrawRow commitRow{};
 			std::memcpy(&commitRow, a_face.commitRow.data(), sizeof(commitRow));
 			TreeInstances::DrawRow row = commitRow;
-			row.visible = a_face.listAddress + TreeInstances::kVisibleHeaderWords * sizeof(std::uint32_t);
+			row.visible = a_face.listRef + TreeInstances::kVisibleHeaderWords * sizeof(std::uint32_t);
 			row.shapeSlots = a_face.drawn ? commitRow.shapeSlots : 0u;
-			row.statsLow = row.statsHigh = 0;  // the main draws' stage stamps only
+			row.stats = {};  // the main draws' stage stamps only
 			std::memcpy(a_face.row.data(), &row, sizeof(row));
 			TreeInstances::VisibleHeader header{};
 			header.phaseOne[0] = header.phaseTwo[0] = header.colour[0] = std::max(row.maxIndices, 1u);
@@ -237,7 +222,6 @@ namespace DCLF::Features::TreeLod
 
 	Api::DrawFamilyContribution::Faces FacesContribution()
 	{
-		// A face's list: a word per instance record its shape slots hold (kMaxGroupInstances a slot); the cull a thread per record.
 		return { .declare = &FacesDeclare,
 			.record = &FacesRecord,
 			.row = &FacesRow,

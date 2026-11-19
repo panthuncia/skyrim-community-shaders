@@ -1,8 +1,7 @@
 #pragma once
 
-// The node capture contributions' Core side (Api/EngineEvents.h, NodeCaptureContribution): each registered class's entry, its RTTI
-// resolved at registration (InstallContext::RegisterNodeCapture, during InstallFeatures; read-only after), which the scene capture reads
-// as data for every node it records (NodeCaptureOf); and the push a feature's own hooks make for a contributed list's edit.
+// Core's side of node capture contributions: each class's entry, which the scene capture reads for every node it records,
+// and the push a feature's hooks make when a contributed list changes.
 
 #include "Features/DrawcallLimitFix/Api/EngineEvents.h"
 
@@ -18,7 +17,7 @@ namespace RE
 
 namespace DCLF::Extensions
 {
-	/** @brief A registered node capture contribution: its name, its class's RTTI (resolved) and its capture. */
+	/** @brief A registered node capture: its name, resolved RTTI and capture. */
 	struct NodeCaptureEntry
 	{
 		std::string name;
@@ -26,18 +25,14 @@ namespace DCLF::Extensions
 		decltype(Api::NodeCaptureContribution::capture) capture = nullptr;
 	};
 
-	/**
-	 * @brief Main thread, InstallFeatures (the registry's InstallContext::RegisterNodeCapture for a_feature): a_capture's entry. Fails the
-	 * install for no name, RTTI or capture, or a class another contribution has.
-	 */
+	/** @brief Main thread, during InstallFeatures. Adds a_capture. Fails for a missing field or a class another contribution has. */
 	void AddNodeCapture(std::string_view a_feature, const Api::NodeCaptureContribution& a_capture);
-	/** @brief Any thread, after InstallFeatures (none before): the contribution whose class has a_rtti exactly, or null. */
+	/** @brief Any thread, after InstallFeatures. The contribution whose class has exactly a_rtti, or null. */
 	const NodeCaptureEntry* NodeCaptureOf(const void* a_rtti);
 
 	/**
-	 * @brief A store of the feature's own to a_node's a_fields (Api::kNodeField* bits): the mirror's update of them, captured on the storing
-	 * thread after the store (inside the engine-read window), in order with what that thread pushed before. Nothing for null.
-	 * Core/Engine/Capture/SceneEvents.cpp.
+	 * @brief Reports a feature's own store to a_node's a_fields. Captured on the storing thread after the store, in the engine-read window,
+	 * in order with that thread's earlier pushes. Null is ignored.
 	 */
 	void PushNodeUpdate(const RE::NiAVObject* a_node, std::uint32_t a_fields);
 }

@@ -203,6 +203,12 @@ public:
 	bool filePresent = false;
 	std::vector<std::string> errors;
 
+	/**
+	 * @brief The preprocessed text FX11 compiled (patches, extender syntax, includes, stringify macros, #line stripped), which the
+	 * ORG FX runtime parses. Empty when the effect came from an encrypted binary or only the raw-source fallback compiled.
+	 */
+	std::string preprocessedSource;
+
 	// Source-parsed group map and declaration order (compiled effect reorders variable types)
 	std::unordered_map<std::string, std::string> sourceGroupMap;
 	std::unordered_map<std::string, int> sourceOrderMap;

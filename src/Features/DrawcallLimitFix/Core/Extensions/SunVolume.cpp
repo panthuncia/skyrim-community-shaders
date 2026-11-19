@@ -1,6 +1,6 @@
-// The sun volume's entry and sinks (see the header).
+// The sun volume's entry and sinks.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SunVolume.h"
 
@@ -33,7 +33,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveSunVolume (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		SunVolumeEntry resolved;
 	}
 

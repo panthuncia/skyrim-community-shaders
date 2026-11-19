@@ -4,24 +4,23 @@
 #include <cstdint>
 #include <string>
 
-// The draws area's report lines (Diagnostics/Reports/Draws*.cpp), taken from the modules' counters at the render thread's report.
+// The draws area's report lines, taken from the modules' counters at the render thread's report.
 
 namespace DCLF::Reports
 {
-	/** @brief The frame values' producer and its parity (CS_DCLF_PERSISTENT_PARITY), or empty when nothing ran. */
+	/** @brief The frame values' producer and its parity, or empty when nothing ran. */
 	std::string FrameValuesLine();
-	/** @brief The frame data through the render thread (bytes a frame, by where, largest first), or empty. */
+	/** @brief Frame data through the render thread, bytes per frame by where, largest first. Empty when none. */
 	std::string FrameDataLine();
-	/** @brief CS_DCLF_PERSISTENT_PARITY: the constant tables against ShaderCache's since the last call (logged; nothing unchecked). */
+	/** @brief Logs the constant tables against ShaderCache's since the last call. */
 	void ConstantTableLines();
-	/** @brief CS_DCLF_PASS_STATS: the main passes' pipeline statistics per frame (Z-prepass, its phase 2, colour), over a_samples frames each. */
+	/** @brief Main pass pipeline statistics per frame, over a_samples frames each. */
 	void PassStatsLine(const std::array<std::array<std::uint64_t, 4>, 4>& a_totals, const std::array<std::uint32_t, 4>& a_samples);
-	/** @brief The colour commits of the report window whose sun test ran without the sun's cascades (a_empty), logged. */
+	/** @brief Logs the colour commits whose sun test ran without the sun's cascades. */
 	void ColourSunTestLine(std::uint32_t a_empty);
 	/**
-	 * @brief The CPU-driven pipeline's window (Direct/Sites.h: TakeWindowCounters), or empty when no CPU frame ran: per view a frame's cull
-	 * time, batches and draws, per site its callback's record time on DXVK's CS thread, the secondaries, the callbacks' waits for a batch
-	 * and the frame slots' waits; a site whose callbacks drew nothing all window tagged (the GPU path's "sequences > 0").
+	 * @brief The CPU pipeline's window, or empty when no CPU frame ran. Per view cull time, batches and draws, and per site its record
+	 * time and waits. A site whose callbacks drew nothing all window is tagged.
 	 */
 	std::string CpuPipelineLine();
 }

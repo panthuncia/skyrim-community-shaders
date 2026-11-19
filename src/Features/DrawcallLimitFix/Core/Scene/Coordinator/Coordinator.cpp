@@ -1,5 +1,4 @@
-// Coordinator's singleton and its per-geometry lookups (the tracked map, read on the coordinator thread or by the render thread's
-// diagnostics).
+// The coordinator's singleton and its per-geometry lookups.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -36,7 +35,6 @@ namespace DCLF::Scene
 		auto it = tracked.find(a_geometry);
 		if (it == tracked.end())
 			return Ineligible::NotTriShape;
-		// The render thread's diagnostics (the capture check): the live records.
 		const Ineligible reason = Eligibility::Static(SceneCapture::LiveLeaf(*a_geometry).view, nullptr);
 		return reason != Ineligible::None ? reason : ClassifyFrame(it->second);
 	}

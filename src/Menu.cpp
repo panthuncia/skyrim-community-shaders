@@ -13,7 +13,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <imgui_impl_dx11.h>
 #include <imgui_impl_win32.h>
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
@@ -36,6 +35,7 @@
 #include "Menu/GoToPalette.h"
 #include "Menu/HomePageRenderer.h"
 #include "Menu/IconLoader.h"
+#include "Menu/ImGuiRenderer.h"
 #include "Menu/MenuHeaderRenderer.h"
 #include "Menu/MenuShortcuts.h"
 #include "Menu/OverlayRenderer.h"
@@ -412,7 +412,7 @@ Menu::~Menu()
 	if (!initialized)
 		return;
 
-	ImGui_ImplDX11_Shutdown();
+	ImGuiRenderer::Shutdown();
 	ImGui_ImplWin32_Shutdown();
 	ImGui::DestroyContext();
 	dxgiAdapter3 = nullptr;
@@ -771,7 +771,7 @@ void Menu::Init()
 
 	// Setup Platform/Renderer backends
 	ImGui_ImplWin32_Init(desc.OutputWindow);
-	ImGui_ImplDX11_Init(globals::d3d::device, globals::d3d::context);
+	ImGuiRenderer::Init(globals::d3d::device, globals::d3d::context);
 
 	ThemeManager::ReloadFont(*this, MenuFonts::GetAtlasState().cachedFontSize);
 

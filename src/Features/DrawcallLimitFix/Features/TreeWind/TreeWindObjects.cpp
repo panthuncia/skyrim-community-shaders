@@ -1,8 +1,7 @@
-// Tree wind's object contributions: technique 12 (TreeAnim) DCLF's under the trees toggle, its objects' record flag, the TreeParams and
-// WindTimers SetupGeometry derives for a TreeAnim property (the shading rows' wind, what a member draws with until TreeWindCS has an
-// entry for its tree), and the engine globals that derivation reads, captured with the frame's.
+// Tree wind's object contributions: technique 12 (TreeAnim) under the trees toggle, its record flag, the TreeParams and WindTimers
+// SetupGeometry derives (used until TreeWindCS has an entry for the tree), and the engine globals that derivation reads.
 
-// TreeWindScene.h first: volk must precede every Vulkan header of the translation unit (FrameGlobals, the records).
+// TreeWindScene.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -17,12 +16,10 @@ namespace DCLF::Features::TreeWind
 	{
 		using Engine::Global;
 
-		// The frame globals' floats (FrameGlobals::features from slot.first): the wind source's magnitude (ShadowSceneNode +0x304), the
-		// fade band, the timer scale.
+		// The frame globals' floats: wind magnitude (ShadowSceneNode +0x304), fade band, timer scale.
 		Api::FrameGlobalsSlot globalsSlot;  // install
 
-		// The block's variables (static storage: the registry keeps the span). WindTimers.y, the previous timer, is not compared: the engine
-		// copies the node's current timer over it after every native draw (CaptureParity).
+		// WindTimers.y, the previous timer, is not compared, because the engine copies the current timer over it after every native draw.
 		constexpr Api::ShadingVariable kBlockVariables[] = {
 			{ .variable = kTreeParamsVariable, .firstWord = kBlockTreeParams, .floats = 4, .compared = 4 },
 			{ .variable = kWindTimersVariable, .firstWord = kBlockWindTimers, .floats = 2, .compared = 1 },
@@ -36,7 +33,6 @@ namespace DCLF::Features::TreeWind
 			kWindGlobals,
 		};
 
-		// Render thread, the frame's start (FrameGlobals::Capture): what DeriveTreeAnim reads.
 		void CaptureWindGlobals(float* a_out)
 		{
 			if (const auto source = Global<std::uintptr_t>(Engine::Address::kShadowSceneNode))
@@ -75,9 +71,8 @@ namespace DCLF::Features::TreeWind
 		}
 
 		/**
-		 * @brief One object's tree-animation constants as SetupGeometry computes them (engine notes: Func6 at 1414dd040, case 0xc), for a
-		 * TreeAnim property (the shading contribution). Skips its previousWindTimer = windTimer write: the native draw still does it, and
-		 * twice would advance trees twice a frame.
+		 * @brief One object's tree-animation constants as SetupGeometry computes them (Func6 at 1414dd040, case 0xc).
+		 * Skips the previousWindTimer write, which the native draw still does. Doing it twice would advance trees twice a frame.
 		 */
 		void DeriveTreeAnim(const Api::ShadingDerivation& a_derivation)
 		{
@@ -113,10 +108,7 @@ namespace DCLF::Features::TreeWind
 
 	void RegisterObjects(Api::InstallContext& a_context, Api::ToggleId a_trees)
 	{
-		// The TreeAnim technique, whose vertex animation reads TreeParams and WindTimers per object (the record's and the shading row's):
-		// an object class under the trees toggle.
 		a_context.RegisterTechnique({ .technique = kTechniqueTreeAnim, .toggle = a_trees, .objectFlags = kObjectTreeAnim });
-		// Its wind, the feature block's (kBlockWords: TreeParams and WindTimers.xy) for its objects.
 		a_context.RegisterShading({ .name = "tree-anim", .propertyFlags = static_cast<std::uint64_t>(RE::BSShaderProperty::EShaderPropertyFlag::kTreeAnim),
 			.derive = &DeriveTreeAnim, .objectFlags = kObjectTreeAnim, .blockWords = kBlockWords, .vsVariables = kBlockVariables });
 		globalsSlot = a_context.RegisterFrameGlobals({ .name = "tree-wind", .floats = kWindGlobals, .capture = &CaptureWindGlobals });

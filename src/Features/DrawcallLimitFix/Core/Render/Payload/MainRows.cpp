@@ -1,4 +1,4 @@
-// The main rows' frame variable places (MainRows.h, PlaceFrameVariables): where a packed material row holds what the frame owns.
+// Finds where a packed material row holds the values the frame owns.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/MainRows.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
@@ -13,8 +13,7 @@ namespace DCLF::Draws
 			std::uint8_t mask = 0;
 		};
 
-		// a_variable's packed dword in a_stage's block and the components the record wrote that follow it there, inside the block's a_bytes
-		// (mask 0: not placed).
+		// Finds a_variable's packed dword in a_stage's block. A zero mask means it is not placed.
 		Placed Place(const ConstantBlock& a_block, const MaterialRowStage& a_stage, std::uint32_t a_variable, std::size_t a_bytes)
 		{
 			const auto& layout = a_stage.layout;
@@ -34,13 +33,11 @@ namespace DCLF::Draws
 	void PlaceFrameVariables(const MaterialRecord& a_material, std::uint8_t a_kind, const MaterialRowStage& a_vs, const MaterialRowStage& a_ps,
 		MainRows::MaterialState& a_state)
 	{
-		// TexcoordOffset's place: the row holds the record's (capture-time) value, which a feature's frame patch overwrites with the
-		// buffer the frame's shaders read (a payload product names the place: texcoordDword, texcoordMask).
+		// The row holds the capture-time value. A feature's frame patch overwrites it with the live buffer.
 		if (const auto texcoord = Place(a_material.vs, a_vs, Extensions::PortRules(a_kind).frameVSVariable, kMaterialRowVSBytes); texcoord.mask) {
 			a_state.texcoordDword = texcoord.dword;
 			a_state.texcoordMask = texcoord.mask;
 		}
-		// The declared frame variables' places likewise: the row holds the record's value until the frame's patch writes the live one.
 		const auto variables = Extensions::FrameVariablesOf(a_kind);
 		for (std::size_t i = 0; i < variables.size() && i < a_state.frameVariables.size(); ++i) {
 			const auto& variable = variables[i];

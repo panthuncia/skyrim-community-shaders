@@ -1,6 +1,5 @@
-// The point lights' culls' report lines (Api::ReportPoint::PrimaryCullSources: Reports::PrimaryCullLines, after the features' primary cull
-// lines, before the stand-in walk parity): the point lights' Accumulate timing and, with the skip installed, its culls', category filter's
-// and bits' lines, with their parity's verdicts (LightCulls).
+// The point lights' culls' report lines: Accumulate timing and, with the skip installed, the culls', category filter's and bits'
+// lines with their parity's verdicts.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"

@@ -1,0 +1,52 @@
+# The green-streak repro (green-whiterun-off.env): DXVK guest mode, Whiterun at 13:00 in clear weather, one shot of the bridge.
+# Score the shot with tools/cs-test/greenscore.py. ORG_PERSISTENT_ALIAS_SHARE_EPOCHS=1 put the streaks back before the alias fix.
+extends = ["guest"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 99
+do = "console"
+arg = "coc Whiterun"
+
+# A coc does not record a new world-ready, so the rest counts frames from the coc (the old scenario's gaps).
+[[steps]]
+at = "previous"
+frames = 600
+do = "weather"
+arg = "SkyrimClear_A"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["whiterun"]

@@ -1,13 +1,15 @@
 #pragma once
 
-// Small helpers every part of IndirectDraws uses: formats, handles, buffers, registers.
-// Self-contained (features include it); Internal.h includes it in its order.
+// Small helpers used across the DCLF draws: formats, handles, buffers, registers.
+// Features include this header directly, so it must stay self-contained.
 
-// volk must precede every Vulkan header in this translation unit (DrawPipelinesRhi.h is included after it).
+// volk must come before every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Switches.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/Buffers/Buffer.h>
@@ -21,20 +23,25 @@
 
 namespace DCLF::Draws
 {
-	// A live override of CS_DCLF_ASYNC_COMPUTE (the test harness's dclf:async-compute, then a graph rebuild): -1 none, 0 graphics, 1 compute.
+	/** @brief Loads a setup's compute program off the render thread. Returns null with a_pending set until it is ready, and DCLF stays off meanwhile.
+	 * Null with a_pending clear means the load failed. Each desc is loaded once per device. Any thread. */
+	std::shared_ptr<const ComputeProgram> LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending);
+
+	// Live override of CS_DCLF_ASYNC_COMPUTE from the test harness. -1 none, 0 graphics, 1 compute.
 	inline std::atomic<int> asyncComputeOverride{ -1 };
-	// The sun views' contribution cull (kCullMinTexels): the least a caster's bound radius may project to, in texels; 0 off. Read by
-	// each shadow commit into its sun views' latches (data only: no recording changes), so it is live for an in-session A/B.
+	// The least a sun caster's bound may project to, in texels, or 0 for off. It is data only, so it can change live for A/B tests.
 	inline std::atomic<float> shadowMinTexels{ 0.0f };
-	// The sun views' size probe (kCullSizeProbe, dclf:shadow-probe): -1 off; else the shadow view label whose counters every readback
-	// samples (in place of the rotation), the sun views counting their drawn casters by size.
+	// The shadow view label whose size probe counters every readback samples, or -1 for off.
 	inline std::atomic<int> shadowSizeProbe{ -1 };
-	// The queue of a pass that prefers async compute: the compute queue, or the graphics queue under CS_DCLF_ASYNC_COMPUTE=0. Read at
-	// the graph's build.
+	// Native mode defaults these passes to the graphics queue. They take about 0.03 ms, but cross-queue waits cost
+	// the graphics queue about 0.13 ms a frame. CS_DCLF_ASYNC_COMPUTE overrides the choice.
 	inline org::QueueKind AsyncComputeQueue()
 	{
 		const int forced = asyncComputeOverride.load(std::memory_order_relaxed);
-		return (forced < 0 ? SwitchOnUnlessZero(Switch::AsyncCompute) : forced != 0) ? org::QueueKind::Compute : org::QueueKind::Graphics;
+		const auto& value = SwitchValue(Switch::AsyncCompute);
+		static const bool native = ::Switches::On("CS_ORG_NATIVE");
+		const bool compute = forced >= 0 ? forced != 0 : value.empty() ? !native : value != "0";
+		return compute ? org::QueueKind::Compute : org::QueueKind::Graphics;
 	}
 
 	// The format that reads a depth resource's depth aspect in a shader, as DXGI names it.
@@ -56,9 +63,8 @@ namespace DCLF::Draws
 		}
 	}
 
-	// A draw's ExecuteIndirect max count: a power of two that only grows, so the recording settles while
-	// the preprocess memory stays near what the frame draws (the GPU count buffer says how many run). Never past a_limit, the
-	// buffer's draws, even when the buffer is sized down under the current count.
+	// A power of two that only grows, so the recording settles while preprocess memory stays near what the frame draws.
+	// Never past a_limit, even when the buffer shrinks under the current count.
 	inline std::uint32_t GrowCapacity(std::uint32_t a_current, std::uint32_t a_needed, std::uint32_t a_limit)
 	{
 		if (a_needed <= a_current)
@@ -76,8 +82,7 @@ namespace DCLF::Draws
 	{
 		if (a.valid != b.valid || !SameHandle(a.layout, b.layout) || a.classes.size() != b.classes.size())
 			return false;
-		// Each state class's sets and signatures (what the calls bind) and how many pipelines they hold (what their preprocessing is
-		// sized against); the class map is the commit's, written into the latch.
+		// Each state class's sets, signatures and pipeline counts. The class map is the commit's.
 		for (std::size_t c = 0; c < a.classes.size(); ++c) {
 			const auto &left = a.classes[c], &right = b.classes[c];
 			if (left.pipelines != right.pipelines)
@@ -90,7 +95,7 @@ namespace DCLF::Draws
 		       a.refractionFormat == b.refractionFormat;
 	}
 
-	// The dispatch signature every BuildDraws pass records with: one Dispatch argument, read from a latch.
+	// The dispatch signature every BuildDraws pass records with. One Dispatch argument, read from a latch.
 	inline rhi::CommandSignaturePtr CreateDispatchSignature(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout)
 	{
 		rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
@@ -108,10 +113,9 @@ namespace DCLF::Draws
 		return buffer;
 	}
 
-	// The constant buffers the native draw rebinds per object are Extensions::PerDrawMask's (Core's, plus the features' per-draw
-	// buffers: Api::PerDrawBuffer); everything else bound in the main pass is per frame and comes from its CPU mirror.
+	// The native draw rebinds only Extensions::PerDrawMask's constant buffers per object. Everything else in the main pass is per frame.
 
 	constexpr std::uint32_t kStrictLightDataBytes = 1216;  // LightLimitFix.hlsli StrictLightData (15 lights)
-	constexpr std::uint32_t kCharacterLightMaterialRegister = 11;  // the engine's register of the character light's noise (kCharacterLightRegister)
+	constexpr std::uint32_t kCharacterLightMaterialRegister = 11;  // the engine's register for the character light's noise
 	constexpr std::uint32_t kInvalidIndex = GpuTextures::kInvalid;
 }

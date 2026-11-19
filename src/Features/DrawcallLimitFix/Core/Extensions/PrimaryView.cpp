@@ -1,4 +1,4 @@
-// The primary view's entry (see the header).
+// The primary view's entry.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PrimaryView.h"
 
@@ -8,7 +8,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolvePrimaryView (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		Api::PrimaryViewContribution resolved;
 		bool registered = false;
 	}

@@ -1,13 +1,23 @@
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define PREFILTER_NORMAL_RESOURCES(X)                \
+	X(SHARED, ConstantBuffer, Shared, 0)             \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)     \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)    \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1)   \
+	X(SRV, Texture2D<float4>, srcNormalRoughness, 0) \
+	X(UAV, RWTexture2D<unorm float2>, outNormal0, 0) \
+	X(UAV, RWTexture2D<unorm float2>, outNormal1, 1) \
+	X(UAV, RWTexture2D<unorm float2>, outNormal2, 2) \
+	X(UAV, RWTexture2D<unorm float2>, outNormal3, 3) \
+	X(UAV, RWTexture2D<unorm float2>, outNormal4, 4)
+ORG_PUSH_BLOCK(PREFILTER_NORMAL_RESOURCES(ORG_HANDLE))
+
 #include "Common/GBuffer.hlsli"
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<float4> srcNormalRoughness : register(t0);
-
-RWTexture2D<unorm float2> outNormal0 : register(u0);
-RWTexture2D<unorm float2> outNormal1 : register(u1);
-RWTexture2D<unorm float2> outNormal2 : register(u2);
-RWTexture2D<unorm float2> outNormal3 : register(u3);
-RWTexture2D<unorm float2> outNormal4 : register(u4);
+PREFILTER_NORMAL_RESOURCES(ORG_RESOURCE)
 
 float2 NormalMIPFilter(float2 enc0, float2 enc1, float2 enc2, float2 enc3)
 {
@@ -17,7 +27,7 @@ float2 NormalMIPFilter(float2 enc0, float2 enc1, float2 enc2, float2 enc3)
 
 groupshared float2 g_scratchNormal[8][8];
 [numthreads(8, 8, 1)] void main(uint2 dispatchThreadID : SV_DispatchThreadID, uint2 groupThreadID : SV_GroupThreadID) {
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
 	// MIP 0
 	const uint2 baseCoord = dispatchThreadID;

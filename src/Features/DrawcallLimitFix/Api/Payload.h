@@ -1,28 +1,21 @@
 #pragma once
 
-// The payload product contract (Api::InstallContext::RegisterPayloadProduct): an immutable value a feature builds with every main
-// payload, carried by the snapshot's payload and installed with it on the render thread.
+// An immutable value a feature builds with every main payload, carried with the snapshot and installed with it on the render thread.
 
 #include <memory>
 #include <string_view>
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/PayloadProducts.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/PayloadProducts.h.
 	class PayloadProductBuild;
 
 	/**
 	 * @brief A payload product.
 	 *
-	 * - build: the snapshot builder (DCLF's pool), at the end of each main build (MainBuild::Finish), given read access to the build's
-	 *   rows and tables, its previous result and the material slots that may have moved since. Its result (null allowed) is immutable
-	 *   from here and shared by both segments' payloads; it may hold engine pointers only while the publication the payload belongs to
-	 *   holds them. Nothing moved: it may return its previous result (the same object), whose pointers the moves it was told of keep
-	 *   current.
-	 * - carried (optional): the snapshot builder, when a payload with main parts is published (PayloadPools::MakeSource), with the main
-	 *   payload's product (null when its build made none).
-	 * - install: render thread, when the frame adopts a snapshot whose payload is not the installed one (AdoptSnapshot), with the
-	 *   installed payload's product (null: no payload, or one without main parts). It stays valid until the next install.
+	 * - build: snapshot builder, at the end of each main build. The result is immutable and may be null.
+	 *   It may hold engine pointers only while the payload's publication holds them. If nothing moved, return the previous result.
+	 * - install: render thread, when the frame adopts a new payload. The product stays valid until the next install.
 	 */
 	struct PayloadProduct
 	{

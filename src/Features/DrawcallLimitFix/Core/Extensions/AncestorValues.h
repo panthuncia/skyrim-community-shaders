@@ -1,7 +1,6 @@
 #pragma once
 
-// The ancestor value contract's Core side (Api/AncestorValues.h): the contribution's entry, resolved once at InstallFeatures (its ancestor
-// classes' RTTI called then; none registered: no key walk, no map, the column none), and the sink its fill hands the map through.
+// Core's side of Api/AncestorValues.h: the contribution's entry, resolved once at install, and the sink its fill hands the map through.
 
 #include "Features/DrawcallLimitFix/Api/AncestorValues.h"
 
@@ -14,22 +13,22 @@
 
 namespace DCLF::Extensions
 {
-	/** @brief The map an ancestor value's fill hands: key node to value (the copy the render thread posts to the scene lane). */
+	/** @brief Key node to value. The render thread posts a copy to the scene lane. */
 	using AncestorValueMap = ankerl::unordered_dense::map<const void*, std::int32_t>;
 }
 
 namespace DCLF::Api
 {
-	/** @brief Where an ancestor value's fill puts the map: Core's copy, posted once filled (FrameView's accumulate inputs). */
+	/** @brief Where a fill puts the map. Core posts its copy once filled. */
 	class AncestorMapSink
 	{
 	public:
 		explicit AncestorMapSink(Extensions::AncestorValueMap& a_out) :
 			out(a_out) {}
 
-		/** @brief Room for a_count entries (the feature's map's size), before they are put. */
+		/** @brief Reserves room for a_count entries. */
 		void Reserve(std::size_t a_count) { out.reserve(a_count); }
-		/** @brief a_node's value (a node put twice keeps its first). */
+		/** @brief Sets a_node's value. A node put twice keeps its first value. */
 		void Put(const void* a_node, std::int32_t a_value) { out.emplace(a_node, a_value); }
 
 	private:
@@ -39,30 +38,26 @@ namespace DCLF::Api
 
 namespace DCLF::Extensions
 {
-	/** @brief The contribution's entry (registered false: none, every field its default). */
+	/** @brief The contribution's entry. Every field keeps its default when none is registered. */
 	struct AncestorValueEntry
 	{
 		bool registered = false;
 		std::string name;
 		std::uint32_t recordWord = 0;
 		std::int32_t none = -1;
-		// The key classes' RTTI (a node whose mirrored RTTI is either is a key; null: unused), called once at the resolution.
+		// RTTI of the key classes, resolved once. A null entry is unused.
 		std::array<const void*, 2> ancestorRtti{};
 		Api::ClassifyInputId whileOn;
 		decltype(Api::AncestorValueContribution::generation) generation = nullptr;
 		decltype(Api::AncestorValueContribution::fill) fill = nullptr;
 
-		/** @brief Whether a node of RTTI a_rtti is a key. */
 		bool IsKey(const void* a_rtti) const { return a_rtti && (a_rtti == ancestorRtti[0] || a_rtti == ancestorRtti[1]); }
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entry from the registration (no name: none), its RTTI called. Once. */
+	/** @brief Main thread, once, at the end of InstallFeatures. Calls the RTTI functions. */
 	void ResolveAncestorValue(const Api::AncestorValueContribution& a_registered);
-	/** @brief Any thread, after InstallFeatures (null before): the contribution's entry, or null without one. */
+	/** @brief Any thread, after InstallFeatures. Null without a contribution. */
 	const AncestorValueEntry* AncestorValue();
-	/**
-	 * @brief Any thread, after InstallFeatures (the scene pass's snapshot of the inputs while one is installed): whether the value is on,
-	 * a contribution registered and its whileOn input on. Off: no post, no lookup, the column none.
-	 */
+	/** @brief Any thread, after InstallFeatures. Whether a contribution is registered and its whileOn input is on. */
 	bool AncestorValueOn();
 }

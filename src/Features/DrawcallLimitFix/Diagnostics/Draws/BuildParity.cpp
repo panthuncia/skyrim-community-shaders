@@ -1,6 +1,5 @@
-// CS_DCLF_BUILD_PARITY: every 300th colour epoch, BuildDraws' output (the sequences, the decal slots, the local shadow lights in the object
-// words) copied to staging and compared three main epochs later with the CPU's templates. The templates' row addresses are offsets into
-// the row tables; the epoch's payload (PayloadVersions) places them, recorded when the check is armed.
+// Build parity. Every 300th colour epoch, BuildDraws' output is copied to staging and compared three main epochs later with
+// the CPU's templates. Template row addresses are table offsets, placed at the bases recorded when the check is armed.
 
 #include "DrawsState.h"
 #include "DrawnLocalShadows.h"
@@ -14,12 +13,10 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		// The newest readback's local shadow lights by object (DrawnLocalShadowsOf).
 		ankerl::unordered_dense::map<std::uint32_t, DrawnLocalShadows> drawnLocalShadows;
 		/**
-		 * @brief The colour draws BuildDraws wrote: each state class's main and terrain sub-ranges (PassFrame::classes), and the class plan's
-		 * main and terrain plain buckets, as far as each count reaches (its classCounts word; past the capacity: dropped,
-		 * kCountClassOverflowWord). Not the forward ones (sorted there).
+		 * @brief The colour draws BuildDraws wrote, from each class's main and terrain sub-ranges and plain buckets, up to each count.
+		 * Forward draws are sorted elsewhere and left out.
 		 */
 		std::vector<DrawSequence> ClassSequences(const DrawsState::ParityReadback& a_parity, const DrawSequence* a_gpu, const std::uint32_t* a_classCounts)
 		{
@@ -43,10 +40,7 @@ namespace DCLF::Diagnostics
 			return built;
 		}
 
-		/**
-		 * @brief A decal slot as BuildDraws wrote it: the sub-range of its group that draws it (its own class's: every other class's holds a
-		 * zero-count filler there), null when none does (culled, or a blank).
-		 */
+		/** @brief The sub-range of its group that draws a decal slot, or null for a culled or blank slot. Other classes hold zero-count fillers there. */
 		const DrawSequence* DrawnDecal(const DrawsState::ParityReadback& a_parity, const DrawSequence* a_gpu, std::uint32_t a_group, std::size_t a_slot)
 		{
 			for (const auto& entry : a_parity.classes) {
@@ -57,7 +51,7 @@ namespace DCLF::Diagnostics
 			return nullptr;
 		}
 
-		/** @brief A template's pipeline index (its set index) as BuildDraws stores it: its index in its state class (IndirectState::classOf). */
+		/** @brief Converts a template's set index to its index within its state class, as BuildDraws stores it. */
 		void ClassIndexOf(DrawSequence& a_template, const std::vector<std::uint32_t>& a_classOf)
 		{
 			if (a_template.pipelineIndex < a_classOf.size() && a_classOf[a_template.pipelineIndex] != kNoSetClass)
@@ -78,7 +72,7 @@ namespace DCLF::Diagnostics
 		const auto& decalTemplates = a_payload.body->decalTemplates;
 		const auto& inputs = a_payload.body->inputList;
 		auto* context = globals::d3d::context;
-		// Every main epoch's payload, while the check is on (by the colour epochs counted): where a row outside its epoch's tables came from.
+		// Every main epoch's payload, to tell where a row outside its epoch's tables came from.
 		if (const auto* seen = a_epoch.payloadVersions; seen && seen->main) {
 			auto& history = state.parityPayloads;
 			const auto newest = state.parityPayloadsSeen ? &history[(state.parityPayloadsSeen - 1) % history.size()] : nullptr;
@@ -107,11 +101,11 @@ namespace DCLF::Diagnostics
 			const std::uint32_t count = static_cast<const std::uint32_t*>(countMap.pData)[0];
 			const std::uint32_t culled = static_cast<const std::uint32_t*>(countMap.pData)[1];
 			const auto* gpuSequences = static_cast<const DrawSequence*>(sequencesMap.pData);
-			// The colour draws and the terrain groups' (phase 2's range), from their state classes' sub-ranges.
+			// The colour and terrain draws, from their state class sub-ranges.
 			std::vector<DrawSequence> built = ClassSequences(*parity, gpuSequences, static_cast<const std::uint32_t*>(classCountsMap.pData));
 			context->Unmap(parity->classCounts.get(), 0);
-			// A sequence against its template, field by field, with the rows as indices into the payload's tables ("-": outside).
-			// Outside: the recent payload whose tables hold it, if any (its serial, and how many colour epochs before the copy it was first seen).
+			// Compares a sequence with its template field by field, rows shown as table indices or "-" when outside.
+			// For outside rows it names the recent payload whose tables hold them.
 			auto originOf = [&](std::uint64_t a_address) -> std::string {
 				const auto& history = state.parityPayloads;
 				const std::uint32_t kept = std::min<std::uint32_t>(state.parityPayloadsSeen, static_cast<std::uint32_t>(history.size()));
@@ -132,14 +126,13 @@ namespace DCLF::Diagnostics
 			auto describe = [&](const DrawSequence& a_gpu, const DrawSequence& a_cpu) {
 				const auto pipelineRow = [&](const DrawSequence& a) { return rowOf(a.pipelineRowAddress, parity->pipelineRowsBase, kPipelineRowBytes); };
 				const auto materialRow = [&](const DrawSequence& a) { return rowOf(a.materialRowAddress, parity->materialRowsBase, kMaterialRowBytes); };
-				return fmt::format("GPU vs CPU: pipeline {} vs {}, pipeline row {} vs {}, material row {} vs {}, vertices {:#x}/{} vs {:#x}/{}, indices {:#x}/{} vs {:#x}/{}, "
+				return fmt::format("GPU vs CPU: pipeline {} vs {}, pipeline row {} vs {}, material row {} vs {}, vertices {}+{:#x}/{} vs {}+{:#x}/{}, indices {:#x}/{} vs {:#x}/{}, "
 								   "index count {} vs {}, first index {} vs {}",
-					a_gpu.pipelineIndex, a_cpu.pipelineIndex, pipelineRow(a_gpu), pipelineRow(a_cpu), materialRow(a_gpu), materialRow(a_cpu), a_gpu.vertexBufferAddress,
-					a_gpu.vertexBufferSize, a_cpu.vertexBufferAddress, a_cpu.vertexBufferSize, a_gpu.indexBufferAddress, a_gpu.indexBufferSize, a_cpu.indexBufferAddress,
+					a_gpu.pipelineIndex, a_cpu.pipelineIndex, pipelineRow(a_gpu), pipelineRow(a_cpu), materialRow(a_gpu), materialRow(a_cpu), a_gpu.vertexBufferRef.viewSlot,
+					a_gpu.vertexBufferRef.byteOffset, a_gpu.vertexBufferSize, a_cpu.vertexBufferRef.viewSlot, a_cpu.vertexBufferRef.byteOffset, a_cpu.vertexBufferSize, a_gpu.indexBufferAddress, a_gpu.indexBufferSize, a_cpu.indexBufferAddress,
 					a_cpu.indexBufferSize, a_gpu.indexCount, a_cpu.indexCount, a_gpu.firstIndex, a_cpu.firstIndex);
 			};
-			// The local shadow lights BuildDraws selected, from each object word, against the CPU's selection; then out of the word,
-			// which the CPU's templates do not carry.
+			// Local shadow lights from each object word against the CPU's selection, then masked out since templates lack them.
 			std::size_t localChecked = 0, localDiffering = 0;
 			std::string localFirst;
 			drawnLocalShadows.clear();
@@ -160,16 +153,14 @@ namespace DCLF::Diagnostics
 			};
 			for (auto& sequence : built)
 				takeLocalShadows(sequence);
-			// The decal slots: fixed, so they compare in place, in the sub-range of their own state class (DrawnDecal). A culled slot is
-			// the template with an index count of zero; anything else differing is a defect.
+			// Decal slots are fixed, so they compare in place in their own class's sub-range. A culled slot is the template with
+			// index count zero. Any other difference is a defect.
 			std::size_t decalDiffering = 0, decalCulled = 0, decalSlots = 0;
 			std::string decalFirst;
 			for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
 				const auto& expectedDecals = parity->expectedDecals[group];
 				for (std::size_t slot = 0; slot < expectedDecals.size() && slot < parity->sequenceDecals; ++slot, ++decalSlots) {
-					// A zero-count slot draws nothing whatever its other fields hold: it is either a decal
-					// the culling rejected or a blank the epoch pushed for one it could not build a record
-					// for (whose template is then empty). Either way only the count matters.
+					// A zero-count slot draws nothing whatever else it holds. It is a culled decal or a blank, so only the count matters.
 					const auto* drawn = DrawnDecal(*parity, gpuSequences, group, slot);
 					if (!drawn) {
 						++decalCulled;
@@ -177,22 +168,18 @@ namespace DCLF::Diagnostics
 					}
 					DrawSequence decal = *drawn;
 					takeLocalShadows(decal);
-					decal.objectIndex &= ~kObjectSunMiss;  // as the draws below: the CPU's template has no cascade test
+					decal.objectIndex &= ~kObjectSunMiss;  // the CPU's template has no cascade test
 					if (std::memcmp(&decal, &expectedDecals[slot], sizeof(DrawSequence)) != 0 && decalDiffering++ == 0)
 						decalFirst = fmt::format("group {} slot {} (object {}): {}", group, slot, decal.objectIndex & kObjectIndexMask, describe(decal, expectedDecals[slot]));
 				}
 			}
 			context->Unmap(parity->count.get(), 0);
 			context->Unmap(parity->sequences.get(), 0);
-			// BuildDraws appends in any order: compare as sets, keyed by the object index (a record address is shared by every sequence
-			// of a deduplicated record, which would leave equal-key runs in arbitrary order on the two sides). A skin of several
-			// partitions writes one sequence per partition drawn (GeometryDraw::nextPartition), which its index range tells apart:
-			// partitions can share one index buffer, so the key is the index buffer and the first index.
-			// A draw that missed every sun cascade carries kObjectSunMiss in its object word; the CPU's template does not.
+			// BuildDraws appends in any order, so compare as sets keyed by object index. Record addresses are shared by deduplicated records.
+			// Multi-partition skins write one sequence per partition, which can share an index buffer, so the key adds the first index.
 			for (auto& sequence : built)
 				sequence.objectIndex &= ~kObjectSunMiss;
-			// The plain draws (CS_DCLF_MAIN_PLAIN, CS_DCLF_TERRAIN_PLAIN) are pooled: no pipeline index, the first index the index pool's, the
-			// count 0 without pool indices, the bucket slot as first instance. With any, those fields are left out on both sides.
+			// Plain draws are pooled with no pipeline index, pooled indices and the bucket slot as first instance. Those fields are skipped on both sides.
 			auto& expected = parity->expected;
 			if (const auto& plan = parity->classPlan; plan && (!plan->main.empty() || !plan->terrain.empty())) {
 				const auto plainFields = [](DrawSequence& a_sequence) {
@@ -211,15 +198,14 @@ namespace DCLF::Diagnostics
 			auto byObject = [&](const DrawSequence& a, const DrawSequence& b) { return keyOf(a) < keyOf(b); };
 			std::sort(built.begin(), built.end(), byObject);
 			std::sort(expected.begin(), expected.end(), byObject);
-			// What the GPU writes is a subset of the CPU's templates whenever the culling rejects anything, so this is a
-			// subsequence check: every sequence BuildDraws wrote must appear in the CPU list under the same object index, byte for byte.
+			// Culling makes the GPU output a subset of the templates. Every sequence written must match a template of the same object byte for byte.
 			std::size_t differing = 0, missing = 0;
 			std::size_t first = SIZE_MAX, firstExpected = 0;
 			for (std::size_t b = 0, e = 0; b < built.size(); ++b) {
 				while (e < expected.size() && byObject(expected[e], built[b]))
-					++e;  // the CPU built a template the culling rejected (or a partition it did not draw)
+					++e;  // a template the culling rejected, or an undrawn partition
 				if (e == expected.size() || keyOf(expected[e]) != keyOf(built[b])) {
-					++missing;  // a sequence with no template at all, which no culling can explain
+					++missing;  // no culling can explain a sequence with no template
 					continue;
 				}
 				if (std::memcmp(&built[b], &expected[e], sizeof(DrawSequence)) != 0) {
@@ -248,13 +234,10 @@ namespace DCLF::Diagnostics
 			parity.reset();
 			return;
 		}
-		// The colour epoch's only: the Z-prepass's draws go to its pipeline slots' buckets (shadow-format sequences at each bucket's
-		// range, BuildDrawsCS's BucketTableOffset path), never to the plain range or the decal slots compared here, which then
-		// still hold the last colour epoch's (another frame's payload).
+		// Colour epochs only. The Z-prepass draws into its pipeline buckets, so the plain range and decal slots still hold the last colour epoch's.
 		if (a_epoch.depthOnly || (parityEpochs++ % 300) != 0 || !a_resources->countD3D11)
 			return;
-		// The version the epoch's recording wrote: the one the adopted set names (resolved through it, IResourceVersions), which
-		// need not be the buffer's current one.
+		// The version the recording wrote is the one the adopted set names, which need not be the buffer's current one.
 		auto namedSequences = DrawsView::Get().Adopted().Find(*a_resources->sequences);
 		const auto currentSequences = a_resources->sequences->Current();
 		const std::uint64_t sequencesNamed = namedSequences ? namedSequences->number : 0;
@@ -262,7 +245,7 @@ namespace DCLF::Diagnostics
 		auto* const sequencesView = state.paritySequences.Of(namedSequences ? std::move(namedSequences) : currentSequences);
 		if (!sequencesView)
 			return;
-		// After the epoch in D3D11 stream order: the copies see what BuildDraws wrote.
+		// After the epoch in D3D11 stream order, so the copies see what BuildDraws wrote.
 		auto staging = [&](ID3D11Buffer* a_source) {
 			D3D11_BUFFER_DESC desc{};
 			a_source->GetDesc(&desc);
@@ -277,7 +260,7 @@ namespace DCLF::Diagnostics
 			context->CopyResource(buffer.get(), a_source);
 			return buffer;
 		};
-		// The row tables BuildDraws read: the epoch's payload's (none: the epoch drew nothing of a payload to compare).
+		// None means the epoch drew no payload to compare.
 		const auto* payloadVersions = a_epoch.payloadVersions;
 		if (!payloadVersions || !payloadVersions->main)
 			return;
@@ -286,7 +269,7 @@ namespace DCLF::Diagnostics
 		readback.materialRowsBase = (*payloadVersions)[Draws::PayloadPart::MaterialRows].address;
 		readback.sequences = staging(sequencesView);
 		readback.count = staging(a_resources->countD3D11.get());
-		// The ranges of the shape the epoch was committed into (the adopted revision's).
+		// The ranges of the adopted revision's shape.
 		const auto& active = DrawsView::Get().revisions.active;
 		const auto epoch = Draws::EpochOfShape(Draws::ShapeKind::Main, static_cast<std::uint32_t>(a_epoch.depthOnly ? kDepthShape : kColourShape));
 		const auto shape = active ? active->Get<PassFrame>(DrawsView::Impl::SceneRevisions::kShapeSlot + epoch) : nullptr;
@@ -296,29 +279,25 @@ namespace DCLF::Diagnostics
 		readback.sequenceDecals = shape->sequenceDecals;
 		readback.classes = shape->classes;
 		readback.classPlan = shape->classPlan;
-		// The state class sub-ranges' counts, the version the adopted set names (as the sequences').
+		// Class counts, at the version the adopted set names.
 		auto* const classCountsView = state.parityClassCounts.Of(DrawsView::Get().Adopted().Find(*a_resources->classCounts));
 		if (!classCountsView)
 			return;
 		readback.classCounts = staging(classCountsView);
-		// The templates cover every candidate; the gate drops the ones the engine culled before BuildDraws
-		// writes a sequence for them, and it is a pure per-object flag test, so the expectation can apply it
-		// exactly. Frustum culling cannot be predicted here, which is why parity and culling are separate
-		// switches. inputs is parallel to sequences.
+		// The templates cover every candidate. The gate is a pure per-object flag test, so the expectation applies it exactly.
+		// Frustum culling cannot be predicted here, which is why parity and culling are separate switches.
 		readback.expected.clear();
 		readback.expected.reserve(sequences.size());
-		// The templates' rows are offsets into the tables: placed at the payload's. Their pipeline index is the set index, which BuildDraws
-		// stores as its index in its state class (the shape's set version's class map).
-		// An animated row's draws read its row of the frame's copy (BuildDrawsCS's MaterialRowAddress: the header's animatedRow, the latch's
-		// animatedRows, as this frame's latches name it).
-		const std::uint64_t animatedRows = Draws::PassAnimatedRows();
+		// Place the template rows at the payload's tables and convert set indices to class indices.
+		// An animated row's draws read the frame's copy of that row, as BuildDrawsCS's MaterialRowAddress does.
+		const std::uint64_t animatedRows = Draws::PassAnimatedRows().address;
 		auto place = [&](DrawSequence& a_sequence) {
 			a_sequence.pipelineRowAddress += readback.pipelineRowsBase;
 			const auto* row = animatedRows ? a_payload.body->materialRows.At(a_sequence.materialRowAddress / kMaterialRowBytes) : nullptr;
 			const std::uint32_t animatedRow = row ? reinterpret_cast<const MaterialRowHeader*>(row->bytes.data() + kMaterialRowHeader)->animatedRow : ~0u;
 			a_sequence.materialRowAddress = animatedRow != ~0u ? animatedRows + std::uint64_t(animatedRow) * kMaterialRowBytes :
 			                                                     a_sequence.materialRowAddress + readback.materialRowsBase;
-			SetSequenceBlocks(a_sequence);  // the blocks' addresses, from the rows' (BuildDrawsCS's StoreSequence)
+			SetSequenceBlocks(a_sequence);  // as BuildDrawsCS's StoreSequence does
 			ClassIndexOf(a_sequence, shape->indirect.classOf);
 		};
 		for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
@@ -327,9 +306,8 @@ namespace DCLF::Diagnostics
 				place(decal);
 		}
 		{
-			// Cull-only inputs carry no sequence, so the two run at different rates and the drawable ones
-			// have to be counted off rather than indexed in step. Decals have their own slots and templates.
-			// A skin of several partitions has one template per partition drawn, consecutive.
+			// Cull-only inputs carry no sequence, so drawable ones are counted off rather than indexed in step.
+			// Decals have their own slots. A multi-partition skin has consecutive templates, one per drawn partition.
 			std::size_t sequence = 0;
 			for (const auto& input : inputs) {
 				if (!(input.flags & kInputDrawable) || (input.flags & kObjectDecal))
@@ -339,7 +317,7 @@ namespace DCLF::Diagnostics
 					break;
 				const std::size_t first = sequence;
 				sequence += templates;
-				// A forward input's draws are in the forward range (sorted there), not compared here.
+				// Forward draws are sorted in their own range and not compared here.
 				if (input.flags & kObjectForward)
 					continue;
 				readback.expected.insert(readback.expected.end(), sequences.begin() + first, sequences.begin() + sequence);
@@ -347,7 +325,7 @@ namespace DCLF::Diagnostics
 			for (auto& expected : readback.expected)
 				place(expected);
 		}
-		// The CPU's local shadow selection for every object the epoch drew, with the volumes it sampled (none on the Z-prepass).
+		// The CPU's local shadow selection for every drawn object. None on the Z-prepass.
 		if (!a_payload.inputs.depthOnly) {
 			const auto& tables = Scene::FrameView::Get().GetTables();
 			const std::uint64_t landscapeFlags = Extensions::LightVolumes().landscapeFlags;

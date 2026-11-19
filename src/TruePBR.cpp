@@ -4,10 +4,12 @@
 
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBRLandscape.h"
+#include "TruePBR/ORGGlintsNoise.h"
 
 #include "Features/InteriorSun.h"
 #include "Features/LinearLighting.h"
 #include "Hooks.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -391,10 +393,35 @@ void TruePBR::Prepass()
 	SetupDefaultPBRLandTextureSet();
 
 	auto context = globals::d3d::context;
-	if (!glintsNoiseTexture)
-		SetupGlintsTexture();
-	ID3D11ShaderResourceView* srv = glintsNoiseTexture->srv.get();
+	// On the ORG path the noise is filled at the EarlyPrepass anchor. Until that run was submitted nothing is bound, so no draw reads
+	// the texture unfilled.
+	const auto& orgNoise = ORGGlintsNoise::Get();
+	ID3D11ShaderResourceView* srv = nullptr;
+	if (orgNoise.Active())
+		srv = orgNoise.NoiseSRV();
+	else {
+		if (!glintsNoiseTexture)
+			SetupGlintsTexture();
+		srv = glintsNoiseTexture->srv.get();
+	}
 	context->PSSetShaderResources(20, 1, &srv);
+}
+
+void TruePBR::PostSetupResources()
+{
+	ORGGlintsNoise::Get().Setup();
+}
+
+void TruePBR::ClearShaderCache()
+{
+	ORGGlintsNoise::Get().ClearShaderCache();
+}
+
+ID3D11ShaderResourceView* TruePBR::GlintsNoiseSRV() const
+{
+	if (auto* srv = ORGGlintsNoise::Get().NoiseSRV())
+		return srv;
+	return glintsNoiseTexture ? glintsNoiseTexture->srv.get() : nullptr;
 }
 
 void TruePBR::SetupGlintsTexture()
@@ -426,7 +453,8 @@ void TruePBR::SetupGlintsTexture()
 		.Texture2D = { .MipSlice = 0 }
 	};
 
-	glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc, "TruePBR::GlintsNoise");
+	// The ORG path's texture has the same name (kNoiseId is a literal, so its data is terminated).
+	glintsNoiseTexture = eastl::make_unique<Texture2D>(tex_desc, ORGGlintsNoise::kNoiseId.data());
 	glintsNoiseTexture->CreateSRV(srv_desc);
 	glintsNoiseTexture->CreateUAV(uav_desc);
 
@@ -683,7 +711,8 @@ struct ExtendedRendererState
 
 	void SetPSTexture(size_t textureIndex, RE::BSGraphics::Texture* newTexture)
 	{
-		ID3D11ShaderResourceView* resourceView = newTexture ? newTexture->resourceView : nullptr;
+		// Bound on the raw context: an engine texture's tripwire handle goes as the D3D11 view it wraps.
+		ID3D11ShaderResourceView* resourceView = newTexture ? RenderGraph::Engine::Tripwire::Unwrap(newTexture->resourceView) : nullptr;
 		//if (PSTexture[textureIndex] != resourceView)
 		{
 			PSTexture[textureIndex] = resourceView;
@@ -1939,6 +1968,8 @@ void TruePBR::PostPostLoad()
 
 	logger::info("[TruePBR] Hooking BSLightingShader::SetupMaterial");
 	stl::write_vfunc<0x4, PBR_BSLightingShader_SetupMaterial>(RE::VTABLE_BSLightingShader[0]);
+
+	ORGGlintsNoise::Reserve();
 }
 
 void TruePBR::DataLoaded()

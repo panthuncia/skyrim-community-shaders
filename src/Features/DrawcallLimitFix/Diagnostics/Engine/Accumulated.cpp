@@ -1,5 +1,5 @@
-// CS_DCLF_ACCUMULATED_PARITY's engine side (Accumulated.h): the render thread's kAccumulated samples and frame camera check, the
-// animation gate's detours (job threads) and the prediction published at Main::Update's entry (main thread).
+// Engine side of the accumulated parity. Render thread samples and camera check, the animation gate detours on job threads, and
+// the prediction published at Main::Update's entry on the main thread.
 
 #include "Accumulated.h"
 
@@ -22,27 +22,26 @@ namespace DCLF::Diagnostics::Accumulated
 	{
 		using Engine::kFlagAccumulated;
 		using Engine::kFlagHidden;
-		constexpr std::uint32_t kFlagIgnoreFade = 1u << 15;  // on a fade node: kIgnoreFade (FUN_1402cff60 runs no fade update)
-		constexpr std::uint32_t kFlag29 = 1u << 29;          // FUN_1402cff60: without kAccumulated, visible only with a zero radius
-		constexpr std::size_t kBoundRadius = 0xF0;           // NiAVObject::worldBound.radius (FUN_1402cff60 tests its bits against 0)
+		constexpr std::uint32_t kFlagIgnoreFade = 1u << 15;  // kIgnoreFade on a fade node, FUN_1402cff60 runs no fade update
+		constexpr std::uint32_t kFlag29 = 1u << 29;          // FUN_1402cff60, without kAccumulated visible only with a zero radius
+		constexpr std::size_t kBoundRadius = 0xF0;           // worldBound.radius, FUN_1402cff60 tests its bits against 0
 		constexpr std::size_t kCurrentFade = 0x130;          // BSFadeNode::currentFade
 
 		std::uint32_t Flags(const void* a_node) { return Engine::FlagsOf(a_node); }
 		bool AccumulatedBit(const void* a_node) { return (Flags(a_node) & kFlagAccumulated) != 0; }
 
-		// AE 1.6.1170 and SE 1.5.97: the three calls of FUN_1402cff60 (SE FUN_14027cac0) (skyrim-engine-notes.md, "who sets kAccumulated").
+		// The three calls of FUN_1402cff60 (SE FUN_14027cac0), for AE 1.6.1170 and SE 1.5.97.
 		constexpr std::array<Engine::Offset, 3> kAnimGateCallSites{ { { { 19204, 0x96 }, { 18714, 0x96 } }, { { 18894, 0x90 }, { 18463, 0x90 } }, { { 18900, 0xa2 }, { 18469, 0xa2 } } } };  // UpdateAnimationJob, FUN_1402b41a0, FUN_1402b52e0
 
-		/** @brief Main::Update's entry's: the stood-in roots and whether DCLF left their kAccumulated set. Immutable once published. */
+		/** @brief The stood-in roots and whether DCLF left their kAccumulated set. Immutable once published. */
 		struct AnimPrediction
 		{
 			ankerl::unordered_dense::map<const void*, bool> roots;
 		};
-		// Published at Main::Update's entry (the main thread), read by the gates on job threads during the frame's cycle; the next
-		// entry, which only follows the cycle's end, lets the last go.
+		// Published at Main::Update's entry and read by the gates on job threads. The next entry only follows the cycle's end, so it frees the last.
 		std::atomic<AnimPrediction*> animPrediction{ nullptr };
 
-		/** @brief Per call site, since the last report (job threads). */
+		/** @brief Per call site, since the last report. Job threads. */
 		struct AnimCounts
 		{
 			std::atomic<std::uint64_t> calls{ 0 }, neverFade{ 0 }, fading{ 0 }, rejected{ 0 }, rejectedNeverFade{ 0 };
@@ -52,7 +51,7 @@ namespace DCLF::Diagnostics::Accumulated
 		std::array<AnimCounts, 3> animCounts;
 		std::atomic<std::uint64_t> animPredictions{ 0 }, animPredictedRoots{ 0 }, animPredictedSet{ 0 };
 
-		/** @brief Job thread, inside the engine's gate's caller: a stood-in root's verdict against DCLF's prediction. */
+		/** @brief A stood-in root's gate verdict against DCLF's prediction. Job thread, inside the gate's caller. */
 		void NoteAnimGate(std::size_t a_site, const RE::NiAVObject* a_root, bool a_result)
 		{
 			const auto* prediction = animPrediction.load(std::memory_order_acquire);
@@ -63,7 +62,7 @@ namespace DCLF::Diagnostics::Accumulated
 				return;
 			auto& c = animCounts[a_site];
 			c.calls.fetch_add(1, std::memory_order_relaxed);
-			// The gate's own reads (FUN_1402cff60): the fade node, its flags and radius; the root's flags.
+			// The gate's own reads in FUN_1402cff60.
 			const auto* fade = const_cast<RE::NiAVObject*>(a_root)->AsFadeNode();
 			const std::uint32_t flags = Flags(a_root);
 			const bool neverFade = !fade || (Flags(fade) & kFlagIgnoreFade) || Engine::At<std::uint32_t>(fade, kBoundRadius) == 0 || (flags & kFlag29);
@@ -72,8 +71,7 @@ namespace DCLF::Diagnostics::Accumulated
 			if (!predicted)
 				c.predictedOut.fetch_add(1, std::memory_order_relaxed);
 			if (a_result) {
-				// Out of view as DCLF wrote it, yet updated: a fading root within its fade distance (the gate's own fade step), as the
-				// engine does for a root its cull failed.
+				// Out of view as DCLF wrote it, yet updated. That is a fading root within its fade distance, as the engine does when its cull fails a root.
 				if (!predicted)
 					c.acceptedPredictedOut.fetch_add(1, std::memory_order_relaxed);
 				return;
@@ -83,7 +81,7 @@ namespace DCLF::Diagnostics::Accumulated
 				c.rejectedNeverFade.fetch_add(1, std::memory_order_relaxed);
 			if (!predicted)
 				return;
-			// Written visible and rejected: fully faded out (the gate's step 2), else a difference.
+			// Written visible and rejected is fine only when fully faded out. Otherwise it is a difference.
 			if (fade && Engine::At<float>(fade, kCurrentFade) <= 0.0f) {
 				c.fadedOut.fetch_add(1, std::memory_order_relaxed);
 				return;
@@ -105,17 +103,16 @@ namespace DCLF::Diagnostics::Accumulated
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// The render thread's: the samples no decode has reached yet, in frame order.
+		// Samples no decode has reached yet, in frame order. Render thread.
 		std::deque<std::unique_ptr<Sample>> samples;
 
-		// The frame camera check (render thread).
 		FrameCamera frameCamera;
 
-		/** @brief PrimaryCull::Install: <- ANIM RATE on FUN_1402cff60's three calls. */
+		/** @brief Installs ANIM RATE on FUN_1402cff60's three calls. */
 		void InstallAnimRate(const On<EnginePoint::PrimaryCullInstalled>&)
 		{
 			const auto base = REL::Module::get().base();
-			// Chained onto whatever the calls hold; only an inline patch (no CALL) keeps the observer out.
+			// Chained onto whatever the calls hold. Only an inline patch with no CALL keeps the observer out.
 			for (const auto site : kAnimGateCallSites)
 				if (*reinterpret_cast<const std::uint8_t*>(base + site) != 0xE8) {
 					logger::warn("[DCLF] anim rate observer (T7b2): FUN_1402cff60's calls are not calls; not installed");
@@ -137,10 +134,10 @@ namespace DCLF::Diagnostics::Accumulated
 				++frameCamera.differ;
 		}
 
-		/** @brief After the list jobs' Finish: the bit on the frame's tables' fade roots and geometries. */
+		/** @brief After the list jobs finish, samples the bit on the frame's fade roots and geometries. */
 		void SampleBits(const On<EnginePoint::ListJobsDone>&)
 		{
-			// The frame's tables (the installed publication's: the same the frame's depth commit armed its readback with).
+			// The installed publication's tables, the same the depth commit armed its readback with.
 			const auto& tables = Scene::FrameView::Get().GetTables();
 			auto sample = std::make_unique<Sample>();
 			sample->frame = Scene::FrameView::Get().GetFrame();
@@ -148,7 +145,7 @@ namespace DCLF::Diagnostics::Accumulated
 			const std::size_t roots = list.nodes.size();
 			sample->rootNodes.assign(list.nodes.begin(), list.nodes.end());
 			sample->rootBits.assign(roots, 0u);
-			// A root the cut stood in for is not the engine cull's (its bit is DCLF's write at Main::Update's entry).
+			// A stood-in root's bit is DCLF's write, not the engine cull's.
 			for (std::size_t r = 0; r < roots; ++r)
 				if (const void* node = list.nodes[r])
 					sample->rootBits[r] = (AccumulatedBit(node) ? kSampleAccumulated : 0u) | (PrimaryCullView::StoodInWhole(node) ? kSampleStoodIn : 0u) |
@@ -162,8 +159,7 @@ namespace DCLF::Diagnostics::Accumulated
 					continue;
 				sample->objectGeometry[o] = geometry;
 				std::uint8_t bits = AccumulatedBit(geometry) ? kSampleAccumulated : 0u;
-				// Its fade root's: a geometry the cull did not reach this frame (its root out of view, or faded out) keeps the bit the
-				// last cull that did left; the root's says which.
+				// A geometry the cull did not reach keeps the bit from the last cull that did. Its fade root's bit says which.
 				const std::uint32_t root = list.RootOf(static_cast<std::uint32_t>(o));
 				if (root != kNoFadeRoot && root < roots && list.nodes[root]) {
 					bits |= (sample->rootBits[root] & kSampleAccumulated) ? kSampleRootAccumulated : 0u;
@@ -176,7 +172,7 @@ namespace DCLF::Diagnostics::Accumulated
 			samples.push_back(std::move(sample));
 		}
 
-		/** @brief Main::Update's entry, after the writes (no animation job or cell animation runs): the prediction for this frame's gates. */
+		/** @brief Publishes the prediction for this frame's gates. Main::Update's entry, after the writes. */
 		void PublishPrediction(const UpdateEntry& a_event)
 		{
 			if (!a_event.running)
@@ -193,7 +189,7 @@ namespace DCLF::Diagnostics::Accumulated
 			animPredictions.fetch_add(1, std::memory_order_relaxed);
 			animPredictedRoots.fetch_add(stoodIn.size(), std::memory_order_relaxed);
 			animPredictedSet.fetch_add(set, std::memory_order_relaxed);
-			// The last frame's gates are done (Main::Update's entry follows the cycle's wait): nothing reads the old one.
+			// Main::Update's entry follows the cycle's wait, so nothing reads the old prediction.
 			delete animPrediction.exchange(prediction, std::memory_order_acq_rel);
 		}
 	}

@@ -1,36 +1,24 @@
 #pragma once
 
-// What the passes and the graph extensions share: recording helpers, registration (the ones features use too: Register and
-// RecordDispatch, Core/Extensions/PassContext.h's; the draw passes' attachments, frame buffers, preprocessed and bucket draws, the latched
-// copies pass, the latched dispatch and the shadow epoch's index pool copies, Passes/DrawHelpers.h's). Part of IndirectDraws'
-// implementation: included by Internal.h, in its order.
+// What the passes and graph extensions share: recording helpers and registration. Feature-facing helpers live in
+// Extensions/PassContext.h and Passes/DrawHelpers.h. Part of IndirectDraws' implementation, included by Internal.h.
 
 #include "Features/DrawcallLimitFix/Api/Passes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 
+#include <Render/RunRef.h>
+
 namespace DCLF::Draws
 {
 	/**
-	 * @brief Folds the camera translation into the view-projection, so that a bound's absolute world
-	 * position can be projected without carrying the camera separately. For CPU readers (the set parity,
-	 * the direct path's forward sort). The shaders project eye-relative positions (LatchCullCamera).
-	 *
-	 * The draws are camera-relative (the engine's posAdjust), and a bound is absolute. The fold is computed in
-	 * double, but it is not exact: its column 3 is rounded to float, and projecting with it cancels large
-	 * terms in float. At positions around 2^18 the clip position is off by a few times 1/32 unit, so a test
-	 * that culls from it needs a margin.
-	 *
-	 * Row-major, as the shader's `mul(M, v)` reads it: M'(p,1) = M(p-e,1) needs only column 3 changed,
-	 * by subtracting M's upper-left 3x3 applied to the camera.
+	 * @brief Folds the camera translation into the view-projection, for CPU readers that project absolute positions. The fold
+	 * is not exact in float. Around 2^18 units the clip position is off by a few 1/32 units, so a cull from it needs a margin.
 	 */
 	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16]);
 
-	/**
-	 * @brief Writes a view's culling camera into its latch: the camera-relative view-projection, the eye it is relative to and the
-	 * margin for tests on absolute planes (BuildDrawsLatch::viewProj, cullEye).
-	 */
+	/** @brief Writes a view's culling camera into its latch: the camera-relative view-projection, its eye and the absolute-plane margin. */
 	inline void LatchCullCamera(BuildDrawsLatch& a_latch, const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye)
 	{
 		std::memcpy(a_latch.viewProj, a_viewProj.data(), sizeof(a_latch.viewProj));
@@ -45,37 +33,30 @@ namespace DCLF::Draws
 	constexpr std::uint8_t kObjectStateDecal = 0xF1;
 	constexpr std::uint8_t kObjectStateAbsent = 0xFF;
 
-	// A DXVK image the graph uses in place, imported without ownership in the layout DXVK rests it in, which is its home state
-	// (RenderGraph::ImportDxvkTexture). Fills the description's dimensions and array shape from the image.
-	std::shared_ptr<org::ExternalTextureResource> ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	// Imports a DXVK image for the graph to use in place, in the layout DXVK rests it in. Every importer shares the one graph
+	// resource. The slot keeps a_texture alive.
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name);
 
-	/**
-	 * @brief The index pool every plain indexed draw binds (IndexPool): the scene's (SceneBuffers::pool), made with its
-	 * copy program by whichever extension sets up first. Null, logged, when the program cannot be created.
-	 */
+	/** @brief The scene's index pool, made by whichever extension sets up first. Null, logged, when its copy program cannot be created. */
 	std::shared_ptr<IndexPool> EnsureIndexPool(SceneBuffers& a_scene, rhi::Device a_device, bool a_small);
 
 	/**
-	 * @brief Brings the index pool up to the tables in the versions a_sealed (the adopted set) names (ShadowIndexPool.cpp): whichever
-	 * commit draws from it first in a frame gives the ranges out and writes their copies' dispatch at a_poolOffset of its latch slot;
-	 * a later commit finds nothing to copy. Returns the copies (the dispatch's count): with none, the depth commit submits its
-	 * recording without the dispatch (RevisionShapes::depthWithoutIndexPool).
+	 * @brief Brings the index pool up to the sealed tables. The first commit to draw from it in a frame writes the copy dispatch,
+	 * and later commits find nothing to copy. Returns the copy count. With none, the depth commit skips the dispatch.
 	 */
 	std::uint32_t UpdateIndexPool(const NamedVersions& a_sealed, IndexPool& a_pool, const SceneTables& a_tables, std::uint32_t a_generation, const org::LatchBlock& a_latch,
-		std::uint32_t a_latchSlot, std::uint32_t a_poolOffset, CommitUploads& a_uploads);
+		const org::RunRef& a_latchRun, std::uint32_t a_poolOffset, CommitUploads& a_uploads);
 
-	// The graph extensions that add DCLF's passes (Passes/MainExtension.cpp, Passes/Shadow.cpp).
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<Resources> a_resources);
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeShadowExtension(std::shared_ptr<ShadowResources> a_resources);
+	// The graph extensions that add DCLF's passes, made from a build state. Null when the state has no resources for them.
+	struct BuildState;
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<const BuildState> a_build);
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeShadowExtension(std::shared_ptr<const BuildState> a_build);
 
-	/** @brief The scene tables, which every extension registers (the same identifiers: a second registration is an update). */
+	/** @brief Registers the scene tables. Every extension does, and a second registration is an update. */
 	void RegisterSceneBuffers(org::RenderGraph& a_graph, const SceneBuffers& a_scene);
 
-	/**
-	 * @brief A pass of an extension: a copy or compute pass on the graphics queue unless a_queue says otherwise, a render pass (the pass
-	 * contract's: Api/Passes.h). Only the schedule's executor (Epochs/ScheduleExecutor.cpp) calls AddPass.
-	 */
+	/** @brief A pass of an extension. Only the schedule's executor calls AddPass. */
 	using PassKind = Api::PassKind;
 	using PassQueue = Api::PassQueue;
 	template <class Epoch>
@@ -86,42 +67,38 @@ namespace DCLF::Draws
 		auto desc = a_kind == PassKind::Copy ? Desc::Copy(std::move(a_name), std::move(a_pass)) :
 		            a_kind == PassKind::Compute ? Desc::Compute(std::move(a_name), std::move(a_pass)) :
 		                                          Desc::Render(std::move(a_name), std::move(a_pass));
-		// An external pass's queue is its description's (ORG reads no builder preference for it), so CS_DCLF_ASYNC_COMPUTE=0 is applied here.
+		// ORG reads an external pass's queue from its description, so CS_DCLF_ASYNC_COMPUTE=0 is applied here.
 		if (a_queue == PassQueue::Compute)
 			desc.PreferQueue(AsyncComputeQueue());
 		else if (a_queue == PassQueue::Default && a_kind != PassKind::Render)
 			desc.PreferQueue(org::QueueKind::Graphics);
-		// Recorded by its external epoch's execution (Api::PassDef::recordAtExecution): ORG's late batch.
+		// Recorded in ORG's late batch by its external epoch's execution.
 		if (a_recordAtExecution)
 			desc.RecordAtExecution();
 		a_out.push_back(std::move(desc.Epoch(a_epoch)));
 	}
 
-	/**
-	 * @brief A forward range's sort, back to front (ForwardSortCS.hlsl), as of the shape its preparation is for: per state class with a
-	 * forward sub-range (GpuLayouts.h, kClassRangeForward), its staging half's first slot and capacity (each half's) and its count word's
-	 * byte offset, a dispatch each. No program: nothing to sort.
-	 */
+	/** @brief A forward range's back-to-front sort, one dispatch per state class with a forward sub-range. No program means nothing to sort. */
 	struct ForwardSortSource
 	{
 		struct Range
 		{
 			std::uint32_t stagingBase = 0, capacity = 0, countOffset = 0;
-			std::uint32_t options = 0;  // added to the range's kCountOffset (ForwardSortConstants::kRankInstance)
+			std::uint32_t options = 0;  // added to the range's kCountOffset
 		};
 		std::shared_ptr<const ComputeProgram> program;
 		std::vector<Range> ranges;
 	};
-	/** @brief The sort of a forward range of a_sequences (the main one, a view's), its classes' counts read from a_counts. */
+	/** @brief Sorts a forward range of a_sequences, the main one or a view's, reading class counts from a_counts. */
 	std::shared_ptr<org::RenderPass> MakeForwardSortPass(Versioned a_sequences, LatchedTarget a_counts, std::function<ForwardSortSource(const org::PassPrepareContext&)> a_source);
 
-	/** @brief The rows' strides into BuildDraws' constants (BuildDrawsCS: RowsOf; the addresses are the latch's: PayloadLatch). */
+	/** @brief Sets the row strides in BuildDraws' constants. */
 	inline void SetRowStrides(BuildDrawsConstants& a_constants, bool a_pipelineRows = true)
 	{
 		a_constants.materialRowStride = kMaterialRowBytes;
 		a_constants.pipelineRowStride = a_pipelineRows ? kPipelineRowBytes : 0u;
 	}
-	/** @brief The installed payload's main parts into a culling latch: the scene list, the geometry table, the main rows. */
+	/** @brief Writes the installed payload's main parts into a culling latch. */
 	inline void PayloadLatch(const PayloadVersions& a_payload, BuildDrawsLatch& a_latch)
 	{
 		const std::uint64_t materialRows = a_payload[PayloadPart::MaterialRows].address, pipelineRows = a_payload[PayloadPart::PipelineRows].address;
@@ -131,17 +108,18 @@ namespace DCLF::Draws
 		a_latch.materialRowsHi = static_cast<std::uint32_t>(materialRows >> 32);
 		a_latch.pipelineRowsLo = static_cast<std::uint32_t>(pipelineRows);
 		a_latch.pipelineRowsHi = static_cast<std::uint32_t>(pipelineRows >> 32);
-		// The frame's copy of the rows that animate (Api::PassDef::animatedRows), which their draws read in place of the installed rows.
-		const std::uint64_t animatedRows = PassAnimatedRows();
-		a_latch.animatedRowsLo = static_cast<std::uint32_t>(animatedRows);
-		a_latch.animatedRowsHi = static_cast<std::uint32_t>(animatedRows >> 32);
-		// The frame's per-object rows (Api::PassDef::frameRows), which their pass writes from this latch.
+		a_latch.materialRowsRef = a_payload[PayloadPart::MaterialRows].ref;
+		// The frame's copy of animated rows, which their draws read instead of the installed rows.
+		const auto animatedRows = PassAnimatedRows();
+		a_latch.animatedRowsLo = static_cast<std::uint32_t>(animatedRows.address);
+		a_latch.animatedRowsHi = static_cast<std::uint32_t>(animatedRows.address >> 32);
+		a_latch.animatedRowsRef = animatedRows.ref;
+		// The frame's per-object rows, which their pass writes from this latch.
 		const auto frameRows = PassFrameRows();
-		a_latch.frameRowsLo = static_cast<std::uint32_t>(frameRows.address);
-		a_latch.frameRowsHi = static_cast<std::uint32_t>(frameRows.address >> 32);
-		a_latch.frameRowsCount = frameRows.address ? frameRows.count : 0u;
+		a_latch.frameRowsRef = frameRows.ref;
+		a_latch.frameRowsCount = frameRows.ref ? frameRows.count : 0u;
 	}
-	/** @brief The installed payload's shadow parts into a shadow or occlusion view's latch: the scene list, the geometry table, the shadow rows. */
+	/** @brief Writes the installed payload's shadow parts into a shadow or occlusion view's latch. */
 	inline void ShadowPayloadLatch(const PayloadVersions& a_payload, BuildDrawsLatch& a_latch)
 	{
 		const std::uint64_t shadowRows = a_payload[PayloadPart::ShadowRows].address;
@@ -149,21 +127,19 @@ namespace DCLF::Draws
 		a_latch.geometriesIndex = a_payload[PayloadPart::Geometries].srvIndex;
 		a_latch.materialRowsLo = static_cast<std::uint32_t>(shadowRows);
 		a_latch.materialRowsHi = static_cast<std::uint32_t>(shadowRows >> 32);
+		a_latch.materialRowsRef = a_payload[PayloadPart::ShadowRows].ref;
 		a_latch.pipelineRowsLo = a_latch.pipelineRowsHi = 0;
 	}
-	/**
-	 * @brief A bucket map into a latch slot at a_offset: a_map, then kNoBucket for the pipeline slots past it up to a_slots (gained since
-	 * the map was made: none of their draws is the frame's).
-	 */
-	inline void WriteBucketMap(const org::LatchBlock& a_latch, std::string_view a_what, std::uint32_t a_slot, std::uint32_t a_offset, std::span<const std::uint32_t> a_map,
+	/** @brief Writes a bucket map into a run's latch region. Slots added since the map was made get kNoBucket. */
+	inline void WriteBucketMap(const org::LatchBlock& a_latch, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, std::span<const std::uint32_t> a_map,
 		std::uint32_t a_slots)
 	{
 		if (!a_map.empty())
-			LatchWrite(a_latch, a_what, a_slot, a_offset, std::as_bytes(a_map));
+			LatchWrite(a_latch, a_what, a_run, a_offset, std::as_bytes(a_map));
 		if (a_slots <= a_map.size())
 			return;
 		static thread_local std::vector<std::uint32_t> none;
 		none.assign(a_slots - a_map.size(), kNoBucket);
-		LatchWrite(a_latch, a_what, a_slot, a_offset + static_cast<std::uint32_t>(a_map.size() * sizeof(std::uint32_t)), std::as_bytes(std::span(none)));
+		LatchWrite(a_latch, a_what, a_run, a_offset + static_cast<std::uint32_t>(a_map.size() * sizeof(std::uint32_t)), std::as_bytes(std::span(none)));
 	}
 }

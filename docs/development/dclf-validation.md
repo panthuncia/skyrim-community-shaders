@@ -32,8 +32,11 @@ Every engine address here is Skyrim AE 1.6.1170's, the only runtime DCLF install
 -   A switch is read from the environment first, then from `<Documents>\My Games\Skyrim Special Edition\SKSE\CommunityShaders-DCLF.ini`,
     a flat `NAME=value` file beside `CommunityShaders.log` (`Core/Settings/Switches.h`, `Utils/SwitchFile.h`). The file exists
     because Mod Organizer 2 hands the game its own environment block, so variables a launcher exports may never arrive.
--   Some switches are read from the environment only: the render graph's `CS_ORG_*`, `CS_GPU_*`, `CS_NVPERF_*`, and DXVK's and
-    the Vulkan loader's variables. The switches file does not carry them.
+-   Some switches are read from the environment only: the render graph's `CS_ORG_*` (and everything else read through
+    `RenderGraph/Switches.h`), `CS_GPU_*`, `CS_NVPERF_*`, and DXVK's and the Vulkan loader's variables. The switches file does not
+    carry them. `CommunityShaders.env` beside the log does: the plugin applies it to the process environment and the C runtime's
+    copy at load (`XSEPlugin.cpp`, `[DevEnv]` lines), so `GetEnvironmentVariable` and `getenv` both see it. A switch read before
+    that (`CS_TEST_CRASH`) needs the real environment.
 -   Every switch is read once, on first use, so none changes under a running frame. Feature switches register at install
     (`RegisterSwitch`, `Api::FeatureSwitch`), Core's are the registry in `Core/Settings/Switches.cpp`.
 -   The startup log prints `[DCLF] switches: ...`, grouped as features, parity, diagnostics, test and other. A `CS_DCLF_*` name
@@ -54,7 +57,7 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_PRECOMPILE` | on (unless 0) | `0`: DCLF's SPIR-V programs compile on first use instead of alongside the engine's shaders. |
 | `CS_DCLF_CULL` | `occlusion` (`frustum` on AMD) | `off`, `frustum` or `occlusion`: GPU culling. `off` and `frustum` count as a reduced featureset. AMD defaults to `frustum` while its HZB reads back empty (dclf-open-defects.md). |
 | `CS_DCLF_PIPELINE` | `gpu` | `cpu`: the CPU-driven pipeline (an experiment; dclf-architecture.md, "The CPU-driven pipeline"). Live: `dclf:pipeline=gpu\|cpu`, from the next build point. |
-| `CS_DCLF_CPU_RECORD` | `serial` on NVIDIA, `indirect` elsewhere | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). `parallel`: the CPU pipeline's plain lists recorded into a secondary per batch on the pool. Live: `dclf:cpu-record=indirect\|serial\|parallel`. |
+| `CS_DCLF_CPU_RECORD` | `indirect` on every vendor | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). `parallel`: the CPU pipeline's plain lists recorded into a secondary per batch on the pool. Live: `dclf:cpu-record=indirect\|serial\|parallel`. |
 | `CS_DCLF_CPU_CADENCE` | `frame` | `frame\|snapshot`, or `<view>=frame\|snapshot,...`: a CPU pipeline view culled every frame or once per snapshot (main always per frame). Live: `dclf:cpu-cadence-<view>=frame\|snapshot`, `dclf:cpu-cadence=frame\|snapshot`. Views: `main`, `decal`, `forward`, `refraction`, `sun`, `spot`, `point`, `sky`, `precipitation`, `reflection`, `first-person`. |
 | `CS_DCLF_CPU_BATCH` | 256 | The CPU pipeline's batch lanes, at startup (a multiple of 8). |
 | `CS_DCLF_SKINNED` | on (unless 1) | `0`: skinned objects stay native. |
@@ -80,12 +83,29 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_SKYLIGHT` | on (unless 1) | `0`: Skylighting's occlusion map stays native. |
 | `CS_DCLF_PRECIPITATION` | on (unless 1) | `0`: the precipitation occlusion mask stays native. |
 | `CS_DCLF_REFLECTIONS` | on (unless 1) | `0`: the water reflection's faces stay native. |
-| `CS_DCLF_FIRST_PERSON` | off | `1`: DCLF draws the first-person arms, weapons and magic hands; unset or `0` they stay native (cheaper: hand-back sweep 0.15 ms). |
+| `CS_DCLF_FIRST_PERSON` | on (unless 0) | DCLF draws the first-person arms, weapons and magic hands; `0` they stay native. A GPU-driven graph without device-generated commands and without the direct forward family leaves them native too. |
 | `CS_DCLF_FIRST_PERSON_DECALS` | on (unless 0) | `0`: decals on first-person entries (an effect's blood on the arms, a weapon's `BloodLighting`) stay the engine's. Needs `CS_DCLF_FIRST_PERSON` and `CS_DCLF_DECALS`. |
 | `CS_DCLF_OPAQUE_EFFECTS` | on (unless 0) | `0`: opaque effect meshes (hint 0: forge coals, slag) stay the engine's. Needs decals. |
+| `CS_DCLF_EFFECT_CLOUD_LIGHT` | on (unless 0) | `0`: Lighting-variant effects with `kCloudLOD` (lit by the cloud light) stay the engine's (`cloud-lighting`). |
+| `CS_DCLF_EFFECT_FALLOFF` | on (unless 0) | `0`: effect meshes with Falloff and no blending alpha property stay the engine's (`effect-opaque`). Needs forward. |
+| `CS_DCLF_EFFECT_RIGID_SKINS` | **off** | `1`: effect meshes with a skin instance whose pass has no Skinned bit (the property without `kSkinned`) are DCLF's, each partition drawn with the unskinned vertex stage and the geometry's world, as the engine draws them; `0` they stay the engine's (`effect-variant (skinned)`). Needs effects and `CS_DCLF_SKINNED`. See "The residue census and DCLF" below. |
 | `CS_DCLF_PARTICLES` | on (unless 1) | `0`: effect-shaded particle systems stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARDS` | on (unless 1) | `0`: effect meshes under an `NiBillboardNode` (fire cards, spray jets) stay native. Needs `CS_DCLF_EFFECTS`. |
 | `CS_DCLF_BILLBOARD_PARTICLES` | on (unless 0) | `0`: particle systems under billboard nodes (the magic hands' fire cores) stay the engine's. Needs billboards and particles. |
+| `CS_DCLF_MASTER_PARTICLES` | on (unless 0) | the particle manager's master particle systems (torches, candles, street mist, blood impacts) are DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4). Needs `CS_DCLF_PARTICLES`. Its observers (`<- MASTER SET`, `<- MASTER REFS` in the particles report) run with `CS_DCLF_STATS` only. `0`: they stay the engine's. Scenarios: `master-particles-0.env` (off), `-1.env`. |
+| `CS_DCLF_SHADOW_DEPTH_CLAMP` | on (unless 0) | `0`: a shadow view whose rasterizer state turns depth clipping off stays the engine's, instead of drawing with depth clamped to the viewport's range (where the device has `depthClamp`). `CS_DCLF_TEST_SHADOW_CLAMP=1` reaches the path. |
+| `CS_DCLF_GRASS` | on (unless 1) | `0`: grass stays native (Grass Optimizations' or the engine's). |
+| `CS_DCLF_MAIN_PLAIN` | on (unless 0) | `0`: the colour pass draws its main range device-generated, a call per state class, instead of a plain draw per pipeline. |
+| `CS_DCLF_TERRAIN_PLAIN` | on (unless 0) | `0`: the colour segment's second pass draws the terrain groups' ranges device-generated instead of a plain draw per pipeline. |
+| `CS_DCLF_DECAL_PLAIN` | on (unless 0) | `0`: the decal groups draw device-generated, a call per state class (the engine's order within a class), instead of a plain draw per pipeline. |
+| `CS_DCLF_FORWARD_PLAIN` | on (unless 0) | `0`: the forward epoch draws its range device-generated instead of a plain draw per pipeline. |
+| `CS_DCLF_FORWARD_DIRECT` | on (unless 0) | `0`: the GPU-driven graph keeps its forward family (blended, refraction, first person's forward part) on the GPU, sorted per pipeline, instead of drawing it through the CPU pipeline. |
+| `CS_DCLF_SHADOW_MERGE` | on (unless 0) | `0`: a shadow view's pipelines keep every technique bit and vertex layout of its casters' keys, instead of one pipeline per canonical depth-only technique. |
+| `CS_DCLF_SHADOW_ORDER` | 8 | The CPU pipeline's shadow draw order: casters nearest the light first, in this many depth slabs, by pipeline within each. `1`: by distance alone; `0`: the lists' order, by pipeline. |
+| `CS_DCLF_LAZY_ROWS` | on (unless 0) | `0`: a pulled build reads every row block member into a static at entry instead of loading each where it is used. |
+| `CS_DCLF_TEX_STREAM` | on (unless 0) | `0`: the game's textures stay whole, not shells with streamed mip windows. Read at the first texture load ([texture-streaming.md](./texture-streaming.md)). |
+| `CS_DCLF_TEX_DISTANCE` | the menu's | `0`: texture streaming has no distance floor, over the menu's setting. |
+| `CS_DCLF_TEX_FEEDBACK` | the menu's | `0`: texture streaming has no shader feedback, over the menu's setting. |
 | `CS_DCLF_EMPTY_FADE_NODE` | on (unless 0) | `0`: the engine's empty fade node (the `BSFadeNode` at `0x14332a2a0` every `BSShaderProperty` starts with) is listed as one fade root of all its geometry, instead of no root. |
 
 ### Parity checks and observers
@@ -109,6 +129,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_ACCUMULATED_PARITY` | `1`: DCLF's decoded visibility against the engine's `kAccumulated`, and the animation gate (`FUN_1402cff60`) against DCLF's writes. Off, the readback and the writes still run. |
 | `CS_DCLF_FADE_PARITY` | `1`: the fade port against the engine's functions, and `FadeStateCS` against the port. |
 | `CS_DCLF_SKYLIGHT_PARITY` | `1`: DCLF's occlusion maps against the engine's, texel by texel. |
+| `CS_DCLF_STRICT_LIGHT_PARITY` | `1`: the portal-strict point lights' native culls against DCLF's model of them, on the parity frames (AE). |
 | `CS_DCLF_FOLIAGE_PARITY` | `1`: the alpha-tested colour draws' pixels against the frame before's, tree wind frozen; `wind`: wind running; `land`: wind frozen and terrain LOD coverage counted. |
 
 ### Probes and diagnostics
@@ -119,6 +140,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_PASS_STATS` | `1`: per-pass counts in the report. |
 | `CS_DCLF_PROFILE` | `1`: scene-phase timings in the report. The profile perturbs what it measures. |
 | `CS_DCLF_CENSUS` | `1`: the registration census, every report, with or without `CS_DCLF_STATS`. |
+| `CS_DCLF_CELL_TRACE` | `1`: actors across cell changes. Each scene pass logs, per actor, the attaches and detaches of its geometry and what they did (added, re-filed under a new category node, kept, erased) with the count tracked after, and each event's thread and frame. Each frame logs nearby actors whose parts changed: live parts, records, DCLF members, parts withheld while waiting, parts the engine kept, parts drawn by nobody (an engine-kept part counts as drawn only where the engine's draws still reach the screen, not under the flush latch or in native mode), the installed publication's frame, all geometry held, and the cell. A waiting actor part logs its reasons and its pipeline key against the last ready one, a part joining the main phase logs it, and a drawn part whose rebind waits logs the binding it keeps drawing. |
 | `CS_DCLF_PRECISION_CENSUS` | `1`: every 300 frames, what the engine's float translations lose against their parent chains composed in double, by distance from the origin, for rows and bones. |
 | `CS_DCLF_SHADER_DEBUG` | Default on (off in the release profile, where `1` turns it on): SPIR-V with debug info, and the HLSL sources copied beside the log. `0`: without. It inflates the depth pipeline groups. |
 | `CS_DCLF_SHADER_SOURCE_DIR` | Where `CS_DCLF_SHADER_DEBUG` copies the HLSL sources. |
@@ -135,6 +157,15 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_DRAW_TRACE` | `1`: the callers of the D3D11 draws. |
 | `CS_DCLF_DEPTH_TRACE` | `1`: the D3D11 calls that touch the main depth buffer, for five frames. |
 | `CS_DCLF_TRACE_TEXTURE_PATHS` | Set: texture identities are logged with their paths. |
+| `CS_DCLF_LAND_TRACE` | `1`: every loaded land quad's engine state (node, geometry, property, material, texture paths) when first seen and when it changes. |
+| `CS_DCLF_TREE_LOD_TINT` | `1`: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels (`tools/dclf-corrupt-frames.py --key magenta`). |
+| `CS_DCLF_TREE_LOD_STAGES` | `1`: each stage of the main tree LOD draws stamps the frame; frames a stage missed are logged. |
+| `CS_DCLF_PORTAL_CAPTURE` | `<dir>`: portal corpora (programs and batch queries) written there for `tests/DclfPortalBench` ([dclf-portal-query-batches.md](./dclf-portal-query-batches.md)). |
+| `CS_DCLF_PORTAL_CAPTURE_EVERY` | Depth epochs between portal captures (default 300). |
+| `CS_DCLF_PORTAL_TRACE` | `1`: inline portal batches write each query's decision trace; `CS_DCLF_PORTAL_CAPTURE` checks it against the CPU. |
+| `CS_DCLF_PORTAL_UNIFORM_SCAN` | `1`: portal batches are evaluated with the diagnostic uniform instruction scan. |
+| `CS_DCLF_SITE_STATS` | `1`: pipeline statistics per CPU pipeline site, logged periodically (`[DCLF] site stats on`). Read from the environment only. |
+| `CS_DCLF_STAGE_DUMP` | `<dir>`: every DCLF stage request's compile inputs, the Lighting programs' descriptor pairs and the pulled rewrite's options, as JSON lines in `<dir>/stages.jsonl`, for `tools/shader-compare`. |
 | `CS_DCLF_TABLE_START` | `small`: the growable GPU tables start with a few rows, so growth runs early and often. |
 
 ### Test harness
@@ -147,37 +178,47 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_TEST_MOVE` | `<start>:<end>:<units per frame>;...` | Carries the player forward. |
 | `CS_DCLF_TEST_TURN` | `<start>:<end>:<degrees per frame>;...` | Turns the player. |
 | `CS_DCLF_TEST_TOGGLE` | `<off frame>:<on frame>...` | Switches DCLF off and on. |
-| `CS_DCLF_TEST_EXIT` | `<frame>` | The game exits after that many frames. The count includes the main menu's frames, so below about 200 the game exits before DCLF draws. |
+| `CS_DCLF_TEST_EXIT` | `<frame>` | The game exits after that many frames, loading screens not counted, its log flushed first ("test exit at frame N"). The count includes the main menu's frames, so below about 200 the game exits before DCLF draws. The frames the command list's `dclf:wait=` held move it later, as they move the commands after them; each wait holds at most its limit, so the exit always comes. |
 | `CS_DCLF_TEST_REFUSE` | `<name>,...` | Geometry whose node name contains one of the names is refused as an unstable buffer (what a RaceMenu-morphed shape got on test2), so a run has engine-only geometry of any class: the engine-only subset's paths (`Core/Scene/EngineCasters.h`). `Rock` in Riverwood gives about 860 roots: the sun's whole skip and the occlusion maps cull them alone (their report lines). |
+| `CS_DISABLE_FEATURES` | `<short name>,...` | Those features are disabled at boot for this run only (the saved "Disable at Boot" settings are not changed). Read through `Switches::List` (`State.cpp`): the environment or `CommunityShaders.env`, never the switches file, so a scenario sets it and it does not carry over to later runs. Such a run compiles on demand: put `dclf:wait=shaders` before its shots. |
+| `CS_DCLF_LATE_POSE` | `0\|1` | `0`: the player's parts Improved Camera hides after the shadow maps are not looked for; `1`: they are looked for in first person without the plugin too. |
+| `CS_DCLF_PORTAL_EVALUATOR` | `inline\|batched` | Portal batches' evaluation: one dispatch (`inline`, the default) or by program (count, scan, scatter, evaluate). |
+| `CS_DCLF_TEX_STREAM_FULL` | `1` | Every texture window is the full chain, made as the texture loads (the streaming baseline). |
+| `CS_DCLF_TEX_STREAM_DELAY_MS` | `<ms>` | A delay before each background window build, to see late windows. |
+| `CS_DCLF_TEST_SHADOW_CLAMP` | `1` | Every shadow view draws with depth clamped instead of clipped, as a view whose rasterizer state turns depth clipping off does (`CS_DCLF_SHADOW_DEPTH_CLAMP`, on unless `0`): the engine's own states all clip, so this is the only way a run reaches that path. Shadows may differ only where a caster crosses a view's near or far plane; the `shadow view rasterizer state N` lines say `depth clamped`. |
 
 ### Tuning
 
 | Switch | Default | Meaning |
 | --- | --- | --- |
 | `CS_DCLF_WORKERS` | hardware threads - 2 | The preparation pool's threads (at least 1). |
+| `CS_DCLF_FRAME_WORKERS` | a quarter of the pool, at least 2 | The frame-critical threads. `0`: none, the preparation workers alone take frame-critical jobs. |
 | `CS_DCLF_SCENE_COPIES` | 3 | The copies FrameValues' pools keep a class, 2 to the frames in flight: a frame's producer reuses the copy the oldest in-flight frame bound, its uploads waiting for that frame on the GPU. |
 | `CS_DCLF_SHRINK` | on | When the growable scene buffers give memory back (one policy, `PooledBackings::Shrink`): a buffer asked at most a quarter of its capacity for 5 s gets a version at the fresh size for that window's peak. `off`: grow-only; `eager`: at the first such ask, for stress and parity runs. |
 | `CS_DCLF_FANOUT` | `2` | The scene pass's evaluation: `0` interleaved on the scene lane (the reference), `1` every entry evaluated then merged on the lane, `2` evaluated on the preparation pool from 128 entries, merged in order. |
 | `CS_DCLF_ASYNC_PRIORITY` | unset | `normal`: the coordinator and scene threads keep normal priority instead of above normal; `noboost`: workers are not raised to a `ParallelFor` caller's priority. |
-| `CS_DCLF_ASYNC_COMPUTE` | on | `0`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue, for timing them in the graphics queue's order. |
+| `CS_DCLF_TEX_STREAM_BASE` | 128 | Texture streaming's base window, its largest side. |
+| `CS_DCLF_TEX_STREAM_BUDGET_MB` | the driver's budget | The memory texture streaming keeps to, in MiB. |
+| `CS_DCLF_TEX_STREAM_RATE_MB` | 256 | Texture upgrades started per second, in MiB. |
+| `CS_DCLF_TEX_STREAM_VISIBLE_OFFSET` | 0 | Over the budget, how many mips what is on screen may step down (0: it loads what it asks for). |
+| `CS_DCLF_TEX_STREAM_DISTANCE_SCALE` | 1 | The distance floor's sharpness: above 1, finer mips. |
+| `CS_DCLF_ASYNC_COMPUTE` | on in guest, off in native | `0`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue, for timing them in the graphics queue's order. `1` puts them on the compute queue in native mode too. |
 
 ### Other switches DCLF runs depend on
 
-Read from the environment only.
+Read from the environment only. The epoch and submission switches are registered in `src/Testing/SwitchRegistry.cpp`, not in
+DCLF's registry, so DCLF's startup summary does not list them.
 
 | Switch | Where | Meaning |
 | --- | --- | --- |
-| `CS_ORG_EPOCHS` | registry, `RenderGraphRuntime.cpp` | `0`: the render graph runs without epochs, and DCLF does not install. |
-| `CS_ORG_ASYNC_EPOCHS` | registry | `0`: epochs are recorded on the render thread. A reduced featureset. |
-| `CS_ORG_CLOSED` | registry | `0`: epochs do not return their resources to their home states. |
-| `CS_ORG_BATCH_SUBMIT` | registry | `0`: an epoch's submissions go to DXVK one at a time. |
-| `CS_ORG_EARLY_FLUSH` | registry | `1`: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch). |
+| `CS_ORG_CLOSED` | `RenderGraphRuntime.cpp` | `1`: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback). |
+| `CS_ORG_BATCH_SUBMIT` | `RenderGraphRuntime.cpp` | `0`: an epoch's submissions go to DXVK one at a time. |
+| `CS_ORG_EARLY_FLUSH` | `RenderGraphRuntime.cpp` | `1`: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch). |
 | `CS_ORG_COMPUTE_QUEUE` | `RenderGraphRuntime.cpp` | `0`: BasicRHI's compute queue aliases the graphics one. |
 | `CS_ORG_UPLOAD_QUEUE` | `RenderGraphRuntime.cpp` | `0`: no spare transfer queue for uploads. |
-| `CS_ORG_SUBMIT` | `RenderGraphRuntime.cpp` | `flush`: each epoch flushes and waits for DXVK's command stream instead of enqueuing its submission. |
-| `CS_ORG_REUSE_RECORDINGS` | `RenderGraphRuntime.cpp` | `0`: epochs are prepared again instead of replaying kept recordings. Kept recordings carry no Tracy GPU zones, so turn it off to see the epochs' passes in Tracy. |
 | `CS_ORG_RECORDING_TIMESTAMPS` | `RenderGraphRuntime.cpp` | `1`: the recordings kept across frames carry pass and barrier timestamps (`GraphHost::SetRecordingTimestamps`), as a timestamp trace turns on; the others are always timed. |
 | `CS_ORG_EPOCH_STATS` | `RenderGraphRuntime.cpp` | `1`: render-thread CPU time per epoch, and the tickets prepared again after their inputs changed. |
+| `CS_ORG_FRAME_SEQUENCE` | `FrameSequence.cpp` | `N`: one frame's ordered anchor runs (with clients and targets), epoch submissions and boundaries, every N frames per window (`1` means 600). |
 | `CS_ORG_DETAILED_CHECKPOINTS` | `RenderGraphRuntime.cpp` | `1`: ORG records detailed command checkpoints for Aftermath. |
 | `CS_ORG` | `RenderGraphRuntime.cpp` | `0`: no render graph; `features`: the interop device features are requested but no graph is made. |
 | `CS_UPSCALE_SUBMIT` | registry | `direct`: upscaling's ring submissions wait for DXVK's command stream. |
@@ -187,8 +228,42 @@ Read from the environment only.
 | `CS_GPU_CRASH_ANALYSIS` | `Aftermath.cpp`, `DxvkLoader.cpp` | `1`: the device is created with DXVK's hang mode. See [Crash triage](#crash-triage). |
 | `CS_GPU_EVENT_TIMERS` | `GpuEventTimers.cpp` | `<frames>`: GPU time per engine event, logged every that many frames. Works with DCLF off. |
 | `CS_GPU_IDLE_TRACE` | `GpuIdleTrace.cpp` | `<frames>`: GPU idle attribution, one summary per that many analysed frames. |
+| `CS_GPU_TIMERS` | `RenderGraph/GpuTimingSource.cpp` | `graph`: the profiler, `CS_PROFILER_LOG` and `CS_GPU_EVENT_TIMERS` read GPU time from the render graph only, with no D3D11 query. See [render-graph.md](./render-graph.md#gpu-timers-from-the-graph). |
+| `CS_GPU_IDLE_SOURCE` | `RenderGraph/GpuTimingSource.cpp` | `graph`: `CS_GPU_IDLE_TRACE` reads the graph's ranges instead of DXVK's submission trace. |
 | `CS_NVPERF_RANGES` | `Features/RemoteControl/NvPerf.cpp` | A headless Nsight Perf range capture (with `CS_NVPERF_START_FRAME`, `CS_NVPERF_SAMPLES`, `CS_NVPERF_METRICS`, `CS_NVPERF_CSV`). See [nsight-perf.md](./nsight-perf.md). |
 | `CS_NVPERF_TEMPLATE` | `Features/RemoteControl/NvPerfTrace.cpp` | A headless Nsight Perf trace of a template (with `CS_NVPERF_LABEL`, `CS_NVPERF_BASELINE`, `CS_NVPERF_START_FRAME`, `CS_NVPERF_SAMPLES`, `CS_NVPERF_REPEATS`). See [nsight-perf.md](./nsight-perf.md). |
+
+### Other Community Shaders switches
+
+Not DCLF's, but read in the same runs. "Env" means the environment (and `CommunityShaders.env`) only; "file" means the
+switches file too (`Util::SwitchFile`).
+
+| Switch | Where | Meaning |
+| --- | --- | --- |
+| `CS_TEST_CRASH` | `CrashDump.cpp`, env (the real environment only) | `<seconds>`: a worker thread faults that long after load, to test the crash dump path ([Crash triage](#crash-triage)). |
+| `CS_HANG_WATCHDOG`, `CS_TEST_HANG` | `HangWatchdog.cpp`, env | See [Hangs](#hangs). |
+| `CS_AB_PROBE` | `Vram/MemProbe.h`, env | `1`: a row of memory figures a second in `CS-AB-memory.csv`. `tools/cs-ab` sets it on every run. |
+| `CS_NATIVE_D3D11` | `DxvkLoader.cpp`, env | `1`: the native D3D11 runtime instead of DXVK (no render graph). |
+| `CS_NO_D3DX_UPGRADE` | `D3DX9MathUpgrade.cpp`, env | `1`: the D3DX9 math upgrade is not patched in. |
+| `CS_NO_PASS_PREFETCH` | `Hooks.cpp`, env | `1`: no next-pass prefetch detour on `BSBatchRenderer::RenderPassImmediately` (an A/B escape hatch). |
+| `CS_PASS_SKIP`, `CS_PASS_ROUNDS` | `GpuEventTimers.cpp`, env | Cost attribution by dropping events' draws ([Cost attribution](#cost-attribution-cutting-pieces-out)); `CS_PASS_ROUNDS` is how many times the list is cycled (default 2). |
+| `CS_PASS_SAMPLE` | `GpuEventTimers.cpp`, env | Set: a sampler thread profiles the main thread during `CS_PASS_SKIP` runs and logs each thread's share of wall time (`[PassSkip] thread ...`). |
+| `CS_GPU_EVENT_STATS` | `GpuEventTimers.cpp`, env | `<event>\|<event>...`: D3D11 pipeline statistics for those engine events, logged every `CS_GPU_EVENT_TIMERS` frames (`[GpuStats]`). |
+| `CS_GPU_OP_PROBE` | `GpuEventTimers.cpp`, env | Set: each D3D11 call is an event of its own, unless it sits inside a native batch. |
+| `CS_GPU_IDLE_MIN_GAP_US` | `GpuIdleTrace.cpp`, env | The shortest GPU idle gap `CS_GPU_IDLE_TRACE` counts, in microseconds (default 50). |
+| `CS_SHADER_DXC` | `Utils/DxcShaderStore.cpp`, env | A regex over `<path>:<target>` choosing the game shaders built with DXC; unset: the image-space blurs only; empty: none ([dxc-game-shaders.md](./dxc-game-shaders.md)). |
+| `CS_FXC_REQUEST_DUMP` | `Utils/FxcShaderStore.cpp`, env | `<folder>`: one line per FXC request in `fxc-requests.jsonl`, for `tools/shader-compare/dxc_survey.py`. |
+| `CS_RENDERDOC_DLL` | `Features/RenderDoc.cpp`, env | The RenderDoc DLL to load instead of the installed one. |
+| `CS_RENDERDOC_REF_ALL` | `Features/RenderDoc.cpp`, env | `0`: RenderDoc's "reference all resources" option off (on by default: DXVK resources outlive its frame tracking). |
+| `CS_STREAMLINE_DLSS` | `Upscaling/Streamline.cpp`, file | `0`: Streamline loads neither DLSS nor DLSS-G (DLSS-G's plugin adds `VK_NV_optical_flow` even when DXVK runs on another vendor's GPU). |
+| `CS_TEX_CENSUS` | `TextureStreaming/Census.cpp`, file | `1`: the texture survey; `dclf:tex-census` writes `texture-census-<n>.json` ([texture-streaming.md](./texture-streaming.md)). |
+| `CS_VRAM_DEBUG` | `Vram/Debug.cpp`, file | `1`: VRAM attribution's debug hooks ([memory-usage.md](./memory-usage.md)). |
+| `CS_GPA`, `CS_GPA_DIR` | `RemoteControl/Gpa.cpp`, env | `1` (or a GPU counter request): AMD's GPUPerfAPI counters; `0` never. `CS_GPA_DIR` is where its DLLs are (default the DXVK runtime folder). |
+| `CS_GPU_COUNTERS_<suffix>` | `RemoteControl/GpuCounters.cpp`, env | The vendor-neutral names of the range capture's `CS_NVPERF_<suffix>` (`RANGES`, `METRICS`, `START_FRAME`, `SAMPLES`, `CSV`); either works. |
+| `CS_NVPERF_MIN_SAMPLES`, `CS_NVPERF_MAX_SAMPLES`, `CS_NVPERF_MAX_REPEATS`, `CS_NVPERF_HALF_WIDTH` | `RemoteControl/GpuCountersTrace.cpp`, env | A template trace's statistics bounds ([nsight-perf.md](./nsight-perf.md)). |
+| `DXVK_SHADER_DUMP_PATH` | DCLF's `DrawPipelinesImpl.h`, env | DXVK's own variable; DCLF also writes each pipeline's pixel SPIR-V there, named by its label. |
+
+The render graph's own switches, and BasicRHI's `BASICRHI_VK_CRASH_MARKERS`, are in [render-graph.md](./render-graph.md#switches).
 
 `CS_ORG_LLF_PARITY` (`LightLimitFix.cpp`) is Light Limit Fix's own parity and is not DCLF's. The tree wind report's text names
 a `CS_DCLF_TREE_LIST=0` mode, but no such switch exists: the animation list is always DCLF's.
@@ -506,6 +581,35 @@ report, with or without `CS_DCLF_STATS`. So it shows what the engine still draws
 -   Expected in the main view: no `alpha-blend`, refraction `technique`, `effect-opaque`, `billboard` or `unsupported-parent`
     classes beyond the variants DCLF does not draw.
 
+### The residue census and DCLF
+
+The ORG residue census (`CS_ORG_RESIDUE_CENSUS=1`, [p5/flush.md](./p5/flush.md)) counts the engine draws that reach D3D11; the
+registration census says why DCLF left each pass to the engine. Run both together:
+
+-   `tools/cs-ab/scenarios/p5-all-census-dclf.env`: the p5-all tour with every graph family, both censuses and the report
+    (`CS_ORG_RESIDUE_CENSUS_TOP=60`, so the small classes are listed too).
+-   `p5-all-census-dclf-take.env`: the same with the residue switches that are off by default (`CS_DCLF_MASTER_PARTICLES=1`,
+    `CS_DCLF_EFFECT_RIGID_SKINS=1`).
+-   `dclf-residue-census.env`: DCLF without the graph families, so every Lighting, Utility, Effect, Particle and DistantTree
+    draw left is DCLF's to explain.
+
+Read a residue draw class (`[ORG] residue census: draw #..`) by its caller chain and technique, then the DCLF census class of the
+same view: a `Lighting` or `Utility` draw through `RenderBatches` (AE 107642) is a `lighting: ...` class of `main` or `main depth`
+(or a shadow view for DS `kSHADOWMAPS`); an `Effect` draw through the skin path (AE 71150, 70776) an `effect: ... (skinned)`
+class; an `Effect` draw through the particle draw (`DrawDynamicTriShape (DrawData copy)`, the dispatcher's +0x101: geometry
+type 1, NiParticles) an `effect: untracked, eligible` master particle system (`MPS*`). What to expect:
+
+-   **After a load** (the first window after `coc`, a save's load, `cow`): Lighting, Utility depth (vs `0x2000`, `0x209b`,
+    `0x400209b`), shadow casters and grouped alphas (AE 107673) for a window. These are objects not yet members (the engine draws
+    an object until the publication that claims it is installed) and tree LOD before its gates open. They must be gone from the
+    next window on; one that stays is a defect.
+-   **In a settled window**: no `Lighting` or `Utility` draw through `RenderBatches` but water's (RT `kREFRACTION_NORMALS`) and
+    the shadow mask (AE 107141), no skinned `Effect` draw (`effect-variant (skinned)` was the Effect port reading the renderer
+    data's vertex description instead of the shape's, fixed), and with `CS_DCLF_MASTER_PARTICLES=1` no particle `Effect` draw.
+-   **Left by class**: `Particle` (the `BSParticleShader` techniques: precipitation, Blackreach's spores) and the menus' hidden
+    first-person parts (`lighting: hidden`; skinned `Utility` vs `0x2004` and `0xc004` through AE 70776). p5/flush.md "DCLF's
+    share" has the blocker of each.
+
 ### Lines in every report
 
 These need no parity switch. Most come with `CS_DCLF_STATS=1`.
@@ -513,6 +617,8 @@ These need no parity switch. Most come with `CS_DCLF_STATS=1`.
 | Line | Tag | Means |
 | --- | --- | --- |
 | `[DCLF] main camera since the last report: N native passes drawn, N of them set members' ...` | `<- LEAK` | A set member the engine drew in the main camera. Must be 0. Printed in every run. |
+| the same line's `drawn by nobody: N lit passes in N frames, at most N a frame (N waiting, N kept by the engine with nothing to draw them)` | `<- NOBODY` | Lit passes into the main views that nobody drew: a waiting object's (withheld) and, under the flush latch or in native mode, a kept one's. Nonzero after a load and for the few frames before a newly attached object's publication is installed (dclf-open-defects.md). Anything else is a regression. |
+| `[DCLF] split move: 'name' ... erased by a detach at frame N and tracked again at frame N` | | A geometry a detach erased and an attach tracked again within two frames outside a load. Its parts were drawn by nobody in between. Must not appear in play. |
 | `[DCLF] persistent draws (last frame, colour): N kept inputs, N sequences, ...` | | Sequences must be thousands in a populated cell, never 0. |
 | `[DCLF] claims published that their records do not draw: N (first: ...)` | `<- UNDRAWN CLAIM` | A claim its publication's tables do not draw (`CheckClaimsDrawable`). Printed only when N > 0. Must never appear: such an object is drawn by nobody until the next publication. |
 | `[DCLF] indirect draws (last frame): N candidates ..., skipped: ...` | | Per reason: `pipeline`, `geometry`, `texture`, `sampler`, `constants`, `capacity`, `not-in-set`, `candidate-only`. `constants` and `texture` must be 0. |
@@ -793,8 +899,7 @@ the accepted difference "Tree LOD instances the engine leaves hidden after `allV
 ### GPU timing
 
 -   DCLF's epochs replay kept recordings, which record no ORG pass timestamps, so ORG's GPU timing report is empty for them.
-    Compare whole frames (`[Perf] rendered N fps (N ms)` in the log) and Tracy's CPU zones; turn recordings off
-    (`CS_ORG_REUSE_RECORDINGS=0`) to see the epochs' passes as Tracy GPU zones.
+    Compare whole frames (`[Perf] rendered N fps (N ms)` in the log) and Tracy's CPU zones.
 -   `CS_GPU_EVENT_TIMERS=<frames>` times the engine's events; select them by exact name. `CS_GPU_IDLE_TRACE=<frames>` attributes GPU
     idle time. `CS_ORG_EPOCH_STATS=1` gives the render thread's time per epoch.
 -   Nsight Perf's range profiler drains around each range, so many small native ranges each pay a drain and DCLF's few large ones
@@ -856,7 +961,10 @@ withheld and drawn by nobody. Before reading parity or timing, check in each run
         held ("test wait '...' held frames A-B"), so the gaps after it are frames of the outcome: `reload` (the last
         `dclf:reload-shaders` finished and its rebuilt pipelines swapped in; one takes ~20 s), `settled` (the frames draw under the
         requested toggles on the pipeline they choose; at once with the feature off), `nvperf` (the last `dclf:nvperf` capture
-        done) and `signal:<name>` (a remote client's `dclf:signal=<name>`).
+        done), `signal:<name>` (a remote client's `dclf:signal=<name>`) and `shaders` (Community Shaders' compile queue is empty: a
+        run that compiles on demand, as `CS_DISABLE_FEATURES` makes one, has every shader in view built). Every wait has a limit:
+        3000 frames, or the frames after an `@` (`dclf:wait=shaders@12000` for a cold compile). A wait that reaches it logs "test wait
+        '<condition>' timed out" and the list goes on, shifted by the frames it held; `CS_DCLF_TEST_EXIT` moves by the same frames.
     -   `dclf:define=<NAME>[=<value>],...` adds defines to every DCLF stage compiled from then on (empty: none). With
         `dclf:reload-shaders=<file>` and `dclf:wait=reload` after it, a shader A/B is an `#if` in the source compared in one launch.
     -   `dclf:capture[=<seconds>]` takes a [diagnostic capture](#the-diagnostic-capture) at the next Present (no Explorer window, nothing on the clipboard).
@@ -928,9 +1036,14 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     be wrong (it labels by the nearest symbol), and a probable frame is not the same as a stack-scan hit.
 -   **Community Shaders' minidump**, `CommunityShaders.dmp` beside the game executable, is written from outside the game by
     `tools/crash-dump-helper` (`CommunityShadersCrashDump.exe`). The plugin starts it at load (`CrashDump.cpp`,
-    `CrashDump::Start`); on a crash its vectored handler signals it and logs `[CRASH] exception ... - writing
-    CommunityShaders.dmp`. `MiniDumpWriteDump` run inside the game deadlocked on the heap lock. Read the dump with cdb or
-    WinDbg.
+    `CrashDump::Start`). The dump is for the exception that ends the process: an unhandled exception filter (chained to the
+    one installed before it) signals the helper and logs `[CRASH] unhandled exception <code> at ... (<module>+<offset>) ...
+    Writing CommunityShaders.dmp`. A vectored handler logs the session's first 16 faults at first chance (`[CRASH]
+    first-chance exception ...; a handler may still catch it`) without a dump: a handler may still catch them, and the
+    game goes on. A crash logger installed after Community Shaders that does not chain its filter replaces this one, and
+    then there is no dump. `MiniDumpWriteDump` run inside the game deadlocked on the heap lock. Read the dump with cdb or
+    WinDbg. `CS_TEST_CRASH=<seconds>` faults a worker thread that long after load, to test the path end to end; it is
+    read before the dev environment file is applied, so set it in the process environment.
 -   **Heap corruption** shows its fault later and elsewhere. Typical DCLF causes are an engine object read through a raw pointer
     nothing held, and a last release on the wrong thread. `CS_DCLF_RELEASE_GUARD`, `CS_DCLF_HIDDEN_WATCH` and
     `CS_DCLF_MIRROR_WATCH` name the thread or writer.
@@ -977,8 +1090,8 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     the main menu's frames), the game relaunched at once.
 -   **Bisect by arms and rates.** Run each arm until its first loss and compare counts; an intermittent fault needs many runs per
     arm before an arm is cleared. Re-run the control at the end.
--   **Reduce the configuration** with the feature toggles, `CS_DCLF=0`, `CS_ORG_COMPUTE_QUEUE=0`, `CS_ORG_SUBMIT=flush` or
-    `CS_ORG_ASYNC_EPOCHS=0` to tell DCLF's work from the render graph's submission paths.
+-   **Reduce the configuration** with the feature toggles, `CS_DCLF=0` or `CS_ORG_COMPUTE_QUEUE=0` to tell DCLF's work
+    from the render graph's submission paths.
 -   Open crashes are in [dclf-open-defects.md](./dclf-open-defects.md), "Open crashes".
 
 Not verified here: the crash logger's exact log format (it is a separate SKSE plugin), and that a release build of
@@ -1031,6 +1144,32 @@ Bugs DCLF's parity checks found in other Community Shaders features, in the engi
 -   DCLF's rule: bind what `Skin::MaterialTexturesOf` returns for the material (`Integrations/AdvancedSkin/SkinTextures.cpp`), so DCLF
     follows the fix. A FaceGen material with no hash key or no extra texture binds black to both. Capture parity's `skin parity`
     line compares t71 and t74.
+
+**Wetness Effects: the shore term darkens menu and loading-screen models in D3D11.** Still present. Left as it is for now
+(decided 2026-11-18).
+-   Where: the shore wetness in `package/Shaders/Lighting.hlsl` (`shoreFactor` from `wetnessDistToWater`, then `shoreWetness` and
+    `wetnessGlossinessAlbedo`). It reads the world's water table at the draw's coordinates and is not gated by `inWorld`, so a
+    menu scene's model, which is not in the world, is treated as standing on a shore. The rain term beside it is gated
+    (`wetnessOcclusion` is 0 outside the world).
+-   Evidence: the loading-screen model's mean luminance at the same shot point in plain D3D11 is 16.2 with Wetness Effects on and
+    21.1 with it off. The pale war paint on loading-screen actors is the same effect.
+-   Found by the loading screen port's comparison against D3D11 (org-native-frame-graph.md, "Loading screens"). The ORG build has
+    no wetness on these draws, so the two builds differ there. Model area mean in that comparison: ORG 14.1 to 14.3, D3D11 15.2
+    with Wetness Effects on.
+-   Proposed fix: gate the shore term by `inWorld`, as the rain term is. The D3D11 build then matches the ORG build on menu models.
+-   The ORG build's rule: no wetness on models outside the world. The difference against D3D11 is accepted until the fix.
+
+**ShaderCache: the shadow masks' filter selector 3 is unsupported, so every shadow mask builds SHADOWFILTER 0.** Still present.
+-   Where: `ShaderCache.cpp`'s Utility defines take the shadow mask filter from the descriptor's bits 17-20 and accept 0, 1, 2, 4
+    and 8. The engine's sun, spot and point light masks carry 3 there (bits 17 and 18: descriptors `0x262102`, `0x462102`,
+    `0x1062002`, `0x462002`), so each build logs `Unsupported Utility shadow-filter selector 0x3` and falls back to SHADOWFILTER 0:
+    one plain sample of t3 and a hand compare, with no PCF. Both the D3D11 and the ORG builds take the same defines.
+-   Unverified: what the engine means by 3. The table treats the field as one bit per filter; the field may be a number, and 3 a
+    filter the table maps to nothing. The vanilla shader's own handling (the engine's Utility PS for these descriptors) is the
+    reference to read before choosing a fix.
+-   Found by the shadow mask port's parity (p5/shadow-mask.md, "The shadow map at t3 and t4"): the ORG build read t3 as the engine
+    latched it, a null view, and every sun mask came out black. The ORG build now reads the shadow map through t4's index, so it
+    matches the D3D11 build whatever the fix here turns out to be.
 
 **Terrain Blending leaks write mode 1 into the blended decals that follow its hook.** The difference is on RT0 alpha only, which
 the composite never reads. DCLF's rule: derive write mode 11 for those decals; the difference is accepted.

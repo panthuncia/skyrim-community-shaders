@@ -1,4 +1,4 @@
-// ImportRelocations: DXVK's moves of the pinless imports, taken on the render thread and routed to their importers (see the header).
+// Takes DXVK's moves of pinless imports on the render thread and routes them to their importers.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -20,7 +20,7 @@ namespace DCLF::ImportRelocations
 		std::atomic<std::uint64_t> imagesTaken{ 0 }, buffersTaken{ 0 };
 		std::atomic<std::int64_t> storagesHeld{ 0 };
 
-		// The old storage, given back to DXVK by its last holder (any thread).
+		// Given back to DXVK by its last holder, on any thread.
 		std::shared_ptr<const void> Hold(void* a_storage)
 		{
 			storagesHeld.fetch_add(1, std::memory_order_relaxed);
@@ -51,9 +51,9 @@ namespace DCLF::ImportRelocations
 		}
 		imagesTaken.fetch_add(images.size(), std::memory_order_relaxed);
 		buffersTaken.fetch_add(buffers.size(), std::memory_order_relaxed);
-		// With none as well: the moves no import claimed expire here, or they would hold their old storages until the next move.
+		// Called even with none, so unclaimed moves expire instead of holding their old storages.
 		GpuTextures::Get().NoteRelocations(images);
-		// Each instance imports on its own (a buffer both use is two imports): each takes what names its own.
+		// Each instance imports on its own, so each takes what names its own.
 		if (!buffers.empty()) {
 			GpuResources::Scene().PostRelocations(buffers);
 			GpuResources::Frame().PostRelocations(buffers);

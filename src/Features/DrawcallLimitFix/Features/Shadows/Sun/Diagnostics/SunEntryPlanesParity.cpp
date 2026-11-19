@@ -1,6 +1,5 @@
-// The sun entry rule's planes (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY), render thread: as a shadow build's inputs take them from
-// the Sun board, against the engine's full-frustum processes' own after their cull; counted in the sun views' tally (SunViewParity.cpp's
-// line).
+// The sun entry rule's planes (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the Sun board's against the engine's full-frustum
+// processes' after their cull. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
 

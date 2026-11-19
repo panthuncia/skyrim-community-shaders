@@ -19,6 +19,11 @@
  *
  * GPU timestamps are placed on the CPU clock by the smallest observed (GPU begin - queue submit) difference:
  * the GPU cannot start a submission before it is submitted, so that bound is tight whenever the queue was idle.
+ *
+ * CS_GPU_IDLE_SOURCE=graph reads no DXVK export: the GPU busy spans are the render graph's ranges on the graphics queue
+ * (passes, and barrier batches of kept recordings), per Present (GpuTimingSource), placed on the CPU clock by the render
+ * thread's epoch submission. Work outside graph ranges (all of DXVK's command lists while D3D11 draws remain, barriers of
+ * recordings that are not timed, the present) counts as idle there.
  */
 namespace GpuIdleTrace
 {

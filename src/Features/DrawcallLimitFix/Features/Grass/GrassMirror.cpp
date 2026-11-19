@@ -1,5 +1,4 @@
-// Grass: the sink's channel's render-thread end - the Mirror (Drain in seq order per group, shape slots, the instance table's ranges,
-// buckets and their visible bases, mesh leases, the shared library's LOD meshes) the depth commit uploads from.
+// The render-thread grass mirror. See GrassMirror.h.
 
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
@@ -28,7 +27,7 @@ namespace DCLF::Features::Grass
 			return ankerl::unordered_dense::hash<std::uint64_t>{}((a_hash * 0x9E3779B97F4A7C15ull) ^ a_value);
 		}
 
-		// A bucket's row's fixed part, from its key and material (the mesh slots, visible bases, count and bindings are the commit's).
+		// Only the fixed part. The commit fills mesh slots, visible bases, count and bindings.
 		void FillBucketRow(BucketRow& a_row, const BucketKey& a_key, const BucketSource& a_source)
 		{
 			a_row.flags = (a_key.pbr ? GrassInstances::kBucketTruePbr : 0u) | (a_key.sphereNormal ? GrassInstances::kBucketSphereNormal : 0u);
@@ -36,14 +35,13 @@ namespace DCLF::Features::Grass
 			std::copy_n(a_source.boundCenter, 3, a_row.boundCenter);
 			a_row.modelRadius = a_source.modelRadius;
 			a_row.wavePeriod = a_source.wavePeriod;
-			// Grass Optimizations' mesh cost (GrassBucketStore::CacheBucketTypeParams): a mesh of more triangles is drawn less far and
-			// larger, as the cost bias ramps in.
+			// Grass Optimizations' mesh cost. Heavier meshes draw over a shorter distance and need a larger screen size.
 			const float weight = std::sqrt(std::max(1.0f, static_cast<float>(a_source.triangleCount) / 8.0f));
 			a_row.distScale = 1.0f / weight;
 			a_row.minPixelScale = weight;
 			a_row.pbrFlags = a_source.pbrFlags;
 			std::copy_n(a_key.windDirection.data(), 2, a_row.windDirection);
-			// The vertex stage's ScaleMask (BSGrassShader::SetupGeometry): every axis with kUniformScale, else the height alone.
+			// As BSGrassShader::SetupGeometry sets ScaleMask. All axes with kUniformScale, else height only.
 			const float uniform = a_key.uniformScale ? 1.0f : 0.0f;
 			a_row.scaleMask[0] = uniform;
 			a_row.scaleMask[1] = uniform;
@@ -52,8 +50,7 @@ namespace DCLF::Features::Grass
 			std::copy_n(a_source.pbrParams2, 4, a_row.pbrParams2);
 			std::copy_n(a_source.pbrParams3, 4, a_row.pbrParams3);
 			std::copy_n(a_source.pbrParams4, 4, a_row.pbrParams4);
-			// BSGrassShader's GrassCanopyHeight (Hooks.cpp): grass meshes are rooted at the model origin, so the bound's centre sits about
-			// halfway up. The LOD tiers' are their meshes' (LayOutVisible).
+			// Grass meshes are rooted at the model origin, so the bound's centre sits about halfway up.
 			const float canopy = a_source.boundCenter[2] > 1.0f ? 2.0f * a_source.boundCenter[2] : std::max(a_source.boundCenter[2] + a_source.modelRadius, 1.0f);
 			std::fill_n(a_row.canopyHeight, kTiers, canopy);
 		}
@@ -84,7 +81,6 @@ namespace DCLF::Features::Grass
 	void Mirror::Drain(std::uint32_t a_frame)
 	{
 		++drains;
-		// The spawn fade's clock: the engine's frame time, summed every frame (Grass Optimizations' timeAccum).
 		if (const auto* state = globals::game::smState)
 			fadeClock += state->timerValues[1];
 		events.Drain([&](Event&& a_event) {
@@ -102,12 +98,11 @@ namespace DCLF::Features::Grass
 
 	bool Mirror::Stale(const Event& a_event) const
 	{
-		// Older than the shape's removal: the event is the destroyed shape's (an address reused by a new shape has later seqs).
+		// Older than the shape's removal means it belongs to the destroyed shape, not a new one at the same address.
 		if (const auto tomb = tombstones.find(a_event.shape); tomb != tombstones.end() && a_event.seq < tomb->second.first)
 			return true;
 		if (a_event.kind == Event::Kind::Remove)
 			return false;
-		// Older than what the group holds, or than the group's removal.
 		if (const auto it = shapes.find(a_event.shape); it != shapes.end()) {
 			if (const auto group = it->second.slots.find(a_event.group); group != it->second.slots.end() && a_event.seq < group->second.seq)
 				return true;
@@ -125,7 +120,6 @@ namespace DCLF::Features::Grass
 		}
 		const GroupKey key{ a_event.shape, a_event.group };
 		if (a_event.kind == Event::Kind::RemoveGroup) {
-			// The cell's records are not what the engine draws any more; a later add may reuse the group's index.
 			if (const auto it = shapes.find(a_event.shape); it != shapes.end() && it->second.slots.contains(a_event.group)) {
 				++stats.groupRemoves;
 				RemoveGroup(it->second, a_event.group);
@@ -137,18 +131,16 @@ namespace DCLF::Features::Grass
 		}
 		groupTombstones.erase(key);
 		auto& shape = shapes[a_event.shape];
-		// An add or a rejection replaces what the group held.
 		if (shape.slots.contains(a_event.group))
 			RemoveGroup(shape, a_event.group);
 		if (a_event.kind == Event::Kind::Rejected) {
-			// The engine draws the group, so the family stays the engine's while it lives (RejectedLive).
+			// The engine still draws this group, so the family stays the engine's while it lives.
 			++stats.rejected;
 			++rejectedGroups;
 			shape.slots[a_event.group] = { Shape::kRejected, a_event.seq };
 			return;
 		}
 		++stats.adds;
-		// Each group has its own slot and range.
 		const std::uint32_t slot = AcquireSlot();
 		slotShapes[slot] = a_event.shape;
 		auto& group = groups[slot];
@@ -174,7 +166,7 @@ namespace DCLF::Features::Grass
 		const auto it = shapes.find(a_shape);
 		if (it == shapes.end())
 			return;
-		// Its groups older than the removal: a later one is a new shape's at the same address.
+		// Only groups older than the removal. A later one belongs to a new shape at the same address.
 		std::vector<std::uint32_t> removed;
 		for (const auto& [index, group] : it->second.slots)
 			if (group.seq < a_seq)
@@ -202,7 +194,7 @@ namespace DCLF::Features::Grass
 		ReleaseGroup(groups[slot]);
 		slotShapes[slot] = nullptr;
 		freeSlots.push_back(slot);
-		MarkSlot(slot);  // its row's count 0
+		MarkSlot(slot);  // sends the row with count 0
 	}
 
 	void Mirror::ReleaseGroup(Group& a_group)
@@ -231,7 +223,6 @@ namespace DCLF::Features::Grass
 	{
 		if (!a_count)
 			return 0;
-		// First fit over the free ranges, else past the high-water mark.
 		for (auto it = freeRanges.begin(); it != freeRanges.end(); ++it) {
 			if (it->second < a_count)
 				continue;
@@ -250,7 +241,7 @@ namespace DCLF::Features::Grass
 	{
 		if (!a_count)
 			return;
-		// Its owners go ~0u (the cull skips it) at the next commit.
+		// The next commit sets its owners to ~0u so the cull skips it.
 		freedRanges.emplace_back(a_first, a_count);
 		std::uint32_t first = a_first, end = a_first + a_count;
 		if (auto next = freeRanges.find(end); next != freeRanges.end()) {
@@ -264,7 +255,6 @@ namespace DCLF::Features::Grass
 				freeRanges.erase(previous);
 			}
 		}
-		// A range that reaches the high-water mark lowers it.
 		if (end == instanceSlots)
 			instanceSlots = first;
 		else
@@ -304,7 +294,7 @@ namespace DCLF::Features::Grass
 			bucket.meshes[0] = AddMeshUser(std::move(a_event.mesh));
 		}
 		auto& bucket = buckets[slot];
-		// A bucket made before LoadGrassType named its shapes' mesh takes it from a later group.
+		// A bucket made before LoadGrassType named its mesh picks it up from a later group.
 		if (!bucket.lodMesh && a_event.lodMesh)
 			AdoptLodMesh(bucket, a_event.lodMesh);
 		++bucket.shapes;
@@ -322,8 +312,7 @@ namespace DCLF::Features::Grass
 		MarkBucket(a_slot);
 		if (--bucket.shapes)
 			return;
-		// Its meshes' users go, then its hold on the library's LOD meshes; its slot's row is sent zero, which releases its bindings (the
-		// bucket table's content owners).
+		// Sending the slot's row as zero releases its texture bindings.
 		for (const void* mesh : bucket.meshes)
 			RemoveMeshUser(mesh);
 		if (auto* record = static_cast<::GrassMeshLibrary::MeshRecord*>(bucket.lodMesh))
@@ -337,8 +326,7 @@ namespace DCLF::Features::Grass
 
 	void Mirror::AdoptLodMesh(Bucket& a_bucket, void* a_lodMesh)
 	{
-		// Held while the bucket lives, so the library keeps the record's LOD meshes (CommitLoadedLODMeshes drops a load no bucket holds,
-		// ReleaseMesh evicts them at zero), as Grass Optimizations' buckets hold it.
+		// The shared library drops or evicts LOD meshes no bucket holds, so hold the record while the bucket lives.
 		++static_cast<::GrassMeshLibrary::MeshRecord*>(a_lodMesh)->activeBuckets;
 		a_bucket.lodMesh = a_lodMesh;
 		a_bucket.lodPending = true;
@@ -347,9 +335,7 @@ namespace DCLF::Features::Grass
 
 	void Mirror::ResolveLods()
 	{
-		// Grass Optimizations' LOD meshes (meshes\LOD\Grass\<stem>_LOD0.nif and _LOD1.nif), by the buckets' source meshes, loaded off
-		// the render thread by the shared library: a bucket's tiers resolve once both of its loads settle (the far tier falls back to the
-		// middle mesh, GetLODMesh). A tier's new mesh is leased by the next TakeChanges, which lays the visible bases out again.
+		// LOD meshes load off the render thread. A bucket's tiers resolve once both loads settle, and the far tier falls back to the middle mesh.
 		if (!lodPending || !GrassShared::Settings().EnableMeshLOD)
 			return;
 		auto& library = GrassShared::MeshLibrary();
@@ -408,7 +394,7 @@ namespace DCLF::Features::Grass
 		const auto it = a_key ? meshes.find(a_key) : meshes.end();
 		if (it == meshes.end() || --it->second.users)
 			return;
-		// Its leases outlive the frames in flight (TakeRetired); no bucket names its slot until it is reused.
+		// The leases must outlive the frames in flight.
 		for (auto* owner : { &it->second.vertexOwner, &it->second.indexOwner })
 			if (*owner)
 				retired.push_back(std::move(*owner));
@@ -419,8 +405,8 @@ namespace DCLF::Features::Grass
 
 	void Mirror::LayOutVisible()
 	{
-		// Every live bucket's ranges, in slot order, each the bucket's instance count long: tier 0's, and one tiers 1 and 2 share (tier 1
-		// from its start, tier 2 down from its end), for the tiers with a resolved mesh.
+		// Each bucket gets one range for tier 0 and one shared by tiers 1 and 2, each as long as its instance count.
+		// An instance is in only one tier per frame, so the shared range is enough.
 		std::uint32_t base = 0;
 		for (auto& bucket : buckets) {
 			if (!bucket.live)
@@ -446,7 +432,7 @@ namespace DCLF::Features::Grass
 					}
 					row.flags |= tier == 1 ? GrassInstances::kBucketTierOne : tier == 2 ? GrassInstances::kBucketTierTwo : 0u;
 				}
-				// A LOD tier's own mesh cost (Grass Optimizations' UploadCullBucketConstants: sqrt(triangles / 8)), tier 0's without a mesh.
+				// sqrt(triangles / 8) as in Grass Optimizations. Falls back to tier 0's cost without a mesh.
 				if (tier > 0) {
 					row.lodMeshCost[tier - 1] = drawn ? std::sqrt(std::max(1.0f, static_cast<float>(it->second.source.indexCount) / 24.0f)) : row.minPixelScale;
 					row.canopyHeight[tier] = drawn ? it->second.source.canopyHeight : row.canopyHeight[0];
@@ -484,17 +470,17 @@ namespace DCLF::Features::Grass
 		changedMeshes.clear();
 		for (std::uint32_t slot = 0; slot < meshSlots.size(); ++slot)
 			changedMeshes.push_back(slot);
-		// A new backing of the owners holds nothing: the free ranges' owners go ~0u again.
+		// A new owners backing starts empty, so free ranges must be cleared to ~0u again.
 		for (const auto& [first, count] : freeRanges)
 			freedRanges.emplace_back(first, count);
 	}
 
 	void Mirror::TakeChanges(Changes& a_changes)
 	{
-		// The render thread's registry (GpuResources::Frame): the scene work leases the geometry slots' buffers from its own, on its thread.
+		// The render thread's registry. The scene work uses its own on its own thread.
 		auto& gpu = GpuResources::Frame();
 		gpu.BeginFrame();
-		// The new meshes' buffers, leased (they stay pinned while the mesh lives); a mesh that cannot be leased is drawn by no tier.
+		// Leases stay pinned while the mesh lives. A mesh that cannot be leased is drawn by no tier.
 		std::vector<std::uint32_t> pending;
 		bool settled = false;
 		for (const std::uint32_t slot : changedMeshes) {
@@ -511,7 +497,7 @@ namespace DCLF::Features::Grass
 				auto vertex = gpu.Acquire(mesh.source.vertexBuffer.get());
 				auto index = vertex ? gpu.Acquire(mesh.source.indexBuffer.get()) : std::nullopt;
 				if (vertex && index) {
-					mesh.row = { .vertexAddress = vertex->buffer.address, .indexAddress = index->buffer.address, .vertexDesc = mesh.source.vertexDesc,
+					mesh.row = { .vertexRef = vertex->buffer.ref, .indexRef = index->buffer.ref, .vertexDesc = mesh.source.vertexDesc,
 						.indexCount = mesh.source.indexCount, .vertexStride = static_cast<std::uint32_t>(mesh.source.vertexDesc & 0xF) * 4 };
 					mesh.vertexOwner = std::move(vertex->owner);
 					mesh.indexOwner = std::move(index->owner);
@@ -526,7 +512,6 @@ namespace DCLF::Features::Grass
 			a_changes.meshes.push_back(slot);
 		}
 		changedMeshes = std::move(pending);
-		// A mesh settled or a bucket's total moved: the tiers' visible bases again, every bucket's row with them.
 		if (settled || totalsChanged) {
 			LayOutVisible();
 			totalsChanged = false;

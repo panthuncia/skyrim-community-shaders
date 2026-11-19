@@ -1,5 +1,5 @@
-// The compatibility monitor (PlayerParity.h): the request, applied at the frame's start; the offenders, the coordinator's, published
-// to the menu as an immutable snapshot; the report.
+// The compatibility monitor. The request is applied at frame start. The coordinator's offenders are published to the menu as an
+// immutable snapshot.
 #include "PlayerParity.h"
 
 #include "Hooks.h"
@@ -26,12 +26,12 @@ namespace DCLF::Diagnostics::PlayerParity
 	namespace
 	{
 		std::atomic<bool> requested{ false };  // the menu's
-		std::atomic<bool> active{ false };     // the render thread's, applied at the frame's start
+		std::atomic<bool> active{ false };     // the render thread's, applied at frame start
 		std::atomic<bool> resetPending{ false };
 		std::atomic<bool> clearPending{ false };
 
-		// The coordinator's: the offenders by (reference, or the shared object for a property or an alpha; record type; fields), in the
-		// order found, each with the references it was found under; and whether they changed since published.
+		// Coordinator thread. Offenders keyed by reference, or by the shared object for a property or alpha, then record type and fields.
+		// Kept in the order found, with the references each was found under.
 		struct Table
 		{
 			std::map<std::tuple<std::uintptr_t, std::uint8_t, std::uint32_t>, std::size_t> index;
@@ -41,7 +41,7 @@ namespace DCLF::Diagnostics::PlayerParity
 		} table;
 		std::atomic<std::shared_ptr<const Offenders>> published{ std::make_shared<const Offenders>() };
 
-		// The render thread's leaks, to the coordinator's table (NoteCheck drains them).
+		// The render thread's leaks, drained into the coordinator's table by NoteCheck.
 		struct LeakNote
 		{
 			std::uint32_t form = 0;
@@ -49,9 +49,9 @@ namespace DCLF::Diagnostics::PlayerParity
 		};
 		EventQueue<LeakNote, 64> leakNotes;
 
-		// The longest example kept: a mirror parity line can run to several hundred characters.
+		// A mirror parity line can run to several hundred characters.
 		constexpr std::size_t kExampleChars = 400;
-		// The offenders kept at most; past it a new one only counts (one noisy writer must not grow the table without bound).
+		// Past this a new offender only counts, so one noisy writer cannot grow the table without bound.
 		constexpr std::size_t kMaxOffenders = 4096;
 
 		void Restart()
@@ -86,7 +86,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			}
 		}
 
-		/** @brief The plugin a form ID's load order index names (a reference no longer loaded still names its plugin). */
+		/** @brief The plugin a form ID's load order index names. A reference no longer loaded still names its plugin. */
 		std::string PluginOfId(std::uint32_t a_form)
 		{
 			auto* handler = RE::TESDataHandler::GetSingleton();
@@ -99,7 +99,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			return file ? std::string(file->GetFilename()) : index == 0xFF ? "created in game" : "?";
 		}
 
-		/** @brief An offender's reference as the menu and the report name it: plugin, base object, and the plugin that last edits it. */
+		/** @brief An offender's reference by plugin, base object, and the plugin that last edits it. */
 		struct Named
 		{
 			std::string plugin, lastPlugin, reference;
@@ -130,7 +130,7 @@ namespace DCLF::Diagnostics::PlayerParity
 
 		void OnFrameBegin(const FrameBegin&)
 		{
-			// The frame's start: every switchable observer on or off for the whole frame (Hooks.h); on starts a fresh session.
+			// Arm every switchable observer for the whole frame. Turning on starts a fresh session.
 			const bool want = requested.load(std::memory_order_relaxed);
 			if (want == active.load(std::memory_order_relaxed))
 				return;
@@ -145,7 +145,7 @@ namespace DCLF::Diagnostics::PlayerParity
 	void Install()
 	{
 		Subscribe<FrameBegin>(OnFrameBegin);
-		// A subtree another plugin detached by a path no hook sees (the coordinator's; one offender per class of its root).
+		// A subtree another plugin detached by a path no hook sees. One offender per class of its root.
 		SubscribeSwitchable<MirrorEvicted>([](const MirrorEvicted& a_event) {
 			NoteMissed(a_event.rtti, 0, kEvicted, 0, fmt::format("a {} with {} records under it, {}", a_event.rtti ? a_event.rtti : "?", a_event.records, a_event.what));
 		});
@@ -162,15 +162,14 @@ namespace DCLF::Diagnostics::PlayerParity
 		if (!resetPending.exchange(false, std::memory_order_acq_rel))
 			return false;
 		Restart();
-		leakNotes.Discard();  // from before the session (the queue's one consumer is this thread)
+		leakNotes.Discard();  // from before the session, and this thread is the queue's one consumer
 		return true;
 	}
 
 	void NoteMissed(const void* a_object, std::uint32_t a_form, std::uint8_t a_type, std::uint32_t a_fields, std::string_view a_example)
 	{
 		const auto frame = SceneCapture::Frame();
-		// A property's or an alpha's write shows on every reference whose mesh shares it: one offender, by the object (an eviction's: by
-		// its root's class).
+		// A write to a shared property or alpha shows on every reference whose mesh shares it, so it is one offender keyed by the object.
 		const bool shared = a_type == 2 || a_type == 3 || a_type == kEvicted;
 		const auto key = std::make_tuple(shared ? reinterpret_cast<std::uintptr_t>(a_object) : a_form, a_type, a_fields);
 		if (const auto found = table.index.find(key); found != table.index.end()) {
@@ -194,7 +193,7 @@ namespace DCLF::Diagnostics::PlayerParity
 		table.referencesOf.push_back({ a_form });
 		table.offenders.entries.push_back({ a_form, 1, a_type, a_fields, 1, frame, frame, std::string(a_example.substr(0, kExampleChars)) });
 		table.dirty = true;
-		// One line per new offender (not per check): the plugin by the form ID's load order index, the rest in the menu and the report.
+		// One line per new offender, not per check. The rest is in the menu and the report.
 		if (a_type == kLeak || a_type == kEvicted)
 			logger::warn("[DCLF] compatibility monitor: a {} {}: {}{} <- OFFENDER", TypeName(a_type), FieldNames(a_type, a_fields), a_example,
 				a_form ? fmt::format(", reference {:08X} ({})", a_form, PluginOfId(a_form)) : "");
@@ -214,7 +213,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			Restart();
 		leakNotes.Drain([](LeakNote&& a_note) { NoteMissed(nullptr, a_note.form, kLeak, 0, a_note.example); });
 		++table.offenders.probes;
-		// Each check counts, so the menu's numbers move; a copy every 30 checks while only counts change, at once for a new offender.
+		// Publish every 30 checks while only counts change, and at once for a new offender.
 		if (!table.dirty && table.offenders.probes % 30 != 0)
 			return;
 		table.dirty = false;
@@ -233,7 +232,7 @@ namespace DCLF::Diagnostics::PlayerParity
 
 	std::string WriteReport(const std::filesystem::path& a_path)
 	{
-		// No path given: a stamped file beside the log.
+		// With no path given, a stamped file beside the log.
 		auto path = a_path;
 		if (path.empty()) {
 			const auto directory = logger::log_directory();
@@ -295,7 +294,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			ImGui::TextUnformatted("Each frame compares a slice of the scene with what DCLF holds; a difference no hook explains is an offender. Turning it on starts a fresh list.");
 		const auto offenders = Current();
 		ImGui::Text("%llu checks, %zu offenders", static_cast<unsigned long long>(offenders->probes), offenders->entries.size());
-		// The report goes into the diagnostic capture (the Advanced section's button).
+		// The report also goes into the diagnostic capture.
 		if (ImGui::Button("Clear"))
 			Clear();
 		constexpr std::size_t kRows = 200;
@@ -307,7 +306,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			ImGui::TableSetupColumn("Checks");
 			ImGui::TableSetupColumn("Frames");
 			ImGui::TableHeadersRow();
-			// The names resolved once per form (the menu draws every frame).
+			// Names are resolved once per form, since the menu draws every frame.
 			static std::map<std::uint32_t, Named> names;
 			for (std::size_t i = 0; i < std::min(kRows, offenders->entries.size()); ++i) {
 				const auto& offender = offenders->entries[i];

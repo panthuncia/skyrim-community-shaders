@@ -1,4 +1,88 @@
-#include "Common/DummyVSTexCoord.hlsl"
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. The copies whose vertex shader passes
+// the coordinates through use the graph's fullscreen triangle as their vertex stage. ISCopyScaleBias and ISCopyTextureMask use the
+// ORG vertex stage below: the same triangle, with the coordinates moved as vanilla's vertex shaders move them.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISCOPY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISCOPY_ORG_RESOURCES(ORG_HANDLE))
+ISCOPY_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
+// ISCopyScaleBias and ISCopyTextureMask move the texture coordinates in their vertex shader, as vanilla's do. The other
+// copies pass them through.
+#if defined(VSHADER) && defined(CS_ORG_BINDLESS) && (defined(SCALE_BIAS) || defined(MASK))
+struct VS_OUTPUT
+{
+	float4 Position: SV_POSITION0;
+	float2 TexCoord: TEXCOORD0;
+};
+
+#	if defined(MASK)
+static float4 RotationMatrix = OrgEngineRow(PerGeometryAt, 0);
+#	else
+static float4 ScaleBias = OrgEngineRow(PerGeometryAt, 2);
+#	endif
+
+// The fullscreen triangle of RenderGraph/FullscreenVS.hlsl. The coordinate change is affine, so it interpolates over the larger
+// triangle as it does over the engine's quad.
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	VS_OUTPUT vsout;
+	const float2 texCoord = float2((a_vertexID << 1) & 2, a_vertexID & 2);
+	vsout.Position = float4(texCoord * 2.0 - 1.0, 0.0, 1.0);
+	vsout.Position.y = -vsout.Position.y;
+#	if defined(MASK)
+	const float4 rotated = (texCoord.xxyy - 0.5) * RotationMatrix;
+	vsout.TexCoord = (rotated.xy + rotated.zw) + 0.5;
+#	else
+	vsout.TexCoord = texCoord * ScaleBias.xy + ScaleBias.zw;
+#	endif
+	return vsout;
+}
+#elif defined(VSHADER) && (defined(SCALE_BIAS) || defined(MASK))
+struct VS_INPUT
+{
+	float4 Position: POSITION0;
+	float2 TexCoord: TEXCOORD0;
+};
+
+struct VS_OUTPUT
+{
+	float4 Position: SV_POSITION0;
+	float2 TexCoord: TEXCOORD0;
+};
+
+cbuffer PerGeometry : register(b2)
+{
+#	if defined(MASK)
+	float4 RotationMatrix : packoffset(c0);  // a 2x2 matrix that turns the coordinates about the center
+#	else
+	float4 ScaleBias : packoffset(c2);  // xy: scale, zw: bias
+#	endif
+};
+
+VS_OUTPUT main(VS_INPUT input)
+{
+	VS_OUTPUT vsout;
+
+	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(MASK)
+	const float4 rotated = (input.TexCoord.xxyy - 0.5) * RotationMatrix;
+	vsout.TexCoord = (rotated.xy + rotated.zw) + 0.5;
+#	else
+	vsout.TexCoord = input.TexCoord * ScaleBias.xy + ScaleBias.zw;
+#	endif
+
+	return vsout;
+}
+#else
+#	include "Common/DummyVSTexCoord.hlsl"
+#endif
 #include "Common/FrameBuffer.hlsli"
 
 typedef VS_OUTPUT PS_INPUT;
@@ -13,6 +97,11 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 RotationMatrix = OrgEngineRow(PerGeometryAt, 0);
+static float4 ColorSelect = OrgEngineRow(PerGeometryAt, 1);
+static float4 ScaleBias = OrgEngineRow(PerGeometryAt, 2);
+#	else
 SamplerState ImageSampler : register(s0);
 
 Texture2D<float4> ImageTex : register(t0);
@@ -23,6 +112,7 @@ cbuffer PerGeometry : register(b2)
 	float4 ColorSelect : packoffset(c1);
 	float4 ScaleBias : packoffset(c2);
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {

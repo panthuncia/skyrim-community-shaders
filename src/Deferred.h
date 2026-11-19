@@ -35,6 +35,12 @@ public:
 	/** @brief Creates render targets, samplers, and the directional shadow structured buffer. */
 	void SetupResources();
 
+	/**
+	 * @brief With CS_ORG_ENGINE_TARGETS, tells the engine targets which of the engine's render targets SetupResources remakes,
+	 * and how, so ORG makes them that way from the start. Called once at hook install, before the render graph exists.
+	 */
+	static void PlanTargets();
+
 	/** @brief Runs feature reflection prepasses with render targets unbound. */
 	void ReflectionsPrepasses();
 
@@ -63,6 +69,12 @@ public:
 	void ClearShaderCache();
 
 	/**
+	 * @brief The defines of the deferred composite's build (DeferredCompositeCS.hlsl) besides the common ones: INTERIOR, and the
+	 * loaded features it reads. One list for the D3D11 shaders and the ORG composite (ORGDeferredComposite).
+	 */
+	static std::vector<std::pair<const char*, const char*>> CompositeDefines(bool a_interior);
+
+	/**
 	 * @brief Gets or compiles the exterior deferred composite compute shader.
 	 * @return Cached or freshly compiled compute shader with feature-dependent defines.
 	 */
@@ -81,6 +93,12 @@ public:
 	 * once shadow maps have been rendered.
 	 */
 	void CopyShadowLightData();
+
+	/**
+	 * @brief The directional shadow parameters CopyShadowLightData uploads, as of now: false, a_out untouched, when there is no sun
+	 * shadow light. For passes that latch them rather than read the t98 buffer.
+	 */
+	bool GetDirectionalShadowLightData(DirectionalShadowLightData& a_out);
 
 	// The engine's blend states as the deferred pass draws with them (OverrideBlendStates, made once on its first call; null
 	// until then), and the forward ones they replace for its duration.
@@ -167,6 +185,8 @@ public:
 			stl::write_thunk_call<Main_RenderFirstPersonView>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x944, 0x954, 0x971));
 
 			stl::detour_thunk<Renderer_ResetState>(REL::RelocationID(75570, 77371));
+
+			PlanTargets();
 
 			logger::info("[Deferred] Installed hooks");
 		}

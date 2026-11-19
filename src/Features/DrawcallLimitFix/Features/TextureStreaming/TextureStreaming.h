@@ -1,8 +1,8 @@
 #pragma once
 
-// Texture streaming's part in DCLF (the core is src/TextureStreaming, which knows nothing of DCLF): the window builds as graph work, the swaps
-// reaching the material bindings, and the demand: the distance floor from the published scene's bounds, and the shaders' feedback (their UV
-// footprint per material), corrected on top. Everything but the feedback pass runs on the streaming worker's low-priority thread.
+// Texture streaming's part in DCLF. The core in src/TextureStreaming knows nothing of DCLF. This adds window builds as graph work,
+// the swaps into material bindings, and the demand from scene bounds plus shader feedback. All but the feedback pass run on the
+// streaming worker's low-priority thread.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 

@@ -282,13 +282,13 @@ bool DXVKInterop::PresenterStateMatches(
 
 bool DXVKInterop::RefreshPresenterSurfaceState()
 {
-	if (!getPresenterSurfaceState)
-		return false;
-
 	uint32_t format = VK_FORMAT_UNDEFINED;
 	uint32_t requestedColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	uint32_t effectiveColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	const uint64_t serial = getPresenterSurfaceState(&format, &requestedColorSpace, &effectiveColorSpace);
+	uint64_t serial = 0;
+	if (getPresenterSurfaceState) {
+		serial = getPresenterSurfaceState(&format, &requestedColorSpace, &effectiveColorSpace);
+	}
 	if (!serial)
 		return false;
 

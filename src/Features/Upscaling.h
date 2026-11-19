@@ -93,10 +93,12 @@ public:
 
 	static void NotifyWindowFocus(bool a_focused);        // WM_ACTIVATEAPP / WM_ACTIVATE
 	/**
-	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the next render
-	 * frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
+	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the frame
+	 * boundary after the next render frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
 	 */
 	static void RequestFrameGenTest(int a_method);
+	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the frame boundary after the next render frame's start. */
+	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
 	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
 	static void NotifyDesktopChanged();                   // WM_DISPLAYCHANGE
@@ -109,6 +111,7 @@ public:
 
 	static inline std::atomic<bool> s_windowUnfocused{ false };
 	static inline std::atomic<int> s_frameGenTestRequest{ -1 };  // RequestFrameGenTest's, -1: none
+	static inline std::atomic<int> s_upscaleTestRequest{ -1 };   // RequestUpscaleTest's, -1: none
 	static inline std::atomic<bool> s_windowModifying{ false };
 	static inline std::atomic<bool> s_displayOff{ false };
 	static inline std::atomic<std::uint64_t> s_displayChangedTick{ 0 };
@@ -216,6 +219,8 @@ public:
 	void PostDisplay();
 	void PerformUpscaling();
 	void UpscaleDepth();
+	/** @brief The depth upscale's constants for this frame: the jitter, and the wide kernel's choice with its hysteresis. */
+	JitterCB DepthUpscaleConstants();
 
 	static double GetRefreshRate(HWND a_window);
 
@@ -229,6 +234,10 @@ private:
 	void CreateHudlessTexture();
 	bool DestroyHudlessTexture(bool a_commandRingDrained = false);
 	ID3D11Resource* CaptureHudlessColor();
+	/** @brief The upscaler's output as ORGUpscaling::Texture chooses it (the graph's export with CS_ORG_UPSCALING); null when neither exists. */
+	ID3D11Texture2D* UpscaledResource() const;
+	/** @brief Frame generation's hudless colour, as UpscaledResource. */
+	ID3D11Texture2D* HudlessResource() const;
 	bool CopyHudlessColor(ID3D11ShaderResourceView* a_source);
 	void PrepareFrameGeneration(ID3D11Resource* a_hudlessColor);
 

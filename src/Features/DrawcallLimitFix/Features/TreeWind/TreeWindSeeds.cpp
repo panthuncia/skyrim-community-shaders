@@ -1,6 +1,5 @@
-// Tree wind's seeds: a frame-value pool of the listed trees' nodes as the frame's start had them (TreeStatic, two rows a tree slot:
-// MergeTreeSeed), read on the render thread at the frame's start, written and sent by FrameValues' producer, read by TreeWindCS
-// through the depth commit's frame row.
+// Tree wind's seeds: a frame-value pool of the listed trees' nodes as the frame's start had them, two rows per tree slot.
+// Read on the render thread at frame start, sent by FrameValues' producer, and read by TreeWindCS through the depth commit's frame row.
 
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -18,7 +17,7 @@ namespace DCLF::Features::TreeWind
 {
 	namespace
 	{
-		float TreeNodeFloat(const void* a_node, std::size_t a_offset)
+		float SeedNodeFloat(const void* a_node, std::size_t a_offset)
 		{
 			return *reinterpret_cast<const float*>(static_cast<const std::byte*>(a_node) + a_offset);
 		}
@@ -39,20 +38,19 @@ namespace DCLF::Features::TreeWind
 			return second && *reinterpret_cast<const std::int32_t*>(second + 0x10) == 1;
 		}
 
-		/** @brief A BSTreeNode's static row into a_out (the render thread's tree seeds). */
+		/** @brief A BSTreeNode's static row into a_out. */
 		void TreeStaticOfNode(const void* a_node, TreeStatic& a_out)
 		{
 			a_out = {};
 			const void* node = a_node;
 			const auto* bytes = static_cast<const std::byte*>(node);
 			std::memcpy(a_out.position, bytes + 0xA0, sizeof(a_out.position));
-			a_out.leafFrequency = TreeNodeFloat(node, 0x160);
-			a_out.timer = TreeNodeFloat(node, 0x164);
-			a_out.previousTimer = TreeNodeFloat(node, 0x168);
-			a_out.amplitude = TreeNodeFloat(node, 0x15c);
-			// The manager advances a node only in its near loop (FUN_1404381e0's loop 2 over FUN_140437e50's near list): one the list
-			// selects whose model (+0xF8, its +0x40) has bones (+0xB8), scaling the gust by the model's +0xB0. Other nodes keep their
-			// clock and amplitude; their +0xB0 is never read (can be garbage like 2.3e36). Not replicated: the near list's count cap.
+			a_out.leafFrequency = SeedNodeFloat(node, 0x160);
+			a_out.timer = SeedNodeFloat(node, 0x164);
+			a_out.previousTimer = SeedNodeFloat(node, 0x168);
+			a_out.amplitude = SeedNodeFloat(node, 0x15c);
+			// The manager advances a node only in its near loop, when its model (+0xF8, then +0x40) has bones (+0xB8). Other nodes keep their
+			// clock, and their +0xB0 is never read and can be garbage. The near list's count cap is not replicated.
 			const auto* holder = *reinterpret_cast<const std::byte* const*>(bytes + 0xF8);
 			const auto* model = holder ? *reinterpret_cast<const std::byte* const*>(holder + 0x40) : nullptr;
 			const bool bones = model && *reinterpret_cast<const void* const*>(model + 0xB8);
@@ -62,28 +60,25 @@ namespace DCLF::Features::TreeWind
 
 		Api::FrameValuePoolId pool;  // install
 
-		// What a kick hands its producer: the seeds read since the last kick (row, value; in request order), and the rows they name.
 		struct SeedInput
 		{
 			std::vector<std::pair<std::uint32_t, TreeStatic>> values;
 			std::uint32_t rows = 0;
 		};
 
-		// Render thread: the seeds read at the frames' starts that no kick handed over yet, the most rows named (2 * slot + seedOdd + 1:
-		// the rows never shrink), and the input a kick hands when nothing is new (kept while the rows stand: no allocation a frame).
+		// Render thread: seeds no kick handed over yet, and the most rows named. The rows never shrink.
 		std::vector<std::pair<std::uint32_t, TreeStatic>> unsent;
 		std::uint32_t seedRows = 0;
 		std::shared_ptr<const SeedInput> idle;
 
-		// The producers', one at a time in frame order: the seed rows, by 2 * tree slot + seedOdd.
+		// The producers run one at a time in frame order.
 		KeptWholeArray<TreeStatic> seeds;
 
 		// Render thread, every frame's start: the seeds the installed publications asked for (the component's listings: FrameView).
 		void FrameStart(const Api::FrameValuePoolFrameStart& a_start)
 		{
 			FrameGlobals::Scope scope(a_start.globals);
-			// Read here, not by the producer: TreeStaticOfNode's near-list test reads the tree's multibound shape's cull result (FUN_14147d640
-			// is a pure read, the first child's AsMultiBoundNode; then the shape's +0x10), which this frame's culls write.
+			// Read here, not by the producer, because the near-list test reads a cull result that this frame's culls write.
 			for (const auto& seed : Scene::FrameView::Get().TakeComponentSeeds(ComponentId())) {
 				if (!seed.node)
 					continue;

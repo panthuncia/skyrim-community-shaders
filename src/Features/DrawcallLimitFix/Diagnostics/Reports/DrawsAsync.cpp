@@ -4,8 +4,7 @@
 #include "Draws.h"
 #include "Engine.h"
 
-// IndirectDraws' report lines at the render thread's report (Reports::RenderThread): the async work, the views' epochs, the snapshots and
-// revisions (the payload's pools are the snapshot builder's: Impl::ProducerReport).
+// IndirectDraws' report lines at the render thread's report. Async work, view epochs, snapshots and revisions.
 
 namespace DCLF
 {
@@ -14,23 +13,19 @@ namespace DCLF
 		std::string text;
 		if (auto window = Reports::EngineReadWindowLine(); !window.empty())
 			text += window + "\n";
-		// The write-backs' lines here (Features/Fades: the fade write-back's and the fade writers').
 		Extensions::ReportTextAt(Api::ReportPoint::AsyncWorkWriteBack, text);
 		text += VisibilityReport();
-		// The views' lines here, before the forward epoch's (Features/Reflection: the reflection faces').
+		// View lines come before the forward epoch's.
 		Extensions::ReportTextAt(Api::ReportPoint::AsyncWorkViews, text);
 		text += SharedEpochReport();
-		// The features' lines here (Features/Particles, Features/Billboards, Features/FirstPerson: the first-person view's).
 		Extensions::ReportTextAt(Api::ReportPoint::AsyncWork, text);
-		// The draw families' lines here (Features/TreeLod's draws and cull).
 		Extensions::ReportTextAt(Api::ReportPoint::AsyncWorkFamilies, text);
-		// The builds' stores (main rows, object records, shadow state, extras rows, geometry table, exclusions) are the snapshot builder's:
-		// their lines are composed in its pass (Impl::StoresReport, with the producer's report) and printed with it, a report behind.
+		// The builds' store lines are composed in the snapshot builder's pass and printed with its report, a report behind.
 		if (auto line = Reports::FrameValuesLine(); !line.empty())
 			text += line + "\n";
 		if (auto line = Reports::FrameDataLine(); !line.empty())
 			text += line + "\n";
-		// The rows naming descriptors (ContentOwners): steady while the scene's bindings are (a growing count is a range never replaced).
+		// Rows naming descriptors. Steady while the scene's bindings are, so a growing count is a range never replaced.
 		if (impl->scene) {
 			const auto content = impl->scene->content.TakeCounts();
 			text += fmt::format("[DCLF] content owners: {} ranges naming descriptors, {} owners; {} snapshots made since the last report\n", content.ranges,
@@ -38,8 +33,7 @@ namespace DCLF
 		}
 		{
 			text += impl->RevisionReport();
-			// The snapshots (the frame's counters, the builder's times) and the builder's own lines (the revisions, the growths,
-			// the shapes made, the draw bound), composed in its pass and taken here.
+			// The snapshots, and the builder's own lines composed in its pass and taken here.
 			text += impl->SnapshotReport();
 		}
 		static constexpr const char* kNames[3] = { "colour", "zprepass", "shadow" };
@@ -53,7 +47,7 @@ namespace DCLF
 			a = {};
 		}
 		if (auto& p = Diagnostics::DrawsState::Get().viewMasks; p.checks.load(std::memory_order_relaxed)) {
-			// The main lists, the caster modes', then each occlusion map's (its entry's list label).
+			// The main lists, the caster modes, then each occlusion map's.
 			static constexpr std::array<const char*, 2 + kFirstOcclusionMode> kLists{ "main", "main drawable", "plain", "clamped", "paraboloid" };
 			const auto listName = [](std::size_t a_list) -> std::string_view {
 				const std::size_t list = std::min<std::size_t>(a_list, 1 + kShadowModeCount);

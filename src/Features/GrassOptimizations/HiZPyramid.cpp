@@ -2,6 +2,7 @@
 
 #include "Features/TerrainBlending.h"
 #include "Profiler.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 void HiZPyramid::SetupResources()
 {
@@ -20,15 +21,17 @@ void HiZPyramid::ClearShaderCache()
 ID3D11ShaderResourceView* HiZPyramid::GetLiveDepthSRV()
 {
 	// Use the live UNORM view because Terrain Blending's replacement is not ready during depth rendering.
+	// The view is bound through DXVK's context. Engine depth fields can be tripwire handles, so this returns the wrapped view.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto& tb = globals::features::terrainBlending;
 	if (tb.loaded && tb.depthSRVBackup)
-		return tb.depthSRVBackup;
+		return Unwrap(tb.depthSRVBackup);
 
 	auto* renderer = globals::game::renderer;
 	if (!renderer)
 		return nullptr;
 
-	return renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	return Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
 }
 
 bool HiZPyramid::CreateTexture(ID3D11Device* device, uint32_t dstW, uint32_t dstH)

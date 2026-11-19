@@ -1,4 +1,4 @@
-// The registered payload products' build, publication and install (see the header).
+// The registered payload products' build, publication and install.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PayloadProducts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"

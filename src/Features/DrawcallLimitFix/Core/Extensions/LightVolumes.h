@@ -1,7 +1,7 @@
 #pragma once
 
-// The light volumes contract's Core side (Api/LightVolumes.h): the contribution's entry, resolved once at InstallFeatures (none
-// registered: no volumes, no landscape rule), and the sink its sample fills: the colour commit's GpuShadowVolume list.
+// Core's side of Api/LightVolumes.h: the contribution's entry and the sink its sample fills.
+// Without a contribution there are no volumes, no landscape rule and no point light table.
 
 #include "Features/DrawcallLimitFix/Api/LightVolumes.h"
 
@@ -17,8 +17,8 @@ namespace DCLF::Draws
 namespace DCLF::Api
 {
 	/**
-	 * @brief Where a light volumes sample puts its volumes: the colour commit's list (IndirectDraws::Impl::shadowVolumes, cleared before
-	 * the sample), a GpuShadowVolume each, in the order put. The list is Core's storage: no allocation per commit once grown.
+	 * @brief Where a sample puts its volumes: the colour commit's list, one GpuShadowVolume per put, in order.
+	 * Core reuses the storage, so nothing allocates per commit once grown.
 	 */
 	class LightVolumeSink
 	{
@@ -35,22 +35,25 @@ namespace DCLF::Api
 
 namespace DCLF::Extensions
 {
-	/** @brief The contribution's entry (registered false: none, every field its default). */
+	/** @brief The contribution's entry. Every field keeps its default when none is registered. */
 	struct LightVolumesEntry
 	{
 		bool registered = false;
 		std::string name;
-		std::uint64_t landscapeFlags = 0;  // per join, data: the properties taking only affectsLand volumes
+		std::uint64_t landscapeFlags = 0;  // properties that take only affectsLand volumes
 		decltype(Api::LightVolumesContribution::sample) sample = nullptr;
+		decltype(Api::LightVolumesContribution::pointLightsActive) pointLightsActive = nullptr;
+		decltype(Api::LightVolumesContribution::pointLights) pointLights = nullptr;
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entry from the registration (no name: none). Once. */
+	/** @brief Main thread, once, at the end of InstallFeatures. */
 	void ResolveLightVolumes(const Api::LightVolumesContribution& a_registered);
-	/** @brief Any thread, after InstallFeatures (unregistered before): the contribution's entry. */
+	/** @brief Any thread, after InstallFeatures. */
 	const LightVolumesEntry& LightVolumes();
-	/**
-	 * @brief Render thread, once per colour commit (CommitShadowInputs): the frame's volumes into a_sink (the contribution's sample);
-	 * nothing without one.
-	 */
+	/** @brief Render thread, once per colour commit. The frame's volumes, or nothing without a contribution. */
 	void SampleLightVolumes(Api::LightVolumeSink& a_sink);
+	/** @brief Any thread, after InstallFeatures. Whether Lighting draws read the point light table. */
+	bool PointLightsActive();
+	/** @brief Render thread, per commit while PointLightsActive. Writes at most a_capacity point lights and returns how many. */
+	std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity);
 }

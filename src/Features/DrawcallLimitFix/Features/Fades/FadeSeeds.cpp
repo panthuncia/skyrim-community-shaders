@@ -1,6 +1,5 @@
-// Fades' seeds: a frame-value pool ("fade-seeds", the last of the pools: Fades registers after every feature) of the fade roots
-// component's seeds, the listed roots' nodes copied on the render thread at each Kick and made into rows (FadeState::StaticOf) by
-// FrameValues' producer; FadeStateCS and the builds read them as the cull binding RootSeeds.
+// Fade seeds, the "fade-seeds" frame-value pool. A seed is a root's node as it was at the start of the frame.
+// The render thread copies the node's bytes, and the producer turns the copy into a row. FadeStateCS and the builds read the rows.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -22,7 +21,7 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		// An engine reference a producer is done with, to the render thread (EngineReleases, at Present).
+		// Engine references must be released on the render thread, never on a worker.
 		template <class T>
 		void ReleaseLater(RE::NiPointer<T>& a_reference)
 		{
@@ -31,22 +30,18 @@ namespace DCLF::Features::Fades
 		}
 
 		/**
-		 * @brief A fade root's node as the frame's start had it: its bytes (FadeState::NodeBytes), copied by the render thread before the
-		 * frame's culls update the node, for the producer's StaticOf (a pure read of them, the tree LOD switch's index aside, which no
-		 * cull writes). Holds the node (the switch's owner) until the producer is done.
+		 * @brief A copy of the node's bytes taken before the frame's culls change it. StaticOf on the copy still reads the live
+		 * tree LOD switch, which no cull writes, so the node is held until the producer is done.
 		 */
 		struct SeedCopy
 		{
 			alignas(16) std::array<std::byte, FadeState::kMaxNodeBytes> bytes{};
 			RE::NiPointer<RE::NiAVObject> node;
-			std::shared_ptr<const FrameGlobals> globals;  // the frame's (StaticOf's LOD scale)
+			std::shared_ptr<const FrameGlobals> globals;  // for StaticOf's LOD scale
 			std::uint32_t row = 0, generation = 0;
 		};
 
-		/**
-		 * @brief What a kick hands its producer: the copies taken since the last kick (in request order), and the rows they name (highest
-		 * named FadeSeedRow + 1). Its engine references go to the render thread (EngineReleases) whenever it goes, never dropped on a worker.
-		 */
+		/** @brief Copies taken since the last kick, in request order. */
 		struct SeedInput
 		{
 			std::vector<SeedCopy> values;
@@ -59,31 +54,27 @@ namespace DCLF::Features::Fades
 			}
 		};
 
-		Api::FrameValuePoolId fadeSeedsPool;  // install
+		Api::FrameValuePoolId fadeSeedsPool;
 
-		// Render thread: the copies no kick handed over yet (in request order), the most rows named, and the input a kick hands when
-		// nothing is new (kept while the rows stand: no allocation a frame).
+		// Render thread. idleSeeds is reused while nothing is new, to avoid an allocation every frame.
 		std::vector<SeedCopy> unsentSeeds;
 		std::uint32_t seedRows = 0;
 		std::shared_ptr<const SeedInput> idleSeeds;
 
-		// The producers', one at a time in frame order: the seed rows (by FadeSeedRow), and the copies a refused lease left unread.
+		// Producer only, one at a time in frame order. owedSeeds are copies a refused lease left unread.
 		KeptWholeArray<FadeRootStatic> fadeSeeds;
 		std::vector<SeedCopy> owedSeeds;
 
-		// The two lists' sizes as their owners last left them, for the diagnostic capture (PeekSeedCounts).
+		// For the diagnostic capture.
 		std::atomic<std::size_t> unsentSeedCount{ 0 }, owedSeedCount{ 0 };
 
-		// Render thread, every Kick: the node as the frame's start has it, before this frame's culls update it (FadeStateCS's first
-		// update is this frame's): its bytes copied here, the row made from the copy by the producer (StaticOf, with the frame's globals:
-		// its LOD scale).
+		// Render thread, before this frame's culls update the nodes. FadeStateCS's first update is this frame's.
 		void FadeSeedsFrameStart(const Api::FrameValuePoolFrameStart& a_start)
 		{
 			auto seeds = Scene::FrameView::Get().TakeComponentSeeds(Scene::FadeRootComponentId());
 			for (auto& seed : seeds) {
 				if (!seed.node)
 					continue;
-				// An actor's root: its fadeAmount taken again now that it is listed (RecheckFadeAmount).
 				if (const auto* reference = seed.node->GetUserData(); reference && reference->IsActor())
 					RecheckFadeAmount(seed.node.get());
 				auto& copy = unsentSeeds.emplace_back();
@@ -97,7 +88,6 @@ namespace DCLF::Features::Fades
 			unsentSeedCount.store(unsentSeeds.size(), std::memory_order_relaxed);
 		}
 
-		// Render thread, at Kick: every copy taken since the last kick, for the frame's producer.
 		Api::FrameValueInput FadeSeedsKick(const Api::FrameValuePoolKick&)
 		{
 			DCLF_ZONE("CS.DCLF.FV.Kick.FadeSeeds");
@@ -128,9 +118,8 @@ namespace DCLF::Features::Fades
 				out.resize(rows, FadeRootStatic{});
 				fadeSeeds.MarkRange(first, rows - first);
 			}
-			// In request order, those a refused lease left first: a later value for the same row wins. StaticOf reads the copy the frame's
-			// start took (and the tree LOD switch it names); once a lease is refused (the window closed) the rest wait, in order, for the next
-			// producer.
+			// Owed copies go first so a later value for the same row wins. StaticOf needs an engine read lease.
+			// Once a lease is refused, the rest wait in order for the next producer.
 			auto carried = std::move(owedSeeds);
 			owedSeeds.clear();
 			bool refusedHere = false;
@@ -161,7 +150,6 @@ namespace DCLF::Features::Fades
 					seed(copy);
 			a_producer.NoteSeeded(seeded);
 			owedSeedCount.store(owedSeeds.size(), std::memory_order_relaxed);
-			// The carried copies' references to the render thread (the input's go with the input).
 			for (auto& copy : carried)
 				ReleaseLater(copy.node);
 		}

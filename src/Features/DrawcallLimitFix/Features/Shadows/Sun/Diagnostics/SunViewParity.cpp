@@ -1,6 +1,5 @@
-// The sun views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY), render thread: the Sun board against the engine's views (the
-// tally, Diagnostics::ShadowViewTally, filled by the shadow epochs' checks and here), the sun accumulation's cascades against the cascade
-// culls' planes, the cascades without DCLF's views; the line every 300 frames with sun views.
+// The sun views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the Sun board against the engine's views and the
+// cascades against the cascade culls' planes. One line every 300 frames with sun views. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Diagnostics/SunAccumulationView.h"
@@ -34,7 +33,7 @@ namespace DCLF::Features::Shadows::Sun
 			a_mask = a_from.activePlanes.underlying() & 0x3Fu;
 		}
 
-		/** @brief The sun views' parity line, logged, the tally reset: every 300 frames with sun views. */
+		/** @brief Logs the sun views' parity line every 300 frames with sun views, and resets the tally. */
 		void SunViewsLines()
 		{
 			auto& p = Diagnostics::ShadowViewTally(ShadowView::Sun);
@@ -69,10 +68,9 @@ namespace DCLF::Features::Shadows::Sun
 		/** @brief The cascade's volume is DCLF's (Accumulate's start), checked once a cascade against the cull's. */
 		void CascadeCulled(const Diagnostics::SunCascadeCulled& a_event)
 		{
-			// After the cull: the traversal's first call (vfunc 0xB8) has set the process up from the cascade's camera. With an empty
-			// objectArray it made none, and the planes are not this cascade's.
+			// The traversal's first call (vfunc 0xB8) set the process up from the cascade's camera. With an empty objectArray it did not.
 			const std::uint32_t bit = 1u << (a_event.cascade & 31);
-			if ((cascadesChecked & bit) || Engine::At<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>(a_event.fullProcess, kProcessObjectArray).empty())
+			if ((cascadesChecked & bit) || DCLF::Engine::At<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>(a_event.fullProcess, kProcessObjectArray).empty())
 				return;
 			cascadesChecked |= bit;
 			const auto& cascade = SunAccumulationView::Cascade(a_event.cascade);

@@ -1,9 +1,6 @@
-// CS_DCLF_PERSISTENT_PARITY: the LOD gates' state (LodGateComponent.cpp) against what it is derived from, at each commit while gates
-// live (SetCommitted: after the gates' settle, before the publication takes the commit's flips): the root map and the mirror's
-// gated roots, the tags, the withheld slots, the open gates' readiness taken again, the commit's flips. Every 60th pass a sweep of the
-// tracked set: the tags and the vetoes (hold-outs, observed incoming), the marks a walk of the mirror gives now, and the open gates'
-// incoming roots hidden. Gate roots are keys: nothing
-// engine is dereferenced. Reported with the gates' line (GATE PARITY).
+// CS_DCLF_PERSISTENT_PARITY checks for the LOD gates. After each commit while gates live, the gates' state is checked
+// against the data it was derived from. Every so many passes a sweep also checks the whole tracked set.
+// Gate roots are used only as keys and are never dereferenced.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 
@@ -24,7 +21,6 @@ namespace DCLF::Features::Lod
 		namespace G = Gates;
 		using Parity = G::ObserverState::Parity;
 
-		/** @brief The commit checked: its store and decision inputs (SetCommitted's), the gates' state, and the counts. */
 		struct Commit
 		{
 			const Scene::Coordinator& store;
@@ -34,14 +30,13 @@ namespace DCLF::Features::Lod
 			Parity& parity;
 		};
 
-		/** @brief a_geometry's gate tag (token 0: none). */
 		G::GateTag GateTagOf(const G::GateState& a_gates, const RE::BSGeometry* a_geometry)
 		{
 			const auto at = a_gates.gateTags.find(a_geometry);
 			return at != a_gates.gateTags.end() ? at->second : G::GateTag{};
 		}
 
-		/** @brief A difference: counted, the first described (a_describe: its text, the invariant's tag first). */
+		// Counts a difference and keeps the text of the first one.
 		template <class Describe>
 		void Differ(Parity& a_parity, Describe&& a_describe)
 		{
@@ -54,10 +49,7 @@ namespace DCLF::Features::Lod
 			return a_side == G::kGateIncoming ? "incoming" : a_side == G::kGateOutgoing ? "outgoing" : "no side";
 		}
 
-		/**
-		 * @brief A slot whole now, as the commit records an observed slot (VetoedPhases): its decision taken again (DecideSlot), its layer partner's main phase paired
-		 * as the commit pairs them, not waiting, every phase it takes part in.
-		 */
+		// Decides the slot again the way the commit records an observed slot, pairing layers the same way.
 		bool SlotWholeNow(const Commit& a_commit, std::uint32_t a_slot)
 		{
 			const auto& tables = V::tables(a_commit.store);
@@ -73,10 +65,7 @@ namespace DCLF::Features::Lod
 			return !decision.wait && phases == (a_commit.live ? V::SetParticipation(a_commit.store, a_slot, a_commit.drawn) : std::uint8_t{ 0 });
 		}
 
-		/**
-		 * @brief GeometryReady with each slot's readiness decided now instead of as the commit recorded it. A slot not evaluated under
-		 * its gate yet (no record of the geometry: TagGate cleared it) is not ready either way: the gate waits for that evaluation.
-		 */
+		// GeometryReady with each slot decided now instead of read from the commit's record.
 		bool ReadyNow(const Commit& a_commit, const RE::BSGeometry* a_geometry, const V::Tracked& a_entry)
 		{
 			if (a_entry.leafWaiting || a_entry.candidateFrame == 0)
@@ -89,11 +78,8 @@ namespace DCLF::Features::Lod
 			return true;
 		}
 
-		/**
-		 * @brief G3: a withheld geometry's slots out of the commit's decision and its base geometry out of the next claims. a_open: an open
-		 * gate's incoming, whose slots are withheld from their first evaluation under the gate (one tagged since, by the settle's walk, is
-		 * the next commit's); else held out, whose slots the flip applied 0 to and every evaluation since withholds.
-		 */
+		// G3. A withheld geometry must have no phases in the commit and no claim in the next publication.
+		// a_open means an open gate's incoming, otherwise a held-out outgoing.
 		void CheckWithheld(const Commit& a_commit, const RE::BSGeometry* a_geometry, const V::Tracked& a_entry, std::uint64_t a_token, bool a_open)
 		{
 			const auto& setPhases = V::setPhasesNext(a_commit.store);
@@ -116,7 +102,7 @@ namespace DCLF::Features::Lod
 					});
 		}
 
-		/** @brief G1: the gates' root lists, the root map and the mirror's gated roots agree. */
+		// G1. The gates' root lists, the root map and the mirror's gated roots agree.
 		void CheckRoots(const Commit& a_commit)
 		{
 			const auto& lodGates = a_commit.gates.lodGates;
@@ -155,7 +141,7 @@ namespace DCLF::Features::Lod
 				Differ(a_commit.parity, [&] { return fmt::format("roots: the mirror gates {} roots, the root map has {} incoming", mirror.GatedCount(), incoming); });
 		}
 
-		/** @brief G2 (a gate's sets): each tagged geometry tracked with the gate's token and side. G3 for its held-out outgoing. */
+		// G2. Each geometry in a gate's sets is tracked and tagged with that gate and side.
 		void CheckTags(const Commit& a_commit, std::uint64_t a_token, const G::LodGate& a_gate)
 		{
 			const auto& tracked = V::tracked(a_commit.store);
@@ -176,10 +162,7 @@ namespace DCLF::Features::Lod
 				}
 		}
 
-		/**
-		 * @brief G3 and G4 for an open gate: its incoming withheld, each incoming geometry's readiness as recorded against a fresh decision,
-		 * the not-ready count against pending, and a gate the settle should have flipped.
-		 */
+		// G3 and G4 for an open gate. Recorded readiness must match a fresh decision, and a ready gate must have flipped.
 		void CheckOpen(const Commit& a_commit, std::uint64_t a_token, const G::LodGate& a_gate, bool a_retagged)
 		{
 			const auto& store = a_commit.store;
@@ -204,16 +187,10 @@ namespace DCLF::Features::Lod
 					differsRecorded = wasReady;
 				}
 			}
-			// Nothing pending, every root mirrored, roots left and the scene built: the settle flips such a gate, or defers it with its
-			// unpublished records as pending.
 			const bool flippable = a_commit.live && !a_gate.unmirrored && !a_gate.incoming.empty();
 			if (flippable && !a_gate.pending)
 				Differ(a_commit.parity, [&] { return fmt::format("stuck: gate {} open with nothing pending ({} incoming geometries, {} roots)", a_token, a_gate.incomingGeometries.size(), a_gate.incoming.size()); });
-			// The count: not for a gate the structure check deferred (every geometry ready by the commit's records; pending then counts the
-			// records not published yet), nor after a tag in the settle's walks (an unmirrored gate's walk may take a geometry of a gate
-			// counted before it; each such tag of a geometry with slots requeues them, and the requeued slots are none after the commit's
-			// start otherwise). A geometry with neither slots nor a verdict queues nothing: taking it needs a root nested under another gate's,
-			// which the marks (G6) flag.
+			// Skip the count when the settle deferred the gate or retagged anything, since pending can legitimately differ then.
 			const bool counted = !(flippable && !recorded) && !a_retagged;
 			if (differs || (counted && fresh != a_gate.pending))
 				Differ(a_commit.parity, [&] {
@@ -225,11 +202,8 @@ namespace DCLF::Features::Lod
 				});
 		}
 
-		/**
-		 * @brief G5 and G4's early flips, for the flips this commit made: incoming the base geometries the commit holds with phases (the flip
-		 * applied them), each ready by a fresh decision; outgoing the gate's tracked outgoing. Not compared after a tag in the settle's walks
-		 * (CheckOpen): a later gate's walk may take a flipped gate's geometry after its flip.
-		 */
+		// G4 and G5 for this commit's flips. Each incoming geometry must be ready and match the commit's phases.
+		// Skipped after a retag, since a later gate's walk may take a flipped gate's geometry.
 		void CheckFlips(const Commit& a_commit, bool a_retagged)
 		{
 			const auto& store = a_commit.store;
@@ -239,7 +213,7 @@ namespace DCLF::Features::Lod
 			const auto& setPhases = V::setPhasesNext(store);
 			const auto& flips = G::Flips(V::componentDeltas(store, G::component));
 			auto& p = a_commit.parity;
-			// This commit's: those after the newest an earlier commit checked (the publication empties the list).
+			// Only the flips after the newest one an earlier commit checked.
 			std::size_t from = 0;
 			if (p.lastFlip)
 				for (std::size_t i = flips.size(); i > 0; --i)
@@ -291,11 +265,8 @@ namespace DCLF::Features::Lod
 			}
 		}
 
-		/**
-		 * @brief The gate root the prepare's mark walk gives an entry now: the nearest key of the root map on its mirror chain, up to its
-		 * category node. a_resolved false: the chain meets a key the mirror holds no record of (the prepare's mark walk stops there; the
-		 * gate's own walk does not reach past it either), or runs past any depth a scene has.
-		 */
+		// The nearest marked root on the entry's mirror chain, as the prepare's mark walk finds it.
+		// a_resolved is false when the chain hits a node the mirror has no record of.
 		const Api::Mark* GateAbove(const Scene::Coordinator& a_store, const RE::BSGeometry* a_geometry, const V::Tracked& a_entry, bool& a_resolved)
 		{
 			const auto& mirror = V::mirror(a_store);
@@ -307,7 +278,7 @@ namespace DCLF::Features::Lod
 			}
 			std::uint32_t depth = 0;
 			for (const void* key = record->parent; key;) {
-				// The nearest mark decides (the prepare's walk): another component's is no gate root.
+				// The nearest mark decides, even when it belongs to another component.
 				if (const auto at = rootMarks.find(key); at != rootMarks.end())
 					return G::IsGateMark(at->second.mark) ? &at->second.mark : nullptr;
 				if (key == a_entry.categoryNode)
@@ -322,12 +293,8 @@ namespace DCLF::Features::Lod
 			return nullptr;
 		}
 
-		/**
-		 * @brief G7: every open gate's incoming root hidden in the mirror (the engine side hides the block before its attach and vetoes its
-		 * shows until the flip). A root the mirror has no record of holds its gate as unmirrored. A shown root can be a forced release's
-		 * show whose outcome is not applied yet (FlushAll shows the blocks, then posts the outcome, which may miss the pass that took the
-		 * show), or a flip-hidden block reattached before its hide's event: flagged only when the same gate still shows it at the next sweep.
-		 */
+		// G7. Every open gate's incoming roots are hidden in the mirror. A forced release can show a root before its
+		// outcome is applied, so a shown root is flagged only when it is still shown at the next sweep.
 		void CheckVetoes(const Commit& a_commit)
 		{
 			const auto& mirror = V::mirror(a_commit.store);
@@ -348,11 +315,7 @@ namespace DCLF::Features::Lod
 			p.shown = std::move(shown);
 		}
 
-		/**
-		 * @brief The sweep: G2 over the tracked set (each tagged entry in its gate's set, its veto as its tag and gate give it, the held-out
-		 * and observed counts), G3 for the held-out entries no gate's set covered, G6 (each entry's tag against the prepare's mark walk now),
-		 * then G7.
-		 */
+		// The sweep runs G2, G3, G6 and G7 over the whole tracked set.
 		void Sweep(const Commit& a_commit)
 		{
 			const auto& store = a_commit.store;
@@ -365,7 +328,7 @@ namespace DCLF::Features::Lod
 				++p.entries;
 				bool covered = false;
 				const auto tag = GateTagOf(a_commit.gates, geometry);
-				// Observed exactly while an open gate's incoming (the withholding its tag and gate give).
+				// Observe must be set exactly while the entry is an open gate's incoming.
 				bool open = false;
 				if (tag.token) {
 					const auto gate = lodGates.find(tag.token);
@@ -389,10 +352,9 @@ namespace DCLF::Features::Lod
 					});
 				if (entry.veto == Api::kVetoHold) {
 					++heldOut;
-					// A gate's held-out outgoing was checked with its gate (CheckTags).
 					if (!covered)
 						CheckWithheld(a_commit, geometry, entry, tag.token, false);
-					// Held out with no gate: a retired flip's outgoing awaiting its detach, under no gate root any more.
+					// A retired flip's outgoing still waiting for its detach.
 					if (!tag.token)
 						continue;
 				}
@@ -403,8 +365,7 @@ namespace DCLF::Features::Lod
 				const std::uint64_t token = above ? above->token : 0;
 				const std::uint8_t side = above ? above->side : 0;
 				if (!above && tag.token && tag.side == G::kGateOutgoing) {
-					// An outgoing tag under no gate root: the root detached (or a held block reattached) ahead of its entries' erasure or
-					// the kept notice, which untag them. Flagged only when still so at the next sweep.
+					// The root can detach before its entries are erased, so flag only when it is still so at the next sweep.
 					++p.unmarked;
 					unmarkedOutgoing.emplace_back(tag.token, geometry);
 					if (std::ranges::find(p.unmarkedOutgoing, unmarkedOutgoing.back()) != p.unmarkedOutgoing.end())

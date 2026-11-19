@@ -1,5 +1,4 @@
-// The occlusion maps' report lines (CS_DCLF_STATS, among the shadow views' with their toggle on): each map DCLF drew in its shadow epoch
-// or left to the engine since the last report, and the maps' render-thread time in the shadow commits.
+// The occlusion maps' report lines under CS_DCLF_STATS: each map DCLF drew or left to the engine, and the maps' render-thread time.
 
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"

@@ -1,7 +1,6 @@
-// The shadow-view entries (see the header): the features' contributions, what the shadow engine reads of them, and the shadow cameras'
-// hooks.
+// The shadow-view entries: the features' contributions, what the shadow engine reads of them, and the shadow sources' hooks.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
@@ -14,7 +13,7 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		/** @brief A feature's map into its entry (Registry refused incomplete ones and a second for a map). */
+		/** @brief Copies a feature's map into its entry. */
 		void FillRegistered(OcclusionMapEntry& a_entry, const Api::OcclusionMapContribution& a_map)
 		{
 			a_entry.registered = true;
@@ -35,7 +34,6 @@ namespace DCLF::Extensions
 			a_entry.ownsAccumulator = a_map.ownsAccumulator;
 		}
 
-		/** @brief Each mode's phase, the readiness order, the views' sources by kind and the import order. */
 		void DeriveShadowOrders(ShadowViewSet& a_set)
 		{
 			for (std::uint32_t m = 0; m < Draws::kFirstOcclusionMode; ++m)
@@ -51,8 +49,7 @@ namespace DCLF::Extensions
 				a_set.occluderViewBits |= map.viewBit;
 				a_set.readinessOrder[a_set.readinessCount++] = map.phase;
 			}
-			// By ShadowViews::Kind (directional, frustum, parabolic, other) and focus: a focus view is the focus source's whatever its host;
-			// a directional view the sun's, a frustum view a spot light's, a parabolic view a point light's; another kind's none.
+			// A focus view belongs to the focus source whatever its host. Directional is the sun, frustum a spot light, parabolic a point light.
 			using S = Api::ShadowSource;
 			a_set.sourceOf = { { { S::Sun, S::Focus }, { S::Spot, S::Focus }, { S::Point, S::Focus }, { S::Count, S::Focus } } };
 			a_set.importOrder = { Api::OcclusionMap::Precipitation, Api::OcclusionMap::Sky };
@@ -86,7 +83,7 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		// Main thread, written by the sources' hooks (ShadowSourceHooks::CullsInstalled), read by the engine side's installs after them.
+		// Written by the sources' hooks on the main thread, and read by the engine side's installs after them.
 		std::array<bool, kShadowSources> sourceCullsInstalled{};
 	}
 
@@ -114,9 +111,7 @@ namespace DCLF::Extensions
 		static bool installed = false;
 		if (std::exchange(installed, true))
 			stl::report_and_fail("Drawcall Limit Fix: the shadow sources' hooks were installed twice");
-		// By source, in ShadowSource order (the install log's): the sun's accumulation and UpdateCamera (Features/Shadows/Sun), the light
-		// selection at the Spot's (Features/LocalLights: it hands the Spot and Point sources their kept lights), the point culls
-		// (Features/Shadows/Local), then the focus cameras (Features/Shadows/Local).
+		// By source in ShadowSource order, which is also the install log's. The light selection installs at the Spot's turn.
 		for (std::size_t s = 0; s < kShadowSources; ++s) {
 			Api::ShadowSourceHooks hooks{ static_cast<Api::ShadowSource>(s) };
 			for (const auto& feature : a_features)

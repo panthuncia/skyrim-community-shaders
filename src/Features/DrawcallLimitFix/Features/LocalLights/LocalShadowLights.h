@@ -14,40 +14,38 @@ namespace RE
 namespace DCLF
 {
 	/**
-	 * @brief The frame's local shadow lights (spot and point), as the main pass's light selection sees them.
-	 *
-	 * BSLightingShaderProperty::GetRenderPasses takes an object's shadow lights from FUN_1414fcf80 (engine notes: light
-	 * selection): every shadow-caster array entry after the sun's whose bit is set in the object's activeLightMask - the
-	 * light's accumulation (CalculateActiveShadowCasterLights, one Accumulate per light) culled the object - unless the
-	 * light's +0x61 is clear and the property is landscape (kLandscape 14, kNoLODLandFade 46; BSLightingShaderProperty's
-	 * FUN_14147c340). Light Limit Fix's ShadowBitMask is then the OR of those lights' maskIndex bits (the accumulation's
-	 * order, BSShadowLight +0x520). The lights and their mask indices are DCLF's selection's (LightSelection), and each shadowmap
-	 * descriptor's cull is what the Lights board has it test (Process2: its custom planes, else its frustum).
+	 * @brief The frame's local spot and point shadow lights, as the main pass's light selection (FUN_1414fcf80) sees them.
+	 * An object takes a light when that light's cull kept it, except landscape objects skip lights whose +0x61 is clear.
+	 * Light Limit Fix's ShadowBitMask is the OR of the taken lights' maskIndex bits.
 	 */
 	struct LocalShadowLights
 	{
 		struct Light
 		{
 			std::uint32_t maskBit = 0;  // 1 << maskIndex
-			bool affectsLand = false;   // +0x61: taken by landscape properties too
-			// The light's sphere: its accumulation walks only the scene around it (BSShadowLight::sceneAccumArray).
+			bool affectsLand = false;   // +0x61
+			// The light's accumulation only walks the scene inside this sphere.
 			float center[3]{};
 			float radius = 0.0f;
-			// Per shadowmap descriptor, its planes ((normal, constant), inside where dot(normal, p) - constant >= 0) and
-			// their active mask: the six its cull tests (the second six unused: mask 0).
+			// Per shadowmap descriptor. Inside is dot(normal, p) - constant >= 0. Only the first six planes are used.
 			struct Volume
 			{
 				std::array<std::array<float, 4>, 12> planes{};
 				std::uint32_t masks[2]{};
 			};
 			std::vector<Volume> volumes;
-			// A portal-strict point light's entry in the frame's light context atlas + 1 (LightSelection::Selected::portalContextIndex): its
-			// receivers pass its strict gates (Portals/StrictGates.h). 0: not gated.
+			// Atlas entry + 1 for a portal-strict point light, whose receivers must pass its strict gates. 0 means not gated.
 			std::uint32_t portalContext = 0;
 		};
 		std::vector<Light> lights;
 
-		/** @brief This frame's, from DCLF's selection and light views (render thread, after the lights accumulated). */
+		/** @brief Render thread, after the lights have accumulated. */
 		static LocalShadowLights Sample();
+
+		/**
+		 * @brief The point light table used without Light Limit Fix, in SetupGeometry's order (FUN_1414df650): shadow lights first,
+		 * then active lights that are neither frustum-culled (+0x5C 0xFF) nor hidden. Render thread, after the lights have accumulated.
+		 */
+		static std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity);
 	};
 }

@@ -1,5 +1,4 @@
-// Portals: the walk's thunk (early hooks), the main cull input and its programs buffer (PortalPrograms.cpp), RoomVisibility's detours
-// and live flag, and the parity (Diagnostics/).
+// Portals: the walk's thunk, the main cull input and its programs buffer, RoomVisibility's detours, and the parity.
 
 #include "Features/DrawcallLimitFix/Features/Portals/Diagnostics/PortalParity.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
@@ -17,17 +16,16 @@ namespace DCLF::Features::Portals
 {
 	namespace
 	{
-		// Engine::Offsets (Address Library ids).
 		constexpr Engine::Offset kPortalWalkCallSite{ { 36564, 0x9bf }, { 35571, 0xdb }, { 36564, 0x9d1 } };  // Main::Update -> FUN_1401a43c0, the main camera's portal walk
 		constexpr Engine::Offset kPortalWalk{ { 13408 }, { 13257 } };
 
-		// The main cull input's programWords (parity only): the walk's programs as encoded now, which a fade log window saves.
+		// Parity only: the programs as encoded now, which a fade log window saves.
 		std::span<const std::uint32_t> ProgramWords()
 		{
 			return PortalViews::Get().Encoded();
 		}
 
-		/** @brief Main::Update's portal walk (FUN_1401a43c0): DCLF's walk follows, same camera, before the list build. */
+		/** @brief Main::Update's portal walk (FUN_1401a43c0). DCLF's walk follows it with the same camera, before the list build. */
 		struct PortalWalk
 		{
 			static void thunk(void* a_tes, void* a_process)
@@ -40,10 +38,7 @@ namespace DCLF::Features::Portals
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief The walk's thunk, before the primary cull's install, which requires it (Extensions::MainWalkInstalled). Chained onto
-		 * whatever the call holds (Preflight required a CALL).
-		 */
+		/** @brief Writes the walk's thunk, which the primary cull's install requires. Chained, since Preflight required a CALL. */
 		void EarlyHooks()
 		{
 			const auto base = REL::Module::get().base();
@@ -98,12 +93,8 @@ namespace DCLF::Features::Portals
 				.judge = &Judge,
 				.test = &PortalTest,
 				.programWords = &ProgramWords });
-			// The programs buffer: its scene resources, the depth commit's upload and the Programs cull binding (PortalPrograms.cpp).
 			RegisterPrograms(a_context);
-			// The frame's Main::IsRoomVisible calls answered by DCLF only while it runs (Main::Update's entry, where the shell set it).
 			a_context.RegisterStandInObserver({ .updateEntry = &RoomVisibility::SetLive });
-			// Main::IsRoomVisible answered from PortalViews' VisibleSet while DCLF runs (its install log right after the primary cull's,
-			// the feature listed first).
 			RoomVisibility::Install();
 			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the portal views against the engine's entry.
 			if (Diagnostics::Observe().claimsOrScene)

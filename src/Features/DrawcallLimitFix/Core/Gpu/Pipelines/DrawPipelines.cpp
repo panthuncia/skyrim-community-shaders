@@ -1,6 +1,4 @@
-// DrawPipelines: the public face (requests and frame inputs), the pipeline lane's pass (DrainLane: passes on the coordinator
-// executor, the published catalog) and the engine states the builds read. Impl is DrawPipelinesImpl.h; the main, shadow,
-// forward and draw family pipelines are MainPipelines.cpp, ShadowPipelines.cpp, ForwardPipelines.cpp and FamilyPipelines.cpp.
+// DrawPipelines' public face, the pipeline lane's pass, and the engine states the builds read.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -21,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
@@ -60,7 +59,7 @@ namespace DCLF
 		case D3D11_BLEND_INV_DEST_COLOR: a_out = rhi::BlendFactor::InvDstColor; return true;
 		case D3D11_BLEND_DEST_ALPHA: a_out = rhi::BlendFactor::DstAlpha; return true;
 		case D3D11_BLEND_INV_DEST_ALPHA: a_out = rhi::BlendFactor::InvDstAlpha; return true;
-		default: return false;  // SRC_ALPHA_SAT, BLEND_FACTOR and the SRC1 family: not in the RHI
+		default: return false;  // SRC_ALPHA_SAT, BLEND_FACTOR and the SRC1 family are not in the RHI
 		}
 	}
 
@@ -88,9 +87,9 @@ namespace DCLF
 			a_error = fmt::format("state indices out of range (bias {}, blend {}, write {})", bias, blendMode, writeMode);
 			return state;
 		}
-		// Fill solid, cull back, no scissor: the cull mode comes from the key, and bias is the same across the table's cull modes.
+		// The cull mode comes from the key, and bias is the same across the table's cull modes.
 		auto* raster = EngineRasterStates()[0][1][bias][0];
-		// The deferred variant: DCLF's main-pass draws are G-buffer draws.
+		// DCLF's main-pass draws are G-buffer draws, so take the deferred variant.
 		auto* blend = DeferredBlendState(blendMode, alphaToCoverage, writeMode, extra);
 		if (!raster || !blend) {
 			a_error = fmt::format("no engine state object at bias {} / blend [{}][{}][{}][{}] (the deferred blend states are made on the first deferred pass)",
@@ -130,33 +129,34 @@ namespace DCLF
 			return false;
 		attempted = true;
 		device = RenderGraphRuntime::Get().Host()->Device();
+		// On D3D12 every layout is root constants alone and the stages read the rest themselves. Only plain indirect draws exist there.
+		d3d12 = ::RenderGraph::Backend::IsD3D12();
 
-		// No vertex buffer arguments: the vertex stages pull their attributes through the buffers' views in the draw's push data
-		// (kDrawPushWords).
-		// Every path needs indirect bindings (the layouts' record-addressed ranges). Device-generated commands with pipeline sets draw the GPU
-		// path's colour classes. Without them (RDNA2 and older AMD, most Intel) the GPU path draws colour with plain indirect draws, a
-		// counted draw per pipeline bucket, as its depth and shadow views always do. Without counted draws every cell draws CPU-driven
-		// (CpuPipelineForced), whose draws bind each key's pipeline themselves.
+		// Device-generated commands with pipeline sets draw the GPU path's colour classes. Without them (RDNA2 and older AMD, most Intel)
+		// colour uses a counted plain draw per pipeline bucket. Without counted draws every cell draws CPU-driven.
 		::IndirectCommandsFeatureInfo indirect{};
-		supported = device.QueryFeatureInfo(&indirect.header) == rhi::Result::Ok && indirect.indirectBindings;
+		supported = device.QueryFeatureInfo(&indirect.header) == rhi::Result::Ok && (d3d12 ? indirect.countedDraws : indirect.indirectBindings);
 		if (!supported) {
-			logger::warn("[DCLF] Indirect pipelines unavailable: indirect bindings {}", indirect.indirectBindings);
+			logger::warn("[DCLF] Indirect pipelines unavailable: indirect bindings {}, counted draws {} ({})", indirect.indirectBindings, indirect.countedDraws,
+				d3d12 ? "D3D12 needs counted draws" : "Vulkan needs indirect bindings");
 			return false;
 		}
+		if (d3d12)
+			logger::info("[DCLF] D3D12: layouts of root constants alone; the pulled stages read their rows and the pass's frame record "
+						 "themselves, and only plain indirect draws are recorded");
 		deviceGenerated = indirect.pipelineSets && indirect.indexBufferArguments && indirect.maxPipelineSetCount >= kMaxPipelines;
 		gpuDriven = indirect.countedDraws;
+		// A shadow view whose rasterizer state turns depth clipping off draws with depth clamped.
+		::FixedFunctionFeatureInfo fixedFunction{};
+		depthClipDisable = device.QueryFeatureInfo(&fixedFunction.header) == rhi::Result::Ok && fixedFunction.depthClipDisable;
 		if (!gpuDriven)
 			logger::warn("[DCLF] Counted indirect draws unavailable (drawIndirectCount): every cell draws CPU-driven");
 		else if (!deviceGenerated)
 			logger::info("[DCLF] Device-generated commands with pipeline sets unavailable (pipeline sets {}, index buffers {}, up to {} pipelines): "
 						 "the GPU path draws colour with plain indirect draws",
 				indirect.pipelineSets, indirect.indexBufferArguments, indirect.maxPipelineSetCount);
-		// The layouts' push data, the draw's words then the pass's (the frame push; the shadow views', kShadowPushWords, fewer). On descriptor
-		// heaps all of it is pushed, and BasicRHI refuses a layout past the device's maxPushDataSize (the indirect pipelines are then
-		// unavailable, as above). On descriptor buffers BasicRHI pushes the device's push constant size (128 to 256 B) and keeps
-		// the rest of the layout's constants in memory: the draw's 96 B are declared first, so they are pushed even at 128 B, where the
-		// pass's 128 B spill. At 256 B (AMD, NVIDIA) nothing spills; spilled words are read through pointers, per lane on AMD. Device-generated commands write only pushed bytes: the draw's Constant argument must fit
-		// IndirectCommandsFeatureInfo::constantArgumentBytes, counted from the first range (0: no limit).
+		// On descriptor buffers BasicRHI pushes only the device's push constant size (128 to 256 B) and spills the rest to memory.
+		// The draw's 96 B are declared first so they stay pushed at 128 B. Device-generated commands write only pushed bytes.
 		constexpr std::uint32_t kPushBytes = 4 * (kDrawPushWords + kFramePushWords);
 		if (deviceGenerated && indirect.constantArgumentBytes && indirect.constantArgumentBytes < 4 * kDrawPushArgumentWords) {
 			logger::warn("[DCLF] Device-generated commands unavailable: a draw's Constant argument is {} B, and they may write {} B of push data; "
@@ -165,7 +165,6 @@ namespace DCLF
 			deviceGenerated = false;
 		}
 
-		// A draw's push data (kDrawPushWords).
 		rhi::PushConstantRangeDesc drawPush{};
 		drawPush.visibility = rhi::ShaderStage::AllGraphics;
 		drawPush.num32BitValues = kDrawPushWords;
@@ -177,9 +176,10 @@ namespace DCLF
 		pushConstants[1].set = 0;
 		pushConstants[1].binding = kFramePushBinding;
 
-		const auto mainRanges = MainLayoutRanges(false);
-		const auto zRanges = MainLayoutRanges(true);
-		// No input assembler: every vertex stage pulls its attributes (DCLF_PULLED_VERTICES).
+		// On D3D12 the main layout has no ranges. Nothing draws with the unpulled builds there.
+		const auto mainRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(false);
+		const auto zRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(true);
+		// No input assembler, since every vertex stage pulls its attributes.
 		const rhi::PipelineLayoutDesc desc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ mainRanges.data(), static_cast<std::uint32_t>(mainRanges.size()) },
 			.pushConstants = { pushConstants, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };
 		logger::info("[DCLF] main layout: {} ranges, {} frame push words", mainRanges.size(), kFramePushWords);
@@ -188,7 +188,7 @@ namespace DCLF
 			logger::error("[DCLF] Indirect pipelines unavailable: could not create the indirect draw pipeline layout ({} push data bytes)", kPushBytes);
 			return false;
 		}
-		// The Z-prepass's plain draws: the main ranges minus the rows'.
+		// The Z-prepass plain draws use the main ranges minus the rows'.
 		const rhi::PipelineLayoutDesc zDesc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ zRanges.data(), static_cast<std::uint32_t>(zRanges.size()) },
 			.pushConstants = { pushConstants, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };
 		if (device.CreatePipelineLayout(zDesc, zLayout) != rhi::Result::Ok) {
@@ -196,10 +196,10 @@ namespace DCLF
 			logger::error("[DCLF] Indirect pipelines unavailable: could not create the Z-prepass's pipeline layout ({} push data bytes)", kPushBytes);
 			return false;
 		}
-		// The shadow views (kShadowPushWords): the draw's words name its material row (pipeline row words unused), the view's the rest.
+		// The shadow views' draw words name the material row. The view's words give the rest.
 		rhi::PushConstantRangeDesc shadowPush[2] = { drawPush, pushConstants[1] };
 		shadowPush[1].num32BitValues = kShadowPushWords;
-		const auto shadowRanges = ShadowLayoutRanges();
+		const auto shadowRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : ShadowLayoutRanges();
 		const rhi::PipelineLayoutDesc shadowDesc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ shadowRanges.data(), static_cast<std::uint32_t>(shadowRanges.size()) },
 			.pushConstants = { shadowPush, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };
 		if (device.CreatePipelineLayout(shadowDesc, shadowLayout) != rhi::Result::Ok) {
@@ -217,24 +217,38 @@ namespace DCLF
 		rhi::CommandSignatureDesc drawDesc{};
 		drawDesc.args = { &draw, 1 };
 		drawDesc.byteStride = sizeof(DrawSequence);
-		if (device.CreateCommandSignature(drawDesc, ShadowLayout(), shadowDrawSignature) != rhi::Result::Ok) {
+		// D3D12's SV_InstanceID does not count the first instance, so each plain draw also writes it into a push word the pulled stages add.
+		rhi::IndirectArg instanceDraw[2]{};
+		instanceDraw[0].kind = rhi::IndirectArgKind::Constant;
+		instanceDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
+		instanceDraw[1].kind = rhi::IndirectArgKind::DrawIndexed;
+		rhi::CommandSignatureDesc refractionDrawDesc = drawDesc;
+		if (d3d12)
+			refractionDrawDesc.args = { instanceDraw, 2 };
+		if (device.CreateCommandSignature(refractionDrawDesc, ShadowLayout(), shadowDrawSignature) != rhi::Result::Ok) {
 			supported = false;
-			logger::error("[DCLF] Could not create the shadow views' draw signature");
+			logger::error("[DCLF] Could not create the refraction's draw signature");
 			return false;
 		}
+		// A shadow view's draw is its first instance, then its arguments. D3D12 reads both, Vulkan only the arguments.
 		rhi::CommandSignatureDesc shadowViewDrawDesc = drawDesc;
 		shadowViewDrawDesc.byteStride = Draws::kShadowDrawBytes;
+		if (d3d12)
+			shadowViewDrawDesc.args = { instanceDraw, 2 };
 		if (device.CreateCommandSignature(shadowViewDrawDesc, ShadowLayout(), shadowViewDrawSignature) != rhi::Result::Ok) {
 			supported = false;
 			logger::error("[DCLF] Could not create the shadow views' draw signature");
 			return false;
 		}
-		if (device.CreateCommandSignature(drawDesc, zLayout->GetHandle(), zDrawSignature) != rhi::Result::Ok) {
+		rhi::CommandSignatureDesc zDrawDesc = drawDesc;
+		if (d3d12)
+			zDrawDesc.args = { instanceDraw, 2 };
+		if (device.CreateCommandSignature(zDrawDesc, zLayout->GetHandle(), zDrawSignature) != rhi::Result::Ok) {
 			supported = false;
 			logger::error("[DCLF] Could not create the Z-prepass's draw signature");
 			return false;
 		}
-		// Every draw family slot's signature, whether a feature takes it or not (this may run before InstallFeatures resolves them).
+		// Every draw family slot's signature, because this may run before InstallFeatures resolves them.
 		rhi::IndirectArg familyDraw{};
 		familyDraw.kind = rhi::IndirectArgKind::Draw;
 		rhi::CommandSignatureDesc familyDesc{};
@@ -246,13 +260,24 @@ namespace DCLF
 				logger::warn("[DCLF] Could not create {}'s draw signature; {}", family.taken ? std::string_view(family.label) : std::string_view("a draw family"),
 					family.taken ? std::string_view(family.nativeNote) : std::string_view("it stays native"));
 			}
+		// The first instance word, then the draw. D3D12 writes the word into kDrawPushInstance and Vulkan starts past it.
+		rhi::IndirectArg instanceFamilyDraw[2]{};
+		instanceFamilyDraw[0].kind = rhi::IndirectArgKind::Constant;
+		instanceFamilyDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
+		instanceFamilyDraw[1].kind = rhi::IndirectArgKind::Draw;
+		rhi::CommandSignatureDesc instanceFamilyDesc = familyDesc;
+		instanceFamilyDesc.byteStride = 5 * sizeof(std::uint32_t);
+		if (d3d12)
+			instanceFamilyDesc.args = { instanceFamilyDraw, 2 };
+		if (device.CreateCommandSignature(instanceFamilyDesc, zLayout->GetHandle(), familyInstanceWordSignature) != rhi::Result::Ok)
+			logger::warn("[DCLF] Could not create the draw families' first instance word signature; the families that draw with it stay native");
 		return true;
 	}
 
 	DrawPipelines::DrawPipelines() :
 		impl(std::make_unique<Impl>())
 	{
-		// Named once this is whole (a pass that runs meanwhile waits for Get's construction).
+		// Set once this is whole. A pass that runs meanwhile waits for Get's construction.
 		SetPipelineLaneDrain(&Impl::DrainLaneThunk);
 	}
 
@@ -274,6 +299,11 @@ namespace DCLF
 		return Enabled() && impl->deviceGenerated;
 	}
 
+	std::size_t DrawPipelines::BuildsInFlight() const
+	{
+		return impl->service.InFlightCount();
+	}
+
 	bool DrawPipelines::GpuDriven() const
 	{
 		return Enabled() && impl->gpuDriven;
@@ -286,7 +316,7 @@ namespace DCLF
 
 	void DrawPipelines::SetTargetFormats(const TargetFormats& a_formats)
 	{
-		// A draw with nothing bound (seen while the game shuts down) is not the main pass.
+		// A draw with nothing bound, seen at shutdown, is not the main pass.
 		if (a_formats == targets || a_formats.colorCount == 0 || a_formats.depth == DXGI_FORMAT_UNKNOWN)
 			return;
 		if (HasTargetFormats()) {
@@ -296,7 +326,7 @@ namespace DCLF
 					text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
 				return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
 			};
-			// The lane rebuilds (RecreateMainSet); until the frame's catalog catches up, GetIndirectState and CatalogFamilyPipelines give none.
+			// Until the frame's catalog catches up, GetIndirectState and CatalogFamilyPipelines give none.
 			logger::info("[DCLF] Main pass targets changed ({} -> {}); the indirect pipelines and tree LOD's are built again", describe(targets), describe(a_formats));
 			++stats.targetChanges;
 			++generation;
@@ -369,15 +399,13 @@ namespace DCLF
 		auto& l = lane;
 		auto& s = l.shadow;
 		auto& f = l.forward;
-		// New inputs: new targets restart the main set and the draw families', a new shadow format the shadow set, new forward targets the
-		// forward pipelines; anything new may unpark keys waiting on an input.
+		// New targets restart the main set and families, a new shadow format the shadow set, new forward targets the forward pipelines.
 		bool inputsChanged = false;
 		if (auto input = inputSlot.Take()) {
 			if (l.input && l.input->targets.colorCount != 0 && !(l.input->targets == input->targets))
 				RecreateMainSet(l.input->targets, input->targets);
 			if (l.input && l.input->shadowFormat != DXGI_FORMAT_UNKNOWN && input->shadowFormat != l.input->shadowFormat)
 				RecreateShadowSet(l.input->shadowFormat, input->shadowFormat);
-			// A view's new targets rebuild every forward pipeline (the first view in slot order whose targets changed names them).
 			for (std::size_t v = 0; l.input && v < Extensions::kEngineViews; ++v)
 				if (l.input->viewTargets[v].colour != DXGI_FORMAT_UNKNOWN && !(l.input->viewTargets[v] == input->viewTargets[v])) {
 					RecreateForward(l.input->viewTargets[v], input->viewTargets[v]);
@@ -389,7 +417,7 @@ namespace DCLF
 			inputsChanged = true;
 			l.dirty = true;  // the catalog names the targets' generation, the shadow format and the forward targets
 		}
-		// Each key once (the lane keeps them and rebuilds them after a target or format change).
+		// Each key once. The lane keeps them and rebuilds after a target or format change.
 		completions->requests.Drain([&](LightingRequest&& a_request) {
 			if (l.asked.try_emplace(a_request.key, a_request.slot).second)
 				TryRequest(a_request.key);
@@ -405,8 +433,7 @@ namespace DCLF
 		TakeFamilyRequests();
 		if (completions->refractionRequest.exchange(false, std::memory_order_acq_rel))
 			l.refraction.asked = true;
-		// A shader reload began reading the files (dclf-hot-reload.md): the programs are made again as asked for, so the keys parked on one,
-		// and those that failed, are requested again (the pipelines built already are the registry's to rebuild).
+		// A shader reload began, so keys parked on a program and failed keys are requested again.
 		if (ShaderPrograms::Get().FollowSources()) {
 			RetryAfterSourcesMoved();
 			inputsChanged = true;
@@ -416,18 +443,17 @@ namespace DCLF
 			s.RetryBlocked([&](const auto& a_key) { TryRequestShadow(a_key); });
 			f.RetryBlocked([&](const auto& a_key) { TryRequestForward(a_key); });
 		}
-		// The draw families and refraction wait on nothing a list holds: tried every pass (cheap once requested, built or failed).
+		// Tried every pass. Cheap once requested, built or failed.
 		TryRequestFamilies();
 		TryRequestRefraction();
-		// Programs finished since the last pass: their keys go on to their pipelines. Loop until none: a program found complete at once
-		// (every stage cached) finishes with no completion to wake the lane.
+		// Loop until none, because a fully cached program finishes with no completion to wake the lane.
 		auto& finished = l.finishedPrograms;
 		for (;;) {
 			finished.Clear();
 			ShaderPrograms::Get().UpdateLane(finished);
 			if (finished.Empty())
 				break;
-			// A family program's id is distinct from every Lighting one (FamilyProgramId); its keys wait in the same map.
+			// Family program ids are distinct from Lighting ones, so their keys share the map.
 			for (const auto& ids : finished.families)
 				finished.lighting.insert(finished.lighting.end(), ids.begin(), ids.end());
 			for (const std::uint64_t id : finished.lighting)
@@ -440,13 +466,12 @@ namespace DCLF
 			if (!finished.shadow.empty())
 				TryRequestRefraction();
 		}
-		// What a shader reload swapped into the registry's slots, before this pass's admissions publish the sets.
+		// Adopt reload swaps before this pass's admissions publish the sets.
 		AdoptLivePipelines();
 		AdmitLane();
 		AdmitShadow();
 		AdmitFamiliesAndForward();
-		// Completed builds become the service's active pipelines (a later request completes at once). The ones they displace retire at once:
-		// every payload a recording may use is held by the lane's own sets and the catalogs (Versions, the retired lists), not the service.
+		// Displaced payloads retire at once, because every payload a recording may use is held by the lane's sets and catalogs, not the service.
 		service.PublishReady(++l.servicePass);
 		service.Retire(l.servicePass);
 		if (l.dirty)
@@ -456,8 +481,7 @@ namespace DCLF
 	void DrawPipelines::Impl::RetryAfterSourcesMoved()
 	{
 		auto& l = lane;
-		// A keyed family's keys parked on a program (its entry is gone), and its failed keys (a program or a build that failed may build from
-		// the files as they are now): blocked, so RetryBlocked requests each again.
+		// Parked and failed keys are marked blocked so RetryBlocked requests each again from the current files.
 		const auto unpark = [](auto& a_family) {
 			std::size_t retried = 0;
 			for (auto& [id, keys] : std::exchange(a_family.programWaiters, {})) {
@@ -475,7 +499,7 @@ namespace DCLF
 			return retried + failed.size();
 		};
 		const std::size_t main = unpark(l), shadow = unpark(l.shadow), forward = unpark(l.forward);
-		// The draw families and refraction are tried every pass: what failed for good is forgotten.
+		// What failed for good is forgotten.
 		for (auto& t : l.families)
 			if (t.failed && !t.built)
 				t.failed = t.programFailed = t.requested = false;
@@ -498,8 +522,7 @@ namespace DCLF
 		const auto swapped = [](const std::shared_ptr<org::services::LivePipelineSlot>& a_slot, const org::services::PipelinePayload& a_payload) {
 			return a_slot && a_slot->Peek() != a_payload.get();
 		};
-		// The main set: each index's payload, usage and constant tables (the catalog's entries, which the scene lane resolves again), then
-		// its Z-prepass groups and state classes taken again (a new pipeline may defer depth now, or share another's depth pipeline).
+		// Reload the main set's payloads, then rebuild its Z groups and state classes, since a new pipeline may now defer depth or share a depth pipeline.
 		std::uint32_t main = 0, shadow = 0, others = 0;
 		for (std::size_t i = 0; i < l.setSlots.size(); ++i) {
 			if (!swapped(l.setSlots[i], l.setPipelines[i]))
@@ -512,8 +535,7 @@ namespace DCLF
 		}
 		if (main) {
 			ReindexMainSet();
-			// Every version starts over: the next publication (AdmitLane) makes one from every index's pipeline as it is now, never writing
-			// an index a version held (the versions a recording holds keep their pipelines until it lets go).
+			// Every version starts over. A version a recording still holds keeps its pipelines until it lets go.
 			l.versions.Retire();
 		}
 		auto& s = l.shadow;
@@ -526,7 +548,7 @@ namespace DCLF
 		}
 		if (shadow)
 			s.versions.Retire();
-		// The pipelines in no set: the catalog names them; the ones replaced are kept for the process, as a target change's.
+		// Pipelines in no set. Replaced ones are kept for the process.
 		const auto adopt = [&](std::shared_ptr<org::services::LivePipelineSlot>& a_slot, org::services::PipelinePayload& a_built,
 							   std::vector<org::services::PipelinePayload>& a_retired) {
 			if (!swapped(a_slot, a_built))
@@ -566,7 +588,7 @@ namespace DCLF
 		catalog->generation = l.generation;
 		catalog->targetsGeneration = l.input ? l.input->targetsGeneration : 0;
 		catalog->revision = ++l.revision;
-		// The version the indices were handed out of, or a later one (published only grows within a generation).
+		// Published only grows within a generation, so this covers every index handed out.
 		catalog->setVersion = l.versions.published.load();
 		const auto& s = l.shadow;
 		catalog->shadowEntries.reserve(s.entries.size());
@@ -595,7 +617,6 @@ namespace DCLF
 		}
 		catalog->viewTargets = l.input ? l.input->viewTargets : decltype(catalog->viewTargets){};
 		catalogSlot.Post(std::move(catalog));
-		// The scene lane takes it at its next pass (ResolveLookups).
 		WakeScenePass(SceneWake::Catalog);
 		l.dirty = false;
 	}
@@ -604,7 +625,7 @@ namespace DCLF
 	{
 		if (!Enabled())
 			return;
-		// State bits the lane asked for: read here (the deferred pass), or kept for a later one.
+		// Read now if inside the deferred pass, otherwise kept for a later one.
 		impl->completions->stateRequests.Drain([&](std::uint32_t&& a_bits) { impl->pendingStateBits.push_back(a_bits); });
 		bool changed = false;
 		auto& input = impl->renderInput;
@@ -617,7 +638,6 @@ namespace DCLF
 			input.lighting = lighting;
 			changed = true;
 		}
-		// The program families' shaders (their programSource: the Effect port's BSEffectShader).
 		for (std::size_t f = 0; f < Extensions::kProgramFamilies; ++f) {
 			const auto& family = Extensions::ProgramFamilies()[f];
 			if (const void* source = family.taken ? family.contribution.programSource() : nullptr; source != input.familySource[f]) {
@@ -625,7 +645,7 @@ namespace DCLF
 				changed = true;
 			}
 		}
-		// The deferred blend states exist from the first deferred pass; read nothing before, so no state is recorded unreadable for good.
+		// The deferred blend states exist only from the first deferred pass. Reading before would record a state as unreadable for good.
 		if (DeferredBlendState(0, 0, 10, 0)) {
 			auto read = [&](std::uint32_t a_bits, bool a_opaque) {
 				if (impl->engineStates.contains(a_bits))
@@ -650,7 +670,7 @@ namespace DCLF
 				impl->engineStates.emplace(a_bits, state);
 				changed = true;
 			};
-			// The opaque write modes (opaque Lighting keys and tree LOD), unasked; then what the lane asked for.
+			// The opaque write modes first, unasked, then what the lane asked for.
 			for (const std::uint32_t writeMode : { Impl::kOpaqueWriteMode, Impl::kAlphaTestedWriteMode })
 				read(writeMode << kRasterWriteModeShift, true);
 			for (const std::uint32_t bits : std::exchange(impl->pendingStateBits, {}))

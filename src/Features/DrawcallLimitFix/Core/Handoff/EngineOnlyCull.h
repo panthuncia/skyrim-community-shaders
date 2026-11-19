@@ -1,13 +1,9 @@
 #pragma once
 
-// An engine cull limited to the frame's engine-only subset (Scene/EngineCasters.h): the one way a view DCLF draws hands the engine what
-// DCLF does not draw. While a Scope lives on a thread, every culling process's Process1 on that thread (BSCullingProcess's, the spot
-// lights' and cascades'; BSParabolicCullingProcess's, the point lights'; BSGeometryListCullingProcess's, the scene lists' culls of an
-// occlusion map) runs only for the subset's roots and their ancestors and skips everything else, so the engine walks down to those roots
-// alone, its own tests (portals, rooms, bounds, fades) on the path.
-//
-// The hooks chain with the other Process1 hooks of those classes (LocalLightCull's, SunAccumulation's): unarmed, they only read a
-// thread-local pointer.
+// Limits an engine cull to the frame's engine-only subset. This is how a view DCLF draws hands the engine what DCLF does not draw.
+// While a Scope lives on a thread, every culling process on that thread runs only for the subset's roots and their ancestors,
+// so the engine's own tests still run on the path.
+// The hooks chain with the other Process1 hooks of those classes. Unarmed, they only read a thread-local pointer.
 
 #include <cstdint>
 #include <functional>
@@ -20,7 +16,7 @@ namespace DCLF::Scene
 
 namespace DCLF::EngineOnlyCull
 {
-	/** @brief Arms a_subset's a_view roots for the culls this thread runs while it lives (null: nothing armed). Scopes nest. */
+	/** @brief Arms a_subset's a_view roots for the culls this thread runs while it lives. Null arms nothing. Scopes nest. */
 	class Scope
 	{
 	public:
@@ -34,38 +30,34 @@ namespace DCLF::EngineOnlyCull
 		std::uint8_t previousView = 0;
 	};
 
-	/** @brief The Process1 hooks (once; PostPostLoad, main thread). */
+	/** @brief Installs the Process1 hooks once, at PostPostLoad on the main thread. */
 	void Install();
 
 	/**
-	 * @brief a_cull under a Scope of a_subset's a_view, with the scene lists' cull jobs held off (their job list null for the call: the list
-	 * culls run inline, on this thread, where the scope is armed). Render thread: an occlusion map's Precipitation::SetupMask.
+	 * @brief Render thread. Runs a_cull under a Scope with the scene lists' cull jobs held off, so the list culls run inline where
+	 * the scope is armed.
 	 */
 	void RunInline(const Scene::EngineOnlySubset* a_subset, std::uint8_t a_view, const std::function<void()>& a_cull);
 
-	/**
-	 * @brief A view that DCLF draws in normal play but the engine culled whole this frame (no subset: everything it reaches registers, the
-	 * members withheld). Every such case is a view DCLF does not cover yet; each is counted, warned about once, and reported
-	 * (WholeCullLine). Parity and diagnostics frames are not noted.
-	 */
+	/** @brief Why the engine culled a DCLF view whole this frame. Each is a gap in DCLF's coverage, counted and warned about once. */
 	enum class WholeCull : std::uint8_t
 	{
-		SunNotCovered,   // a sun cascade not DCLF's (or too many scene lists): the full-frustum cull with the entry exclusion
-		SunNoExclusion,  // and no exclusion current for it: the full-frustum cull of everything
-		PointNotCovered,  // a point light's view not DCLF's, or no selection this frame
-		PointPastMask,    // a point light past the light mask's 32
+		SunNotCovered,  // a sun cascade not DCLF's, culled with the entry exclusion
+		SunNoExclusion,  // no exclusion current either, so everything
+		PointNotCovered,  // or no selection this frame
+		PointPastMask,  // past the light mask's 32
 		SpotNotCovered,
 		SpotPastMask,
-		PrimaryNoSnapshot,  // the main camera's lists culled without the stand-in: no candidates yet
-		OcclusionNotTaken,  // an occlusion map DCLF did not draw: the engine's SetupMask over every scene list
+		PrimaryNoSnapshot,  // no candidates yet
+		OcclusionNotTaken,  // the engine's SetupMask over every scene list
 		Count
 	};
-	/** @brief Any thread: one more whole cull for a_reason (the first of each warned about in the log). */
+	/** @brief Any thread. Counts a whole cull. The first of each reason is logged. */
 	void NoteWholeCull(WholeCull a_reason);
-	/** @brief The whole culls since the last call, by reason, as a report line (empty when there were none). */
+	/** @brief The whole culls since the last call as a report line, or empty. */
 	std::string WholeCullLine();
 
-	/** @brief The armed culls' objects since the last call: culled (roots), descended (ancestors), skipped. */
+	/** @brief The armed culls' counts since the last call. */
 	struct Stats
 	{
 		std::uint64_t culled = 0, descended = 0, skipped = 0;

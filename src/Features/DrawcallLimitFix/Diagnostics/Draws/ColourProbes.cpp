@@ -1,4 +1,4 @@
-// The colour epoch's probe: the objects whose bound covers a pixel (CS_DCLF_TARGET_PROBE).
+// The colour epoch's target probe. Lists the objects whose bound covers a pixel.
 
 #include "DrawsState.h"
 #include "Events.h"
@@ -16,7 +16,7 @@ namespace DCLF::Diagnostics
 		{
 			std::uint32_t width, height;
 		} shape{ a_cull.width, a_cull.height };
-		// The objects whose bound covers the probed pixel, nearest first, with their pipelines' descriptors.
+		// Nearest first, with their pipelines' descriptors.
 		if (!depthOnly && shape.width && shape.height && (frameNumber % 240) == 0) {
 			if (const auto& pixel = Diagnostics::Observe().targetProbe; !pixel.empty()) {
 				const auto sep = pixel.find_first_of(",x");
@@ -25,7 +25,7 @@ namespace DCLF::Diagnostics
 				struct Hit { float w; std::uint32_t object; };
 				std::vector<Hit> hits;
 				for (std::uint32_t o = 0; o < tables.objects.size() && o < tables.objectGeometry.size(); ++o) {
-					// The bound now, from the engine (render thread).
+					// The bound now, from the engine. Render thread.
 					const auto* geometry = tables.objectGeometry[o];
 					if (!geometry || geometry->worldBound.radius <= 0.0f)
 						continue;
@@ -38,7 +38,7 @@ namespace DCLF::Diagnostics
 						            latch.viewProj[row * 4 + 3];
 					if (clip[3] <= 1.0f)
 						continue;
-					// The sphere's screen radius, roughly (the projection's x scale over the distance).
+					// The sphere's rough screen radius, the projection's x scale over the distance.
 					const float scale = std::sqrt(latch.viewProj[0] * latch.viewProj[0] + latch.viewProj[1] * latch.viewProj[1] + latch.viewProj[2] * latch.viewProj[2]);
 					const float radius = bound.radius * scale / clip[3];
 					const float dx = clip[0] / clip[3] - nx, dy = clip[1] / clip[3] - ny;

@@ -1,5 +1,5 @@
-// MirrorWatch (CS_DCLF_MIRROR_WATCH): the debug-register watchpoints, set on every thread by a helper thread, and the vectored exception
-// handler that records the writes. Armed by the capture hooks (the engine's threads) or the mirror parity (render thread).
+// Debug-register watchpoints, set on every thread by a helper thread, and the vectored exception handler that records writes.
+// Armed by the capture hooks on engine threads or by the mirror parity on the render thread.
 
 #include "MirrorWatch.h"
 
@@ -25,7 +25,7 @@ namespace DCLF::MirrorWatch
 			std::array<std::uintptr_t, kFrames> callers{};
 		};
 
-		/** @brief The return addresses above a_context (its unwind data; a leaf's return address at its stack pointer). No allocation. */
+		/** @brief The return addresses above a_context, from unwind data. No allocation. */
 		void Unwind(const CONTEXT& a_context, std::array<std::uintptr_t, kFrames>& a_out)
 		{
 			CONTEXT context = a_context;
@@ -48,7 +48,7 @@ namespace DCLF::MirrorWatch
 
 		std::array<std::atomic<std::uintptr_t>, kSlots> watched{};
 		std::array<std::atomic<std::uint32_t>, kSlots> lastValue{};
-		std::array<std::uint32_t, kSlots> ignored{};  // per slot, the bits whose changes are not recorded
+		std::array<std::uint32_t, kSlots> ignored{};  // per slot, bits whose changes are not recorded
 		std::array<std::string, kSlots> slotNames;
 		std::array<Hit, kMaxHits> hits{};
 		std::atomic<std::uint32_t> hitCount{ 0 };
@@ -68,8 +68,7 @@ namespace DCLF::MirrorWatch
 			const auto triggered = context->Dr6 & 0xF;
 			if (!triggered)
 				return EXCEPTION_CONTINUE_SEARCH;
-			// A watchpoint the disarm did not reach on this thread (its context was not set, or it raced the disarm): this thread's
-			// registers are cleared and it goes on (left unhandled, it crashes the game).
+			// The disarm did not reach this thread, or raced it. Clear this thread's registers and continue, since leaving it unhandled crashes the game.
 			if (!armed.load(std::memory_order_acquire)) {
 				context->Dr7 = 0;
 				context->Dr6 = 0;
@@ -95,7 +94,7 @@ namespace DCLF::MirrorWatch
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
-		/** @brief Every thread's debug registers but the caller's (a helper thread runs this, so the game's all get them). */
+		/** @brief Sets every thread's debug registers except the caller's. A helper thread runs this so all game threads get them. */
 		void SetAll(const std::array<std::uintptr_t, kSlots>& a_addresses)
 		{
 			DWORD64 dr7 = 0;
@@ -114,7 +113,7 @@ namespace DCLF::MirrorWatch
 				HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
 				if (!thread)
 					continue;
-				// The arming thread too: it waits on this helper.
+				// The arming thread too, since it waits on this helper.
 				if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
 					CONTEXT context{};
 					context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -156,8 +155,7 @@ namespace DCLF::MirrorWatch
 			return fmt::format("{}+{:#x}", file.filename().string(), a_rip - reinterpret_cast<std::uintptr_t>(module));
 		}
 
-		// The switch's value: "1" (any placed fade node), a node's name (that fade node), or "geometry:<name>" (a geometry by name at
-		// its world attach: its alpha and shader property pointers and the property's flags and fade node).
+		// "1" for any placed fade node, a node's name, or "geometry:<name>".
 		const std::string& Value() { return SwitchValue(Switch::MirrorWatch); }
 		constexpr std::string_view kGeometryPrefix = "geometry:";
 		constexpr std::string_view kSkinPrefix = "skin:";
@@ -165,10 +163,8 @@ namespace DCLF::MirrorWatch
 
 		bool Matches(const RE::NiAVObject& a_object, std::string_view a_name)
 		{
-			// Alternatives separated by '|'.
 			if (const auto bar = a_name.find('|'); bar != std::string_view::npos)
 				return Matches(a_object, a_name.substr(0, bar)) || Matches(a_object, a_name.substr(bar + 1));
-			// A trailing '*' matches a prefix.
 			if (!a_name.empty() && a_name.back() == '*')
 				return a_object.name.c_str() && std::string_view(a_object.name.c_str()).starts_with(a_name.substr(0, a_name.size() - 1));
 			return a_name.empty() || (a_object.name.c_str() && a_name == a_object.name.c_str());
@@ -225,7 +221,7 @@ namespace DCLF::MirrorWatch
 
 	void ArmNode(const RE::NiAVObject* a_node)
 	{
-		// current:<name>: a fade node at its world attach's capture, its currentFade (+0x130) and screen-door byte (+0x154).
+		// current:<name> watches a fade node's currentFade at +0x130 and screen-door byte at +0x154.
 		constexpr std::string_view kCurrentPrefix = "current:";
 		if (a_node && Enabled() && !armed.load(std::memory_order_acquire) && Value().starts_with(kCurrentPrefix)) {
 			if (const_cast<RE::NiAVObject*>(a_node)->AsFadeNode() && Matches(*a_node, std::string_view(Value()).substr(kCurrentPrefix.size()))) {
@@ -234,7 +230,7 @@ namespace DCLF::MirrorWatch
 			}
 			return;
 		}
-		// parent:<name>: an object at its world attach's capture, its parent pointer (+0x30, both dwords).
+		// parent:<name> watches an object's parent pointer at +0x30, both dwords.
 		constexpr std::string_view kParentPrefix = "parent:";
 		if (a_node && Enabled() && !armed.load(std::memory_order_acquire) && Value().starts_with(kParentPrefix)) {
 			if (Matches(*a_node, std::string_view(Value()).substr(kParentPrefix.size()))) {
@@ -243,9 +239,8 @@ namespace DCLF::MirrorWatch
 			}
 			return;
 		}
-		// transform:<name>: an object at its world attach's capture, its local rotation's first entry (+0x48) and translation (+0x6C).
-		// fade:<name>: a node at its world attach's capture, its fadeAmount (+0x100, Actor::SetAlpha's), +0x109 and currentFade (+0x130).
-		// fadetype:<name>: a fade node at its world attach's capture, its LOD type (+0x153 & 0xF; the dword at +0x150, other bits ignored).
+		// transform:<name> watches local rotation +0x48 and translation +0x6C. fade:<name> watches fadeAmount +0x100, +0x109 and
+		// currentFade +0x130. fadetype:<name> watches the LOD type at +0x153 & 0xF.
 		for (const auto& [prefix, kind] : { std::pair{ std::string_view("transform:"), 0 }, std::pair{ std::string_view("fade:"), 1 }, std::pair{ std::string_view("fadetype:"), 2 } }) {
 			if (!a_node || !Enabled() || armed.load(std::memory_order_acquire) || !Value().starts_with(prefix))
 				continue;
@@ -266,8 +261,7 @@ namespace DCLF::MirrorWatch
 		if (!Matches(*a_node, std::string_view(Value()).substr(kNodePrefix.size())))
 			return;
 		const auto* base = reinterpret_cast<const std::byte*>(a_node);
-		// The collision object, its body (bhkNiCollisionObject +0x20), and the Havok entity's motion type (hkpEntity +0x150 motion,
-		// its type at +0x10: the dword at +0x160).
+		// The collision object, its body at bhkNiCollisionObject +0x20, and the motion type at hkpEntity +0x150, then +0x10, which is the dword at +0x160.
 		const auto* collision = a_node->collisionObject.get();
 		const auto* ni = collision ? const_cast<RE::NiCollisionObject*>(collision)->AsBhkNiCollisionObject() : nullptr;
 		const auto* body = ni ? ni->body.get() : nullptr;
@@ -311,13 +305,13 @@ namespace DCLF::MirrorWatch
 
 	void Arm(const RE::NiAVObject* a_node)
 	{
-		// "1" or a name: every prefixed mode (a name holds no ':') arms elsewhere.
+		// Only "1" or a name arms here. Every prefixed mode contains ':' and arms elsewhere.
 		if (!a_node || !Enabled() || armed.load(std::memory_order_acquire) || Value().find(':') != std::string::npos)
 			return;
 		if (!Matches(*a_node, Value() == "1" ? std::string_view() : std::string_view(Value())))
 			return;
 		const auto* base = reinterpret_cast<const std::byte*>(a_node);
-		// +0x109's 0x40 (+0x108's 0x4000) is the cull's, every frame.
+		// +0x109's 0x40, which is +0x108's 0x4000, is written by the cull every frame.
 		ArmSlots(*a_node, { Slot{ base + 0x108, "+0x108", 0x4000 }, Slot{ base + 0x128, "near" }, Slot{ base + 0x12C, "far" }, Slot{ base + 0x150, "+0x150" } });
 	}
 
@@ -325,14 +319,14 @@ namespace DCLF::MirrorWatch
 	{
 		if (!a_geometry || !Enabled() || armed.load(std::memory_order_acquire))
 			return;
-		// parent:<name> and the node modes watch geometries too (a particle system is one).
+		// parent and the node modes watch geometries too. A particle system is one.
 		if (Value().starts_with("parent:") || Value().starts_with("transform:") || Value().starts_with("fade:")) {
 			ArmNode(a_geometry);
 			return;
 		}
 		const auto* base = reinterpret_cast<const std::byte*>(a_geometry);
 		if (Value().starts_with(kSkinPrefix)) {
-			// A dismember skin's first partitions (editorVisible is each Data's first byte; 4 bytes each).
+			// A dismember skin's first partitions. editorVisible is each Data's first byte, 4 bytes each.
 			if (!Matches(*a_geometry, std::string_view(Value()).substr(kSkinPrefix.size())))
 				return;
 			const auto* skin = netimmerse_cast<const RE::BSDismemberSkinInstance*>(a_geometry->GetGeometryRuntimeData().skinInstance.get());
@@ -345,8 +339,8 @@ namespace DCLF::MirrorWatch
 									  Slot{ n > 2 ? partitions + 8 : nullptr, "partition 2" } });
 			return;
 		}
-		// alphas:<form ID>|...: the alpha flags and threshold of a geometry under each of up to four references (hex form IDs, the
-		// first geometry with an alpha under each), from the world attach's capture on, armed together once all have been captured.
+		// alphas:<form ID>|... watches the alpha of the first geometry with one under each of up to four references.
+		// They are armed together once all have been captured.
 		constexpr std::string_view kAlphasPrefix = "alphas:";
 		if (Value().starts_with(kAlphasPrefix)) {
 			const auto* alpha = a_geometry->GetGeometryRuntimeData().alphaProperty.get();
@@ -401,7 +395,7 @@ namespace DCLF::MirrorWatch
 			ArmSlots(all, slots);
 			return;
 		}
-		// alpha:<name>: its alpha property's flags and threshold (one dword at +0x30), from the world attach's capture on.
+		// alpha:<name> watches its alpha property's flags and threshold, one dword at +0x30.
 		constexpr std::string_view kAlphaPrefix = "alpha:";
 		if (Value().starts_with(kAlphaPrefix)) {
 			const auto* alpha = a_geometry->GetGeometryRuntimeData().alphaProperty.get();
@@ -409,8 +403,7 @@ namespace DCLF::MirrorWatch
 				ArmSlots(*a_geometry, { Slot{ reinterpret_cast<const std::byte*>(alpha) + 0x30, "alpha flags and threshold" }, Slot{}, Slot{}, Slot{} });
 			return;
 		}
-		// projected:<name>, land:<name>: the property's projected UV parameters, or its landscape material's land blend, from the
-		// world attach's capture on.
+		// projected:<name> and land:<name> watch the projected UV parameters or the landscape material's land blend.
 		constexpr std::string_view kProjectedPrefix = "projected:";
 		constexpr std::string_view kLandPrefix = "land:";
 		const bool projected = Value().starts_with(kProjectedPrefix);
@@ -478,7 +471,7 @@ namespace DCLF::MirrorWatch
 
 	std::uint32_t MissedFields(std::uint8_t a_type)
 	{
-		// missed:<field>|<field>...: the node or geometry record fields (SceneCapture's kFieldNames) whose missed difference arms.
+		// missed:<field>|<field>... uses SceneCapture's kFieldNames.
 		static const auto fields = [] {
 			std::array<std::uint32_t, 4> out{};
 			constexpr std::string_view kMissedPrefix = "missed:";
@@ -492,7 +485,7 @@ namespace DCLF::MirrorWatch
 					out[0] |= field == SceneCapture::NodeRecord::kFieldNames[f] ? 1u << f : 0u;
 				for (std::uint32_t f = 0; f < SceneCapture::GeometryRecord::kFieldCount; ++f)
 					out[1] |= field == SceneCapture::GeometryRecord::kFieldNames[f] ? 1u << f : 0u;
-				// An alpha's by "alpha <field>" (its names are shared with the node's).
+				// Alpha fields are "alpha <field>", since their names are shared with the node's.
 				for (std::uint32_t f = 0; f < SceneCapture::AlphaRecord::kFieldCount; ++f)
 					out[3] |= field.starts_with("alpha ") && field.substr(6) == SceneCapture::AlphaRecord::kFieldNames[f] ? 1u << f : 0u;
 				names = bar == std::string_view::npos ? std::string_view() : names.substr(bar + 1);
@@ -512,7 +505,7 @@ namespace DCLF::MirrorWatch
 		const auto* base = static_cast<const std::byte*>(a_object);
 		const std::uint32_t fields = a_fields & MissedFields(a_type);
 		if (a_type == 3) {
-			// NiAlphaProperty: its flags (+0x30, 16 bits) and threshold (+0x32, 8 bits) in one dword.
+			// NiAlphaProperty flags at +0x30, 16 bits, and threshold at +0x32, 8 bits, in one dword.
 			ArmSlots(fmt::format("alpha {}", a_object), { Slot{ base + 0x30, "alpha flags and threshold" }, Slot{}, Slot{}, Slot{} });
 			return;
 		}
@@ -564,7 +557,7 @@ namespace DCLF::MirrorWatch
 		if (!a_alpha || !Enabled() || !Value().starts_with("parity") || armed.load(std::memory_order_acquire))
 			return;
 		const auto* base = static_cast<const std::byte*>(a_alpha);
-		// The threshold (+0x32) has its writer's event (FUN_1414ab770): the flags only.
+		// The threshold at +0x32 already has its writer's event in FUN_1414ab770, so watch the flags only.
 		ArmSlots(fmt::format("alpha {}", a_alpha), { Slot{ base + 0x30, "flags", 0xFFFF0000u }, Slot{}, Slot{}, Slot{} });
 	}
 
@@ -575,7 +568,7 @@ namespace DCLF::MirrorWatch
 		if (!armedFrame)
 			armedFrame = a_frame;
 		const std::uint32_t count = std::min(hitCount.load(std::memory_order_relaxed), kMaxHits);
-		// alphas: the references' alphas until the run ends (a write made once, at some point after the capture).
+		// alphas runs until the run ends, since the write happens once some time after the capture.
 		const bool done = count >= kMaxHits || (a_frame - armedFrame >= 600 && !Value().starts_with("alphas:"));
 		std::string text;
 		if (count) {

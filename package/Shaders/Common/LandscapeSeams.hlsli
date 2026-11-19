@@ -75,7 +75,7 @@ namespace LandscapeSeams
 		ExtraWeights = 0;
 #if defined(DCLF_BINDLESS_DRAW)
 		Data = (QuadData)0;
-		if (Descriptor(0) == 0 || Descriptor(1) == 0)
+		if (min(Descriptor(0), Descriptor(1)) == 0u)
 			return;
 		StructuredBuffer<QuadData> Quad = ResourceDescriptorHeap[HeapIndex(1)];
 #endif

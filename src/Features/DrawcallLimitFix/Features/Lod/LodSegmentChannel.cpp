@@ -1,6 +1,5 @@
-// Object LOD's segment events on an engine channel (Api/EngineEvents.h): the channel its writers' hooks feed (LodSegmentHooks.cpp), applied
-// after the switch events; its coordinator component, which takes each named shape's drawn ranges again from the mirror into Core's kept
-// ranges (the walk reads them as data: each range a geometry slot of the shape's chain); and its report line.
+// The segment events' channel and component. The component copies each named shape's drawn ranges from the mirror
+// into Core's kept ranges, which the walk reads as one geometry slot per range.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegmentEvents.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegments.h"
@@ -29,13 +28,12 @@ namespace DCLF::Features::Lod
 			auto& stats = a_context.State<SegmentState>().stats;
 			for (const void* key : a_keys) {
 				++stats.events;
-				// Only a tracked shape is known to be alive (its entry holds it).
+				// Only a tracked shape is known to be alive.
 				const auto* kept = a_context.EntryRangesOf(key);
 				if (!kept)
 					continue;
 				const auto* mirrored = a_context.MirroredRanges(key);
 				std::vector<Api::EntryRange> next = mirrored ? *mirrored : std::vector<Api::EntryRange>{};
-				// Changed by an event: rewrite the record (its range slot chain) this frame.
 				const bool changed = next != *kept;
 				if (changed)
 					++stats.changed;
@@ -67,8 +65,7 @@ namespace DCLF::Features::Lod
 
 	void RegisterSegmentChannel(Api::InstallContext& a_context)
 	{
-		// Applied where Core applied the segment events: after the switch events (drained last); the mirror's parity counts the keys named
-		// (the writers' events carry the ranges in the mirror's update, not here).
+		// The ranges themselves arrive through the mirror's update. This channel only names the shapes.
 		segmentChannel = a_context.RegisterEngineChannel({ .name = "object LOD segments",
 			.kind = Api::ChannelKind::Keys,
 			.apply = Api::ChannelApply::AfterSwitches,
@@ -77,7 +74,6 @@ namespace DCLF::Features::Lod
 		const auto component = a_context.RegisterCoordinatorComponent({ .name = "object LOD segments",
 			.make = &MakeState,
 			.events = { .keys = &ApplySegmentEvents } });
-		// Where Core's line was: the coordinator's segments point.
 		a_context.RegisterReportLines({ .name = "object LOD segments",
 			.point = Api::ReportPoint::SceneCoordinatorSegments,
 			.component = component,

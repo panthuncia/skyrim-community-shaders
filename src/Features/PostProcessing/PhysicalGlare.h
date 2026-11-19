@@ -258,6 +258,13 @@ struct PhysicalGlare : public PostProcessFeature
 	bool apertureDirty = true;
 	float tearFilmTimeAccum = 0.f;
 
+	// The frame the debug view last showed texGlarePacked, a D3D11 texture only the D3D11 path writes.
+	uint debugViewFrame = 0;
+	bool debugViewDrawn = false;
+
+	/** @brief Whether the debug view showed the D3D11 glare in this frame or the last (the ORG chain then stays on D3D11). */
+	[[nodiscard]] bool DebugViewShown() const;
+
 	uint currentFFTResolution = 256;
 
 	virtual void SetupResources() override;
@@ -273,14 +280,38 @@ struct PhysicalGlare : public PostProcessFeature
 
 	virtual void Draw(TextureInfo&) override;
 
+	/// Saved settings with the lens aperture (F-stop, blades, rotation) replaced
+	/// by the Cinematic Camera values while it is active and Lens mode is
+	/// selected. Pupil/Eye mode keeps its own aperture model.
+	[[nodiscard]] Settings GetEffectiveSettings() const;
+
+	/** @brief The FFT size a setting asks for: clamped to [FFT_MIN, FFT_MAX] and rounded up to a power of two. */
+	[[nodiscard]] static uint NormaliseFFTResolution(int a_resolution);
+
+	/** @brief The index of a_resolution's FFT shader variant (FFT_MIN is 0). */
+	[[nodiscard]] static uint GetFFTVariant(uint a_resolution);
+
+	/**
+	 * @brief The constants every glare pass reads, for a_effective at an FFT size of a_resolution over an output of
+	 * a_width x a_height. The tear-film time is this feature's accumulated one.
+	 */
+	[[nodiscard]] GlareCB BuildConstants(const Settings& a_effective, float a_deltaTime, uint a_resolution, float a_width, float a_height) const;
+
+	/** @brief What a PSF was generated from: a_effective at a_resolution, with a_useAP1 the working gamut. */
+	[[nodiscard]] static PSFParams CapturePSFParams(const Settings& a_effective, uint a_resolution, bool a_useAP1);
+
+	/**
+	 * @brief Whether a PSF generated from a_cached differs from one for a_effective. Always true while an animated tear film
+	 * is on (pupil mode), which changes the PSF every frame.
+	 */
+	[[nodiscard]] static bool PSFStale(const PSFParams& a_cached, const Settings& a_effective, uint a_resolution, bool a_useAP1);
+
+	/** @brief Whether the static aperture response generated from a_cached differs from one for a_effective. */
+	[[nodiscard]] static bool ApertureStale(const PSFParams& a_cached, const Settings& a_effective, uint a_resolution);
+
 private:
 	void DispatchFFT(ID3D11ComputeShader* shader, Texture2D* input, Texture2D* output, uint resolution);
 	void GeneratePSF(const Settings& a_effective);
 	bool NeedsPSFRegeneration(const Settings& a_effective) const;
 	bool NeedsApertureRegeneration(const Settings& a_effective) const;
-
-	/// Saved settings with the lens aperture (F-stop, blades, rotation) replaced
-	/// by the Cinematic Camera values while it is active and Lens mode is
-	/// selected. Pupil/Eye mode keeps its own aperture model.
-	[[nodiscard]] Settings GetEffectiveSettings() const;
 };

@@ -1,4 +1,4 @@
-// The extension registry (see the header): the install context the features register with, and the lists it fills.
+// The extension registry: the install context features register with, and the lists it fills.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
@@ -44,12 +44,11 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// The show veto's cells while none is registered: never open, never vetoing (the stubs load the cells whatever is registered).
+		// Defaults the show veto stubs load when no veto is registered. They never open and never veto.
 		const std::atomic<std::uint32_t> kShowVetoClosed{ 0 };
 		bool NoShowVeto(const void*) { return false; }
 
-		// Written only during InstallFeatures (the main thread, before DCLF's threads exist: their start orders these writes before
-		// every read), read-only after.
+		// Written only during InstallFeatures on the main thread, before DCLF's threads exist. Read-only after that.
 		struct Lists
 		{
 			std::vector<FrameValuePoolEntry> pools;
@@ -61,95 +60,80 @@ namespace DCLF::Extensions
 			std::vector<ReportLinesEntry> reportLines;
 			std::vector<Api::StandInObserver> standInObservers;
 			std::vector<EngineChannelEntry> engineChannels;
-			// The engine channels needed by name (by need slot), bound at the end (BindEngineChannelNeeds).
+			// Engine channels needed by name, bound once every install has run.
 			std::vector<std::string> engineChannelNeeds;
-			// The show veto's cells (RegisteredShowVeto: their address fixed for the session), its hide sites owned.
+			// The show veto cells. Their address stays fixed for the session.
 			Api::ShowVeto showVeto{ &kShowVetoClosed, &NoShowVeto, nullptr, {} };
 			std::vector<std::uint32_t> showVetoHideSites;
 			bool showVetoRegistered = false;
 			std::uint32_t reservedHiddenSites = 0;
 			std::vector<TableFamilyEntry> tableFamilies;
 			std::vector<CoordinatorComponentEntry> coordinatorComponents;
-			// By entry class: whether the component that follows it takes it (EntryClassTaken).
+			// Per entry class, whether the component that follows it takes it.
 			std::array<bool, static_cast<std::size_t>(Api::EntryClass::Count)> entryClassesTaken{};
 			TechniqueEntries techniques{};
-			// The techniques' property flag rules, once each (PropertyFlagRules): at most one a technique.
+			// At most one property flag rule per technique.
 			std::array<PropertyFlagRule, kTechniqueSlots> propertyFlagRules{};
 			std::size_t propertyFlagRuleCount = 0;
 			GeometryTypeToggles geometryTypes{};
-			// By type: its contribution (geometryType 0xFF: none); by entry class: the rule a contribution names it with.
+			// Per geometry type, its contribution. geometryType 0xFF means none.
 			GeometryTypeContributions geometryTypeContributions{};
 			EntryClassRules entryClassRules{};
-			// The owner classes by form type (OwnerClassOf), whether a class is one, and their entries' timing labels (OwnedEntriesLabel).
+			// Owner classes by form type, and their timing labels.
 			OwnerClasses ownerClasses{};
 			std::array<bool, static_cast<std::size_t>(Api::EntryClass::Count)> ownerClassRegistered{};
 			std::string ownedLabel = "owned", ownedWithoutRecordLabel = "owned without a record";
 			ParentToggles parents{};
 			ObjectClassToggles objectClasses{};
 			CategoryRoots categoryRoots{};
+			Api::UnheldRootsContribution unheldRoots{};
 			std::vector<ShadingContributionEntry> shadingContributions;
 			std::vector<FrameGlobalsEntry> frameGlobals;
 			std::uint32_t frameGlobalsFloats = 0;
-			// By view: its contribution (EngineView::Count: none); the views' work, in order. Resolved at the end (ResolveViews).
+			// Per view, its contribution. EngineView::Count means none.
 			std::array<Api::ViewContribution, kEngineViews> views{};
 			std::vector<Api::ViewWork> viewWork;
-			// By root: its view root contribution (ViewRoot::Count: none). Resolved with the views (ResolveViews).
 			std::array<Api::ViewRootContribution, kViewRoots> viewRoots{};
-			// The cull hidden sources, in registration order. Resolved with the views (ResolveViews).
 			std::vector<Api::CullHiddenSource> cullHiddenSources;
-			// By map and by source: its contribution (Count: none). Resolved at the end (ResolveShadowViews).
+			// Per map and per source, its contribution. Count means none.
 			std::array<Api::OcclusionMapContribution, kOcclusionMaps> occlusionMaps{};
 			std::array<Api::ShadowSourceContribution, kShadowSources> shadowSources{};
-			// The shadow exclusion (no name: none). Resolved with them.
+			// An empty name means none.
 			Api::ShadowExclusionContribution shadowExclusion{};
-			// By family: its contribution (Count: none). Resolved at the end (ResolveDrawFamilies).
 			std::array<Api::DrawFamilyContribution, kDrawFamilies> drawFamilies{};
-			// By slot: its range (Count: none), the held groups' among them. Resolved at the end (ResolveMainRanges).
+			// Per slot, its range, including held groups' ranges.
 			std::array<Api::MainRangeContribution, kMainRangeSlots> mainRanges{};
-			// The held groups, in registration order (HeldGroups); the near twin (target null: none).
+			// A null near twin target means none.
 			std::vector<HeldGroupEntry> heldGroups;
 			NearTwinEntry nearTwin;
-			// The classify inputs, in registration order (an index is the input's id); the names needed (by need slot), bound at the end
-			// (BindClassifyInputNeeds).
+			// An input's index is its id.
 			std::vector<ClassifyInputEntry> classifyInputs;
 			std::vector<std::string> classifyInputNeeds;
-			// The frame graph buffers, in registration order.
 			std::vector<FrameGraphBuffersEntry> frameGraphBuffers;
-			// The light volumes, the sun volume and the ancestor value (no name: none). Resolved at the end (ResolveLightVolumes,
-			// ResolveSunVolume, ResolveAncestorValue).
+			// An empty name means none.
 			Api::LightVolumesContribution lightVolumes{};
 			Api::SunVolumeContribution sunVolume{};
 			Api::AncestorValueContribution ancestorValue{};
-			// The late poses, in registration order. Resolved at the end (ResolveLatePoses).
 			std::vector<Api::LatePoseContribution> latePoses;
-			// The vertex stream (entry class Count: none). Resolved at the end (ResolveVertexStream).
+			// Entry class Count means none.
 			Api::VertexStreamContribution vertexStream{};
-			// The main cull input (no name: none). Resolved at the end (ResolveMainCullInput).
 			Api::MainCullInputContribution mainCullInput{};
-			// By slot: its cull binding (no select: none). Resolved at the end (ResolveCullBindings).
 			std::array<Api::CullBinding, kCullBindingSlots> cullBindings{};
-			// The depth pyramid (no setup: none). Resolved at the end (ResolveDepthPyramid).
 			Api::DepthPyramidContribution depthPyramid{};
-			// The primary view and its feature (no handlers: none). Resolved at the end (ResolvePrimaryView).
 			Api::PrimaryViewContribution primaryView{};
 			std::string primaryViewFeature;
-			// The shadow epochs and their feature (no handlers: none). Resolved at the end (ResolveShadowEpochs).
 			Api::ShadowEpochsContribution shadowEpochs{};
 			std::string shadowEpochsFeature;
-			// The root states (no name: none). Resolved at the end (ResolveRootStates).
 			Api::RootStatesContribution rootStates{};
-			// By palette rows class (its index - 1): its registration (itemClass Count: none). Resolved at the end (ResolvePaletteRows).
+			// Indexed by palette rows class minus 1. itemClass Count means none.
 			std::array<Api::PaletteRowsContribution, Api::kPaletteRowsClasses> paletteRows{};
-			// The shading fields, in registration order; whether a field is taken. Resolved at the end (ResolveShadingFields).
 			std::vector<Api::ShadingFieldContribution> shadingFields;
 			std::array<bool, kShadingRowFields> shadingFieldTaken{};
-			// By kind: Lighting's (0), then the features' ports, in order (materialPorts first unset). Resolved at the end
-			// (ResolveMaterialPorts).
+			// Lighting is kind 0, and the features' ports follow in registration order.
 			std::array<Api::MaterialPortContribution, kMaterialKinds> materialPorts{};
 			std::size_t materialPortCount = 0;
-			// By family: its contribution (Count: none). Resolved at the end (ResolveProgramFamilies).
 			std::array<Api::ProgramFamilyContribution, kProgramFamilies> programFamilies{};
-			// In registration order; the rows sorted by row at the end. By texture register: its frame texture's index.
+			// Rows are sorted by row at the end.
 			std::vector<FrameConstantRowEntry> frameConstantRows;
 			std::vector<FrameTextureEntry> frameTextures;
 			std::array<std::uint8_t, kTextureRegisters> frameTextureIndices = [] {
@@ -157,18 +141,15 @@ namespace DCLF::Extensions
 				indices.fill(kNoFrameTexture);
 				return indices;
 			}();
-			// The material contributors, in registration order, and their registers and witness words so far. Resolved at the end
-			// (ResolveMaterialContributors).
 			std::vector<MaterialContributorEntry> materialContributors;
 			std::uint32_t materialTextureRegisters = 0, materialWitnessWords = 0;
-			// The Lighting join rules, each registration in place (read as registered: RegisteredLightingJoinRules).
 			LightingJoinRules lightingJoinRules;
-			// By stage (Api::ShaderStage): the per-draw constant buffer registers, Core's and the declared ones (PerDrawMask).
+			// Per shader stage, the per-draw constant buffer registers, Core's and the declared ones.
 			std::array<std::uint32_t, 2> perDrawMasks{ kCorePerDrawVS, kCorePerDrawPS };
 			bool installed = false;
 		};
 
-		/** @brief The material contributor registered so far that binds a_register (null: none). */
+		/** @brief The material contributor registered so far that binds a_register, or null. */
 		const MaterialContributorEntry* MaterialRegisterAt(const Lists& a_lists, std::uint32_t a_register)
 		{
 			for (const auto& contributor : a_lists.materialContributors)
@@ -177,10 +158,7 @@ namespace DCLF::Extensions
 			return nullptr;
 		}
 
-		/**
-		 * @brief Adds a_range by its slot, refused (a_who's) for a slot or order already registered, no name, a depth prepass on an
-		 * appended slot, or a feature's class with no registered toggle (a held group's range has none: Count).
-		 */
+		/** @brief Adds a_range by its slot. A held group's range passes no object class. */
 		void AddMainRange(Lists& a_lists, std::string_view a_who, const Api::MainRangeContribution& a_range, bool a_heldGroup)
 		{
 			const bool classValid = a_heldGroup ? a_range.objectClass == Api::ObjectClass::Count :
@@ -198,10 +176,7 @@ namespace DCLF::Extensions
 			entry = a_range;
 		}
 
-		/**
-		 * @brief Adds a_group and its main range (AddMainRange's refusals), refused (a_who's) for a slot not appended, no name or property
-		 * flags, or an input not registered.
-		 */
+		/** @brief Adds a_group and its main range. */
 		void AddHeldGroup(Lists& a_lists, std::string_view a_who, const Api::HeldGroupContribution& a_group)
 		{
 			if (a_group.slot < Api::MainRangeSlot::Appended0 || a_group.slot >= Api::MainRangeSlot::Count || a_group.name.empty() || !a_group.propertyFlags ||
@@ -212,25 +187,19 @@ namespace DCLF::Extensions
 			a_lists.heldGroups.push_back({ a_group.heldWhile, group, a_group.propertyFlags, a_group.toggle });
 		}
 
-		/** @brief Sets a_twin, refused (a_who's) for a second one, or one without a name, debug name, resource, target or near test. */
+		/** @brief Sets the one near twin. */
 		void SetNearTwin(Lists& a_lists, std::string_view a_who, const Api::NearTwinContribution& a_twin)
 		{
 			if (a_twin.name.empty() || a_twin.debugName.empty() || a_twin.resource.empty() || !a_twin.target || !a_twin.nearTest)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete near twin", a_who));
-			// Appended0's twin buckets draw into one target.
 			if (a_lists.nearTwin.target)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered near twin {}, which {} has", a_who, a_twin.name, a_lists.nearTwin.name));
 			const std::string name(a_twin.name);
 			a_lists.nearTwin = { name, std::string(a_twin.debugName), std::string(a_twin.resource), name + " cannot be described", name + " could not be imported",
-				a_twin.target, a_twin.nearTest };
+				a_twin.target, a_twin.nearTest, a_twin.graph };
 		}
 
-		/**
-		 * @brief Adds a_port at the next kind, which it returns, refused (a_who's) for no name, property RTTI, material vtable or callbacks,
-		 * Lighting's or no shader type, a space past kMaxStageVariables or with names not one a variable, a class with no registered toggle,
-		 * frame variables past kMaxMaterialFrameVariables or outside its space or material, a shader type another port has, or a kind past
-		 * kMaterialKinds.
-		 */
+		/** @brief Adds a_port at the next material kind and returns that kind. */
 		std::uint8_t AddMaterialPort(Lists& a_lists, std::string_view a_who, const Api::MaterialPortContribution& a_port)
 		{
 			const auto spaceValid = [](const Api::MaterialStageSpace& a_stage) {
@@ -240,7 +209,7 @@ namespace DCLF::Extensions
 			if (a_port.shaderType == RE::BSShader::Type::Lighting || a_port.shaderType >= RE::BSShader::Type::Total || !classValid || a_port.name.empty() || !a_port.propertyRtti ||
 				!a_port.materialVtable || !a_port.capture || !a_port.derive || !a_port.evaluate || !a_port.shading || !spaceValid(a_port.vs) || !spaceValid(a_port.ps))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete material port", a_who));
-			// Its frame variables: a material row's places, each a variable of its stage read from bytes its material has.
+			// Each frame variable must name a variable of its stage and read only bytes its material has.
 			const auto readable = [&](const std::array<Api::MaterialFrameComponent, 4>& a_components) {
 				return std::all_of(a_components.begin(), a_components.end(), [&](const Api::MaterialFrameComponent& a_component) {
 					return a_component.source + 4u <= a_port.materialBytes &&
@@ -263,7 +232,7 @@ namespace DCLF::Extensions
 			return static_cast<std::uint8_t>(a_lists.materialPortCount++);
 		}
 
-		/** @brief Whether a draw family's program or a program family registered so far is built from a_shaderType. */
+		/** @brief Whether a draw family or program family registered so far builds from a_shaderType. */
 		bool ProgramShaderTaken(const Lists& a_lists, std::uint8_t a_shaderType)
 		{
 			for (const auto& family : a_lists.drawFamilies)
@@ -275,7 +244,7 @@ namespace DCLF::Extensions
 			return false;
 		}
 
-		/** @brief Whether a_root has an owner registered so far: a view root contribution or a draw family's faces. */
+		/** @brief Whether a_root already has an owner. */
 		bool ViewRootTaken(const Lists& a_lists, Api::ViewRoot a_root)
 		{
 			if (a_lists.viewRoots[static_cast<std::size_t>(a_root)].root != Api::ViewRoot::Count)
@@ -286,10 +255,7 @@ namespace DCLF::Extensions
 			return false;
 		}
 
-		/**
-		 * @brief Whether a_faces are all or none: the callbacks, sizes, names and root all set (a trees view's faces draw the family) or none
-		 * (they do not).
-		 */
+		/** @brief Whether a_faces are all set or all unset. */
 		bool DrawFamilyFacesComplete(const Api::DrawFamilyContribution::Faces& a_faces)
 		{
 			const int callbacks = (a_faces.declare ? 1 : 0) + (a_faces.record ? 1 : 0) + (a_faces.row ? 1 : 0) + (a_faces.lists ? 1 : 0) + (a_faces.face ? 1 : 0);
@@ -298,10 +264,7 @@ namespace DCLF::Extensions
 			return callbacks == 0 ? data == 0 : callbacks == 5 && data == 7;
 		}
 
-		/**
-		 * @brief Adds a_family by its family, refused (a_who's) for a family already registered, Lighting's or no shader type, no name, key
-		 * name or source path, or no program source; or a shader type a draw family's program or another program family has.
-		 */
+		/** @brief Adds a_family by its family. */
 		void AddProgramFamily(Lists& a_lists, std::string_view a_who, const Api::ProgramFamilyContribution& a_family)
 		{
 			if (a_family.family >= Api::ProgramFamily::Count || a_family.shaderType == RE::BSShader::Type::Lighting || a_family.shaderType >= RE::BSShader::Type::Total ||
@@ -316,7 +279,7 @@ namespace DCLF::Extensions
 			entry = a_family;
 		}
 
-		/** @brief Adds a_row, refused (a_who's) for a row outside Core's feature rows or another registration's, no name or no sample. */
+		/** @brief Adds a_row. */
 		void AddFrameConstantRow(Lists& a_lists, std::string_view a_who, const Api::FrameConstantRow& a_row)
 		{
 			if (a_row.name.empty() || !a_row.sample || a_row.row < kFrameConstantRowFirst || a_row.row >= kFrameConstantRowsEnd)
@@ -327,7 +290,7 @@ namespace DCLF::Extensions
 			a_lists.frameConstantRows.push_back({ std::string(a_row.name), a_row.row, a_row.sample });
 		}
 
-		/** @brief The frame graph buffers registered so far that read a_register (null: none). */
+		/** @brief The frame graph buffers registered so far that read a_register, or null. */
 		const FrameGraphBuffersEntry* GraphBuffersAt(const Lists& a_lists, std::uint32_t a_register)
 		{
 			for (const auto& buffers : a_lists.frameGraphBuffers)
@@ -336,11 +299,7 @@ namespace DCLF::Extensions
 			return nullptr;
 		}
 
-		/**
-		 * @brief Adds a_buffers, refused (a_who's) for no name, resources or indices, a non-empty resource after an empty one, a register
-		 * below the frame textures or past t127, Core's, a frame binding's, a frame texture's or other graph buffers', or one past
-		 * kFrameGraphBufferSlots.
-		 */
+		/** @brief Adds a_buffers. */
 		void AddFrameGraphBuffers(Lists& a_lists, std::string_view a_who, const Api::FrameGraphBuffers& a_buffers)
 		{
 			std::uint32_t count = 0;
@@ -367,7 +326,7 @@ namespace DCLF::Extensions
 				if (const auto* contributor = MaterialRegisterAt(a_lists, r))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, contributor->name));
 			}
-			// A commit keeps each registration's indices in a fixed array (FrameGraphBufferValues).
+			// A commit keeps each registration's indices in a fixed array.
 			if (a_lists.frameGraphBuffers.size() >= kFrameGraphBufferSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} are one past kFrameGraphBufferSlots: grow it first", a_who, a_buffers.name));
 			auto& entry = a_lists.frameGraphBuffers.emplace_back();
@@ -379,14 +338,12 @@ namespace DCLF::Extensions
 			entry.indices = a_buffers.indices;
 		}
 
-		/**
-		 * @brief Adds a_texture, refused (a_who's) for a register below the frame textures or past t127, Core's, a frame binding's or another
-		 * frame texture's, no name or no view, or one past kFrameTextureSlots.
-		 */
+		/** @brief Adds a_texture. */
 		void AddFrameTexture(Lists& a_lists, std::string_view a_who, const Api::FrameTexture& a_texture)
 		{
 			const auto r = a_texture.textureRegister;
-			if (a_texture.name.empty() || !a_texture.view || r < kPixelTextureSlots || r >= kTextureRegisters)
+			const bool graphIds = std::ranges::any_of(a_texture.graphResources, [](std::string_view a_id) { return !a_id.empty(); });
+			if (a_texture.name.empty() || (!a_texture.view && !graphIds) || r < kPixelTextureSlots || r >= kTextureRegisters)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame texture", a_who));
 			if (CoreFrameRegister(r))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which Core keeps", a_who, a_texture.name, r));
@@ -399,17 +356,14 @@ namespace DCLF::Extensions
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, buffers->name));
 			if (const auto* contributor = MaterialRegisterAt(a_lists, r))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, contributor->name));
-			// A colour commit samples every view into a fixed array (ResolveFrameTextures).
+			// A colour commit samples every view into a fixed array.
 			if (a_lists.frameTextures.size() >= kFrameTextureSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} is one past kFrameTextureSlots: grow it first", a_who, a_texture.name));
 			a_lists.frameTextureIndices[r] = static_cast<std::uint8_t>(a_lists.frameTextures.size());
-			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull });
+			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources });
 		}
 
-		/**
-		 * @brief Whether a_contributor is complete: a name, sample and evaluate; its stage's callback alone (Replace: takesPass, After:
-		 * covers); a material class's callbacks all or none; its registers strictly ascending within the frame textures' (t16-t127).
-		 */
+		/** @brief Whether a_contributor has everything its stage needs and ascending registers within t16-t127. */
 		bool MaterialContributorComplete(const Api::MaterialContributor& a_contributor)
 		{
 			const bool stageValid = a_contributor.stage == Api::MaterialStage::Replace ? a_contributor.takesPass && !a_contributor.covers :
@@ -425,12 +379,7 @@ namespace DCLF::Extensions
 			       registersValid;
 		}
 
-		/**
-		 * @brief Adds a_contributor, refused (a_who's) when incomplete (MaterialContributorComplete), for a register Core's, a frame
-		 * binding's, a frame texture's or graph buffers', a register range overlapping another contributor's (each contributor's registers
-		 * take consecutive slots), or one past kFeatureTextureSlots registers, kMaterialContributorWitnessWords words or
-		 * kMaterialContributorSlots contributors.
-		 */
+		/** @brief Adds a_contributor. Each contributor's registers take consecutive feature texture slots. */
 		void AddMaterialContributor(Lists& a_lists, std::string_view a_who, const Api::MaterialContributor& a_contributor)
 		{
 			if (!MaterialContributorComplete(a_contributor))
@@ -453,14 +402,12 @@ namespace DCLF::Extensions
 					if (!other.registers.empty() && registers.front() <= other.registers.back() && other.registers.front() <= registers.back())
 						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}-t{}, which overlap {}'s", a_who, a_contributor.name,
 							registers.front(), registers.back(), other.name));
-			// MaterialRecord::featureTextures' slots are the row header's (frozen with the HLSL decode).
+			// The feature texture slots are frozen by the row header and the HLSL decode.
 			if (a_lists.materialTextureRegisters + registers.size() > kFeatureTextureSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes registers past kFeatureTextureSlots", a_who, a_contributor.name));
-			// The frame witness holds every contributor's words (MaterialContributorSamples::words).
 			if (a_lists.materialWitnessWords + a_contributor.witnessWords > kMaterialContributorWitnessWords)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} writes witness words past kMaterialContributorWitnessWords: grow it first",
 					a_who, a_contributor.name));
-			// A frame's samples hold one a contributor (MaterialContributorSamples::contributors).
 			if (a_lists.materialContributors.size() >= kMaterialContributorSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} is one past kMaterialContributorSlots: grow it first", a_who,
 					a_contributor.name));
@@ -480,13 +427,12 @@ namespace DCLF::Extensions
 			entry.evaluate = a_contributor.evaluate;
 		}
 
-		/** @brief Adds a_fact as the next facts bit, which it returns, refused (a_who's) for no name or sample, or past kReferenceFactSlots. */
+		/** @brief Adds a_fact as the next fact bit and returns it. */
 		Api::ReferenceFactId AddReferenceFact(Lists& a_lists, std::string_view a_who, const Api::ReferenceFact& a_fact)
 		{
 			auto& rules = a_lists.lightingJoinRules;
 			if (a_fact.name.empty() || !a_fact.sample)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete reference fact", a_who));
-			// The node record holds each fact in a bit (NodeRecord's facts).
 			if (rules.factCount >= kReferenceFactSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s reference fact {} is one past kReferenceFactSlots: grow it first", a_who, a_fact.name));
 			const std::uint32_t index = rules.factCount++;
@@ -495,7 +441,7 @@ namespace DCLF::Extensions
 			return { index };
 		}
 
-		/** @brief Adds a_bits, refused (a_who's) for no name, bits or capture, bits another registration has, or past kPropertyBitsSlots. */
+		/** @brief Adds a_bits. */
 		void AddPropertyBits(Lists& a_lists, std::string_view a_who, const Api::PropertyBits& a_bits)
 		{
 			auto& rules = a_lists.lightingJoinRules;
@@ -509,10 +455,7 @@ namespace DCLF::Extensions
 			rules.propertyBitsTaken = static_cast<std::uint8_t>(rules.propertyBitsTaken | a_bits.bits);
 		}
 
-		/**
-		 * @brief Adds a_flag, refused (a_who's) for an object or record flag not one bit or another registration's, no applies, or past
-		 * kLightingObjectFlagSlots.
-		 */
+		/** @brief Adds a_flag. */
 		void AddLightingObjectFlag(Lists& a_lists, std::string_view a_who, const Api::LightingObjectFlag& a_flag)
 		{
 			auto& rules = a_lists.lightingJoinRules;
@@ -522,17 +465,13 @@ namespace DCLF::Extensions
 				if (rules.objectFlags[i].objectFlag == a_flag.objectFlag || rules.objectFlags[i].recordFlag == a_flag.recordFlag)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting object flag {:#x} (record flag {:#x}) is another registration's", a_who,
 						a_flag.objectFlag, a_flag.recordFlag));
-			// The record flags' pairs are read per record (LightingRecordFlagsOf).
 			if (rules.objectFlagCount >= kLightingObjectFlagSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting object flag {:#x} is one past kLightingObjectFlagSlots: grow it first", a_who,
 					a_flag.objectFlag));
 			rules.objectFlags[rules.objectFlagCount++] = a_flag;
 		}
 
-		/**
-		 * @brief Adds a_rules' masks and derivePass, refused (a_who's) for nothing to apply, a pixelKeep outside kLightingPixelSplitBits, a
-		 * raw rule without rawWhen or when another registration has one, or derivePass past kLightingPassDeriveSlots.
-		 */
+		/** @brief Adds a_rules' masks and derivePass. */
 		void AddLightingPassRules(Lists& a_lists, std::string_view a_who, const Api::LightingPassRules& a_rules)
 		{
 			auto& rules = a_lists.lightingJoinRules;
@@ -540,7 +479,7 @@ namespace DCLF::Extensions
 			const bool empty = !a_rules.pixelKeep && !a_rules.rawWhen && !a_rules.rawSet && !a_rules.rawFlip && !a_rules.derivePass;
 			if (empty || (a_rules.pixelKeep & ~kLightingPixelSplitBits) || ((a_rules.rawSet || a_rules.rawFlip) && !a_rules.rawWhen))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete Lighting pass rules", a_who));
-			// SetupGeometry's raw technique takes one rule (LightingRawTechnique).
+			// SetupGeometry's raw technique takes only one rule.
 			if (a_rules.rawWhen && masks.rawWhen)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting pass rules give a raw technique rule, which another registration has", a_who));
 			if (a_rules.derivePass && rules.deriveCount >= kLightingPassDeriveSlots)
@@ -552,10 +491,7 @@ namespace DCLF::Extensions
 				rules.derives[rules.deriveCount++] = a_rules.derivePass;
 		}
 
-		/**
-		 * @brief Adds a_buffer's register to its stage's per-draw mask, refused (a_who's) for no name, a stage or register out of range,
-		 * Core's or another declaration's.
-		 */
+		/** @brief Adds a_buffer's register to its stage's per-draw mask. */
 		void AddPerDrawBuffer(Lists& a_lists, std::string_view a_who, const Api::PerDrawBuffer& a_buffer)
 		{
 			const auto stage = static_cast<std::size_t>(a_buffer.stage);
@@ -586,7 +522,7 @@ namespace DCLF::Extensions
 			{
 				if (a_pool.name.empty() || !a_pool.stride || !a_pool.kick || !a_pool.sample || !a_pool.send)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame-value pool", feature));
-				lists.pools.push_back({ std::string(a_pool.name), a_pool.stride, a_pool.deviceAddress, a_pool.frameStart, a_pool.kick, a_pool.sample, a_pool.send });
+				lists.pools.push_back({ std::string(a_pool.name), a_pool.stride, a_pool.deviceAddress, a_pool.unorderedAccess, a_pool.frameStart, a_pool.kick, a_pool.sample, a_pool.send });
 				return { static_cast<std::uint32_t>(lists.pools.size() - 1) };
 			}
 
@@ -604,7 +540,6 @@ namespace DCLF::Extensions
 			{
 				if (a_resources.name.empty() || !a_resources.setup || !a_resources.postInputs != !a_resources.inputWords)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete scene resources", feature));
-				// RevisionInputs holds every registration's posted words (SceneResourceInputs).
 				if (lists.sceneResourceInputs + a_resources.inputWords > kSceneResourceInputWords)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s scene resources {} post words past kSceneResourceInputWords: grow it first", feature, a_resources.name));
 				lists.sceneResources.push_back({ std::string(a_resources.name), a_resources.setup, a_resources.registerGraph, a_resources.require, a_resources.fit,
@@ -639,7 +574,6 @@ namespace DCLF::Extensions
 				if (const auto* contributor = MaterialRegisterAt(lists, a_binding.textureRegister))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
 						contributor->name));
-				// A build embeds every binding's value (ResourceAddresses::frameBindings).
 				if (lists.frameBindings.size() >= kFrameBindingSlots)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} is one past kFrameBindingSlots: grow it first", feature, a_binding.name));
 				lists.frameBindings.push_back({ std::string(a_binding.name), a_binding.textureRegister, a_binding.select });
@@ -659,10 +593,8 @@ namespace DCLF::Extensions
 			{
 				if (a_input.name.empty() || !a_input.sample)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete classify input", feature));
-				// A set holds each input in a bit (ClassifyInputSet).
 				if (lists.classifyInputs.size() >= kClassifyInputSlots)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s classify input {} is one past kClassifyInputSlots: grow it first", feature, a_input.name));
-				// The needs bind by name (NeedClassifyInput).
 				for (const auto& input : lists.classifyInputs)
 					if (input.name == a_input.name)
 						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s classify input {} has a name another input has", feature, a_input.name));
@@ -674,12 +606,11 @@ namespace DCLF::Extensions
 			{
 				if (a_name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} needs a classify input without a name", feature));
-				// A name needed twice is one need.
+				// A name needed twice counts as one need.
 				std::size_t slot = 0;
 				while (slot < lists.classifyInputNeeds.size() && lists.classifyInputNeeds[slot] != a_name)
 					++slot;
 				if (slot == lists.classifyInputNeeds.size()) {
-					// The bound table holds each need in a slot (ClassifyInputs.h).
 					if (slot >= kClassifyInputNeedSlots)
 						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s need of classify input {} is one past kClassifyInputNeedSlots: grow it first", feature, a_name));
 					lists.classifyInputNeeds.emplace_back(a_name);
@@ -693,7 +624,6 @@ namespace DCLF::Extensions
 			{
 				if (a_volumes.name.empty() || !a_volumes.sample)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete light volumes contribution", feature));
-				// BuildDraws tests one list of volumes.
 				if (!lists.lightVolumes.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes light volumes {}, which {} has", feature, a_volumes.name, lists.lightVolumes.name));
 				lists.lightVolumes = a_volumes;
@@ -703,7 +633,6 @@ namespace DCLF::Extensions
 			{
 				if (a_volume.name.empty() || !a_volume.cascades || !a_volume.entryPlanes)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete sun volume contribution", feature));
-				// One sun: its cascades and its full-frustum planes are one feature's.
 				if (!lists.sunVolume.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes sun volume {}, which {} has", feature, a_volume.name, lists.sunVolume.name));
 				lists.sunVolume = a_volume;
@@ -711,11 +640,10 @@ namespace DCLF::Extensions
 
 			void RegisterAncestorValue(const Api::AncestorValueContribution& a_value) override
 			{
-				// Its input registered before (an integration registers its own first).
+				// Its input must be registered first, so an integration registers its own input before this.
 				if (a_value.name.empty() || (!a_value.ancestorRtti[0] && !a_value.ancestorRtti[1]) || !a_value.generation || !a_value.fill ||
 					a_value.whileOn.index >= lists.classifyInputs.size())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete ancestor value", feature));
-				// The record has one ancestor value column.
 				if (!lists.ancestorValue.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes ancestor value {}, which {} has", feature, a_value.name, lists.ancestorValue.name));
 				lists.ancestorValue = a_value;
@@ -733,10 +661,10 @@ namespace DCLF::Extensions
 
 			void RegisterReportLines(const Api::ReportLines& a_lines) override
 			{
-				// A point composing its text takes text lines; the others, logged lines.
+				// Points that compose text take text lines. The others take logged lines.
 				const auto point = a_lines.point;
 				const bool text = Api::ReportPointComposesText(point);
-				// A coordinator component's lines in text's (or lines') place, at the coordinator's points, after the component.
+				// A component's lines replace text or lines at a coordinator point, and the component must be registered first.
 				const bool component = Api::ReportPointTakesComponents(point) && a_lines.componentText;
 				if (component && (!a_lines.component || a_lines.component.index >= lists.coordinatorComponents.size()))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s report lines {} name no registered component", feature, a_lines.name));
@@ -748,7 +676,7 @@ namespace DCLF::Extensions
 
 			bool RegisterStandInObserver(const Api::StandInObserver& a_observer) override
 			{
-				// Without the primary cull nothing stands in, and nothing would call it.
+				// Without the primary cull nothing stands in, so nothing would call the observer.
 				if (!StandInInstalled())
 					return false;
 				lists.standInObservers.push_back(a_observer);
@@ -757,12 +685,11 @@ namespace DCLF::Extensions
 
 			Api::EngineChannelId RegisterEngineChannel(const Api::EngineChannel& a_channel) override
 			{
-				// A SceneStack channel's events are on the scene's stack: no queue to drain.
+				// A SceneStack channel's events live on the scene's stack, so there is no queue to drain.
 				if (a_channel.name.empty() || (a_channel.kind != Api::ChannelKind::SceneStack && !a_channel.drain))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete engine channel", feature));
 				if (FindEngineChannel(a_channel.name))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s engine channel {} has a name another channel has", feature, a_channel.name));
-				// A batch holds each channel's keys in a slot of its own (Coordinator::EventBatch::channelKeys).
 				if (lists.engineChannels.size() >= kEngineChannelSlots)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s engine channel {} is one past kEngineChannelSlots: grow it first", feature, a_channel.name));
 				lists.engineChannels.push_back({ std::string(a_channel.name), a_channel.kind, a_channel.apply, a_channel.wake, a_channel.namesKeys,
@@ -774,12 +701,11 @@ namespace DCLF::Extensions
 			{
 				if (a_name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} needs an engine channel without a name", feature));
-				// A name needed twice is one need.
+				// A name needed twice counts as one need.
 				std::size_t slot = 0;
 				while (slot < lists.engineChannelNeeds.size() && lists.engineChannelNeeds[slot] != a_name)
 					++slot;
 				if (slot == lists.engineChannelNeeds.size()) {
-					// The bound table holds each need in a slot (EngineEvents.h).
 					if (slot >= kEngineChannelNeedSlots)
 						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s need of engine channel {} is one past kEngineChannelNeedSlots: grow it first", feature, a_name));
 					lists.engineChannelNeeds.emplace_back(a_name);
@@ -791,7 +717,7 @@ namespace DCLF::Extensions
 			{
 				if (!a_veto.open || !a_veto.vetoes)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete show veto", feature));
-				// The stubs load one veto's cells.
+				// The stubs load only one veto's cells.
 				if (std::exchange(lists.showVetoRegistered, true))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered a show veto, which another registration has", feature));
 				lists.showVetoHideSites.assign(a_veto.hideSites.begin(), a_veto.hideSites.end());
@@ -815,10 +741,9 @@ namespace DCLF::Extensions
 			{
 				if (a_family.name.empty() || !a_family.make || !a_family.assign || !a_family.clear || !a_family.recycle)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete table family", feature));
-				// A SceneFit bounds each family's rows (Draws::SceneFit::familyRows).
 				if (lists.tableFamilies.size() >= kTableFamilySlots)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s table family {} is one past kTableFamilySlots: grow it first", feature, a_family.name));
-				// The reference must leave a bit above its shift, and a shifted or biased reference needs a word to ride in.
+				// The row needs a bit above its shift, and a shifted or biased row needs a record word to ride in.
 				if (a_family.recordShift >= 32 || ((a_family.recordShift || a_family.recordBias || !a_family.recordTag) && a_family.recordWord == ~0u))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s table family {} packs its record reference past the word, or into none", feature, a_family.name));
 				lists.tableFamilies.push_back({ std::string(a_family.name), a_family.make, a_family.assign, a_family.assignRow, a_family.same, a_family.clear, a_family.recycle, a_family.rowsEnd,
@@ -831,7 +756,7 @@ namespace DCLF::Extensions
 				const auto& followed = a_component.entryClass;
 				if (a_component.name.empty() || !a_component.make || followed.follows >= Api::EntryClass::Count)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete coordinator component", feature));
-				// One component follows an entry class: it supplies what the class's writes wait on.
+				// Only one component may follow an entry class.
 				if (followed.follows != Api::EntryClass::None)
 					for (const auto& component : lists.coordinatorComponents)
 						if (component.entryClass.follows == followed.follows)
@@ -846,14 +771,14 @@ namespace DCLF::Extensions
 
 			void RegisterTechnique(const Api::TechniqueContribution& a_technique) override
 			{
-				// A property flag rule names the geometry type its flagged objects must be.
+				// A property flag rule must name the geometry type its flagged objects must be.
 				if (a_technique.technique >= kTechniqueSlots || !a_technique.toggle || (a_technique.propertyFlags && a_technique.geometryType >= kGeometryTypeSlots))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete technique contribution", feature));
 				auto& entry = lists.techniques[a_technique.technique];
 				if (entry.toggle)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes technique {}, which another feature has", feature, a_technique.technique));
 				entry = { a_technique.toggle, a_technique.objectFlags, a_technique.extras };
-				// Its property flag rule, once for the techniques that share it (LODLand and LODLandNoise: one rule).
+				// Techniques that share a rule, like LODLand and LODLandNoise, add it once.
 				if (a_technique.propertyFlags) {
 					const PropertyFlagRule rule{ a_technique.propertyFlags, a_technique.geometryType, a_technique.toggle };
 					const auto rules = std::span(lists.propertyFlagRules).first(lists.propertyFlagRuleCount);
@@ -867,7 +792,7 @@ namespace DCLF::Extensions
 
 			void RegisterTechniqueGate(const Api::TechniqueGate& a_gate) override
 			{
-				// It gates a contribution registered before (an integration's gates a feature's technique).
+				// The gated technique must already be registered, so an integration can gate a feature's technique.
 				if (a_gate.technique >= kTechniqueSlots || !lists.techniques[a_gate.technique].toggle || a_gate.whileOn.index >= lists.classifyInputs.size() || !a_gate.needs)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete technique gate", feature));
 				auto& entry = lists.techniques[a_gate.technique];
@@ -879,7 +804,7 @@ namespace DCLF::Extensions
 
 			void RegisterGeometryType(const Api::GeometryTypeContribution& a_type) override
 			{
-				// A toggle, but for a contribution that names an entry class alone; an entry class with the parent kinds it is under.
+				// A toggle is required unless the contribution only names an entry class, which needs its parent kinds.
 				const auto& entry = a_type.entry;
 				const bool entryValid = entry.entryClass < Api::EntryClass::Count &&
 				                        (entry.entryClass == Api::EntryClass::None ? !entry.parentKind && !entry.perFrame && !entry.holdsParent : entry.parentKind != 0);
@@ -893,7 +818,7 @@ namespace DCLF::Extensions
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes geometry type {}, which another feature has", feature, static_cast<std::uint32_t>(a_type.geometryType)));
 				contribution = a_type;
 				lists.geometryTypes[a_type.geometryType] = a_type.toggle;
-				// One rule an entry class: a second type naming it names it alike.
+				// One rule per entry class. A second type naming it must name it the same way.
 				if (entry.entryClass != Api::EntryClass::None) {
 					if (lists.ownerClassRegistered[static_cast<std::size_t>(entry.entryClass)])
 						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s geometry type {} names entry class {}, an owner class", feature,
@@ -929,9 +854,18 @@ namespace DCLF::Extensions
 				lists.categoryRoots[static_cast<std::size_t>(a_class.objectClass)] = a_class.categoryRoot;
 			}
 
+			void RegisterUnheldRoots(const Api::UnheldRootsContribution& a_roots) override
+			{
+				if (!a_roots.owner || !a_roots.enter || !a_roots.leave || !a_roots.gather)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete unheld roots contribution", feature));
+				if (lists.unheldRoots.gather)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes unheld roots, which another feature has", feature));
+				lists.unheldRoots = a_roots;
+			}
+
 			void RegisterEntryClass(const Api::EntryClassContribution& a_class) override
 			{
-				// Its own motion (every frame, no event) makes its entries per frame.
+				// ownMotion means no events, so it requires everyFrame.
 				if (a_class.entryClass == Api::EntryClass::None || a_class.entryClass >= Api::EntryClass::Count || a_class.name.empty() ||
 					(a_class.ownMotion && !a_class.everyFrame))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete entry class contribution", feature));
@@ -941,7 +875,6 @@ namespace DCLF::Extensions
 					lists.entryClassRules[index].entryClass != Api::EntryClass::None)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes entry class {} (form type {}), which another contribution has", feature,
 						static_cast<std::uint32_t>(a_class.entryClass), static_cast<std::uint32_t>(a_class.ownerFormType)));
-				// The timing report's labels: the registered names, in registration order.
 				const bool first = std::ranges::none_of(lists.ownerClassRegistered, std::identity{});
 				lists.ownerClassRegistered[index] = true;
 				owner = { a_class.entryClass, a_class.everyFrame, a_class.ownMotion, a_class.published };
@@ -951,7 +884,7 @@ namespace DCLF::Extensions
 
 			void RegisterShading(const Api::ShadingContribution& a_shading) override
 			{
-				// A block's variables lie in its words, each one at most a word (a variable mask bit each: Extensions::ShadingBlock::vsMask).
+				// Each variable must lie in the block and take at most a word, because the VS mask has one bit per variable.
 				const auto blockValid = [&] {
 					if (a_shading.blockWords > Api::kShadingBlockWords || (a_shading.blockWords && !a_shading.objectFlags) ||
 						a_shading.vsVariables.size() > a_shading.blockWords)
@@ -964,7 +897,6 @@ namespace DCLF::Extensions
 				};
 				if (a_shading.name.empty() || !a_shading.propertyFlags || !a_shading.derive || !blockValid())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shading contribution", feature));
-				// One block slot.
 				if (a_shading.blockWords)
 					for (const auto& other : lists.shadingContributions)
 						if (other.blockWords)
@@ -988,9 +920,7 @@ namespace DCLF::Extensions
 
 			void RegisterView(const Api::ViewContribution& a_view) override
 			{
-				// Its callbacks: the coverage always, the root for a CategoryRoot view, the accumulators for an InMainRenderers one, the residue
-				// question only for an OwnRenderers one (the watch is the pass capture's OwnRenderers test). Its phase and view bit are checked
-				// against Core's and the other views' once all are in (ResolveViews).
+				// The phase and view bit are checked against Core's and other views' once all are registered.
 				if (a_view.view >= Api::EngineView::Count || !a_view.toggle || !a_view.phase || !a_view.shape.viewBits || !a_view.covered ||
 					(a_view.membership == Api::ViewMembership::CategoryRoot && !a_view.captureRoot) ||
 					(a_view.withholding == Api::ViewWithholding::InMainRenderers && !a_view.accumulators) ||
@@ -1013,7 +943,7 @@ namespace DCLF::Extensions
 			{
 				if (a_root.root >= Api::ViewRoot::Count || !a_root.owned)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete view root contribution", feature));
-				// One owner a root: a view's owned roots are its owners' answers.
+				// One owner per root, because a view's owned roots are its owners' answers.
 				if (ViewRootTaken(lists, a_root.root))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes view root {}, which another registration has", feature,
 						static_cast<std::uint32_t>(a_root.root)));
@@ -1029,8 +959,7 @@ namespace DCLF::Extensions
 
 			void RegisterOcclusionMap(const Api::OcclusionMapContribution& a_map) override
 			{
-				// Its toggle, flag, bits, rule, camera and accumulator test always, the import for an ImportedTexture map. Its bits are checked against Core's and the other
-				// views' once all are in (ResolveViewBits).
+				// The bits are checked against Core's and other views' once all are registered.
 				if (a_map.map >= Api::OcclusionMap::Count || !a_map.toggle || !a_map.available || !a_map.bits.phase || !a_map.bits.viewBit ||
 					!a_map.technique || !a_map.camera || !a_map.ownsAccumulator || (a_map.target == Api::OcclusionTarget::ImportedTexture && !a_map.importTarget))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete occlusion map contribution", feature));
@@ -1042,7 +971,7 @@ namespace DCLF::Extensions
 
 			void RegisterShadowSource(const Api::ShadowSourceContribution& a_source) override
 			{
-				// A local light source is told of each light the selection keeps; the Sun alone ends the full-frustum window.
+				// Local light sources hear about each kept light. Only the Sun ends the full-frustum window.
 				const bool local = a_source.source == Api::ShadowSource::Spot || a_source.source == Api::ShadowSource::Point;
 				const bool sun = a_source.source == Api::ShadowSource::Sun;
 				if (a_source.source >= Api::ShadowSource::Count || !a_source.camera || (local && !a_source.lightKept) || sun != !!a_source.fullFrustumWindowEnd)
@@ -1058,7 +987,6 @@ namespace DCLF::Extensions
 			{
 				if (a_exclusion.name.empty() || !a_exclusion.build || !a_exclusion.publish || !a_exclusion.frameStart || !a_exclusion.listExclusion)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shadow exclusion contribution", feature));
-				// The payload carries one exclusion per mode.
 				if (!lists.shadowExclusion.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes shadow exclusion {}, which {} has", feature, a_exclusion.name,
 						lists.shadowExclusion.name));
@@ -1067,11 +995,10 @@ namespace DCLF::Extensions
 
 			void RegisterDrawFamily(const Api::DrawFamilyContribution& a_family) override
 			{
-				// Its class's toggle gates it, its scene resources (registered before) are its tables; its frame and main callbacks, its
-				// program and its engine shapes always, its faces' all or none.
+				// The faces' callbacks come all together or not at all.
 				const auto& main = a_family.main;
 				const auto& program = a_family.program;
-				// One or two colour programs (the second named), an engine write mode (0-12), and a view's forward program only with faces.
+				// One or two colour programs, a write mode of 0-12, and a forward program only with faces.
 				const bool programValid = program.shaderType != RE::BSShader::Type::Lighting && program.shaderType < RE::BSShader::Type::Total && !program.name.empty() &&
 				                          !program.label.empty() && !program.keyName.empty() && !program.sourcePath.empty() && a_family.engineShapes.propertyVtable &&
 				                          (program.colours == 1 || (program.colours == 2 && program.descriptors.colour2)) && program.writeMode < 13 &&
@@ -1085,7 +1012,7 @@ namespace DCLF::Extensions
 				if (entry.family != Api::DrawFamily::Count)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes draw family {}, which another registration has", feature,
 						static_cast<std::uint32_t>(a_family.family)));
-				// Its programs are found by their shader type (Extensions::DrawFamilyOfShader); its faces' root has one owner.
+				// Programs are found by shader type, and the faces' root has one owner.
 				if (ProgramShaderTaken(lists, program.shaderType))
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s draw family {} takes shader type {}, which another family has", feature, program.name,
 						static_cast<std::uint32_t>(program.shaderType)));
@@ -1101,7 +1028,7 @@ namespace DCLF::Extensions
 
 			void RegisterVertexStream(const Api::VertexStreamContribution& a_stream) override
 			{
-				// Its scene resources (registered before) hold its buffer; a component follows its entry class (registered before).
+				// Its scene resources and the component following its entry class must be registered first.
 				bool followed = false;
 				for (const auto& component : lists.coordinatorComponents)
 					followed = followed || (a_stream.entryClass != Api::EntryClass::None && component.entryClass.follows == a_stream.entryClass);
@@ -1149,7 +1076,6 @@ namespace DCLF::Extensions
 			{
 				if (a_input.name.empty() || !a_input.unboundVisible || !a_input.structure || !a_input.programsVersion || !a_input.judge || !a_input.test)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete main cull input", feature));
-				// The scene lists' keep check and the depth commits' programs read one walk.
 				if (!lists.mainCullInput.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes main cull input {}, which {} has", feature, a_input.name, lists.mainCullInput.name));
 				lists.mainCullInput = a_input;
@@ -1159,7 +1085,6 @@ namespace DCLF::Extensions
 			{
 				if (a_binding.slot >= Api::CullBindingSlot::Count || a_binding.name.empty() || !a_binding.select)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete cull binding", feature));
-				// Core's cull reads each slot at one descriptor word.
 				auto& taken = lists.cullBindings[static_cast<std::size_t>(a_binding.slot)];
 				if (taken.select)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s cull binding {} takes slot {}, which {} has", feature, a_binding.name,
@@ -1171,7 +1096,6 @@ namespace DCLF::Extensions
 			{
 				if (a_pyramid.resource.empty() || a_pyramid.scratchResource.empty() || !a_pyramid.setup)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete depth pyramid", feature));
-				// The cull tests one pyramid.
 				if (lists.depthPyramid.setup)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes depth pyramid {}, which another feature has", feature, a_pyramid.resource));
 				lists.depthPyramid = a_pyramid;
@@ -1181,7 +1105,6 @@ namespace DCLF::Extensions
 			{
 				if (!a_view.beforeOpaque || !a_view.afterOpaque)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete primary view", feature));
-				// FrameDriver's main pass points call one main view.
 				if (lists.primaryView.beforeOpaque)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes a primary view, which {} has", feature, lists.primaryViewFeature));
 				lists.primaryView = a_view;
@@ -1192,7 +1115,6 @@ namespace DCLF::Extensions
 			{
 				if (!a_epochs.beforeShadowCasters || !a_epochs.beforeShadowMaps || !a_epochs.afterShadowMaps || !a_epochs.occlusionReady)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete shadow epochs", feature));
-				// FrameDriver's shadow and occlusion points call one shadow engine's epoch.
 				if (lists.shadowEpochs.afterShadowMaps)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes the shadow epochs, which {} has", feature, lists.shadowEpochsFeature));
 				lists.shadowEpochs = a_epochs;
@@ -1201,10 +1123,9 @@ namespace DCLF::Extensions
 
 			void RegisterRootStates(const Api::RootStatesContribution& a_states) override
 			{
-				// Its family registered before (its objects' references are the roots Core reads), and the callbacks Core calls per decode and join.
+				// Its table family must be registered first, because its objects' references are the roots Core reads.
 				if (a_states.name.empty() || !a_states.family || a_states.family.index >= lists.tableFamilies.size() || !a_states.view || !a_states.test)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete root states", feature));
-				// The cull, the shadows and the draws read one producer's states.
 				if (!lists.rootStates.name.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes root states {}, which {} has", feature, a_states.name, lists.rootStates.name));
 				lists.rootStates = a_states;
@@ -1217,7 +1138,6 @@ namespace DCLF::Extensions
 			{
 				if (a_extraName.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} declared a geometry extra without a name", feature));
-				// The geometry record keeps one extra value.
 				auto& declared = lists.lightingJoinRules.geometryExtra;
 				if (!declared.empty())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} declared geometry extra {}, but {} is declared", feature, a_extraName, declared));
@@ -1231,7 +1151,6 @@ namespace DCLF::Extensions
 			{
 				if (!a_bits.keyBits || !a_bits.permutation)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete Lighting key bits", feature));
-				// The Lighting key has one set of spare bits.
 				auto& claimed = lists.lightingJoinRules.keyBits;
 				if (claimed.keyBits)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered Lighting key bits, which another registration has", feature));
@@ -1241,8 +1160,8 @@ namespace DCLF::Extensions
 			void RegisterLightingPassRules(const Api::LightingPassRules& a_rules) override { AddLightingPassRules(lists, feature, a_rules); }
 			void DeclarePerDrawBuffer(const Api::PerDrawBuffer& a_buffer) override { AddPerDrawBuffer(lists, feature, a_buffer); }
 
-			std::string_view feature;                       // the feature installing
-			const Api::FrameSchedule* schedule = nullptr;  // the schedule InstallFeatures resolves (FindTrigger)
+			std::string_view feature;
+			const Api::FrameSchedule* schedule = nullptr;
 
 		private:
 			Lists& lists;
@@ -1271,10 +1190,9 @@ namespace DCLF::Extensions
 		auto& lists = Registered();
 		if (std::exchange(lists.installed, true))
 			stl::report_and_fail("Drawcall Limit Fix: the features were installed twice");
-		// Core's passes (Core/Render/Passes/CorePasses.cpp) before the features', so a feature's key that is Core's fails its install.
+		// Core's passes register first, so a feature reusing a Core key fails its install.
 		Draws::RegisterCorePasses();
-		// Lighting's space and rules as kind 0; the features' material ports take kinds from 1 in their registration order, which the records
-		// they write name (RegisterMaterialPort returns it).
+		// Lighting is kind 0. The features' material ports take kinds from 1 in registration order.
 		lists.materialPorts[lists.materialPortCount++] = CoreLightingPort();
 		Context context(lists);
 		context.schedule = &a_schedule;
@@ -1283,9 +1201,7 @@ namespace DCLF::Extensions
 			if (feature.install)
 				feature.install(context);
 		}
-		// The integrations after every feature (Integrations/IntegrationList.cpp): what they register may name what a feature registered
-		// (Integrations/AdvancedSkin's wetness: Features/Actors' published actor-owned class). They have no early or source hooks (the
-		// shell installs those for the features alone).
+		// Integrations install after every feature, because they may name what a feature registered. They have no early or source hooks.
 		for (const auto& integration : a_integrations) {
 			if (integration.earlyHooks || integration.sourceHooks)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: integration {} has early or source hooks", integration.name));
@@ -1293,22 +1209,15 @@ namespace DCLF::Extensions
 			if (integration.install)
 				integration.install(context);
 		}
-		// The features' switches' anchors, which may name a switch a later feature registered.
+		// Switch anchors may name a switch a later feature registered.
 		CheckSwitchAnchors();
-		// The classify inputs needed by name, which a later feature or an integration may register; then the light volumes, the sun volume
-		// and the ancestor value (its key classes' RTTI).
+		// Classify inputs needed by name may come from a later feature or an integration.
 		BindClassifyInputNeeds(lists.classifyInputNeeds);
-		// The engine channels needed by name (Features/Actors' fade amounts, a later feature's channel).
 		BindEngineChannelNeeds(lists.engineChannelNeeds);
 		ResolveLightVolumes(lists.lightVolumes);
 		ResolveSunVolume(lists.sunVolume);
 		ResolveAncestorValue(lists.ancestorValue);
 		ResolveLatePoses(lists.latePoses);
-		// The views' entries, from Core's slots and the features' contributions, work and view roots; the occlusion maps', shadow sources' and shadow exclusion's, from
-		// the features' contributions; then both families' phases and view bits; the draw families' from their registrations; the main
-		// ranges' draw order; the vertex stream's (and the scene resources' order: its first); the main cull input's; the cull bindings'; the depth pyramid's; the primary view's; the shadow epochs'; the root states'; the palette rows classes'; the shading fields'
-		// (and the published entry classes); the material ports'
-		// (their engine addresses and spaces); the program families' (their ports' kinds); the frame constant rows, in row order.
 		ResolveViews(lists.views, lists.viewWork, lists.viewRoots, lists.cullHiddenSources);
 		ResolveShadowViews(lists.occlusionMaps, lists.shadowSources, lists.shadowExclusion);
 		ResolveViewBits();
@@ -1324,14 +1233,12 @@ namespace DCLF::Extensions
 		ResolvePaletteRows(lists.paletteRows);
 		ResolveShadingFields(lists.shadingFields);
 		ResolveMaterialPorts(lists.materialPorts, lists.materialPortCount);
-		// The material contributors' order (stage, order, registration), feature texture slots, witness words and classes.
 		ResolveMaterialContributors(lists.materialContributors);
 		ResolveProgramFamilies(lists.programFamilies);
 		std::ranges::sort(lists.frameConstantRows, {}, &FrameConstantRowEntry::row);
-		// The Core flags' needs by name resolved, then the features' toggles placed in the menu's table by their anchors (which may
-		// name a toggle a later feature registered), then seeded from their switches, into the requested and active sets.
+		// Toggles may be anchored to a toggle a later feature registered, so they are placed and seeded only now.
 		Toggles::Get().SeedRegistered();
-		// The frame's schedule against every registered pass: a key nobody registered fails the install.
+		// A schedule key that nobody registered fails the install.
 		Draws::ResolveSchedule(a_schedule);
 	}
 
@@ -1360,6 +1267,7 @@ namespace DCLF::Extensions
 	std::string_view OwnedEntriesLabel(bool a_withoutRecord) { return a_withoutRecord ? Registered().ownedWithoutRecordLabel : Registered().ownedLabel; }
 	std::span<const PropertyFlagRule> PropertyFlagRules() { return std::span(Registered().propertyFlagRules).first(Registered().propertyFlagRuleCount); }
 	const CategoryRoots& RegisteredCategoryRoots() { return Registered().categoryRoots; }
+	const Api::UnheldRootsContribution& RegisteredUnheldRoots() { return Registered().unheldRoots; }
 	const ParentToggles& RegisteredParents() { return Registered().parents; }
 	const ObjectClassToggles& RegisteredObjectClasses() { return Registered().objectClasses; }
 	std::span<const ShadingContributionEntry> RegisteredShadingContributions() { return Registered().shadingContributions; }

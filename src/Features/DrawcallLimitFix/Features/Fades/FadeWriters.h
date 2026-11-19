@@ -1,9 +1,8 @@
 #pragma once
 
-// Fades' writer hooks (FadeWriters.cpp): DCLF as the one fade writer of the roots it lists. The writer tables (the scene tables accepted
-// at Main::Update's entry, the set the engine's fade writers skip), the fade stores written back there, the animation job's fade updates
-// (AnimatedFade, batched at the list jobs' end for FadeStateCS) and the fade OnVisibles without their stores (FadeOnVisible, LeafOnVisible,
-// TreeOnVisible); and the root test's fade-out distance. Included by the feature's sources only.
+// Hooks that make DCLF the only writer of fade state on the roots it lists.
+// The engine's fade writers skip those roots, and the GPU's results are written back at Main::Update's entry.
+// The animation job's fade updates are queued so FadeStateCS can repeat them.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRecords.h"
 
@@ -18,34 +17,28 @@ namespace DCLF::SceneCapture
 
 namespace DCLF::Features::Fades
 {
-	/**
-	 * @brief Main thread, at Main::Update's entry (the stand-in observer's updateEntry, last of the observers): publishes the writer
-	 * tables, then writes the fade stores back. a_running false drops the writes.
-	 */
+	/** @brief Main thread, at Main::Update's entry. Publishes the writer tables, then writes the fade stores back. */
 	void WriteFadeWriters(bool a_running);
 	/**
-	 * @brief Any thread: whether DCLF is a_node's one fade writer this frame (kFadeRootWritten in the tables published at
-	 * Main::Update's entry). The gate's fade update (FUN_1402cff60 -> FUN_14147a160) and FadeOnVisible skip their stores on
-	 * those; FadeStateCS makes the update on the GPU and the write-back carries it to the node.
+	 * @brief Whether DCLF is the node's only fade writer this frame. Any thread.
+	 * The engine's fade update and OnVisible skip their stores on such nodes.
 	 */
 	bool FadeWrittenByDclf(const void* a_node);
-	/** @brief a_node listed by a_tables (SceneTables) with kFadeRootWritten. Any thread; the tables are immutable. */
+	/** @brief Any thread. The tables are immutable. */
 	bool WrittenByTables(const void* a_tables, const void* a_node);
-	/** @brief Since the last call: the gate's fade updates and OnVisible fade steps skipped. */
+	/** @brief Engine fade writes skipped since the last call. */
 	struct FadeWriterCounts
 	{
 		std::uint64_t gateSkipped = 0, onVisibleSkipped = 0;
-		std::size_t roots = 0;  // the roots in the writer set
+		std::size_t roots = 0;  // roots in the writer set
 	};
 	FadeWriterCounts TakeFadeWriterCounts();
-	/** @brief The same counts since the last TakeFadeWriterCounts, not reset (the diagnostic capture's). Any thread. */
+	/** @brief Like TakeFadeWriterCounts but does not reset. Any thread. */
 	FadeWriterCounts PeekFadeWriterCounts();
 
 	/**
-	 * @brief One animation-job fade update, its root resolved on the job thread through the writer tables (the SceneTables
-	 * accepted at Main::Update's entry, immutable and held until the next entry, so stable through the animation job): the slot in
-	 * those tables, its row's generation and the node. A consumer reading other tables (the frame's, after a swap at frame start)
-	 * takes the slot only where its root list's nodes[slot] is the node and rows[slot].generation the generation; no hashing.
+	 * @brief One animation-job fade update, resolved against the writer tables. Readers of other tables accept the slot only
+	 * if the node and generation still match there, which avoids a hash lookup.
 	 */
 	struct AnimatedFadeRoot
 	{
@@ -53,40 +46,27 @@ namespace DCLF::Features::Fades
 		std::uint32_t slot = 0;
 		std::uint32_t generation = 0;
 	};
-	/**
-	 * @brief Render thread, after the list jobs: the animation job's fade updates since the previous list jobs (roots listed by
-	 * the writer tables, one per update, and inputs), which FadeStateCS repeats before its cull test (FadeFrame anim*).
-	 */
+	/** @brief Render thread. The animation job's fade updates since the last list jobs, which FadeStateCS repeats before its cull test. */
 	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/**
-	 * @brief Render thread: a copy of the batch FadeStateCS's frame took, for the CPU fade stage's next observer frame (it steps the same
-	 * updates a frame later), and that copy taken, emptied.
-	 */
+	/** @brief Render thread. Keeps a copy of the batch so the CPU stage's observer frame can step it a frame later. */
 	void KeepAnimatedBatchForObserver(const std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs);
 	void TakeObserverAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/**
-	 * @brief Render thread, at the list jobs' Finish (the stand-in observer's listJobsDone): the animation job's queued updates and
-	 * inputs become the batch TakeAnimatedBatch hands out.
-	 */
+	/** @brief Render thread, when the list jobs finish. Turns the queued updates into the batch. */
 	void DrainAnimatedFades();
 	/**
-	 * @brief Render thread, at the CPU fade stage's kick: its producer drains the batch (TakeAnimatedBatchOnWorker), not this thread.
-	 * Nothing pushes between the frame's start and the producer's drain: the cell animations job pushes inside Main::Draw only after
-	 * the frame's sampling, which the drain is part of (WindowWriters: FrameValues::WaitSampled), and Main::Update's jobs push after its
-	 * entry, which waits for the drain (WaitAnimatedDrain). So the producer's drain takes the batch the frame start's took.
+	 * @brief Render thread. Lets the CPU fade stage's producer do the drain instead. This is safe because nothing pushes
+	 * until the frame's sampling is done, and Main::Update's entry waits for the drain.
 	 */
 	void HandAnimatedDrainToWorker();
-	/** @brief The CPU fade stage's producer, once a handed-off drain: DrainAnimatedFades then TakeAnimatedBatch. */
+	/** @brief CPU fade stage producer, after a hand-off. */
 	void TakeAnimatedBatchOnWorker(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/** @brief A handed-off drain whose producer never ran: drained and dropped, as a dropped kick's batch was. */
+	/** @brief Drains and drops a handed-off batch whose producer never ran. */
 	void DropAnimatedDrain();
-	/** @brief Waits until no handed-off drain is outstanding (Main::Update's entry, and the render thread's own drains). */
 	void WaitAnimatedDrain();
 
 	/**
-	 * @brief The root test (per join): where FUN_14147b110's fade value falls below BSFadeNode::OnVisible's fade-out threshold
-	 * (kObjectFadeTest), from the fade node's record and the frame's captured globals. > 0: scaled by the camera's LOD factor; < 0:
-	 * by a constant, folded in; 0: never fades out by distance.
+	 * @brief Distance at which the engine's fade value drops below OnVisible's fade-out threshold.
+	 * Positive values scale with the camera's LOD factor. Negative values have a constant folded in. 0 means never by distance.
 	 */
 	float FadeDistanceOf(const SceneCapture::NodeRecord& a_root);
 }

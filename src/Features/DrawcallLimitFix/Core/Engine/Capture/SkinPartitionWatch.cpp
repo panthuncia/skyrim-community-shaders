@@ -10,10 +10,9 @@ namespace DCLF::SkinPartitionWatch
 {
 	namespace
 	{
-		// How long a copied partition is watched. skee stores the copy at once on the main thread, or in an SKSE task (the next main
-		// loop tick) from any other thread, so a few frames would do; the margin covers a load's long frames.
+		// skee stores the copy at once or at the next main loop tick, so a few frames would do. The margin covers a load's long frames.
 		constexpr auto kWatchFor = std::chrono::seconds(5);
-		// skee copies one partition per shape and step: a slider drag makes many. Past this the oldest are dropped.
+		// A slider drag makes many copies, so past this the oldest are dropped.
 		constexpr std::size_t kMaxWatched = 512;
 
 		struct Watched
@@ -44,8 +43,7 @@ namespace DCLF::SkinPartitionWatch
 
 		struct CreateDeepCopy
 		{
-			// NiObject::CreateDeepCopy(NiPointer<NiObject>& out): the source is this. Only a skin partition's copy is noted; the copy is
-			// the caller's (skee stores it later), so only the source, the partition the plan holds, is known here.
+			// Only the source is known here, the partition the plan holds. The copy is the caller's and is stored later.
 			static void thunk(RE::NiObject* a_this, RE::NiPointer<RE::NiObject>& a_out)
 			{
 				func(a_this, a_out);
@@ -59,7 +57,7 @@ namespace DCLF::SkinPartitionWatch
 
 	void Install()
 	{
-		// It chains (another plugin's detour of the function keeps running), so no entry check.
+		// It chains, so no entry check.
 		stl::detour_thunk<CreateDeepCopy>(REL::RelocationID(68839, 70191));
 		HookSites::NoteDetour("NiObject::CreateDeepCopy (RaceMenu's skin partition copies)", CreateDeepCopy::func.address());
 		if (CreateDeepCopy::func.address())

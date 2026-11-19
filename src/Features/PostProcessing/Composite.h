@@ -60,4 +60,10 @@ struct Composite : public PostProcessFeature
 	virtual void DrawSettings() override {}
 
 	virtual void Draw(TextureInfo&) override;
+
+	/**
+	 * @brief This frame's composite constants for an output of a_outputSize pixels: the bloom sampling when a_bloom, the lens
+	 * flare's when a_flare (zero otherwise). Shared by the D3D11 draw and the ORG chain.
+	 */
+	CompositeCB Constants(float2 a_outputSize, bool a_bloom, bool a_flare) const;
 };

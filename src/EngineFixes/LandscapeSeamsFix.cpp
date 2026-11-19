@@ -1,6 +1,7 @@
 #include "LandscapeSeamsFix.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "TruePBR.h"
@@ -150,8 +151,9 @@ void LandscapeSeamsFix::Bind(RE::BSGeometry* a_geometry)
 		for (uint32_t extra = 0; extra < MaxExtraLayers; ++extra) {
 			for (uint32_t texture = 0; texture < TexturesPerExtra; ++texture) {
 				const auto& source = resources->extras[extra][texture];
+				// The raw context takes D3D11 views, never an engine texture's tripwire handle.
 				if (source != nullptr && source->rendererTexture != nullptr)
-					views[2 + extra * TexturesPerExtra + texture] = source->rendererTexture->resourceView;
+					views[2 + extra * TexturesPerExtra + texture] = RenderGraph::Engine::Tripwire::Unwrap(source->rendererTexture->resourceView);
 			}
 		}
 	}

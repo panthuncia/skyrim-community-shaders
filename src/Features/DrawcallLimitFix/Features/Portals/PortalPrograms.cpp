@@ -1,9 +1,7 @@
-// Portals' programs (PortalPrograms.h's encoding, "cs.dclf.portal-programs"): each depth commit publishes the frame's encoding whole
-// into an immutable pooled backing sized to it (no capacity substitution), retained by every execution that reads it until GPU
-// retirement; the cull binding Programs names its descriptor (Api::CullBindingSlot::Programs, the depth latch's portalProgramsIndex).
-// Also the member batch's scratch (scene resources required to the objects and the encoding's buckets) and PortalTest on the CPU.
+// Portal programs: each depth commit publishes the frame's encoding into an immutable pooled backing sized to it. Every execution
+// that reads it retains it until GPU retirement. Also holds the member batch's scratch and PortalTest on the CPU.
 
-// Helpers.h first, in its own include block: volk must precede every Vulkan header of the translation unit.
+// Helpers.h first, in its own include block, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
@@ -38,21 +36,26 @@ namespace DCLF::Features::Portals
 	namespace
 	{
 		constexpr const char* kProgramsName = "cs.dclf.portal-programs";
+		constexpr const char* kStandInName = "cs.dclf.portal-programs.stand-in";
 		constexpr std::uint32_t kBucketsInput = 0, kInputWords = 1;
 
-		/** @brief An immutable published encoding: its words, the lease holding them on the GPU, and the descriptor the latch names. */
+		/** @brief An immutable published encoding, its buffer version and the descriptor the latch names. */
 		struct Publication
 		{
 			std::vector<std::uint32_t> words;
-			std::shared_ptr<const org::services::BackingLease> lease;
+			std::shared_ptr<const org::BufferVersion> version;
 			std::uint32_t descriptor = 0;
 		};
 
-		/** @brief The member batch, the publications' pool and the depth commit's publication (render thread). */
+		/**
+		 * @brief The member batch, the publications' pool, the programs' buffer and the current publication. Render thread.
+		 * The buffer is late-bound, so a reader on the compute queue waits for the upload that fills each version.
+		 */
 		struct ProgramsScene
 		{
 			std::shared_ptr<Batch> members;
 			std::shared_ptr<org::services::BackingPool> pool;
+			std::shared_ptr<org::VersionedBuffer> programs;
 			std::shared_ptr<const Publication> current;
 			std::uint32_t frame = ~0u;  // the scene frame current was published for
 		};
@@ -64,7 +67,6 @@ namespace DCLF::Features::Portals
 			return Extensions::SceneResourcesOf<ProgramsScene>(a_scene, sceneId);
 		}
 
-		// The scene's tables are made (the first frame with a device): the member batch and the publications' pool.
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto scene = std::make_shared<ProgramsScene>();
@@ -73,15 +75,19 @@ namespace DCLF::Features::Portals
 				return nullptr;
 			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
 				{ .name = kProgramsName, .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
+			auto standIn = a_setup.StructuredBuffer(1, 4, kStandInName);
+			if (!standIn)
+				return nullptr;
+			scene->programs = org::VersionedBuffer::CreateLateBound(std::move(standIn));
 			return scene;
 		}
 
 		void RegisterGraph(const Api::SceneResourcesGraph& a_graph)
 		{
-			RegisterBatch(a_graph.graph, *a_graph.State<ProgramsScene>().members);
+			const auto& scene = a_graph.State<ProgramsScene>();
+			RegisterBatch(a_graph.graph, *scene.members);
 		}
 
-		// The member batch's scratch: by object, and its bucket scratch to the encoding's programs (posted with the revision's inputs).
 		void Require(const Api::SceneResourcesRequirements& a_requirements)
 		{
 			const auto& scene = a_requirements.State<ProgramsScene>();
@@ -94,7 +100,7 @@ namespace DCLF::Features::Portals
 
 		void Fit(Api::SceneResourcesFit& a_fit)
 		{
-			// A set sealed before a revision required the batch names none of it: no object fits it (as Fades' roots), never a throw.
+			// A set sealed before the revision required the batch names none of it. No object fits it, and that must not throw.
 			const auto& b = *a_fit.State<ProgramsScene>().members;
 			std::uint64_t units = ~0ull;
 			for (const auto* buffer : { &b.queries, &b.results, &b.ranks, &b.indices, &b.tasks })
@@ -128,17 +134,13 @@ namespace DCLF::Features::Portals
 			return scene ? MakeBatchPass(resources, scene->members, a_context.segment, Evaluate) : nullptr;
 		}
 
-		// The encoding's programs: what the member batch's bucket scratch must hold.
 		void PostInputs(std::span<std::uint32_t> a_words)
 		{
 			const auto& encoded = PortalViews::Get().Encoded();
 			a_words[kBucketsInput] = encoded.size() >= kPortalHeaderBytes / 4 ? encoded[kPortalSetBytes / 4] : 0u;
 		}
 
-		/**
-		 * @brief The frame's encoding, whole, into a pooled backing sized to it (render thread, the frame's first depth commit). An
-		 * unchanged encoding keeps the last publication. The backing is immutable once published: every execution retains it.
-		 */
+		/** @brief Publishes the frame's encoding into a backing sized to it. An unchanged encoding keeps the last one. Render thread. */
 		std::shared_ptr<const Publication> Publish(ProgramsScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
 			const auto& encoded = PortalViews::Get().Encoded();
@@ -148,7 +150,6 @@ namespace DCLF::Features::Portals
 				return a_scene.current;
 			auto publication = std::make_shared<Publication>();
 			publication->words = encoded;
-			// Rows of a uint structured buffer, as the shaders' ByteAddressBuffer reads them (the view the previous buffer had).
 			auto lease = std::make_shared<org::services::BackingLease>(a_scene.pool->Acquire(
 				{ .capacityClass = std::bit_ceil(std::max<std::uint64_t>(64, encoded.size())), .stride = 4, .name = "cs.dclf.portal-programs.encoding" }));
 			if (!*lease)
@@ -157,11 +158,12 @@ namespace DCLF::Features::Portals
 			if (!publication->descriptor)
 				throw std::runtime_error("missing GPU descriptor");
 			a_uploads((*lease)->buffer, encoded.data(), encoded.size() * sizeof(std::uint32_t), 0);
-			publication->lease = std::move(lease);
+			// Move the lease into the version, which keeps the backing current while this publication lives.
+			auto buffer = (*lease)->buffer;
+			publication->version = a_scene.programs->PublishLate(std::move(buffer), std::move(lease));
 			return publication;
 		}
 
-		// The depth commit only: FadeStateCS (the next frame's state) and the depth segment's query stages read the frame's programs.
 		void Commit(const Api::CommitContext& a_commit)
 		{
 			if (a_commit.kind != Api::CommitKind::Depth)
@@ -172,8 +174,7 @@ namespace DCLF::Features::Portals
 			if (scene->frame != a_commit.frame) {
 				CheckMainBatchCapacity(*scene->members, a_commit.frame, std::min(Draws::NamedUnits(a_commit.adopted, scene->members->counts), Draws::NamedUnits(a_commit.adopted, scene->members->offsets)) / 2);
 				scene->frame = a_commit.frame;
-				// Commit hooks run unguarded on the render thread. Without a publication the latch names none (descriptor 0) and every
-				// reader takes the frustum alone, the "no programs" meaning: only an allocation failure leads here.
+				// Commit hooks run unguarded on the render thread. Without a publication every reader takes the frustum alone.
 				try {
 					scene->current = Publish(*scene, a_commit.uploads);
 				} catch (const std::exception& e) {
@@ -183,15 +184,17 @@ namespace DCLF::Features::Portals
 						logger::error("[DCLF][structural-gap] portal programs not published at frame {}: {}. Occurrences: {}", a_commit.frame, e.what(), failed);
 				}
 			}
-			// Each execution reading the latch's descriptor retains the backing until GPU retirement.
 			if (scene->current)
 				a_commit.executionOwners.push_back(scene->current);
 		}
 
-		// The frame's publication's descriptor (the depth commit's latch; 0: none this frame).
 		void SelectPrograms(Api::CullBindingSelect& a_select)
 		{
-			if (const auto* scene = SceneOf(a_select.scene); scene && scene->current && scene->frame == a_select.frame)
+			const auto* scene = SceneOf(a_select.scene);
+			if (!scene)
+				return;
+			a_select.Published(scene->programs);
+			if (scene->current && scene->frame == a_select.frame)
 				a_select.Index(scene->current->descriptor);
 		}
 	}

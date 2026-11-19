@@ -2,62 +2,68 @@
 #include "Common/ColorSpaces.hlsli"
 #include "Common/Math.hlsli"
 
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
 
 #define LUT_SIZE 64
 
-Texture2D<float4> TexColor : register(t0);
-Texture3D<float4> TexLUT : register(t1);
-
-SamplerState LinearSampler : register(s0);
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below and reads ColorCB (ColorGrading::ColorCB) at b1,
+// declared exactly as before. Under ORG (ORG/ORGColorGrading.cpp) the same fields are the LATCH entry ColorGradingFrame
+// (struct ColorConstants), and each field is copied into a static of the same name, so the grading code reads them as
+// it does under D3D11 (ORG_GLOBAL_LATCH_BEGIN). The fields are listed once, in COLOR_CB_FIELDS: M(type, name) for a
+// value, A(type, name, count) for an array.
+#define COLOR_GRADING_RESOURCES(X)         \
+	X(SRV, Texture2D<float4>, TexColor, 0) \
+	X(SRV, Texture3D<float4>, TexLUT, 1)   \
+	X(UAV, RWTexture3D<float4>, RWLUT, 0)  \
+	X(SAMPLER, SamplerState, LinearSampler, 0)
+ORG_PUSH_BLOCK(COLOR_GRADING_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, ColorConstants, ColorGradingFrame, 1))
+COLOR_GRADING_RESOURCES(ORG_RESOURCE)
 
 #include "PostProcessing/ColorGrading/Include/OpenDRTConfig.hlsli"
 
-cbuffer ColorCB : register(b1)
-{
-	float4 asccdl[3];
-	float4 liftgammagain[3];  // lift，gamma，gain
-	float4 inOutGamma;        // .z = input gamma, .w = output gamma
-	float4 oklchSaturation;
-	float4 oklchColorMixer[7];
-	float4 contrast;
-	float4 pivot;
-	float4 exposureTemperatureTint;
-	float4 shadows;
-	float4 midtones;
-	float4 highlights;
-	float4 shadowsHighlightsRange;  // shadowBegin, shadowEnd, highlightBegin, highlightEnd
+#define COLOR_CB_FIELDS(M, A)                                                                    \
+	A(float4, asccdl, 3)                                                                         \
+	A(float4, liftgammagain, 3) /* lift，gamma，gain */                                          \
+	M(float4, inOutGamma)       /* .z = input gamma, .w = output gamma */                        \
+	M(float4, oklchSaturation)                                                                   \
+	A(float4, oklchColorMixer, 7)                                                                \
+	M(float4, contrast)                                                                          \
+	M(float4, pivot)                                                                             \
+	M(float4, exposureTemperatureTint)                                                           \
+	M(float4, shadows)                                                                           \
+	M(float4, midtones)                                                                          \
+	M(float4, highlights)                                                                        \
+	M(float4, shadowsHighlightsRange) /* shadowBegin, shadowEnd, highlightBegin, highlightEnd */ \
+	A(float4, tonemapParams, 2)                                                                  \
+	A(float4, inputToWorking, 3)   /* scene RGB → working color space */                         \
+	A(float4, workingToTonemap, 3) /* working → tonemapper native space */                       \
+	A(float4, tonemapToOutput, 3)  /* tonemapper native → output space */                        \
+	A(float4, workingToXYZ, 3)     /* working → XYZ D65 (white balance and Oklab) */             \
+	A(float4, xyzToWorking, 3)     /* XYZ D65 → working */                                       \
+	M(float4, workingWhitePoint)   /* .xy = D65 reference white of the XYZ matrices */           \
+	M(float4, shadowsOffset)       /* SMH color offsets */                                       \
+	M(float4, midtonesOffset)                                                                    \
+	M(float4, highlightsOffset)                                                                  \
+	M(float4, cinematic) /* game value: saturation, brightness, contrast */                      \
+	M(float4, fade)      /* color */                                                             \
+	M(float4, tint)      /* color */                                                             \
+	M(uint, logType)                                                                             \
+	M(uint, skipLDR)                                                                             \
+	M(uint, skipLUT)                                                                             \
+	M(uint, enableTonemap)                                                                       \
+	M(uint, enableColorSpaceTransform)                                                           \
+	M(uint, enableHDR)          /* HDR display is enabled (auto-set from HDR feature) */         \
+	M(float, hdrPeakNits)       /* Maximum display brightness in nits for HDR */                 \
+	M(float, hdrPaperWhiteNits) /* Reference white brightness in nits for HDR */                 \
+	M(OpenDRTConfig, odrtConfig)
 
-	float4 tonemapParams[2];
-	float4 inputToWorking[3];    // scene RGB → working color space
-	float4 workingToTonemap[3];  // working → tonemapper native space
-	float4 tonemapToOutput[3];   // tonemapper native → output space
-
-	float4 workingToXYZ[3];  // working → XYZ D65 (white balance and Oklab)
-	float4 xyzToWorking[3];  // XYZ D65 → working
-
-	float4 workingWhitePoint;  // .xy = D65 reference white of the XYZ matrices
-
-	float4 shadowsOffset;  // SMH color offsets
-	float4 midtonesOffset;
-	float4 highlightsOffset;
-
-	// game value
-	float4 cinematic;  // saturation, brightness, contrast
-	float4 fade;       // color
-	float4 tint;       // color
-
-	uint logType;
-	uint skipLDR;
-	uint skipLUT;
-	uint enableTonemap;
-	uint enableColorSpaceTransform;
-	uint enableHDR;           // HDR display is enabled (auto-set from HDR feature)
-	float hdrPeakNits;        // Maximum display brightness in nits for HDR
-	float hdrPaperWhiteNits;  // Reference white brightness in nits for HDR
-
-	OpenDRTConfig odrtConfig;
-};
+ORG_GLOBAL_LATCH_BEGIN(ColorConstants, ColorCB, 1)
+COLOR_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(ColorConstants, ColorGradingFrame, 1)
+#define ORG_GLOBAL_LATCH ColorGradingFrame
+COLOR_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 #include "PostProcessing/ColorGrading/Include/GT7ToneMapping.hlsli"
 #include "PostProcessing/ColorGrading/Include/OpenDRT.hlsli"
@@ -879,8 +885,6 @@ float4 PSColorGrading(FullscreenTriangleVSOutput input) : SV_Target
 
 	return float4(color, 1);
 }
-
-RWTexture3D<float4> RWLUT : register(u0);
 
 [numthreads(8, 8, 8)] void CSLUTGen(uint3 DTid : SV_DispatchThreadID) {
 	float3 uvw = float3(DTid) / float3((LUT_SIZE - 1).xxx);

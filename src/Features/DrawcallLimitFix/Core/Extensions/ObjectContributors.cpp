@@ -1,4 +1,4 @@
-// The shading and frame-globals contributions' calls (see the header).
+// The shading and frame-globals contributions' calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"

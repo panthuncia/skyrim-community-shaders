@@ -1,5 +1,4 @@
-// Extended Translucency: the AnisotropicAlphaMaterial geometry extra and the Lighting key's spare bits (its material model, and the
-// permutation's ExtraFeatureDescriptor from them). Both gates read the feature live, as does SkinnedOnly (the join pool).
+// Extended Translucency: the AnisotropicAlphaMaterial geometry extra and the Lighting key's spare bits. Both read the feature live on the join pool.
 
 #include "Features/DrawcallLimitFix/Integrations/ExtendedTranslucency/ExtendedTranslucency.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
@@ -35,13 +34,13 @@ namespace DCLF::Integrations::ExtendedTranslucency
 			return material == Model::Disabled ? Model::DescriptorDisabled : material;
 		}
 
-		// The key's 3 bits: the model XOR DescriptorDisabled (0 for unblended geometry, and while the feature is unloaded).
+		// The key's 3 bits: the model XOR DescriptorDisabled. 0 for unblended geometry and while the feature is unloaded.
 		std::uint32_t KeyBits(const Api::LightingJoinView& a_view)
 		{
 			return globals::features::extendedTranslucency.loaded ? (Model::DescriptorDisabled ^ TranslucencyModelOf(a_view)) & 7u : 0u;
 		}
 
-		// Extended Translucency's material model, as its SetupGeometry hook sets it (the key carries it).
+		// The material model, as its SetupGeometry hook sets it.
 		std::uint32_t Permutation(std::uint32_t a_keyBits)
 		{
 			return globals::features::extendedTranslucency.loaded ?

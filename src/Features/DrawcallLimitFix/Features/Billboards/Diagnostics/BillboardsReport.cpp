@@ -1,5 +1,4 @@
-// Billboards' report lines (CS_DCLF_STATS, among the draws' async work): the billboard members, and with CS_DCLF_SET_PARITY the
-// engine's turns against DCLF's.
+// Billboards' report lines under CS_DCLF_STATS, plus the turn parity under CS_DCLF_SET_PARITY.
 
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
@@ -15,8 +14,7 @@ namespace DCLF::Features::Billboards
 	{
 		void Lines(std::string& a_text)
 		{
-			// The billboard members in the installed tables: objects of a family's key with a billboard mode (its turned key bits: the Effect
-			// family's).
+			// Only the Effect family's keys carry billboard mode bits.
 			std::uint32_t members = 0;
 			{
 				const auto& tables = Scene::FrameView::Get().GetTables();

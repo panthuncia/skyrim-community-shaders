@@ -1,11 +1,18 @@
-// FrameDriver: the render thread's DCLF work at each engine point of the frame (see the header).
+// FrameDriver: the render thread's DCLF work at each engine point of the frame.
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#include "Features/DrawcallLimitFix/Core/Render/StartupHold.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Globals.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "Testing/Testing.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Scene.h"
@@ -53,6 +60,20 @@ namespace DCLF
 		}
 	}
 
+	namespace
+	{
+		// The frame whose build point already ran at Renderer::Begin.
+		std::uint64_t s_buildPointFrame = 0;
+	}
+
+	void BuildPointAtFrameStart(std::uint64_t a_frame)
+	{
+		if (!globals::features::drawcallLimitFix.HooksInstalled())
+			return;
+		IndirectDraws::Get().BuildPoint();
+		s_buildPointFrame = a_frame;
+	}
+
 	FrameDriver& FrameDriver::Get()
 	{
 		static FrameDriver driver;
@@ -61,72 +82,62 @@ namespace DCLF
 
 	bool FrameDriver::BeginFrame(bool a_running, bool a_installed)
 	{
+		// The engine's update is over, so a detach still waiting for a re-attach is a removal.
+		SceneTracker::Get().PushHeldDetaches();
+		// Start a load's hold before anything checks whether a load screen is up.
+		if (a_installed)
+			LoadHold::OnFrameStart(a_running);
 		Diagnostics::Notify(Diagnostics::FrameBegin{ a_running });
-		// The occlusion maps the last frame took and drew are its own.
 		occlusionWanted = occlusionDrawn = 0;
-		// The graph's build point, every frame (loaded or not): an extension added or removed during the last frame is built here, before
-		// anything decides what the frame's recordings cover.
-		IndirectDraws::Get().BuildPoint();
+		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
+		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
+		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
+			IndirectDraws::Get().BuildPoint();
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
-		// The scene work on the render thread (Policy::ScenePassInline): the pump's wakes are dropped then, and the frame's start runs the
-		// pass itself (Coordinator::RunScenePassInline).
+		// Inline scene passes drop the pump's wakes and run the pass at frame start instead.
 		const bool inlinePass = Policy::ScenePassInline();
 		if (!a_running) {
-			// The passes apply the events alone while DCLF does not run (the tracked set stays current), and the switch catch-ups they ask
-			// for are still served (engine writes), as tree LOD's mirror is drained.
+			// While DCLF is off, the passes still apply events so the tracked set stays current.
 			if (a_installed) {
 				scene.SetScenePassMode(false, inlinePass);
 				if (!view.NoteLoadingScreen())
 					view.ServeFrameRequests(false);
 			}
-			// No frame values: nothing this frame submits waits for them.
 			FrameValues::Get().Skip();
 			return false;
 		}
-		// The engine's update is done: workers may read its scene graph until Present (EngineReadWindow).
+		// The engine's update is done, so workers may read its scene graph until Present.
 		EngineReadWindow::Open();
-		// The coordinator's pump runs the scene passes whenever its producers wake it. The frame's posts below (the frame inputs, the ahead
-		// context, the captures, the root states' task's) wake it once, when this scope ends.
+		// The posts below wake the coordinator once, when this scope ends.
 		ScenePassWakeBatch wakes;
 		scene.SetScenePassMode(true, inlinePass);
-		// The requested toggles applied, before the frame inputs carry them to the coordinator, which commits its next publication under
-		// them; the frames keep the installed publication's (Toggles::Adopt at the hand-over) until one committed under them is installed,
-		// drawing and covering as it says meanwhile (a toggle withdraws nothing). A change that enters the classification drops the cached
-		// verdicts (the coordinator drops them at its next pass, told by the frame inputs); so does a classify input's (Api/ClassifyInputs.h:
-		// a CS feature switched on or off that holds objects back, moving them between their held groups and the native loop).
+		// Apply requested toggles before the frame inputs carry them to the coordinator. Frames keep the installed publication's
+		// toggles until one committed under the new ones is installed. A classify input change also drops the cached verdicts.
 		static Extensions::ClassifyInputSet inputsSeen = Extensions::SampleClassifyInputs();
 		const auto inputs = Extensions::SampleClassifyInputs();
 		const bool togglesClassify = Toggles::Get().BeginFrame();
 		if (togglesClassify || inputs != std::exchange(inputsSeen, inputs))
 			view.RequestVerdictsInvalidated();
 		ScopedPerfEvent event("CS DCLF: scene tables");
-		// The frame number, the frame's globals captured and the frame inputs posted (an engine capture: the budget's scene captures).
 		{
 			DCLF_ZONE("CS.DCLF.BF.ViewBeginFrame");
 			RenderThreadBudget::Part captures(RenderThreadBudget::Bucket::SceneCaptures);
 			view.BeginFrame();
 		}
 		TracyCZoneN(bfCamera, "CS.DCLF.BF.Camera", true);
-		// The frame's camera duties from the main camera, under the frame's number: the camera cut, then the root states' frame inputs
-		// (Features/Fades: the fade test's eye and tree height test), with the primary cull installed.
 		PrimaryCull::Get().BeginFrameCamera();
 		if (PrimaryCull::Get().Installed())
 			Extensions::RootStatesFrameStart();
-		// The palette rows classes' frame start (Features/Particles: the main camera the frame's particle quads face, which FrameValues'
-		// producer expands them for, and the renderer's quads once).
 		Extensions::PaletteRowsFrameStart();
 		TracyCZoneEnd(bfCamera);
 		TracyCZoneN(bfAdopt, "CS.DCLF.BF.Adopt", true);
 		auto& draws = IndirectDraws::Get();
-		// A load screen's frames are claims-less whatever their snapshot (NoteLoadingScreen): neither waited for nor required covered.
+		// Load screen frames have no claims, so they are never waited for or required to be covered.
 		const bool loading = Scene::FrameView::IsLoadingScreenUp();
 		{
-			// The newest complete snapshot the builder posted, adopted whole - its revision, its draws and its publication (installed here
-			// with the log walked up to it, its toggles the frame's). Once DCLF draws, a frame whose newest is stale or none for the graph
-			// as built (a graph build, new main resources, targets or shadow format) waits here for the builder's next current one: a
-			// one-off stall on a rare event, never a frame handed back to the engine. Everything the builder needs is posted by now (the
-			// build point's revision inputs, the frame inputs above; AdoptCurrentSnapshot says why nothing later is).
+			// Once DCLF draws, a frame with a stale snapshot waits here for a current one rather than hand drawing back to the engine.
+			// Everything the builder needs has been posted by now.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			TracyCZoneN(bfAdoptSnapshot, "CS.DCLF.BF.AdoptCurrentSnapshot", true);
 			auto adopted = draws.AdoptCurrentSnapshot(!view.NotDrawingYet() && !loading);
@@ -139,54 +150,68 @@ namespace DCLF
 		}
 		TracyCZoneEnd(bfAdopt);
 		TracyCZoneN(bfViewsStart, "CS.DCLF.BF.ViewsStartAndLookups", true);
-		// The views' frame start before the coverage that decides whether their members are withheld (Features/FirstPerson's: the view's
-		// latch, targets, pipelines and resources).
+		// Views start before the coverage decision that withholds their members.
 		RunViewWork(Api::ViewPoint::FrameStartBeforeCoverage);
-		// The candidate entries changed since the sun exclusion's snapshot leave it (the engine culls them); the rest stand (the exclusion
-		// contribution's frameStart: Features/Shadows/Local's SunExclusionSlot::BeginFrame).
+		// Entries changed since the sun exclusion's snapshot leave it, and the engine culls them.
 		Extensions::ShadowExclusionFrameStart();
-		// The lookups are the installed publication's; what only the frame has goes to the scene lane (PostLookupInputs). DXVK's moves
-		// of the pinless imports first: the superseded textures leave the registry, the buffers go to their instances' next pass.
 		Diagnostics::Notify<Diagnostics::FramePoint::LookupsInstalled>();
-		ImportRelocations::Poll();
 		draws.PostLookupInputs();
 		TracyCZoneEnd(bfViewsStart);
 		{
 			DCLF_ZONE("CS.DCLF.BF.Claims");
-			// The claims are installed on every covered frame. Before the first (NotDrawingYet: tables, resources and the first revision
-			// being made) a frame has none, and the engine draws everything; after it, DCLF never hands drawing back: the frame waited for
-			// a snapshot it can draw from (AdoptCurrentSnapshot), so one it does not cover is a defect, reported with the coverage state
-			// (a load screen's frames aside: their claims are none anyway). A toggle withdraws nothing: the installed publication's toggles
-			// are the frame's.
+			// Before the first covered frame the engine draws everything. After it, an uncovered frame is a defect,
+			// because the frame already waited for a snapshot it can draw from. Load screen frames are the exception.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			if (draws.DecideCoverage() && view.HasInstalled())
+			const bool covered = draws.DecideCoverage();
+			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
+			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
+				static std::uint32_t s_uncovered = 0;
+				if (s_uncovered++ % 300 == 0)
+					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.GetFrame(), covered,
+						view.HasInstalled(), loading, draws.CoverageState());
+			}
+			if (covered && view.HasInstalled())
 				view.InstallClaims();
-			else if (!view.NotDrawingYet() && !loading)
+			else if (!view.NotDrawingYet() && !loading) {
+				// The graph itself stopped, so no snapshot can cover a frame again and that reason is the defect.
+				// "GPU completion timeline failed" means a timeline read UINT64_MAX, which Windows sets on a removed device's fences.
+				// A lost device ends the game here with its reason logged. A fatal message box would hide behind the full-screen window.
+				const HRESULT removed = globals::d3d::device ? globals::d3d::device->GetDeviceRemovedReason() : S_OK;
+				if (removed != S_OK || Testing::DeviceLossSeen()) {
+					const auto reason = fmt::format("Drawcall Limit Fix: the GPU device was lost (D3D11's removed reason {:#x}, BasicRHI saw it {}) before frame {}; "
+													"the game ends. The GPU work it was running is in the log above (crash markers with DXVK_DEBUG=hang, or the hang "
+													"report's stream order)",
+						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.GetFrame());
+					logger::critical("{}", reason);
+					Testing::ReportDeviceLost("D3D11 device removed at DCLF's frame start", 0, "", "");
+					spdlog::default_logger()->flush();
+					::TerminateProcess(::GetCurrentProcess(), 0xDEAD0007u);
+				}
+				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
+													 "draws. D3D11's device removed reason: {:#x}",
+						view.GetFrame(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} is not covered by the snapshot it adopted after waiting for a current one, and DCLF "
 												 "does not hand drawing back to the engine once it draws: {}",
 					view.GetFrame(), draws.CoverageState()));
-			// The releases' report (the render thread's: the flip to its release), with the engine side's, once a report window.
+			}
 			Reports::GateReleases(view.GetFrame());
-			// The components' adoption of the installed publications' deltas, before the culls (in the frame whose claims are post-swap):
-			// the LOD gates the installed publications flipped, released.
+			// Release the LOD gates the installed publications flipped, before the culls.
 			Extensions::ComponentsAdopt(view.GetFrame(), view.AdoptedClaims(), view.AdoptedDeltas());
 			view.ClearAdoptedDeltas();
 		}
 		Diagnostics::Notify<Diagnostics::FramePoint::ClaimsInstalled>();
 		TracyCZoneN(bfKicks, "CS.DCLF.BF.AheadAndKicks", true);
-		// The CategoryRoot views' members the frame's epochs draw (the first person's): their rows and palettes taken by the frame values'
-		// kick (below) on this thread, before Main::Draw moves the skeleton into its root's space.
+		// First person's rows and palettes must be taken before Main::Draw moves the skeleton into its root's space.
 		bool rootViewsCovered = false;
 		for (std::uint32_t i = 0; i < Extensions::Views().rootCount; ++i)
 			rootViewsCovered = rootViewsCovered || draws.ViewCovered(Extensions::Views().rootViews[i]);
 		FrameValues::Get().SetRootViewClaims(rootViewsCovered ? view.FrameClaims() : nullptr);
-		// What the next builds ahead take from the frame.
 		{
 			DCLF_ZONE("CS.DCLF.BF.PostAheadContext");
 			draws.PostAheadContext();
 		}
-		// The root states' task (Features/Fades' write-back of the stood-in roots) and the visibility readbacks: tasks on DCLF's executor,
-		// never joined.
+		// Tasks on DCLF's executor that are never joined.
 		{
 			DCLF_ZONE("CS.DCLF.BF.RootStatesKick");
 			Extensions::RootStatesKick();
@@ -196,15 +221,13 @@ namespace DCLF
 			draws.KickVisibilityReadback();
 		}
 		TracyCZoneEnd(bfKicks);
-		// What the coordinator's passes asked of the render thread, served, and its captures posted for them (not while a load screen is
-		// up): the switch catch-ups (engine writes, before the culls), the category capture, the mirror's capture requests, tree LOD's mirror.
+		// Serve what the coordinator asked of the render thread, outside load screens. Switch catch-ups write engine memory, so they go before the culls.
 		{
 			const auto eventsStart = std::chrono::steady_clock::now();
 			if (!view.NoteLoadingScreen())
 				view.ServeFrameRequests(true);
 			counters.timing.eventsMs += MillisecondsSince(eventsStart);
 		}
-		// The shadow sources' frame start, in source order (Features/Shadows/Local's point-light culls: this frame's paraboloid exclusion).
 		TracyCZoneN(bfFamilies, "CS.DCLF.BF.SourcesAndFamilies", true);
 		{
 			DCLF_ZONE("CS.DCLF.BF.ShadowSourcesFrameStart");
@@ -214,8 +237,7 @@ namespace DCLF
 			DCLF_ZONE("CS.DCLF.BF.RefreshMainRenderers");
 			PassCapture::Get().RefreshMainRenderers();
 		}
-		// The draw families' for the frame (Features/TreeLod's), before the main camera's cull registers its passes; the views' work after
-		// it (Features/Reflection's: the water reflection's forward pipelines).
+		// Draw families decide before the main camera's cull registers its passes.
 		{
 			DCLF_ZONE("CS.DCLF.BF.DecideDrawFamilies");
 			draws.DecideDrawFamilies(view.GetFrame());
@@ -229,20 +251,14 @@ namespace DCLF
 			PrimaryCull::Get().PublishListFilter();
 		}
 		TracyCZoneEnd(bfFamilies);
-		// The frame's values (FrameValues): the placements and the shading the frame draws with, made on the pool from the plans and named
-		// slots the installed publications carried, and waited for by the GPU; the shading fields captured here (Integrations/AdvancedSkin's
-		// wetness: Skin's cache is the render thread's). Then the scene payload: the installed snapshot's parts' versions (PayloadPools,
-		// built and GPU ready before it was posted), named for the frame's epochs (MakeFramePayload).
 		// The capture reads the shading changes the take empties.
 		{
 			DCLF_ZONE("CS.DCLF.BF.FrameValuesKick");
 			TracyCZoneN(bfFields, "CS.DCLF.BF.CaptureShadingFields", true);
 			auto fields = Extensions::CaptureShadingFields(view);
 			TracyCZoneEnd(bfFields);
-			// The CPU frames signalled before the last present join its seal: the producers' uploads may wait for those points only.
+			// Producers' uploads may only wait for CPU frames signalled before the last present.
 			SealCpuFrames();
-			// The late poses' plan (Core/LatePoses): the last frame's hidden nodes, which the frame's producer applies to a second copy of
-			// its rows.
 			FrameValues::Get().SetLatePoses(LatePoses::PrepareFrame());
 			(void)FrameValues::Get().Kick(view.TakePlacementPlans(), view.TakeShadingItems(), std::move(fields), view.FrameGlobalsOfFrame());
 		}
@@ -250,8 +266,7 @@ namespace DCLF
 			DCLF_ZONE("CS.DCLF.BF.MakeFramePayload");
 			(void)draws.MakeFramePayload();
 		}
-		// Under the parities the scene pass runs here, inline, so the render thread's observers keep their placement; the normal path
-		// never waits for a pass.
+		// Parity modes run the scene pass inline here so render-thread observers stay in place. The normal path never waits for a pass.
 		if (inlinePass)
 			scene.RunScenePassInline();
 		frameRan = true;
@@ -260,21 +275,13 @@ namespace DCLF
 
 	void FrameDriver::DepthCommitted()
 	{
-		// The Z-prepass and the views' work here (the reflection's faces and first person's depth, which the depth epoch hosts) are submitted
-		// under depth.committed.
 		Extensions::TriggerScope trigger(Draws::CoreTriggerOf(Draws::CoreTrigger::DepthCommitted));
-		// The late poses (Core/LatePoses): parts a plugin hid after the shadow maps. Before the depth epoch is submitted, so the epochs
-		// from here read the late copies the frame's producer filled, when the frame's plan holds now.
+		// Late poses are parts a plugin hid after the shadow maps. Confirm them before the depth epoch, so later epochs read the late copies.
 		if (LatePoses::ConfirmFrame())
 			FrameValues::Get().UseLatePoses();
-		// The views' work at the depth commit (Features/Reflection's: the frame's reflection faces, every TESWaterReflections::Update of the
-		// frame having run, two a frame, a face each, drawn by DCLF before the water reads the cube; dclf-architecture.md, "Water
-		// reflections"; then Features/FirstPerson's: the frame's first-person depth, its camera set by Main::Draw before RenderDepth, drawn
-		// into the main depth before the engine's first-person draw and kPOST_ZPREPASS_COPY), run by the depth commit inside its epoch's
-		// execution: the depth epoch hosts the views' passes (Schedule/Frame.cpp), which follow its index pool copies, so they draw the
-		// frame's publication whose scene list they cull (against the frame before's pool, a slot the publication gave another geometry
-		// would draw its old indices against its new vertices: a device fault). A frame whose depth epoch did not commit runs it after (its
-		// inputs are then stale: nothing drawn, the features' frame kept).
+		// The depth epoch hosts the view passes, such as reflection faces and first-person depth, so they draw after its index pool copies.
+		// Drawn against the previous frame's pool, a reused slot would read old indices with new vertices and fault the device.
+		// A frame whose depth epoch did not commit runs the view work after, with stale inputs, and draws nothing.
 		bool ran = false;
 		const std::function<void()> work = [&] {
 			ran = true;
@@ -297,8 +304,7 @@ namespace DCLF
 
 	void FrameDriver::BeforePresent()
 	{
-		// The CPU pipeline's frame signal behind its sites' callbacks: the present sends it on with the frame's work. EndFrame runs after
-		// the present (State::Reset), where it would ride the next frame's command list.
+		// Queue the frame signal before the present. EndFrame runs after the present and would ride the next frame's command list.
 		Direct::QueueFrameSignal();
 		FrameValues::Get().WaitSignalSubmitted();
 		LatePoses::CheckAtPresent();
@@ -306,9 +312,8 @@ namespace DCLF
 
 	void FrameDriver::EndFrame(bool a_running)
 	{
-		// The session's first frames' hold (StartupHold.h): advanced, and released once DCLF covers its views.
-		StartupHold::OnFrameEnd(a_running);
-		// The engine's next update follows Present: no worker may be inside its memory from here (EngineReadWindow).
+		LoadHold::OnFrameEnd(a_running);
+		// The engine's next update follows Present, so no worker may be inside its memory from here.
 		{
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
 			EngineReadWindow::Close();
@@ -317,29 +322,26 @@ namespace DCLF
 		TracyCZoneN(efCull, "CS.DCLF.EF.PrimaryCull", true);
 		PrimaryCull::Get().EndFrame();
 		TracyCZoneEnd(efCull);
-		// The CPU pipeline's frame (its signal queued before the present, BeforePresent), first: the retirement points bound below cover it.
+		// End the CPU pipeline's frame first, so the retirement points bound below cover it.
 		Direct::EndFrame();
 		TracyCZoneN(efBind, "CS.DCLF.EF.BindAdoptedAndValues", true);
-		// The growable versions and the payload the frame read: kept from reuse until what it submitted retires.
+		// Keep what the frame read from reuse until its GPU work retires.
 		IndirectDraws::Get().BindAdopted();
-		// What the frame submitted: the GPU point its frame values' buffer is free again after.
 		FrameValues::Get().EndFrame();
 		FrameData::EndFrame();
 		TracyCZoneEnd(efBind);
 		TracyCZoneN(efReports, "CS.DCLF.EF.ReportsAndReleases", true);
-		// The frame's reports, once a frame number (a menu or a load holds the number still while Presents go on).
+		// Once per frame number. Menus and loads hold the number still while Presents continue.
 		if (a_running) {
 			static std::uint32_t reportedFrame = ~0u;
 			if (const std::uint32_t frame = Scene::FrameView::Get().GetFrame(); std::exchange(reportedFrame, frame) != frame)
 				Reports::RenderThread(frame);
 		}
-		// A load screen (in menus too): noted once and the set withdrawn; the coordinator's passes apply the queues meanwhile.
 		Scene::FrameView::Get().NoteLoadingScreen();
-		// Under the parities the passes run inline at the frame's start alone: with no frame since the last Present (menus, load screens),
-		// one applying the events alone runs here, so the queues do not wait for a frame.
+		// In parity modes passes only run inline at frame start. With no frame since the last Present, run one here so the queues do not stall.
 		if (const bool ran = std::exchange(frameRan, false); Policy::ScenePassInline() && !ran)
 			Scene::Coordinator::Get().ApplyEventsInline();
-		// What the scene work let go of: dropped on the engine's main thread with nothing reading them.
+		// Dropped on the engine's main thread, where nothing reads them.
 		EngineReleases::Release();
 		TracyCZoneEnd(efReports);
 		counters.timing.eventsMs += MillisecondsSince(start);
@@ -354,8 +356,7 @@ namespace DCLF
 	{
 		const auto start = std::chrono::steady_clock::now();
 		shadowViewsMs = 0.0;
-		// The frame's shadow views begun (Core's), then their coverage decided (the shadow epochs': Features/Shadows/Engine), before the
-		// engine keeps its first light: its registrations, the sun's claims and the census test this frame's coverage.
+		// Decide shadow coverage before the engine keeps its first light, since its registrations and the sun's claims depend on it.
 		Draws::BeginShadowViews();
 		if (const auto* epochs = Extensions::ShadowEpochs())
 			epochs->beforeShadowCasters();
@@ -369,10 +370,17 @@ namespace DCLF
 		AddShadowViewsTime(start);
 	}
 
+	void FrameDriver::ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin)
+	{
+		const auto start = std::chrono::steady_clock::now();
+		Draws::ShadowFocusAccumulating(a_light, a_begin);
+		AddShadowViewsTime(start);
+	}
+
 	void FrameDriver::ShadowCastersSelected()
 	{
 		const auto start = std::chrono::steady_clock::now();
-		// The frame's shadow views listed from DCLF's selection (Core's), in the order the engine renders them at the shadow draw.
+		// Listed in the order the engine renders them.
 		Draws::ListShadowViews();
 		AddShadowViewsTime(start);
 	}
@@ -382,11 +390,9 @@ namespace DCLF
 		ScopedPerfEvent event("CS DCLF: shadow views");
 		const auto start = std::chrono::steady_clock::now();
 		Diagnostics::Notify<Diagnostics::FramePoint::ShadowViewsBegin>();
-		// The revision inputs the listed views move (Core's), then the shadow frame begun (the shadow epochs': Features/Shadows/Engine).
 		Draws::NoteShadowRevisionInputs();
 		if (const auto* epochs = Extensions::ShadowEpochs())
 			epochs->beforeShadowMaps();
-		// The frame's shadow views' points, whole (BeforeShadowCasters on).
 		const double ms = std::exchange(shadowViewsMs, 0.0) + MillisecondsSince(start);
 		counters.timing.sceneMs += ms;
 		counters.timing.sceneMaxMs = std::max(counters.timing.sceneMaxMs, ms);
@@ -394,19 +400,21 @@ namespace DCLF
 
 	void FrameDriver::AfterShadowMaps()
 	{
-		// The frame's shadow epoch (Features/Shadows/Engine, under its shadow-maps.after trigger), with the occlusion maps OcclusionReady
-		// took before the engine drew the shadow maps (Skylighting set their views up and cleared them there): one epoch for both.
+		// One epoch draws the shadow views and the occlusion maps taken before the engine drew the shadow maps.
 		const std::uint32_t wanted = std::exchange(occlusionWanted, 0u);
 		PassCapture::Get().SetOcclusionPhase(0);
 		const auto* epochs = Extensions::ShadowEpochs();
 		occlusionDrawn = epochs ? epochs->afterShadowMaps(wanted) : 0u;
+		occlusionEverDrawn |= occlusionDrawn;
+		for (std::uint32_t map = 0; map < occlusionNeedStreak.size(); ++map)
+			if (occlusionDrawn & (1u << map))
+				occlusionNeedStreak[map] = 0;
 		Diagnostics::Notify(Diagnostics::OcclusionMapsDrawn{ occlusionDrawn });
 	}
 
 	void FrameDriver::EarlyPrepass()
 	{
-		// Once the registration jobs have finished: the frame inputs posted for the next scene pass (Light Limit Fix's room map, the
-		// capture's drain), then the captures the last pass asked for, answered for the next. Nothing here reads the coordinator's state.
+		// Runs after the registration jobs finish. Reads none of the coordinator's state.
 		ScopedPerfEvent event("CS DCLF: accumulator tables and pipelines");
 		const auto start = std::chrono::steady_clock::now();
 		auto& view = Scene::FrameView::Get();
@@ -421,9 +429,9 @@ namespace DCLF
 	void FrameDriver::Prepass()
 	{
 		auto& view = Scene::FrameView::Get();
-		// The one point in the frame where `currentAccumulator` is the main camera's accumulator: latched for the frame's readers.
+		// The only point in the frame where `currentAccumulator` is the main camera's, so latch it for the frame.
 		view.LatchAccumulator();
-		// The camera-dependent half of the per-frame constants: the main camera's shadow state is current here.
+		// The main camera's shadow state is current here.
 		view.RefreshFrameConstants();
 		Diagnostics::Notify<Diagnostics::FramePoint::PrepassEnd>();
 	}
@@ -432,20 +440,16 @@ namespace DCLF
 	{
 		auto& capture = PassCapture::Get();
 		capture.SetOcclusionPhase(0);
-		// The CPU pipeline's graph: the shadow site draws the maps with the shadow views while it is live (Direct::ShadowSiteLive); until
-		// then the engine renders them.
+		// In the CPU pipeline the engine renders the maps until the shadow site is live.
 		if (!a_running || a_map >= Extensions::kOcclusionMaps || !Extensions::OcclusionOn(ActiveToggles(), a_map) || (Direct::CpuFrame() && !Direct::ShadowSiteLive()))
 			return false;
-		// At the shadow maps, before the engine draws them: DCLF draws the map's members of the set in this frame's shadow epoch when the
-		// selected revision's shadow shape has the map's view, and the frame's set draws its phase (none until then: a frame after the first
-		// that drew it). Else the engine renders the map whole at its own point (OcclusionNeedsEngine).
+		// DCLF draws the map in this frame's shadow epoch when the revision's shadow shape has its view. Otherwise the engine renders it whole.
 		const auto* epochs = Extensions::ShadowEpochs();
 		const bool ready = epochs && epochs->occlusionReady(a_map);
 		const std::uint8_t phase = Extensions::OcclusionMapOf(a_map).phase;
 		auto& view = Scene::FrameView::Get();
 		const auto set = view.FrameClaims();
-		// Occluders not yet members of the map's phase (joining) are left out of DCLF's map until they join: the engine's cull is no
-		// fallback for them (it would cull the whole scene for a few objects).
+		// Occluders still joining the map's phase are left out until they join. The engine's cull is no fallback, it would cull the whole scene.
 		const bool taken = ready && set && (set->drawn & phase);
 		occlusionFrames.native[a_map] += ready ? 0 : 1;
 		occlusionFrames.joining[a_map] += taken && view.SetLacking(phase) > 0 ? 1 : 0;
@@ -461,20 +465,21 @@ namespace DCLF
 	{
 		if (a_map < 32)
 			occlusionHeld &= ~(1u << a_map);
-		// At the engine's occlusion point: the engine renders the map whole unless this frame's shadow epoch drew it (AfterShadowMaps).
 		const bool needed = !a_running || a_map >= Extensions::kOcclusionMaps || !(occlusionDrawn & (1u << a_map));
-		// The engine's cull of the map reads the scene lists: whole again.
+		// The engine's cull of the map reads the scene lists, so make them whole again.
 		if (needed)
 			PrimaryCull::Get().RestoreSceneLists();
 		if (a_map < Extensions::kOcclusionMaps)
 			occlusionFrames.engine[a_map] += needed ? 1 : 0;
-		// A map DCLF draws in normal play (on, not its parity's reference) that the engine would render whole: a view DCLF does not cover
-		// yet. Held in the session's first frames (StartupHold.h: black, the map not rendered), else counted.
+		// A map DCLF should draw but the engine must render. Held during a load's hold, otherwise counted.
 		if (needed && a_running && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(ActiveToggles(), a_map)) {
-			// Held: the map still renders at the engine's point, its camera set and DCLF's view of it taken (OcclusionView), but without the
-			// engine's cull (the shell skips SetupMask for a held map, OcclusionHeld): no occluder until DCLF takes it, under the blackout.
-			if (StartupHold::Active()) {
-				StartupHold::NoteHeld(StartupHold::View::Occlusion);
+			// A held map still renders at the engine's point but without the engine's cull, so it has no occluders until DCLF takes it.
+			// After a coc or the first load DCLF cannot draw a map for a few frames, and the map is held meanwhile.
+			const std::uint32_t streak = ++occlusionNeedStreak[a_map];
+			if (!LoadHold::Active() && ((occlusionEverDrawn & (1u << a_map)) || streak <= kOcclusionReentryFrames))
+				LoadHold::BeginReentry("an occlusion map DCLF cannot draw this frame (its layout is new, or the graph rebuilds)");
+			if (LoadHold::Active()) {
+				LoadHold::NoteHeld(LoadHold::View::Occlusion);
 				occlusionHeld |= 1u << a_map;
 				return needed;
 			}
@@ -494,21 +499,16 @@ namespace DCLF
 
 	void FrameDriver::BeforeOpaquePass()
 	{
-		// The main pass's bindings for this frame's colour epoch, where the opaque batches start. The engine binds the G-buffer (and clears
-		// it) only when a draw applies its state, so the state is applied here as the first draw would apply it: a frame whose every
-		// lighting draw in view is DCLF's has no native draw to take them from. The end of the pass is no substitute: by then the sky's
-		// clouds have rebound Cloud Shadows' t26.
+		// The engine binds and clears the G-buffer only when a draw applies its state, so apply it here as the first draw would.
+		// A frame where DCLF owns every lighting draw has no native draw to do it. The pass end is too late, the clouds have rebound t26.
 		Engine::ApplyPendingState();
 		globals::EndDCLFDepthTrace();
-		// The main view's capture (Features/MainView: the targets' formats, the bindings, the engine's states); the frame it was taken in,
-		// for the native draws' observers.
 		if (const auto* view = Extensions::PrimaryView(); view && view->beforeOpaque())
 			captureFrame = Scene::FrameView::Get().GetFrame();
 	}
 
 	void FrameDriver::AfterOpaquePass()
 	{
-		// The main view's colour epoch (Features/MainView, under its opaque.after trigger).
 		if (const auto* view = Extensions::PrimaryView())
 			view->afterOpaque();
 	}
@@ -516,8 +516,7 @@ namespace DCLF
 	void FrameDriver::NativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 	{
 		auto& view = Scene::FrameView::Get();
-		// A ProjectedUV draw has SetupGeometry's four projected textures bound here: kept for the pipelines DCLF builds with that bit (the
-		// Hair technique binds none).
+		// A ProjectedUV draw has SetupGeometry's four projected textures bound here. Hair binds none.
 		if (globals::deferred->deferredPass && (PassDescriptorOf(a_pass->passEnum) & 0x8000u) && ((PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f) != 6)
 			view.NoteProjectedTextures();
 		if (Diagnostics::Armed<Diagnostics::NativeLightingDraw>()) {

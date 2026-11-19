@@ -1,5 +1,4 @@
-// The entry exclusions' build (ExclusionBuild.h): the verdicts kept by what moved, their stamped words and forward links, and the caches
-// by mode. Snapshot builder, on DCLF's pool.
+// Builds the entry exclusions on DCLF's pool, keeping verdicts and updating only what moved.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/ExclusionBuild.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -24,11 +23,8 @@
 namespace DCLF::Features::Shadows::Local
 {
 	/**
-	 * @brief What BuildSunExclusion keeps in a SunExclusionCache (its index) to update its verdicts by what moved instead of judging every
-	 * object again: the objects indexed by their geometry (an entry's verdict is read from the objects of its geometries), the mode's
-	 * inputs, the exclusion the verdicts were published in (published again while nothing moved), the stamped words every version
-	 * shares (SunExclusion), and the ends of the forward chains (ForwardExclusion). The snapshot builder's thread only (one build
-	 * at a time).
+	 * @brief What a SunExclusionCache keeps to update its verdicts by what moved instead of judging every object again.
+	 * Snapshot builder thread only, one build at a time.
 	 */
 	struct SunExclusionIndex
 	{
@@ -38,21 +34,18 @@ namespace DCLF::Features::Shadows::Local
 		std::vector<const RE::BSGeometry*> objectGeometry;
 		std::vector<std::uint32_t> nextObject;
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> firstObject;
-		// The mode's inputs as of the last build, per object: kInput, of them kRegion (the region's, kept by the kept build's moves) and
-		// kList (the frame's list's: a few, read again whenever the inputs may have moved), kScratch a build's; and the list's ones.
+		// Input marks per object. kRegion and kList are the two input sources, and kScratch is a build's.
 		static constexpr std::uint8_t kInput = 1, kScratch = 2, kRegion = 4, kList = 8;
 		std::vector<std::uint8_t> inputMark;
 		std::vector<std::uint32_t> faces;
 		std::uint32_t modeBits = 0;
-		// A build's scratch: the objects it looks at again, the entries it judges again, the inputs it looks at again.
 		std::vector<std::uint8_t> objectMark, entryMark;
 		std::vector<std::uint32_t> objects, entries, changed, moved;
-		// The stamped words, grown by replacing them (the versions made before hold theirs).
+		// Grown by replacement, so older versions keep theirs.
 		std::shared_ptr<std::atomic<std::uint32_t>[]> removed, cleared;
 		std::shared_ptr<std::atomic<std::uint64_t>[]> lightReach;
 		std::uint32_t removedCount = 0, clearedCount = 0;
-		// Every exclusion made for the last candidates the mode was built for whose chain is still held (each link is held by the one
-		// before it; the first by whoever holds the built exclusion): translated to the next candidates when they move.
+		// Exclusions made for older candidates whose chain is still held. Each link is held by the one before it.
 		std::vector<std::weak_ptr<SunExclusion>> ends;
 		bool valid = false;
 
@@ -85,7 +78,6 @@ namespace DCLF::Features::Shadows::Local
 					return;
 				}
 		}
-		/** @brief Every object indexed again from the tables. */
 		void Reindex(const SceneTables& a_tables)
 		{
 			const std::size_t count = a_tables.objects.size();
@@ -109,7 +101,6 @@ namespace DCLF::Features::Shadows::Local
 			if (entryMark.size() < a_entries)
 				entryMark.resize(a_entries, 0);
 		}
-		/** @brief The stamped words for a_entries entries and a_geometries geometries (a_reach: with the reach words). */
 		void EnsureStamps(std::uint32_t a_entries, std::uint32_t a_geometries, bool a_reach)
 		{
 			if (!removed || removedCount < a_entries || (a_reach && !lightReach)) {
@@ -136,7 +127,6 @@ namespace DCLF::Features::Shadows::Local
 
 	namespace
 	{
-		/** @brief The cache's index, made with its first build. */
 		SunExclusionIndex& IndexOf(SunExclusionCache& a_cache)
 		{
 			if (!a_cache.index)
@@ -145,10 +135,8 @@ namespace DCLF::Features::Shadows::Local
 		}
 
 		/**
-		 * @brief An object blocks its entry when the engine would cast it here and this build does not draw it (volumetric-only too: a
-		 * paraboloid light registers them). A point light's registration also sets its activeLightMask bit on every geometry its
-		 * cull reaches; the Point source's culls (Features/Shadows/Local) write those for a skipped entry themselves. A fading object (ShadowReject::Faded) counts as a
-		 * caster: the exclusion is used a frame later and the culls update the fade themselves (BSFadeNode::OnVisible).
+		 * @brief Whether an object blocks its entry: the engine would cast it and this build does not draw it.
+		 * A fading object counts as a caster, because the exclusion is used a frame later and the culls update fades themselves.
 		 */
 		bool EngineCaster(const SceneTables& a_tables, std::size_t a_object)
 		{
@@ -156,7 +144,7 @@ namespace DCLF::Features::Shadows::Local
 			       (a_object < a_tables.shadowReject.size() && a_tables.shadowReject[a_object] == static_cast<std::uint8_t>(ShadowReject::Faded));
 		}
 
-		/** @brief The mode's inputs: a_mark |= a_bit for each (a_list: each once). */
+		/** @brief Sets a_bit in a_mark for each of the mode's inputs. */
 		void CollectInputs(const Api::ShadowExclusionBuild& a_build, std::vector<std::uint8_t>& a_mark, std::uint8_t a_bit, std::vector<std::uint32_t>& a_list)
 		{
 			a_build.ForEachInput([&](const Draws::DrawInput& a_input) {
@@ -168,11 +156,10 @@ namespace DCLF::Features::Shadows::Local
 			});
 		}
 
-		/** @brief Every entry judged from every object (the reference the kept verdicts are checked against). a_isInput: per object. */
+		/** @brief Judges every entry from every object. The reference the kept verdicts are checked against. */
 		void JudgeAll(const EntrySpace& a_candidates, const SceneTables& a_tables, const std::vector<std::uint8_t>& a_isInput, std::uint8_t a_bit,
 			std::vector<std::uint8_t>& a_out)
 		{
-			// Every live entry excluded unless a caster under it is not drawn; a free index never.
 			const std::size_t count = a_candidates.Capacity();
 			a_out.assign(count, 0);
 			for (std::size_t e = 0; e < count; ++e)
@@ -188,9 +175,8 @@ namespace DCLF::Features::Shadows::Local
 		}
 
 		/**
-		 * @brief The forward links: every chain end made for other candidates translated to a_built's (TranslateExclusion, sharing its
-		 * stamped words), so a reader holding an older verdict takes the one for its frame's candidates by following links
-		 * (ForwardExclusion) instead of translating. The ends whose chain nobody holds any more are dropped.
+		 * @brief Translates every chain end to a_built's candidates, so a reader with an older verdict follows links instead of translating.
+		 * Ends nobody holds any more are dropped.
 		 */
 		void ForwardEnds(SunExclusionIndex& a_index, const std::shared_ptr<SunExclusion>& a_built, bool a_paraboloid)
 		{
@@ -206,8 +192,7 @@ namespace DCLF::Features::Shadows::Local
 					ends.push_back(end);
 					continue;
 				}
-				// The paraboloid's translation keeps the version (the point-light culls' filter stands); the sun's takes a new one when an
-				// entry leaves (the scene lists' filter is judged again), as the frame's translation did.
+				// The paraboloid's translation keeps the version so the point-light filter stands. The sun's takes a new one when an entry leaves.
 				auto next = TranslateExclusion(end, a_built->candidates, !a_paraboloid, a_paraboloid, &a_index.changed, a_built.get());
 				next->forwardChanged = a_index.changed;
 				end->forwardOwned = next;
@@ -219,7 +204,6 @@ namespace DCLF::Features::Shadows::Local
 			a_index.ends = std::move(ends);
 		}
 
-		/** @brief The builds' versions (translated copies count apart: TranslateExclusion). */
 		std::uint64_t NextExclusionVersion()
 		{
 			static std::atomic<std::uint64_t> versions{ 0 };
@@ -281,7 +265,7 @@ namespace DCLF::Features::Shadows::Local
 			}
 		};
 
-		/** @brief The objects the change log moved: their old and new geometries' entries noted, the index relinked. */
+		/** @brief Notes the entries of objects the change log moved, and relinks the index. */
 		void NoteChangedObjects(SunExclusionBuild& b)
 		{
 			auto& x = b.x;
@@ -304,7 +288,7 @@ namespace DCLF::Features::Shadows::Local
 			x.objects.clear();
 		}
 
-		/** @brief The input marks of a_moved settled (kInput from kRegion, kList; kScratch cleared): each that joined or left noted (a_note). */
+		/** @brief Settles the input marks of a_moved. a_note notes each object that joined or left. */
 		void SettleInputs(SunExclusionBuild& b, std::span<const std::uint32_t> a_moved, bool a_note)
 		{
 			auto& x = b.x;
@@ -318,10 +302,7 @@ namespace DCLF::Features::Shadows::Local
 			}
 		}
 
-		/**
-		 * @brief The mode's inputs read whole: the region's and the list's marks set again from the build's inputs, every object's
-		 * settled (O(objects): a new cache, or one that missed a kept build). a_note: the geometries of those that joined or left noted.
-		 */
+		/** @brief Reads the mode's inputs whole, O(objects). For a new cache or one that missed a kept build. */
 		void CollectWhole(SunExclusionBuild& b, bool a_note)
 		{
 			auto& x = b.x;
@@ -346,10 +327,7 @@ namespace DCLF::Features::Shadows::Local
 			all.clear();
 		}
 
-		/**
-		 * @brief The mode's inputs by the kept build's moves (the region's joined and left, since the build the cache read last) and its
-		 * list's again (a few): only the objects they name are looked at; those that joined or left have their geometries noted.
-		 */
+		/** @brief Applies the kept build's input moves, looking only at the objects they name. */
 		void ApplyMovedInputs(SunExclusionBuild& b)
 		{
 			auto& x = b.x;
@@ -386,10 +364,7 @@ namespace DCLF::Features::Shadows::Local
 			moved.clear();
 		}
 
-		/**
-		 * @brief The mode's inputs again: the geometries of the objects that joined or left them noted. By the kept build's moves when the
-		 * cache read the inputs as of the build before, else read whole (CollectWhole).
-		 */
+		/** @brief Notes the objects that joined or left the inputs, by moves when possible, else whole. */
 		void NoteMovedInputs(SunExclusionBuild& b)
 		{
 			DCLF_ZONE("CS.DCLF.BuildSunExclusion.Inputs");
@@ -402,7 +377,6 @@ namespace DCLF::Features::Shadows::Local
 			x.modeBits = b.modeBits;
 		}
 
-		/** @brief The candidates' moved entries noted (ChangedEntriesByLog), the verdicts resized to them. */
 		void NoteMovedCandidates(SunExclusionBuild& b)
 		{
 			auto& c = b.c;
@@ -416,7 +390,7 @@ namespace DCLF::Features::Shadows::Local
 			c.excluded.resize(b.count, 0);
 		}
 
-		/** @brief Each noted entry judged again from the objects of its geometries. Returns whether a verdict flipped. */
+		/** @brief Judges each noted entry again. Returns whether a verdict flipped. */
 		bool JudgeNotedEntries(SunExclusionBuild& b)
 		{
 			auto& c = b.c;
@@ -445,7 +419,7 @@ namespace DCLF::Features::Shadows::Local
 			return flipped;
 		}
 
-		/** @brief The kept verdicts updated by what moved. Returns whether a verdict flipped. */
+		/** @brief Updates the kept verdicts by what moved. Returns whether a verdict flipped. */
 		bool UpdateKeptVerdicts(SunExclusionBuild& b, bool a_candidatesMoved)
 		{
 			b.x.Grow(b.objects, b.count);
@@ -458,7 +432,7 @@ namespace DCLF::Features::Shadows::Local
 			return JudgeNotedEntries(b);
 		}
 
-		/** @brief The kept verdicts' exclusion: the last again while nothing it was judged from moved, else a copy of the cache's. */
+		/** @brief The kept verdicts' exclusion: the same one while nothing moved, else a copy. */
 		std::shared_ptr<SunExclusion> KeptExclusion(SunExclusionBuild& b, bool a_flipped, bool a_candidatesMoved)
 		{
 			auto& c = b.c;
@@ -467,7 +441,6 @@ namespace DCLF::Features::Shadows::Local
 			++c.reused;
 			c.translated += a_candidatesMoved ? 1 : 0;
 			if (!a_flipped && !a_candidatesMoved && x.last && x.last->candidates == b.candidatesRef) {
-				// Nothing it was judged from moved: the same exclusion again.
 				exclusion = x.last;
 				++c.same;
 			} else {
@@ -482,7 +455,7 @@ namespace DCLF::Features::Shadows::Local
 			return exclusion;
 		}
 
-		/** @brief Whole: the index, the inputs and every verdict again (a_whole: already judged when a_judgedWhole). */
+		/** @brief Rebuilds the index, inputs and every verdict. */
 		std::shared_ptr<SunExclusion> WholeExclusion(SunExclusionBuild& b, bool a_judgedWhole, std::vector<std::uint8_t>& a_whole)
 		{
 			auto& c = b.c;
@@ -531,10 +504,8 @@ namespace DCLF::Features::Shadows::Local
 		const std::uint64_t membership = a_build.membership;
 		const std::uint32_t modeBits = a_build.modeBits;
 		SunExclusionBuild b{ candidatesRef, candidates, a_build, tables, c, x, count, objects, membership, modeBits };
-		// The kept verdicts follow what moved: the tables' change log (an object's flags, shadow reject or geometry: kChangeBindings,
-		// kChangeShadow, kChangeGeometry), the mode's inputs (the objects that joined or left them) and the candidates (the entries
-		// whose versions moved: ChangedEntriesByLog). Each entry any of them touches is judged again from the objects of its
-		// geometries; the rest keep theirs. Whole only for a new cache or tables generation, or a reader behind the log's trim.
+		// Kept verdicts follow the change log, the mode's input moves and the moved candidates. Only touched entries are judged again.
+		// A whole build is needed for a new cache or tables generation, or a reader behind the log's trim.
 		bool kept = c.valid && x.valid && c.candidates && c.cursor.Continues(tables.changeLog, a_build.tablesGeneration);
 		bool flipped = false;
 		const bool candidatesMoved = c.candidates != candidatesRef;
@@ -578,7 +549,6 @@ namespace DCLF::Features::Shadows::Local
 
 	SunExclusionCache& ExclusionCacheOf(Api::ShadowSource a_source)
 	{
-		// The Sun's, then the Point's; the build asks for no other.
 		static std::array<SunExclusionCache, 2> caches;
 		return caches[a_source == Api::ShadowSource::Point ? 1 : 0];
 	}

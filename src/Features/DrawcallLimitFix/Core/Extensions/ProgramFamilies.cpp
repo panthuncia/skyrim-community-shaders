@@ -1,4 +1,4 @@
-// The program families' entries and rules (see the header).
+// The program families' entries and rules.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
@@ -7,32 +7,31 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		struct Resolved
+		struct ResolvedFamilies
 		{
 			ProgramFamilySet families;
 			ProgramFamilyRulesTable rules;
-			std::array<std::size_t, kMaterialKinds> kindRules{};  // by material kind: its rules' index (kProgramFamilies: a Lighting key's)
+			std::array<std::size_t, kMaterialKinds> kindRules{};  // per material kind, its rules' index
 		};
 
-		Resolved MakeInitial()
+		ResolvedFamilies MakeInitial()
 		{
-			Resolved initial;
+			ResolvedFamilies initial;
 			initial.kindRules.fill(kProgramFamilies);
 			return initial;
 		}
 
-		// Written only by ResolveProgramFamilies (InstallFeatures, before DCLF's threads exist), read-only after. A namespace-scope object,
-		// not a function's static: the per-object reads (FamilyRules) take no initialization guard.
-		Resolved familyTable = MakeInitial();
+		// Written only during InstallFeatures. A namespace-scope object, not a function static, so per-object reads skip the init guard.
+		ResolvedFamilies familyTable = MakeInitial();
 
-		Resolved& Table() { return familyTable; }
+		ResolvedFamilies& Table() { return familyTable; }
 	}
 
 	void ResolveProgramFamilies(const std::array<Api::ProgramFamilyContribution, kProgramFamilies>& a_registered)
 	{
 		auto& table = Table();
 		const auto& ports = MaterialPorts();
-		// A Lighting key's rules, and a family no feature takes: kind 0's ProjectedUV bit.
+		// A Lighting key's rules, also used for untaken families.
 		auto& lighting = table.rules[kProgramFamilies];
 		lighting.projectedPassBit = ports[0].rules.projectedPassBit;
 		for (std::size_t f = 0; f < kProgramFamilies; ++f)
@@ -41,7 +40,6 @@ namespace DCLF::Extensions
 			const auto& registered = a_registered[f];
 			if (registered.family == Api::ProgramFamily::Count)
 				continue;
-			// Its keys' material kind: the port of its shader.
 			std::uint8_t kind = 0;
 			for (std::uint8_t k = 1; k < kMaterialKinds; ++k)
 				if (ports[k].shaderType == registered.shaderType)
@@ -56,7 +54,7 @@ namespace DCLF::Extensions
 			entry.sourcePath = registered.sourcePath;
 			entry.nativeNote = registered.nativeNote;
 			entry.kind = kind;
-			// The contribution's strings, the entry's own (the table never moves).
+			// The entry owns the strings, and the table never moves.
 			entry.contribution = registered;
 			entry.contribution.name = entry.name;
 			entry.contribution.keyName = entry.keyName;

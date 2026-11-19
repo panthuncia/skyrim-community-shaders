@@ -1,19 +1,15 @@
 #pragma once
 
-// The engine's tree manager list loop, detoured for the stood-in trees (tree wind's engine side). Included by the feature's sources.
+// The tree manager's list loop, detoured for the stood-in trees. Included by the feature's sources.
 
 namespace DCLF::Features::TreeWind::TreeList
 {
 	/**
-	 * @brief The engine's tree manager list loop (skyrim-engine-notes.md, "Tree manager list").
-	 *
-	 * BSTreeManager's update (FUN_140437d40, Main::Update 0x140646176, main thread) runs FUN_140437e50 over its tree list (+0x20:
-	 * BSTreeNodes, exact RTTI): a tree is visited only when its first child's multibound has the cull result 1 (or the process's cull
-	 * mode is 3). FUN_140437e50's call is detoured always: around it TreeAnimation gives the loop the stood-in trees' multibound
-	 * results from DCLF's verdicts and puts the engine's back (TreeAnimation.h).
+	 * @brief Detours the tree manager's list loop (FUN_140437e50, from FUN_140437d40 on the main thread).
+	 * The loop visits a tree only when its first child's multibound cull result is 1, so TreeAnimation sets the stood-in trees' results around it.
 	 */
 	void Install();
 	bool Installed();
-	/** @brief Install's call, before any hook is written (HookSites): a CALL, as the thunk chains. */
+	/** @brief Checks the call before any hook is written. It must be a CALL, as the thunk chains. */
 	void Preflight();
 }

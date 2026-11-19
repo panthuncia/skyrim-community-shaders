@@ -2,6 +2,8 @@
 
 // The plugin log's fan-out sink. Install puts the default logger's sinks behind it, so other sinks can be added for a while and
 // removed again (the DCLF diagnostic capture copies every line it logs into its bundle this way). Adding and removing are thread-safe.
+// The log file's own sinks sit behind a guard: a line repeated more than 20 times in a second is collapsed into one "... repeated N
+// times" line, and past 512 MB only warnings and errors are written, then nothing after a final note at 576 MB.
 
 #include <memory>
 

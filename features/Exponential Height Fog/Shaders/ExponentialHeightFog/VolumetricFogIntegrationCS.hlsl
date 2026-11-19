@@ -1,5 +1,18 @@
-Texture3D<float4> LightScattering : register(t0);
-RWTexture3D<float4> IntegratedLightScattering : register(u0);
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and SharedData's depth are
+// heap reads through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES).
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+#include "ExponentialHeightFog/VolumetricFogConstants.hlsli"
+
+#define VOLUMETRIC_FOG_INTEGRATION_RESOURCES(X)               \
+	X(SHARED, ConstantBuffer, Shared, 0)                      \
+	X(LATCH, VolumetricFogConstants, VolumetricFog, 0)        \
+	X(SRV, Texture3D<float4>, LightScattering, 0)             \
+	X(UAV, RWTexture3D<float4>, IntegratedLightScattering, 0) \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)
+ORG_PUSH_BLOCK(VOLUMETRIC_FOG_INTEGRATION_RESOURCES(ORG_HANDLE))
+VOLUMETRIC_FOG_INTEGRATION_RESOURCES(ORG_RESOURCE)
 
 #include "ExponentialHeightFog/VolumetricFogCSCommon.hlsli"
 

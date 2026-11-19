@@ -1,3 +1,19 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t6, s0-s6 and s9 from the heap, the
+// shared constants, PerGeometry from the engine-constants capture through the pass's latch, and the included feature headers'
+// resources (IBL's SH, Exponential Height Fog's volumes, Dynamic Cubemaps' environment) as EXTERN entries. The list is the same
+// in every permutation: a header that is not included leaves its handle unread.
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSAOCOMPOSITE_ORG_RESOURCES(X)                                                  		X(SHARED, ConstantBuffer, Shared, 0)                                               		X(SRV, Texture2D<float4>, sourceTex, 0)                                            		X(SRV, Texture2D<float4>, SAOTex, 1)                                               		X(SRV, Texture2D<float4>, depthTex, 2)                                             		X(SRV, Texture2D<float4>, NormalsSSRMaskTex, 3)                                    		X(SRV, Texture2D<float4>, snowSpecAlphaTex, 4)                                     		X(SRV, Texture2D<float4>, shadowMaskTex, 5)                                        		X(SRV, Texture2D<float4>, SSRSourceTex, 6)                                         		X(SAMPLER, SamplerState, sourceSampler, 0)                                         		X(SAMPLER, SamplerState, SAOSampler, 1)                                            		X(SAMPLER, SamplerState, depthSampler, 2)                                          		X(SAMPLER, SamplerState, NormalsSSRMaskSampler, 3)                                 		X(SAMPLER, SamplerState, snowSpecAlphaSampler, 4)                                  		X(SAMPLER, SamplerState, shadowMaskSampler, 5)                                     		X(SAMPLER, SamplerState, SSRSourceSampler, 6)                                      		X(SAMPLER, SamplerState, SampColorSampler, 9)                                      		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) 		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     		X(UNREAD, TextureCube<float3>, EnvReflectionsTexture, 30)                          		X(UNREAD, Texture2D<float4>, DepthTexture, 17)                                     		X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISSAOCOMPOSITE_ORG_RESOURCES(ORG_HANDLE))
+ISSAOCOMPOSITE_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
@@ -11,6 +27,19 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 FogParam = OrgEngineRow(PerGeometryAt, 0);
+static float4 FogNearColor = OrgEngineRow(PerGeometryAt, 1);
+static float4 FogFarColor = OrgEngineRow(PerGeometryAt, 2);
+static float4 CameraNearFar = OrgEngineRow(PerGeometryAt, 3);
+static float4 LightDirection = OrgEngineRow(PerGeometryAt, 4);
+static float4 EyePosition = OrgEngineRow(PerGeometryAt, 5);
+static float4 SparklesParameters1 = OrgEngineRow(PerGeometryAt, 6);
+static float4 SparklesParameters2 = OrgEngineRow(PerGeometryAt, 7);
+static float4 SparklesParameters3 = OrgEngineRow(PerGeometryAt, 8);
+static float4 SparklesParameters4 = OrgEngineRow(PerGeometryAt, 9);
+static float4 SSRParams = OrgEngineRow(PerGeometryAt, 10);
+#	else
 SamplerState sourceSampler : register(s0);
 SamplerState SAOSampler : register(s1);
 SamplerState depthSampler : register(s2);
@@ -41,6 +70,7 @@ cbuffer PerGeometry : register(b2)
 	float4 SparklesParameters4 : packoffset(c9);  // fShadowSparkleIntensity in x, fSnowSparklesColorR in y, fSnowSparklesColorG in z, fSnowSparklesColorB in w
 	float4 SSRParams : packoffset(c10);
 };
+#	endif
 
 float3 FastMod(float3 x, float divisor)
 {
@@ -131,7 +161,9 @@ float SimplexNoise(float3 v)
 #	endif
 
 #	if defined(EXP_HEIGHT_FOG) && defined(APPLY_FOG)
+#		if !defined(CS_ORG_BINDLESS)
 SamplerState SampColorSampler : register(s9);
+#		endif
 #		include "ExponentialHeightFog/ExponentialHeightFog.hlsli"
 #	endif
 

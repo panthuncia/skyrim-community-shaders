@@ -5,6 +5,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/Logging.h"
 #include "VanillaBinding.h"
 
 #include "Features/CSEditor.h"
@@ -19,6 +20,14 @@
 #include "Features/Upscaling.h"
 
 #include "Hooks.h"
+#include "ORGDeferredClears.h"
+#include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Transients.h"
+#include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
 {
@@ -36,6 +45,33 @@ struct BlendStates
 	}
 };
 
+namespace
+{
+	/** @brief An engine render target Deferred remakes for itself, at kMAIN's size, with an RTV and an SRV. */
+	struct DeferredTarget
+	{
+		RE::RENDER_TARGET target;
+		const char* name;
+		DXGI_FORMAT format;
+	};
+
+	constexpr UINT kDeferredTargetBinds = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+	// One table for SetupResources and for the engine targets' plans, so both make the same shapes.
+	constexpr DeferredTarget kDeferredTargets[] = {
+		{ ALBEDO, "Deferred::Albedo", DXGI_FORMAT_R10G10B10A2_UNORM },
+		{ SPECULAR, "Deferred::Specular", DXGI_FORMAT_R11G11B10_FLOAT },
+		{ REFLECTANCE, "Deferred::Reflectance", DXGI_FORMAT_R11G11B10_FLOAT },
+		{ NORMALROUGHNESS, "Deferred::NormalRoughness", DXGI_FORMAT_R10G10B10A2_UNORM },
+		{ MASKS, "Deferred::Masks", DXGI_FORMAT_R11G11B10_FLOAT },
+		// Masks2 holds vertexAO; fp16 to allow blending.
+		{ MASKS2, "Deferred::Masks2", DXGI_FORMAT_R16_UNORM },
+		// TAA water history buffers need RGBA16: alpha stores premultiplied coverage for ISWaterBlend.
+		{ RE::RENDER_TARGETS::kWATER_1, "Deferred::Water1", DXGI_FORMAT_R16G16B16A16_FLOAT },
+		{ RE::RENDER_TARGETS::kWATER_2, "Deferred::Water2", DXGI_FORMAT_R16G16B16A16_FLOAT },
+	};
+}
+
 void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE2D_DESC texDesc, D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc, D3D11_RENDER_TARGET_VIEW_DESC rtvDesc, D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc, DXGI_FORMAT format, uint bindFlags)
 {
 	auto renderer = globals::game::renderer;
@@ -46,6 +82,10 @@ void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE
 	srvDesc.Format = format;
 	rtvDesc.Format = format;
 	uavDesc.Format = format;
+
+	// CS_ORG_ENGINE_TARGETS: ORG makes the target again with this description.
+	if (RenderGraph::Engine::Targets::Recreate(target, texDesc, name))
+		return;
 
 	auto& data = renderer->GetRuntimeData().renderTargets[target];
 
@@ -133,22 +173,22 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_1
 		// TEMPORAL_AA_WATER_2
 
-		// Albedo
-		SetupRenderTarget(ALBEDO, "Deferred::Albedo", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Specular
-		SetupRenderTarget(SPECULAR, "Deferred::Specular", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Reflectance
-		SetupRenderTarget(REFLECTANCE, "Deferred::Reflectance", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Normal + Roughness
-		SetupRenderTarget(NORMALROUGHNESS, "Deferred::NormalRoughness", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Masks
-		SetupRenderTarget(MASKS, "Deferred::Masks", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Masks2 (vertexAO; fp16 to allow blending)
-		SetupRenderTarget(MASKS2, "Deferred::Masks2", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-
-		// TAA water history buffers need RGBA16: alpha stores premultiplied coverage for ISWaterBlend
-		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_1, "Deferred::Water1", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_2, "Deferred::Water2", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		// The GBuffer and the water targets. With CS_ORG_ENGINE_TARGETS, ORG made them in these shapes already (PlanTargets).
+		// Native mode: the GBuffer is frame transients (Frame/Transients.h), placed together when the scope ends; ORG derives their
+		// span from the graphs that use them. Its content lives within a frame. The water targets keep memory of their own: they
+		// are the water's TAA history.
+		const auto water = [](const DeferredTarget& a_target) {
+			return a_target.target == RE::RENDER_TARGETS::kWATER_1 || a_target.target == RE::RENDER_TARGETS::kWATER_2;
+		};
+		{
+			RenderGraph::Engine::Native::FrameTransientScope gbuffer("Deferred's G-buffer");
+			for (const auto& target : kDeferredTargets)
+				if (!water(target))
+					SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
+		}
+		for (const auto& target : kDeferredTargets)
+			if (water(target))
+				SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
 	}
 
 	{
@@ -191,6 +231,17 @@ void Deferred::SetupResources()
 		directionalShadowLights = new Buffer(sbDesc, nullptr, "Deferred::DirectionalShadowLights");
 		directionalShadowLights->CreateSRV(srvDesc);
 	}
+
+	// The composite on the render graph, when CS_ORG_COMPOSITE=1 reserved its anchor.
+	ORGDeferredComposite::Get().Setup();
+	// The GBuffer clears at the Prepass anchor, once the targets exist.
+	ORGDeferredClears::Setup();
+}
+
+void Deferred::PlanTargets()
+{
+	for (const auto& target : kDeferredTargets)
+		RenderGraph::Engine::Targets::PlanTarget(target.target, { .owner = target.name, .format = target.format, .bindFlags = kDeferredTargetBinds, .mainSize = true, .dropCopy = true });
 }
 
 void Deferred::ReflectionsPrepasses()
@@ -214,12 +265,18 @@ void Deferred::ReflectionsPrepasses()
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	Feature::ForEachLoadedFeature("ReflectionsPrepass", [](Feature* feature) { feature->ReflectionsPrepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::ReflectionsPrepass);
 }
 
 void Deferred::EarlyPrepasses()
 {
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Early Prepass");
+
+	// Main::RenderShadowMaps returned: every step of the start stage has tapped (its last, the shadow maps' clears, are inside it). The
+	// stage ends here at the latest. In a frame without Drawcall Limit Fix's shadow view epoch (a load hold) it would otherwise stay open
+	// until the pre-depth stage's first tap, after the D3D11 work below.
+	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Start);
 
 	sceneDepthFinal = false;
 
@@ -239,6 +296,7 @@ void Deferred::EarlyPrepasses()
 	CopyShadowLightData();
 
 	Feature::ForEachLoadedFeature("EarlyPrepass", [](Feature* feature) { feature->EarlyPrepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::EarlyPrepass);
 }
 
 void Deferred::PrepassPasses()
@@ -255,6 +313,7 @@ void Deferred::PrepassPasses()
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
 	Feature::ForEachLoadedFeature("Prepass", [](Feature* feature) { feature->Prepass(); }, true);
+	FrameAnchors::Run(FrameAnchors::Anchor::Prepass);
 }
 
 void Deferred::StartDeferred()
@@ -285,9 +344,12 @@ void Deferred::StartDeferred()
 		MASKS2
 	};
 
+	// Dirty from last frame: SRTM_CLEAR makes the engine's next state flush call ClearRenderTargetView once per target. On the render
+	// graph the Prepass anchor's pass clears them instead (ORGDeferredClears), so they are bound without a clear.
+	const auto mode = ORGDeferredClears::TakeClears() ? RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR : RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;
 	for (uint i = 2; i < 8; i++) {
-		renderTargets[i] = targets[i];                                             // We must use unused targets to be indexable
-		setRenderTargetMode[i] = RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;  // Dirty from last frame, this calls ClearRenderTargetView once
+		renderTargets[i] = targets[i];  // We must use unused targets to be indexable
+		setRenderTargetMode[i] = mode;
 	}
 
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
@@ -333,8 +395,14 @@ void Deferred::DeferredPasses()
 	// composite would otherwise see the background where those objects stand. Water also
 	// samples this copy for edge fade and refraction.
 	auto finalDepthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-	context->CopyResource(finalDepthCopy.texture, depth.texture);
+	// CS_ORG_ENGINE_SKELETON: the copy is a graph pass here; otherwise (or when it did not run) D3D11 copies.
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
+	if (!RenderGraph::Engine::Skeleton::CopyPostZPrepassDepth())
+		context->CopyResource(Unwrap(finalDepthCopy.texture), Unwrap(depth.texture));
 	sceneDepthFinal = true;
+	// The render graph's passes here, before the D3D11 passes below read what they write.
+	FrameAnchors::Run(FrameAnchors::Anchor::DeferredPasses);
 	auto reflectance = renderer->GetRuntimeData().renderTargets[REFLECTANCE];
 
 	auto motionVectors = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
@@ -365,42 +433,58 @@ void Deferred::DeferredPasses()
 	{
 		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
 
-		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
-		ID3D11ShaderResourceView* srvs[16]{
-			specular.SRV,                                                                         // t0  SpecularTexture
-			albedo.SRV,                                                                           // t1  AlbedoTexture
-			normalRoughness.SRV,                                                                  // t2  NormalRoughnessTexture
-			masks.SRV,                                                                            // t3  MasksTexture
+		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
+		const std::array<ID3D11ShaderResourceView*, 16> srvs{
+			Unwrap(specular.SRV),                                                                 // t0  SpecularTexture
+			Unwrap(albedo.SRV),                                                                   // t1  AlbedoTexture
+			Unwrap(normalRoughness.SRV),                                                          // t2  NormalRoughnessTexture
+			Unwrap(masks.SRV),                                                                    // t3  MasksTexture
 			dynamicCubemaps.loaded ? Util::GetCurrentSceneDepthSRV(false) : nullptr,              // t4  DepthTexture (24/32-bit; HLSL type baked at compile via TERRAIN_BLENDING)
-			dynamicCubemaps.loaded ? reflectance.SRV : nullptr,                                   // t5  ReflectanceTexture
+			dynamicCubemaps.loaded ? Unwrap(reflectance.SRV) : nullptr,                           // t5  ReflectanceTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envTexture->srv.get() : nullptr,             // t6  EnvTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envReflectionsTexture->srv.get() : nullptr,  // t7  EnvReflectionsTexture
 			dynamicCubemaps.loaded ? skylightingProbes : nullptr,                                 // t8  SkylightingProbeArray
-			masks2.SRV,                                                                           // t9  Masks2Texture (vertexAO in .x)
+			Unwrap(masks2.SRV),                                                                   // t9  Masks2Texture (vertexAO in .x)
 			ssgi_ao,                                                                              // t10 SsgiAoTexture
 			ssgi_hq_spec ? nullptr : ssgi_y,                                                      // t11 SsgiYTexture
 			ssgi_hq_spec ? nullptr : ssgi_cocg,                                                   // t12 SsgiCoCgTexture
 			ssgi_hq_spec ? ssgi_gi_spec : nullptr,                                                // t13 SsgiSpecularTexture
-			ibl.loaded ? ibl.envIBLTexture->srv.get() : nullptr,                                  // t14 EnvIBLTexture
-			ibl.loaded ? ibl.skyIBLTexture->srv.get() : nullptr,                                  // t15 SkyIBLTexture
+			ibl.loaded ? ibl.EnvIBLSRV() : nullptr,                                               // t14 EnvIBLTexture
+			ibl.loaded ? ibl.SkyIBLSRV() : nullptr,                                               // t15 SkyIBLTexture
 		};
 
-		if (dynamicCubemaps.loaded)
-			context->CSSetSamplers(0, 1, &linearSampler);
+		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them
+		// (CS_ORG_COMPOSITE=1), which the D3D11 dispatch below then replaces.
+		auto& orgComposite = ORGDeferredComposite::Get();
+		orgComposite.SetFrame({ .interior = interior,
+			.main = static_cast<std::uint32_t>(forwardRenderTargets[0]),
+			.normals = static_cast<std::uint32_t>(forwardRenderTargets[2]),
+			.groupsX = dispatchCount.x,
+			.groupsY = dispatchCount.y,
+			.views = srvs });
+		FrameAnchors::Run(FrameAnchors::Anchor::DeferredComposite);
 
-		context->CSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
+		if (orgComposite.Lagged()) {
+			static Util::ReasonLog s_lag("[ORG] Deferred composite: the composite lags (its stage's schedule does not hold it yet); nothing composites this frame");
+			s_lag.Report("first build");
+		} else if (!orgComposite.Composited()) {
+			if (dynamicCubemaps.loaded)
+				context->CSSetSamplers(0, 1, &linearSampler);
 
-		ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
-		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
+			context->CSSetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
 
-		auto shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite();
-		context->CSSetShader(shader, nullptr, 0);
+			ID3D11UnorderedAccessView* uavs[3]{ Unwrap(main.UAV), Unwrap(normals.UAV), Unwrap(motionVectors.UAV) };
+			context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
-		{
-			TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite - Dispatch");
-			globals::profiler->BeginPass("DeferredComposite");
-			context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
-			globals::profiler->EndPass();
+			auto shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite();
+			context->CSSetShader(shader, nullptr, 0);
+
+			{
+				TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite - Dispatch");
+				globals::profiler->BeginPass("DeferredComposite");
+				context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
+				globals::profiler->EndPass();
+			}
 		}
 	}
 
@@ -425,6 +509,9 @@ void Deferred::DeferredPasses()
 		globals::features::effects11.DrawVolumetricRays();
 		globals::features::effects11.DrawSunRays();
 	}
+
+	// The render graph's passes here, after the composite: Effects11's rays on the ORG path (CS_ORG_E11_RAYS=1).
+	FrameAnchors::Run(FrameAnchors::Anchor::PostComposite);
 }
 
 void Deferred::EndDeferred()
@@ -563,27 +650,36 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 	}
 }
 
-void Deferred::CopyShadowLightData()
+bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 {
-	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
-
 	auto* shadowSceneNode = globals::game::smState->shadowSceneNode[0];
 	if (!shadowSceneNode)
-		return;
+		return false;
 
 	auto* sunShadowLight = shadowSceneNode->GetRuntimeData().sunShadowDirLight;
 	if (!sunShadowLight)
-		return;
+		return false;
 
 	DirectionalShadowLightData dd{};
-	auto context = globals::d3d::context;
-
 	auto& dirData = sunShadowLight->GetShadowDirectionalLightRuntimeData();
 	dd.EndSplitDistances = { dirData.endSplitDistances[0], dirData.endSplitDistances[1] };
 	dd.StartSplitDistances = { dirData.startSplitDistances[0], dirData.startSplitDistances[1] };
 
 	SetShadowCascadeParameters(sunShadowLight->GetRuntimeData(), dd);
+	a_out = dd;
+	return true;
+}
+
+void Deferred::CopyShadowLightData()
+{
+	ZoneScoped;
+	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
+
+	DirectionalShadowLightData dd{};
+	if (!GetDirectionalShadowLightData(dd))
+		return;
+
+	auto context = globals::d3d::context;
 
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	DX::ThrowIfFailed(context->Map(directionalShadowLights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
@@ -596,6 +692,7 @@ void Deferred::CopyShadowLightData()
 
 void Deferred::ClearShaderCache()
 {
+	ORGDeferredComposite::Get().ClearShaderCache();
 	if (mainCompositeCS) {
 		mainCompositeCS->Release();
 		mainCompositeCS = nullptr;
@@ -606,31 +703,39 @@ void Deferred::ClearShaderCache()
 	}
 }
 
+std::vector<std::pair<const char*, const char*>> Deferred::CompositeDefines(bool a_interior)
+{
+	std::vector<std::pair<const char*, const char*>> defines;
+
+	if (a_interior)
+		defines.push_back({ "INTERIOR", nullptr });
+
+	if (globals::features::dynamicCubemaps.loaded)
+		defines.push_back({ "DYNAMIC_CUBEMAPS", nullptr });
+
+	// Interiors have no sky to occlude.
+	if (!a_interior && globals::features::skylighting.loaded)
+		defines.push_back({ "SKYLIGHTING", nullptr });
+
+	if (globals::features::screenSpaceGI.loaded)
+		defines.push_back({ "SSGI", nullptr });
+
+	if (globals::features::ibl.loaded)
+		defines.push_back({ "IBL", nullptr });
+
+	// TERRAIN_BLENDING flips DepthTexture's HLSL type from `Texture2D<unorm float>`
+	// (R24_UNORM_X8_TYPELESS game depth) to `Texture2D<float>` (R32_FLOAT blendedDepth).
+	if (globals::features::terrainBlending.loaded)
+		defines.push_back({ "TERRAIN_BLENDING", nullptr });
+
+	return defines;
+}
+
 ID3D11ComputeShader* Deferred::GetComputeMainComposite()
 {
 	if (!mainCompositeCS) {
 		logger::debug("Compiling DeferredCompositeCS");
-
-		std::vector<std::pair<const char*, const char*>> defines;
-
-		if (globals::features::dynamicCubemaps.loaded)
-			defines.push_back({ "DYNAMIC_CUBEMAPS", nullptr });
-
-		if (globals::features::skylighting.loaded)
-			defines.push_back({ "SKYLIGHTING", nullptr });
-
-		if (globals::features::screenSpaceGI.loaded)
-			defines.push_back({ "SSGI", nullptr });
-
-		if (globals::features::ibl.loaded)
-			defines.push_back({ "IBL", nullptr });
-
-		// TERRAIN_BLENDING flips DepthTexture's HLSL type from `Texture2D<unorm float>`
-		// (R24_UNORM_X8_TYPELESS game depth) to `Texture2D<float>` (R32_FLOAT blendedDepth).
-		if (globals::features::terrainBlending.loaded)
-			defines.push_back({ "TERRAIN_BLENDING", nullptr });
-
-		mainCompositeCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", defines, "cs_5_0"));
+		mainCompositeCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", CompositeDefines(false), "cs_5_0"));
 	}
 	return mainCompositeCS;
 }
@@ -639,25 +744,7 @@ ID3D11ComputeShader* Deferred::GetComputeMainCompositeInterior()
 {
 	if (!mainCompositeInteriorCS) {
 		logger::debug("Compiling DeferredCompositeCS INTERIOR");
-
-		std::vector<std::pair<const char*, const char*>> defines;
-		defines.push_back({ "INTERIOR", nullptr });
-
-		if (globals::features::dynamicCubemaps.loaded)
-			defines.push_back({ "DYNAMIC_CUBEMAPS", nullptr });
-
-		if (globals::features::screenSpaceGI.loaded)
-			defines.push_back({ "SSGI", nullptr });
-
-		if (globals::features::ibl.loaded)
-			defines.push_back({ "IBL", nullptr });
-
-		// TERRAIN_BLENDING flips DepthTexture's HLSL type from `Texture2D<unorm float>`
-		// (R24_UNORM_X8_TYPELESS game depth) to `Texture2D<float>` (R32_FLOAT blendedDepth).
-		if (globals::features::terrainBlending.loaded)
-			defines.push_back({ "TERRAIN_BLENDING", nullptr });
-
-		mainCompositeInteriorCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", defines, "cs_5_0"));
+		mainCompositeInteriorCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\DeferredCompositeCS.hlsl", CompositeDefines(true), "cs_5_0"));
 	}
 	return mainCompositeInteriorCS;
 }
@@ -735,7 +822,8 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 		auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
-		context->CopyResource(depthCopy.texture, depth.texture);
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+		context->CopyResource(RenderGraph::Engine::Tripwire::Unwrap(depthCopy.texture), RenderGraph::Engine::Tripwire::Unwrap(depth.texture));
 	}
 
 	// After this point, water starts rendering

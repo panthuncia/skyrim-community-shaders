@@ -4,12 +4,15 @@
 
 #include "Buffer.h"
 #include "Effects11.h"
+#include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "Menu.h"
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -263,14 +266,7 @@ namespace
 	{
 		static void thunk(void* a_movie)
 		{
-			auto& hdr = globals::features::hdrDisplay;
-			if (hdr.IsHDREnabledForFrame() && !hdr.framebufferRedirected && hdr.hdrTexture && hdr.hdrTexture->rtv) {
-				const float clearColor[4]{};
-				globals::d3d::context->ClearRenderTargetView(hdr.hdrTexture->rtv.get(), clearColor);
-				hdr.movieDrawnFrame = globals::state->frameCount;
-				hdr.SetUIBuffer();
-			}
-
+			globals::features::hdrDisplay.PrepareMovieDraw();
 			func(a_movie);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -640,6 +636,20 @@ void HDRDisplay::DataLoaded()
 	}
 }
 
+namespace
+{
+	// The engine targets HDR upgrades to R16G16B16A16_FLOAT (UpgradeLDRRenderTargets), and plans for ORG (PostPostLoad).
+	constexpr RE::RENDER_TARGETS::RENDER_TARGET kLDRTargets[] = {
+		RE::RENDER_TARGETS::kLDR_DOWNSAMPLE0,
+		RE::RENDER_TARGETS::kLDR_BLURSWAP,
+		RE::RENDER_TARGETS::kBLURFULL_BUFFER,
+		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY,
+		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY2,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
+	};
+}
+
 void HDRDisplay::PostPostLoad()
 {
 	// When Upscaling is loaded it installs equivalent hooks for these same addresses in its own
@@ -658,6 +668,11 @@ void HDRDisplay::PostPostLoad()
 	}
 
 	stl::detour_thunk<HDR_Movie_Draw>(REL::RelocationID(87907, 90279));
+	ORGHDRDisplay::Reserve();
+	// CS_ORG_ENGINE_TARGETS: ORG makes the LDR targets in the HDR format from the start. The upgrade then finds them done and
+	// skips them, so no graph is built again for a new format at setup.
+	for (auto targetId : kLDRTargets)
+		RenderGraph::Engine::Targets::PlanTarget(targetId, { .owner = "HDR Display", .format = DXGI_FORMAT_R16G16B16A16_FLOAT });
 }
 
 void HDRDisplay::SetupResources()
@@ -718,7 +733,11 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	hdrTexture = new Texture2D(texDesc, "HDR::HdrTexture");
+	// CS_ORG_HDR_DISPLAY=1: HDR's textures are graph-owned, exported to D3D11 (ORGHDRDisplay::MakeTexture); else D3D11's.
+	auto& graphTextures = ORGHDRDisplay::Get();
+	hdrTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Scene, texDesc, "HDR::HdrTexture");
+	if (!hdrTexture)
+		hdrTexture = new Texture2D(texDesc, "HDR::HdrTexture");
 	hdrTexture->CreateSRV(srvDesc);
 	hdrTexture->CreateUAV(uavDesc);
 
@@ -735,7 +754,9 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	outputTexture = new Texture2D(texDesc, "HDR::OutputTexture");
+	outputTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Output, texDesc, "HDR::OutputTexture");
+	if (!outputTexture)
+		outputTexture = new Texture2D(texDesc, "HDR::OutputTexture");
 	outputTexture->CreateSRV(srvDesc);
 	outputTexture->CreateUAV(uavDesc);
 
@@ -752,9 +773,13 @@ void HDRDisplay::SetupResources()
 	D3D11_UNORDERED_ACCESS_VIEW_DESC uiUavDesc = uavDesc;
 	uiUavDesc.Format = uiTexDesc.Format;
 
-	uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
+	uiTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Ui, uiTexDesc, "HDR::UiTexture");
+	if (!uiTexture)
+		uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
 	uiTexture->CreateSRV(uiSrvDesc);
 	uiTexture->CreateUAV(uiUavDesc);
+	// A new texture's contents are undefined (a graph twin's natively): the first redirect clears it.
+	uiTextureClean = false;
 
 	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 	rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -767,6 +792,8 @@ void HDRDisplay::SetupResources()
 	UpdateHDRData();
 
 	GetHDROutputCS();
+	// CS_ORG_HDR_DISPLAY: ApplyHDR composes on the render graph from now on, or stays on D3D11.
+	ORGHDRDisplay::Get().Setup();
 
 	UpgradeLDRRenderTargets();
 }
@@ -814,6 +841,13 @@ void HDRDisplay::RedirectFramebuffer()
 	framebufferRedirected = true;
 }
 
+ID3D11Texture2D* HDRDisplay::PostChainTarget() const
+{
+	if (!loaded || !IsHDREnabledForFrame() || !hdrTexture || !hdrTexture->rtv || !hdrOutputCS)
+		return nullptr;
+	return reinterpret_cast<ID3D11Texture2D*>(hdrTexture->resource.get());
+}
+
 void HDRDisplay::RestoreFramebuffer()
 {
 	if (!framebufferRedirected)
@@ -851,11 +885,32 @@ void HDRDisplay::SetUIBuffer()
 		savedFramebufferRTV = fb.RTV;
 	}
 
-	float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	globals::d3d::context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+	// Still clean from the last clear (natively the graph's, after the composite): nothing to clear. A second redirect in a frame
+	// clears what the first drew, as before.
+	if (!uiTextureClean) {
+		float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		globals::d3d::context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+	}
+	uiTextureClean = false;
 
 	fb.RTV = uiTexture->rtv.get();
 	globals::d3d::context->OMSetRenderTargets(1, &fb.RTV, nullptr);
+}
+
+void HDRDisplay::PrepareMovieDraw()
+{
+	if (IsHDREnabledForFrame() && !framebufferRedirected && hdrTexture && hdrTexture->rtv) {
+		// On the graph the clear is a pass before the composite (ORGHDRDisplay::Compose): the movie draws into the UI texture, and
+		// nothing reads or writes the scene until the composite.
+		if (ORGHDRDisplay::Get().CanClearScene()) {
+			sceneClearFrame = globals::state->frameCount;
+		} else {
+			const float clearColor[4]{};
+			globals::d3d::context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+		}
+		movieDrawnFrame = globals::state->frameCount;
+		SetUIBuffer();
+	}
 }
 
 bool HDRDisplay::UsesDeferredPresentComposite() const
@@ -872,6 +927,8 @@ void HDRDisplay::SyncFramebufferUIRedirect()
 	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 	if (!savedFramebufferRTV && fb.RTV != uiTexture->rtv.get())
 		savedFramebufferRTV = fb.RTV;
+	// Engine draws go into it from here.
+	uiTextureClean = false;
 	fb.RTV = uiTexture->rtv.get();
 	globals::d3d::context->OMSetRenderTargets(1, &fb.RTV, nullptr);
 }
@@ -1114,9 +1171,13 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 void HDRDisplay::ClearUIBuffer()
 {
 	auto* context = globals::d3d::context;
+	// The graph cleared it after this frame's composite (ORGHDRDisplay).
 	if (context && uiTexture && uiTexture->rtv) {
-		float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+		if (!ORGHDRDisplay::Get().TakeUIClear()) {
+			float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+		}
+		uiTextureClean = true;
 	}
 
 	if (savedFramebufferRTV) {
@@ -1143,6 +1204,10 @@ void HDRDisplay::ApplyHDR()
 	auto renderer = globals::game::renderer;
 
 	UpdateHDRData();
+
+	// A movie frame's scene clear the graph was to make before the composite (PrepareMovieDraw); one from an earlier frame whose
+	// composite never ran is dropped, since that frame's scene was never read.
+	const bool clearScene = std::exchange(sceneClearFrame, UINT32_MAX) == globals::state->frameCount;
 
 	state->BeginPerfEvent("HDR Processing");
 
@@ -1177,16 +1242,21 @@ void HDRDisplay::ApplyHDR()
 			return;
 		}
 
-		DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
-	}
+		winrt::com_ptr<ID3D11Texture2D> backBuffer;
+		globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()));
 
-	{
-		ID3D11Texture2D* backBuffer = nullptr;
-		HRESULT hr = globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-		if (SUCCEEDED(hr) && backBuffer) {
-			context->CopyResource(backBuffer, outputTexture->resource.get());
-			backBuffer->Release();
+		// CS_ORG_HDR_DISPLAY: the composite, and the copy when it can, on the render graph. Else D3D11.
+		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get(), clearScene);
+		if (composed == ORGHDRDisplay::Composed::None) {
+			// The graph did not compose, so it did not clear the scene either.
+			if (clearScene && hdrTexture->rtv) {
+				const float clearColor[4]{};
+				context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+			}
+			DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
 		}
+		if (backBuffer && composed != ORGHDRDisplay::Composed::OutputAndBackBuffer)
+			context->CopyResource(backBuffer.get(), outputTexture->resource.get());
 	}
 
 	RestoreCleanScene();
@@ -1336,6 +1406,9 @@ void HDRDisplay::DestroyResources()
 		uiTexture = nullptr;
 	}
 
+	// The graph-owned ones go once D3D11 is past them, now that nothing of D3D11 views them.
+	ORGHDRDisplay::Get().ReleaseTextures();
+
 	if (cleanSceneCapture) {
 		cleanSceneCapture->srv = nullptr;
 		cleanSceneCapture->resource = nullptr;
@@ -1357,17 +1430,7 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
-	static const RE::RENDER_TARGETS::RENDER_TARGET ldrTargets[] = {
-		RE::RENDER_TARGETS::kLDR_DOWNSAMPLE0,
-		RE::RENDER_TARGETS::kLDR_BLURSWAP,
-		RE::RENDER_TARGETS::kBLURFULL_BUFFER,
-		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY,
-		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY2,
-		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
-		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
-	};
-
-	for (auto targetId : ldrTargets) {
+	for (auto targetId : kLDRTargets) {
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 		if (!rt.texture)
 			continue;
@@ -1386,6 +1449,15 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 
 		D3D11_TEXTURE2D_DESC newDesc = origDesc;
 		newDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+		// CS_ORG_ENGINE_TARGETS: ORG makes the target again in the HDR format. Nothing is saved: the restore makes it again from the
+		// engine's own description.
+		const auto hdrName = fmt::format("HDR::{}", magic_enum::enum_name(targetId));
+		if (RenderGraph::Engine::Targets::Recreate(targetId, newDesc, hdrName.c_str(), true)) {
+			savedLDRTargets.push_back({ targetId, {} });
+			logger::info("[HDR] Upgraded render target {} to R16G16B16A16_FLOAT on the render graph (was format {})", static_cast<int>(targetId), static_cast<int>(origDesc.Format));
+			continue;
+		}
 
 		ID3D11Texture2D* newTexture = nullptr;
 		if (FAILED(device->CreateTexture2D(&newDesc, nullptr, &newTexture)))
@@ -1443,6 +1515,9 @@ void HDRDisplay::RestoreLDRRenderTargets()
 	auto renderer = globals::game::renderer;
 
 	for (auto& [targetId, saved] : savedLDRTargets) {
+		// An upgrade made on the render graph saved nothing: ORG makes the target again as the engine described it.
+		if (!saved.texture && RenderGraph::Engine::Targets::Restore(targetId))
+			continue;
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 
 		if (rt.texture)
@@ -1465,6 +1540,7 @@ void HDRDisplay::RestoreLDRRenderTargets()
 void HDRDisplay::ClearShaderCache()
 {
 	patchedBlendStateCache.clear();
+	ORGHDRDisplay::Get().ClearShaderCache();
 	if (hdrOutputCS) {
 		hdrOutputCS->Release();
 		hdrOutputCS = nullptr;
@@ -1588,6 +1664,18 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	// chain moving to another monitor), and the cached luminance was previously read once at
 	// setup and never again.
 	RefreshDisplayLuminance();
+
+	// Native mode: the swap chain handle answers no IDXGISwapChain4. BasicRHI's swap chain takes the colour space directly, and the
+	// output reaches it as in guest mode (ORGHDRDisplay copies it into the native back buffer, which the present copies to the swap
+	// chain image).
+	if (RenderGraph::Engine::Native::Active()) {
+		const bool hdr = IsHDREnabledForFrame();
+		if (RenderGraph::Engine::Native::SetSwapChainColorSpace(hdr))
+			logger::info("[HDR] Set swap chain color space to {} (native)", hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)");
+		else
+			logger::warn("[HDR] Failed to set {} color space (native)", hdr ? "HDR10" : "SDR");
+		return;
+	}
 
 	IDXGISwapChain4* swapChain4 = nullptr;
 

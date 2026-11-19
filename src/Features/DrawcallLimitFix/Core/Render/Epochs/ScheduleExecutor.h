@@ -1,8 +1,7 @@
 #pragma once
 
-// The schedule's executor: every registered pass (Api::PassDef, Core's and the features'), the frame's schedule resolved against them once
-// at install, the passes' setups (the scene's GPU setup) and latch word (the depth commit), and each graph extension's epochs' passes added
-// from it at the graph's build (GatherStructuralPasses).
+// The schedule's executor. It holds every registered pass, resolves the frame's schedule against them once at install,
+// runs the passes' setups, and adds each graph extension's epoch passes at the graph's build.
 
 #include "Features/DrawcallLimitFix/Api/Epochs.h"
 #include "Features/DrawcallLimitFix/Api/Passes.h"
@@ -21,75 +20,50 @@ namespace DCLF::Draws
 {
 	struct SceneBuffers;
 
-	/**
-	 * @brief Main thread, during InstallFeatures (Api::InstallContext::RegisterPass): a_pass, copied, registered by a_who. Fails the install
-	 * for no key, a key another pass has, neither or both of make and emit, or an anchor with a setup or latch word.
-	 */
+	/** @brief Main thread, during InstallFeatures: registers a copy of a_pass. Fails the install on a missing or duplicate key or a bad shape. */
 	void RegisterPassDef(const Api::PassDef& a_pass, std::string_view a_who);
-	/** @brief Main thread, at InstallFeatures, before the features install: Core's passes (Passes/CorePasses.cpp). */
+	/** @brief Main thread, before the features install: registers Core's passes. */
 	void RegisterCorePasses();
 	/**
-	 * @brief Main thread, once, at the end of InstallFeatures: the epochs' definitions (the revisions' epochs, Revision/Epochs.h: EpochCount,
-	 * EpochTraitsOf, EpochOfShape, EpochById, ViewEpochsOf) and the frame's orders (Extensions::ScheduledFrameOrders), then each epoch's
-	 * keys to their passes, grouped by shape (and view). Fails the install for an epoch id unknown or duplicated, a segment used twice, more
-	 * epochs than kMaxEpochs, a shape Core has not or one of Core's with no epoch, a sharesWith naming no earlier epoch recording that shape
-	 * itself, an order not naming every epoch and foreign epoch once (a hosted one never); a hosted epoch (Api::EpochDef::hostedBy) whose
-	 * host is not an earlier Main epoch of its own of its trigger and segment (a host may host several), which is no View epoch of its own
-	 * or has passes of its own; a host's key of an epoch it does not host; a trigger id missing or duplicated, an epoch's trigger
-	 * the schedule has not, a trigger no epoch names, one of Core's (CoreTrigger) missing; a key nobody registered, naming it and its epoch;
-	 * a pass with a setup in a Shadow epoch; a second pass with a latch word, or one the schedule names anywhere but in main.depth before
-	 * core.z.build-draws.
+	 * @brief Main thread, once at the end of InstallFeatures: resolves the epochs, the frame's orders and each epoch's pass keys.
+	 * Fails the install on any inconsistency in the schedule, naming the key or epoch at fault.
 	 */
 	void ResolveSchedule(const Api::FrameSchedule& a_schedule);
-	/**
-	 * @brief Main thread, during InstallFeatures (Api::InstallContext::FindTrigger, and Core's own at ResolveSchedule): a_schedule's
-	 * trigger a_id, its row. Fails the install, naming a_who, for an id it has not.
-	 */
+	/** @brief Main thread, during InstallFeatures: the row of trigger a_id. Fails the install, naming a_who, for an unknown id. */
 	Api::TriggerId FindTrigger(const Api::FrameSchedule& a_schedule, std::string_view a_id, std::string_view a_who);
 
-	/**
-	 * @brief Core's trigger points (FrameDriver's), resolved by id at ResolveSchedule: a schedule without one fails the install. The main
-	 * pass's opaque.after is Features/MainView's (its handler, called from FrameDriver: Api/PrimaryView.h); shadow-maps.after is
-	 * Features/Shadows/Engine's (its handler, called from FrameDriver: Api/ShadowEpochs.h).
-	 */
+	/** @brief Core's trigger points, resolved by id at ResolveSchedule. A schedule without one fails the install. */
 	enum class CoreTrigger : std::uint32_t
 	{
-		DepthCommitted,  // depth.committed
+		DepthCommitted,
 		Count,
 	};
 	/** @brief Any thread, after InstallFeatures: Core's trigger a_trigger. */
 	Api::TriggerId CoreTriggerOf(CoreTrigger a_trigger);
-	/** @brief Any thread, after InstallFeatures: epoch a_epoch's trigger's row (Api::EpochDef::trigger). */
+	/** @brief Any thread, after InstallFeatures: epoch a_epoch's trigger row. */
 	std::uint32_t EpochTrigger(std::uint32_t a_epoch);
-	/** @brief Any thread, after InstallFeatures: trigger row a_trigger's id ("none" for Extensions::kNoTrigger). */
+	/** @brief Any thread, after InstallFeatures: trigger row a_trigger's id, "none" for Extensions::kNoTrigger. */
 	std::string_view TriggerName(std::uint32_t a_trigger);
-	/**
-	 * @brief Render thread (EnsureSceneBuffers), after every table: every registered pass's setup (Api::PassDef::setup), in registration
-	 * order: its state by pass (SceneBuffers::passStates; null: no setup, or the pass is not added).
-	 */
+	/** @brief Render thread, after every table: runs each pass's setup in registration order. Null where a pass has none. */
 	std::vector<std::shared_ptr<const void>> SetUpPassStates(rhi::Device a_device, const SceneBuffers& a_scene);
-	/** @brief Render thread (the depth commit): the depth segment's latch stage word (Api::PassDef::latchWord of the pass with one; 0: none). */
+	/** @brief Render thread: the depth segment's latch stage word, 0 for none. */
 	std::uint32_t PassLatchWord();
-	/** @brief Render thread (each latch of the main rows): the frame's copy of the animated material rows (Api::PassDef::animatedRows; 0: none). */
-	std::uint64_t PassAnimatedRows();
-	/** @brief Render thread (each latch of the main rows): the frame's rows of the pass with them (Api::PassDef::frameRows; none: 0). */
+	/** @brief Render thread: the frame's copy of the animated material rows, 0 for none. */
+	Api::FrameRows PassAnimatedRows();
+	/** @brief Render thread: the frame rows of the pass that has them, 0 for none. */
 	Api::FrameRows PassFrameRows();
 	/**
-	 * @brief Render thread, at the graph's build (an extension's GatherStructuralPasses; never per frame): a_shape's epochs (a_view's, for
-	 * the View shape), in the schedule's order, each its passes in order, made from a_base with the epoch's fields set: a make's non-null
-	 * pass added to a_out, an anchor's emit called. A Main epoch hosting views' epochs makes each one's passes, in its list's order, with
-	 * that view's resources (Resources::views) as their view, while they can be added (ViewPassesReady, each view on its own); its own
-	 * passes see the views whose passes are added (PassContext::hosted).
+	 * @brief Render thread, at the graph's build and never per frame: makes a_shape's epoch passes in schedule order. A Main
+	 * epoch also makes its hosted views' passes. Only a_graphEpoch's passes are made, UINT32_MAX for every epoch.
 	 */
-	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::vector<org::RenderGraph::ExternalPassDesc>& a_out);
-	/**
-	 * @brief Any thread, after InstallFeatures: whether epoch row a_epoch (not hosted) has CPU pipeline work (a pass with Api::PassDef::cpuPipeline and
-	 * a make, its own or a hosted epoch's): in the CPU pipeline those passes are its graph's, the revisions record it, and its site
-	 * executes the recording (Direct::ExecuteEpoch).
-	 */
+	void GatherScheduled(Api::EpochShape a_shape, Api::EngineView a_view, const Api::PassContext& a_base, std::uint32_t a_graphEpoch,
+		std::vector<org::RenderGraph::ExternalPassDesc>& a_out);
+	/** @brief Render thread: the graph epochs an extension gathering a_shape is made into, including the Main epochs hosting a view. */
+	std::vector<std::uint32_t> ExtensionEpochs(Api::EpochShape a_shape, Api::EngineView a_view = {});
+	/** @brief Any thread, after InstallFeatures: whether epoch row a_epoch has CPU pipeline passes, which its site then executes. */
 	bool CpuPipelineRecords(std::uint32_t a_epoch);
-	/** @brief Any thread, after InstallFeatures: whether an epoch of a_segment does (CpuPipelineRecords). */
+	/** @brief Any thread, after InstallFeatures: whether an epoch of a_segment has CPU pipeline passes. */
 	bool CpuPipelineSegmentRecords(RenderGraphRuntime::Segment a_segment);
-	/** @brief Any thread, after InstallFeatures: the ORG epochs (RenderGraphRuntime::EpochOf) of the epochs that do: external in the CPU pipeline. */
+	/** @brief Any thread, after InstallFeatures: the ORG epochs that are external in the CPU pipeline. */
 	std::vector<std::uint32_t> CpuPipelineEpochs();
 }

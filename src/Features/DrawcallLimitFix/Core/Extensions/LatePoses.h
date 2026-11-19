@@ -1,6 +1,6 @@
 #pragma once
 
-// The late pose contract's Core side (Api/LatePoses.h): the contributions, resolved once at InstallFeatures.
+// Core's side of Api/LatePoses.h: the contributions, resolved once at install.
 
 #include "Features/DrawcallLimitFix/Api/LatePoses.h"
 
@@ -10,15 +10,15 @@
 
 namespace DCLF::Extensions
 {
-	/** @brief A registered late pose (its name owned). */
+	/** @brief A registered late pose, with its name owned. */
 	struct LatePoseEntry
 	{
 		std::string name;
 		decltype(Api::LatePoseContribution::root) root = nullptr;
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entries from the registrations. Once. */
+	/** @brief Main thread, once, at the end of InstallFeatures. */
 	void ResolveLatePoses(std::span<const Api::LatePoseContribution> a_registered);
-	/** @brief Any thread, after InstallFeatures (empty before): the entries, in registration order. */
+	/** @brief Any thread, after InstallFeatures. In registration order. */
 	std::span<const LatePoseEntry> LatePoses();
 }

@@ -1,6 +1,5 @@
-// One native descriptor traversal per stream, in native preorder. Visited must already include ancestor and node-specific
-// traversal rejection. A rejected Process1 call can still write state; Decision.x must not be used as the event predicate.
-// Replay/integration stage: not scheduled until the persistent traversal and descriptor initial state are published.
+// One native descriptor traversal per stream, in native preorder. Visited must already include ancestor and node rejection.
+// A rejected Process1 call can still write state, so Decision.x must not be used as the event predicate.
 cbuffer Constants : register(b0)
 {
 	uint DecisionsIndex;

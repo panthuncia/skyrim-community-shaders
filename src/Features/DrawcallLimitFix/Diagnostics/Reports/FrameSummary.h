@@ -7,9 +7,6 @@
 
 namespace DCLF::Reports
 {
-	/**
-	 * @brief Render thread. The "This frame" panel's lines: the active toggles, the tracked set, this frame's draws, GPU timings and
-	 * shadow views. Reads only; no counter is reset.
-	 */
+	/** @brief The "This frame" panel's lines. Reads only, no counter is reset. Render thread. */
 	std::vector<std::string> FrameSummary();
 }

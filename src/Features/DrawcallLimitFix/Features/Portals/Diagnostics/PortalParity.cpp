@@ -1,4 +1,4 @@
-// The portal views' parity (PortalParity.h): at PortalViews::Build's end, render thread.
+// Portal views' parity, at PortalViews::Build's end. Render thread.
 
 #include "PortalParity.h"
 
@@ -60,24 +60,20 @@ namespace DCLF::Diagnostics::PortalParity
 			return a_room ? fmt::format("'{}'", object->name.c_str() ? object->name.c_str() : "") : std::string("unbound space");
 		}
 
-		/**
-		 * @brief Whether the camera moved after the engine's walk (its eye, or its view planes: turned), with the list process's view planes
-		 * against DCLF's tallied.
-		 */
+		/** @brief Whether the camera moved or turned after the engine's walk. */
 		bool CameraMoved(Tally& p, const std::byte* a_listProcess, const std::byte* a_entry, decltype(View::Camera()) camera)
 		{
-			// The eye the engine's walk measured from (its unbound frustum's, Reset at the walk's start: +0xA0): Main::Update's camera,
-			// which the frame's draw may since have moved. A frame whose eye differs is tallied apart: its programs are a later camera's.
+			// The eye the engine's walk measured from (+0xA0). The frame's draw may have moved the camera since, and such frames are tallied apart.
 			const float* engineEye = &At<float>(a_entry + kEntryUnbound, 0xA0);
 			const float moved = std::max({ std::abs(engineEye[0] - camera.eye.x), std::abs(engineEye[1] - camera.eye.y), std::abs(engineEye[2] - camera.eye.z) });
-			// And the camera's world view planes it Reset with (+0x30): a camera turned since gives other side planes, eye unmoved.
+			// A camera turned since gives other side planes with the eye unmoved.
 			const auto& engineView = At<const PlaneSet>(a_entry + kEntryUnbound, 0x30);
 			bool turned = false;
 			for (std::uint32_t q = 0; q < 6 && !turned; ++q)
 				for (std::uint32_t c = 0; c < 4; ++c)
 					turned = turned || engineView.plane[q][c] != camera.view.plane[q][c];
 			p.turned += turned ? 1 : 0;
-			// The list process's own view planes (+0x3C, SetFrustum before the jobs), which its sphere test reads: DCLF's must be them.
+			// The list process's own view planes (+0x3C), which its sphere test reads. DCLF's must match them.
 			{
 				const auto& listPlanes = At<const PlaneSet>(a_listProcess, 0x3C);
 				bool differ = listPlanes.mask != camera.view.mask;
@@ -104,7 +100,6 @@ namespace DCLF::Diagnostics::PortalParity
 			const bool branches = !a_tokensOnly && finalized && a_ours.finalized;
 			if (branches && At<std::uint32_t>(a_engine, kFrustumFirstOp) != a_ours.firstOp)
 				why = fmt::format("first op {}, the engine's {}", a_ours.firstOp, At<std::uint32_t>(a_engine, kFrustumFirstOp));
-			// The tokens (with the tests' set words), the tests' branches, and the root, ACCEPT and REJECT records after them.
 			const auto count = static_cast<std::uint32_t>(std::min<std::size_t>(branches ? freeOp + 3 : freeOp, a_ours.ops.size()));
 			for (std::uint32_t i = 0; why.empty() && i < count; ++i) {
 				const auto& a = a_ours.ops[i];
@@ -167,11 +162,8 @@ namespace DCLF::Diagnostics::PortalParity
 		}
 
 		/**
-		 * @brief One program against an engine BSCompoundFrustum. Unbound space's of a walk from unbound space that differs is built again as
-		 * the engine's walk built it: DCLF judges every graph plane before the walk as the actor culler does (PlaneJudged), while the
-		 * engine's other occluder tests (FUN_1414a8ba0 and its siblings: HighActorCuller::Operate, FUN_140524a30) judge them lazily after
-		 * Main::Update's reset (FUN_1401a4a00), and its walk tests a plane they left untested with WithinFrustumDistFirst, whose rectangle
-		 * bug takes planes wholly outside the view. Matching then, the difference is the engine's job order and that bug, not DCLF's port.
+		 * @brief Compares one program with an engine BSCompoundFrustum. A differing unbound-space program is rebuilt as the engine's walk
+		 * built it, so a remaining match proves the difference is the engine's lazy plane judging and rectangle bug, not DCLF's port.
 		 */
 		void CompareProgram(Walk& a_walk, const Program& a_ours, const std::byte* a_engine, const void* a_room, bool a_tokensOnly)
 		{
@@ -229,10 +221,7 @@ namespace DCLF::Diagnostics::PortalParity
 				}
 		}
 
-		/**
-		 * @brief Unbound space's program against the entry's own; with another operator count, each graph plane occluder, with the engine's
-		 * state and edge flags and DCLF's test of it again (WithinFrustumDistFirst's parts).
-		 */
+		/** @brief Compares unbound space's program. On another operator count, compares each graph plane occluder's state too. */
 		void CompareUnbound(Walk& a_walk)
 		{
 			auto& p = a_walk.p;
@@ -322,7 +311,7 @@ namespace DCLF::Diagnostics::PortalParity
 
 		void Check(const On<EnginePoint::PortalWalkBuilt>&)
 		{
-			// The engine's entry as Main::Update's walk left it (the list jobs, which add the portals' shared-node frustums, have not run).
+			// The list jobs, which add the portals' shared-node frustums, have not run yet.
 			auto& p = tally;
 			++p.frames;
 			const auto* processes = Global<const std::byte* const*>(Engine::Address::kListProcesses);

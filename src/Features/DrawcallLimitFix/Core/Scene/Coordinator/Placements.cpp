@@ -1,5 +1,5 @@
-// The coordinator's placement work (scene lane): the move events drained into move keys, the light path's gate on them, the
-// placement set (movers, moving and still roots with their dependents), and the placement plan published when that set changes.
+// The coordinator's placement work on the scene lane: move events into move keys, the light path's gate, the placement set,
+// and the plan published when that set changes.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -11,7 +11,7 @@ namespace DCLF::Scene
 	{
 		// A reference's animation pushes several in a row.
 		const void* last = nullptr;
-		// "This frame and the last": the keys turn over when the pass's frame moved on, so a burst's passes add to the frame's.
+		// Keys turn over when the pass's frame moves on, so a burst's passes add to the same frame.
 		if (std::exchange(movedKeysFrame, sceneFrame) != sceneFrame) {
 			std::swap(movedKeys[0], movedKeys[1]);
 			movedKeys[0].clear();
@@ -23,9 +23,8 @@ namespace DCLF::Scene
 				movedKeys[0].push_back(a_key);
 			}
 		});
-		// A node event names a node: the reference above it, or its category node when no node up to it has one.
 		for (const auto& node : nodeChanged) {
-			// The mirror's chain (the scene work reads no engine memory).
+			// The mirror's chain, since the scene work reads no engine memory.
 			const void* key = nullptr;
 			for (const void* at = node.get(); at && !key; at = mirror.Parent(at))
 				if (const auto* record = mirror.Node(at))
@@ -39,7 +38,7 @@ namespace DCLF::Scene
 		}
 		if (a_full)
 			moveUngatedThrough = sceneFrame + 1;
-		// Pruned once 256 frames went by (by the frames the passes saw, which may skip the multiples of 256).
+		// The passes may skip the multiples of 256.
 		if (sceneFrame - movedPruneFrame >= 256) {
 			movedPruneFrame = sceneFrame;
 			std::erase_if(movedFrame, [&](const auto& a_entry) { return sceneFrame - a_entry.second > 1; });
@@ -49,7 +48,6 @@ namespace DCLF::Scene
 
 	const void* Coordinator::MoveKeyOf(const RE::BSGeometry& a_geometry, const RE::NiNode* a_categoryNode) const
 	{
-		// The mirror's chain.
 		++MirrorReads().reads[static_cast<std::size_t>(MirrorRead::MoveKey)];
 		auto keyOf = [&](auto&& a_parent, auto&& a_reference) -> const void* {
 			const void* key = nullptr;
@@ -75,8 +73,7 @@ namespace DCLF::Scene
 	{
 		if (const void* key = MoveKeyOf(a_geometry, a_categoryNode))
 			return { key, nullptr };
-		// No one reference: the innermost and the outermost on the chain (an outer reference's update moves the inner's 3D, and the inner
-		// may move on its own), or with none the category node (a cell's update pass keys its dynamic node's subtree by the node).
+		// An outer reference's update moves the inner's 3D, and the inner may move on its own. A cell's update keys its dynamic subtree by the node.
 		const void* inner = nullptr;
 		const void* outer = nullptr;
 		for (const void* object = &a_geometry; object && object != a_categoryNode; object = mirror.Parent(object))
@@ -91,17 +88,16 @@ namespace DCLF::Scene
 
 	bool Coordinator::MoverDue(const Tracked& a_tracked, const RE::BSGeometry* a_geometry, std::uint32_t& a_why) const
 	{
-		// No light path: its record cannot be kept (it has none), so it is written in full every frame.
+		// Without a light path there is no kept record, so it is written in full every frame.
 		if (!a_tracked.lightTraits) {
 			a_why = 4;
 			return true;
 		}
-		// A hidden event on its chain owes an actor's verdict a retake.
 		if (a_tracked.hiddenEventOwed) {
 			a_why = 2;
 			return true;
 		}
-		// First-person chains (a CategoryRoot view's entries') are recaptured every frame (FrameVerdictKept takes their verdict every frame).
+		// First-person chains are recaptured every frame.
 		if ((a_tracked.lightTraits & kTraitOwnerClass) && ViewRootEntry(a_tracked.categoryNode)) {
 			a_why = 3;
 			return true;
@@ -130,13 +126,10 @@ namespace DCLF::Scene
 		const std::uint32_t slot = a_tracked.slot;
 		PlannedKey key{ a_geometry, slot, slot < tables.layerOf.size() ? tables.layerOf[slot] : kNoObjectSlot, 0, 0, a_tracked.entryRoot,
 			ViewRootEntry(a_tracked.categoryNode), Api::FrameValueItemClass::None };
-		// A skinned record's palette: its block, which the record addresses.
 		if (slot < tables.boneRows.size() && (tables.objects[slot].flags & kObjectPaletteBlock) && tables.boneRows[slot]) {
 			key.boneOffset = tables.boneOffset[slot];
 			key.boneRows = tables.boneRows[slot];
-			// A palette rows member's block holds its class's rows (a particle system's quads: Api::PaletteRowsContribution), not a skin's
-			// palette: its geometry type's item class for a skinless record (the mirror's record says which; the frame values' parity tests
-			// the same, Extensions::PlannedItemClass).
+			// A palette rows member's block holds its class's rows, such as a particle system's quads, not a skin's palette.
 			if (const auto* record = mirror.Geometry(a_geometry)) {
 				key.itemClass = Extensions::PlannedItemClass(true, record->type, record->skin != nullptr);
 				if (key.itemClass == Api::FrameValueItemClass::None)
@@ -150,7 +143,6 @@ namespace DCLF::Scene
 	{
 		const PlannedKey key = PlacedKeyOf(a_geometry, a_tracked);
 		PlacementPlan::Item item;
-		// Copies of references the scene work holds: the entry's, and its listed root's.
 		item.geometry = a_tracked.geometry;
 		item.listedRoot = OwnedRoot(a_tracked.entryRoot);
 		item.slot = key.slot;
@@ -165,8 +157,7 @@ namespace DCLF::Scene
 
 	bool Coordinator::IsPlacedMover(const Tracked& a_tracked) const
 	{
-		// A recorded light-path entry that moves, is skinned or is an actor's (an actor's skeleton moves with no controller or body on its
-		// chain: Havok's behaviour graph, its owner class's own motion). FrameValues places every one each frame from the set the plans left.
+		// An actor's skeleton moves with no controller or body on its chain, through Havok's behaviour graph.
 		return a_tracked.perFrame &&
 		       ((a_tracked.lightTraits & (kTraitMoves | kTraitRootMoves | kTraitSkin)) || ((a_tracked.lightTraits & kTraitOwnerClass) && a_tracked.owner.ownMotion)) &&
 		       a_tracked.geometry && a_tracked.slot != kNoObjectSlot && a_tracked.objectStamp == objectStamp && a_tracked.slot < tables.objects.size();
@@ -176,7 +167,6 @@ namespace DCLF::Scene
 	{
 		const bool placed = IsPlacedMover(a_tracked);
 		const bool changed = placed ? moverSet.insert(a_geometry).second : moverSet.erase(a_geometry) != 0;
-		// Compared at the next plan: a member that joined or left, or one whose write may have moved its key.
 		if (changed || (placed && a_written))
 			placementMoversTouched.push_back(a_geometry);
 		return changed;
@@ -184,9 +174,8 @@ namespace DCLF::Scene
 
 	void Coordinator::QueueRoots()
 	{
-		// A root RootMoves found still, whose reference had a move event: the cells' update passes recompute its bound
-		// (FireSpitCooking's drifts by a tenth of a unit with nothing under it moving). Listed from its first event until its last
-		// dependent goes; a moving root is listed already. Only the keys this frame added since the last pass.
+		// Cell update passes recompute a still root's bound once its reference had a move event, as FireSpitCooking drifts by a tenth of
+		// a unit with nothing under it moving.
 		auto& keys = movedKeys[0];
 		for (; movedKeysQueued < keys.size(); ++movedKeysQueued) {
 			const auto it = referenceRoot.find(keys[movedKeysQueued]);
@@ -201,8 +190,7 @@ namespace DCLF::Scene
 
 	void Coordinator::SyncPlacementSet()
 	{
-		// A planned slot's change (a release, a rewrite, a moved palette block: whatever its causes) may change the key of an item naming
-		// it: those items are compared at the plan. A log this reader cannot continue, or invalidated object indices, make the set anew.
+		// A planned slot's change may change the key of an item naming it. A log this reader cannot continue makes the set anew.
 		auto& log = tables.changeLog;
 		if (!placementCursor.Continues(log, tablesGeneration)) {
 			placementCursor.Restart(tablesGeneration);
@@ -252,7 +240,6 @@ namespace DCLF::Scene
 
 	std::optional<Coordinator::PlannedKey> Coordinator::PlannedDependentNow(const RE::NiAVObject* a_root, const void* a_geometry) const
 	{
-		// Listed under the root (Tracked::listedRoot: its rootDependents key) with a record.
 		const auto it = tracked.find(static_cast<RE::BSGeometry*>(const_cast<void*>(a_geometry)));
 		if (it == tracked.end() || it->second.listedRoot != a_root || it->second.slot == kNoObjectSlot || it->second.slot >= tables.objects.size())
 			return std::nullopt;
@@ -291,7 +278,7 @@ namespace DCLF::Scene
 	{
 		auto& d = placementDeltaStats;
 		if (a_reset) {
-			// Made anew: everything the coordinator lists now, against an empty planned set (the consumer clears its kept one).
+			// The consumer clears its kept set.
 			a_plan.reset = true;
 			++d.resets;
 			plannedMovers.clear();
@@ -309,7 +296,6 @@ namespace DCLF::Scene
 		d.moversTouched += placementMoversTouched.size();
 		d.rootsTouched += placementRootsTouched.size();
 		d.dependentsTouched += placementDependentsTouched.size();
-		// Movers: joined, changed or left, each compared with its planned key.
 		for (auto* geometry : placementMoversTouched) {
 			const auto now = PlannedMoverNow(geometry, true);
 			const auto planned = plannedMovers.find(geometry);
@@ -335,7 +321,6 @@ namespace DCLF::Scene
 			AddPlannedSlots(*now, owner);
 			plannedMovers.insert_or_assign(geometry, *now);
 		}
-		// Roots: one plan entry each, its reference copied from the owner once.
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::size_t> rootAt;
 		auto rootEntry = [&](const RE::NiAVObject* a_root) -> PlacementPlan::Root& {
 			const auto [it, inserted] = rootAt.try_emplace(a_root, a_plan.roots.size());
@@ -363,7 +348,6 @@ namespace DCLF::Scene
 				}
 				continue;
 			}
-			// A root that stays listed changes by its dependents, touched one by one.
 			if (planned != plannedRoots.end())
 				continue;
 			++d.rootsListed;
@@ -377,7 +361,6 @@ namespace DCLF::Scene
 				}
 			d.dependentsJoined += entry.dependents.size();
 		}
-		// Dependents of the roots that stay listed.
 		for (const auto& [root, geometry] : placementDependentsTouched) {
 			const auto planned = plannedRoots.find(root);
 			if (planned == plannedRoots.end())
@@ -414,7 +397,6 @@ namespace DCLF::Scene
 
 	PlacementPlan::Check Coordinator::RebuildPlacementSet()
 	{
-		// The whole set as the plans before the delta store made it (every member and listed root, sorted), nothing pruned.
 		PlacementPlan::Check check;
 		auto byObject = [](const PlannedKey& a_left, const PlannedKey& a_right) { return a_left.object < a_right.object; };
 		for (auto* geometry : moverSet) {
@@ -451,12 +433,8 @@ namespace DCLF::Scene
 	void Coordinator::PublishPlacementPlan()
 	{
 		DCLF_SCENE_PART(Placements, "CS.DCLF.Scene.Placements");
-		// A plan is a delta of the placement set (dclf A1): every recorded per-frame mover, every moving root and every still root listed,
-		// with their dependents. The set is kept by key (plannedMovers, plannedRoots) and only what the membership points touched since the
-		// last plan is compared with it (O(changes)), so motion alone needs no plan: one is made only when the walk wrote a slot, the set
-		// changed or the tables' sizes did. FrameValues applies the plans in order onto the set it keeps and samples it every frame. What the
-		// coordinator keeps is keys and slots alone; the references are copied from the entries (PlanItemOf) and the root owners only into
-		// a plan, so the pump never holds one across passes.
+		// Only what changed since the last plan is compared, so motion alone needs no plan. The coordinator keeps keys and slots only,
+		// and copies references into a plan, so the pump never holds one across passes.
 		QueueRoots();
 		SyncPlacementSet();
 		auto& g = moverGateStats;
@@ -467,8 +445,6 @@ namespace DCLF::Scene
 		const bool sized = objectSlots != plannedObjectSlots || boneCapacity != plannedBoneCapacity;
 		const bool reset = placementDirty;
 		const bool touched = reset || !placementMoversTouched.empty() || !placementRootsTouched.empty() || !placementDependentsTouched.empty();
-		// Parity (the mover gate's witness passes): the set rebuilt whole against the planned one, and handed to FrameValues with the plan
-		// to compare its kept set (PlacementPlan::check).
 		auto parity = [&]() -> std::shared_ptr<const PlacementPlan::Check> {
 			if (!hiddenWitness)
 				return nullptr;
@@ -539,8 +515,7 @@ namespace DCLF::Scene
 		plan.slots = objectSlots;
 		plan.boneCapacity = boneCapacity;
 		plan.check = parity();
-		// A plan no publication took yet (a pass that threw before its publication) is kept for the next one, which carries every plan
-		// since (TakeDeltas): the frame takes every plan, in order, so none is replaced (each is a delta).
+		// A plan no publication took yet is kept for the next one. Each plan is a delta, so none may be replaced.
 		if (placementPlanReady)
 			placementPlansHeld.push_back(std::move(placementPlanReady));
 		placementPlanReady = std::move(placementPlan);
@@ -549,7 +524,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ReportPlacementDeltas()
 	{
-		// Once the pass's frame is in a later report window (the coordinator's clock may skip frame numbers).
+		// The coordinator's clock may skip frame numbers.
 		const std::uint32_t window = sceneFrame / Reports::Interval();
 		if (window == placementDeltaWindow)
 			return;

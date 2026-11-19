@@ -1,7 +1,4 @@
-// The first-person view's scene diagnostics, on Core's root view hook points (Diagnostics/Scene/RootViewEvents.h): the subtree's bits by
-// events against the live tree (CS_DCLF_PERSISTENT_PARITY), its live chain and its hidden geometry (render thread, FrameGlobals' engine
-// moments); the hidden verdicts of its entries (the classification); and under CS_DCLF_SET_PARITY the entries filed under another category
-// node and the slots the set's decisions leave out of the view, the commit's and its parity's, reported after the set's line.
+// The first-person view's scene diagnostics, subscribed to Core's root view events (Diagnostics/Scene/RootViewEvents.h).
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 
@@ -22,7 +19,7 @@ namespace DCLF::Features::FirstPerson
 	{
 		using V = Diagnostics::SceneView;
 
-		/** @brief Every node and geometry under a_root (not a_root) as it is now (the tree alive: the render thread, inside the frame). */
+		// Walks the live tree, so it must run on the render thread inside the frame.
 		void LiveSubtree(const RE::NiAVObject* a_root, std::vector<RootSubtreeNode>& a_out)
 		{
 			a_out.clear();
@@ -35,13 +32,9 @@ namespace DCLF::Features::FirstPerson
 			std::ranges::sort(a_out, {}, &RootSubtreeNode::key);
 		}
 
-		/** @brief The node's bit at the last culls, else now. */
 		bool CulledBit(const Diagnostics::RootSubtreeSynced& a_subtree, const RootSubtreeNode& a_node) { return a_subtree.culled && a_node.saved ? a_node.culled : a_node.hidden; }
 
-		/**
-		 * @brief CS_DCLF_PERSISTENT_PARITY: the subtree's bits by events against a walk of the live tree now (render thread, at an engine
-		 * moment, right after the subtree's sync): membership and each node's bit. A periodic line, and the first differences named.
-		 */
+		// CS_DCLF_PERSISTENT_PARITY: compares the event-tracked subtree with a walk of the live tree.
 		struct SubtreeParity
 		{
 			std::uint64_t checks = 0, compared = 0, membership = 0, bits = 0, walks = 0;
@@ -71,7 +64,7 @@ namespace DCLF::Features::FirstPerson
 					++i;
 				} else if (i == p.live.size() || kept[j].key < p.live[i].key) {
 					++p.membership;
-					++j;  // gone from the tree: not dereferenced
+					++j;  // Gone from the tree, so never dereferenced.
 				} else {
 					++p.compared;
 					if (p.live[i].hidden != kept[j].hidden) {
@@ -91,7 +84,6 @@ namespace DCLF::Features::FirstPerson
 			p.first.clear();
 		}
 
-		/** @brief The live chain of the first shown geometry, once (render thread, the frame's start: the tree alive): where the skeleton hangs. */
 		void LogSubtreeChain(const Diagnostics::RootSubtreeSynced& a_subtree)
 		{
 			static bool chainLogged = false;
@@ -110,10 +102,6 @@ namespace DCLF::Features::FirstPerson
 				}
 		}
 
-		/**
-		 * @brief The first-person diagnostic (render thread, the frame's start): the geometry of the first-person subtree hidden now and at the
-		 * last culls, logged when the two lists change (at most 24 times). Evaluated only when the bits or the membership changed.
-		 */
 		void NoteFirstPersonDifference(const Diagnostics::RootSubtreeSynced& a_subtree)
 		{
 			static std::string last;
@@ -146,7 +134,6 @@ namespace DCLF::Features::FirstPerson
 
 		void OnSubtreeSynced(const Diagnostics::RootSubtreeSynced& a_subtree)
 		{
-			// At both moments the parity; at the frame's start the chain (once) and the hidden geometry, in that order.
 			if (subtreeParityOn)
 				CheckSubtree(a_subtree);
 			if (!a_subtree.frameStart)
@@ -157,7 +144,6 @@ namespace DCLF::Features::FirstPerson
 
 		void OnHidden(const Diagnostics::RootViewHidden& a_hidden)
 		{
-			// The node that hid a first-person skeleton entry (ClassifyFrame), the first 16.
 			static std::atomic<std::uint32_t> logged{ 0 };
 			if (logged.fetch_add(1, std::memory_order_relaxed) >= 16)
 				return;
@@ -183,19 +169,14 @@ namespace DCLF::Features::FirstPerson
 				cullHidden.size(), chain);
 		}
 
-		/**
-		 * @brief CS_DCLF_SET_PARITY: entries whose mirror chain reaches the first-person root while they are filed under another category
-		 * node (the first-person view never takes them), counted from the evaluations' threads; and the first-person slots the set's
-		 * decisions leave out (the coordinator's: the commit's and its parity's), with the first of each.
-		 */
+		// Misfiled entries reach the first-person root but are filed under another category node, so the view never takes them.
+		// The counters are written from the evaluation threads.
 		struct FilingState
 		{
 			std::atomic<std::uint64_t> misfiled{ 0 };
 			std::atomic<const void*> misfiledGeometry{ nullptr }, misfiledCategory{ nullptr };
-			// First-person entries' slots the first-person view takes no part in (SetParticipation), the first.
 			std::uint64_t excluded = 0;
 			std::string firstExcluded;
-			// First-person slots that take part but are held out (not resident, not main-ready, pipelines), the first.
 			std::uint64_t held = 0;
 			std::string firstHeld;
 		} filing;
@@ -207,7 +188,6 @@ namespace DCLF::Features::FirstPerson
 			filing.misfiledCategory.store(a_event.category, std::memory_order_relaxed);
 		}
 
-		/** @brief The first-person slot a decision left out (a_waitWhy: the waiting reason it is shown with). */
 		void NoteLeftOut(const Scene::Coordinator& a_store, std::uint32_t a_slot, const V::SlotDecision& a_decision, std::uint8_t a_waitWhy)
 		{
 			auto& fp = filing;
@@ -251,7 +231,6 @@ namespace DCLF::Features::FirstPerson
 
 	void SetLines(std::uint32_t)
 	{
-		// The scene lane, the coordinator's report, right after the set's line: the filing, then the slots held out, then those excluded.
 		if (const auto misfiled = filing.misfiled.exchange(0, std::memory_order_relaxed))
 			logger::info("[DCLF] first-person entries filed under another category node (T7e, CS_DCLF_SET_PARITY): {} evaluations; last geometry {} under {} "
 						 "(the first-person root {}) <- FIRST-PERSON FILING",

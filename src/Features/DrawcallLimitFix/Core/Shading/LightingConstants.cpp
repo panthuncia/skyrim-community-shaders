@@ -1,5 +1,4 @@
-// LightingConstants.h's implementations: frame block merges, the render thread's frame samples (extras), the object rows
-// (BuildObjectRecord, SampleShading) and the constant-group packing.
+// LightingConstants.h's implementations: frame block merges, the frame samples, the object rows and constant-group packing.
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
@@ -19,7 +18,7 @@ namespace DCLF
 {
 	namespace
 	{
-		// The land blend's globals (SampleExtrasFrame): BSShaderManager::State's (AE 0x142033060, SE 0x141e0ded0) and AE's 0.2.
+		// The land blend's globals in BSShaderManager::State (AE 0x142033060, SE 0x141e0ded0), and AE's 0.2.
 		constexpr Engine::Offset kStateTimer{ { 390953 }, { 513213 } };             // State+0x20: timerValues[0]
 		constexpr Engine::Offset kStateLandFadeSeconds{ { 390972 }, { 513232 } };   // State+0x98: landLOFadeSeconds
 		constexpr Engine::Offset kStateOldGridCenterX{ { 390976 }, { 513236 } };    // State+0xa8: oldGridArrayCenter
@@ -27,7 +26,7 @@ namespace DCLF
 		constexpr Engine::Offset kStateGridCenterX{ { 390978 }, { 513238 } };       // State+0xb0: gridArrayCenter
 		constexpr Engine::Offset kStateGridCenterY{ { 390979 }, { 513238, 0x4 } };
 		constexpr Engine::Offset kStateGridLerpStart{ { 390980 }, { 513239 } };     // State+0xb8: gridArrayLerpStart
-		constexpr Engine::Offset kLandFadeFraction{ { 470010 }, {} };               // float 0.2, AE only (SE's code divides by 5)
+		constexpr Engine::Offset kLandFadeFraction{ { 470010 }, {} };               // float 0.2, AE only. SE's code divides by 5.
 
 		void StoreRelative(float* a_out, const float (&a_world)[12], const RE::NiPoint3& a_posAdjust)
 		{
@@ -37,8 +36,8 @@ namespace DCLF
 			a_out[11] = a_world[11] - a_posAdjust.z;
 		}
 
-		// A variable's dword offset in the shader's cbuffer, or ~0 when the permutation lacks it (offset 0
-		// is also what reflection leaves for missing variables, so it only counts for the group's first).
+		// A variable's dword offset in the shader's cbuffer, or ~0 when the permutation lacks it.
+		// Reflection also gives 0 for missing variables, so offset 0 only counts for the group's first.
 		std::uint32_t OffsetOf(std::span<const std::uint8_t> a_table, std::uint32_t a_variable, std::uint32_t a_firstVariable)
 		{
 			if (a_variable >= a_table.size())
@@ -64,7 +63,7 @@ namespace DCLF
 
 	namespace
 	{
-		/** @brief Each frame lighting component: its float in a PerGeometry PS block and its index in FrameLighting. */
+		/** @brief Each frame lighting component's float in a PS PerGeometry block and its FrameLighting index. */
 		template <class F>
 		void ForEachFrameLightingFloat(F&& a_f)
 		{
@@ -92,7 +91,7 @@ namespace DCLF
 
 	namespace
 	{
-		/** @brief Each fog float: its stage, its block's float and its FrameFog index (FogColor: none, ~0u). */
+		/** @brief Each fog float's stage, block float and FrameFog index. FogColor has none. */
 		template <class F>
 		void ForEachFogFloat(F&& a_visit)
 		{
@@ -141,16 +140,14 @@ namespace DCLF
 		EngineReadWindow::Touch("SampleExtrasFrame");
 		ExtrasFrame frame;
 		auto at = [](std::uintptr_t a_offset) { return *reinterpret_cast<const float*>(REL::Offset(a_offset).address()); };
-		// BSLightingShader::SetupGeometry, techniques 8 and 19 (engine notes: per-object constants): a blend between two
-		// BSShaderManager::State positions by a clock the same state holds. Each runtime's own arithmetic, for its bits: AE multiplies
-		// by 0.2 (the constant at 0x141ad2840) over the fade seconds, SE (FUN_1412f4e20) divides by the fade seconds times 5.
+		// SetupGeometry for techniques 8 and 19 blends two BSShaderManager::State positions by its clock. Each runtime's own arithmetic, to match bits:
+		// AE multiplies by 0.2 (0x141ad2840) over the fade seconds, SE (FUN_1412f4e20) divides by fade seconds times 5.
 		const float elapsed = at(kStateTimer) - at(kStateGridLerpStart);
 		float t = REL::Module::IsSE() ? elapsed / (at(kStateLandFadeSeconds) * 5.0f) : elapsed * (at(kLandFadeFraction) / at(kStateLandFadeSeconds));
 		t = t <= 0.0f ? 0.0f : 1.0f <= t ? 1.0f : t;
 		frame.landBlend[0] = (at(kStateGridCenterX) - at(kStateOldGridCenterX)) * t + at(kStateOldGridCenterX);
 		frame.landBlend[1] = (at(kStateGridCenterY) - at(kStateOldGridCenterY)) * t + at(kStateOldGridCenterY);
-		// The ProjectedUV projection (SetupGeometry's ProjectedUV block): a fixed rotation about Z at posAdjust, through the engine's
-		// own NiTransform-to-matrix routine (which subtracts posAdjust).
+		// The ProjectedUV projection: a fixed rotation about Z at posAdjust, built by the engine's own NiTransform-to-matrix routine.
 		using ToMatrix = void (*)(float*, const RE::NiTransform*);
 		static const REL::Relocation<ToMatrix> toMatrix{ REL::Offset(Engine::Address::kTransformToMatrix) };
 		RE::NiTransform projection;
@@ -166,7 +163,7 @@ namespace DCLF
 		projection.translate = globals::game::shadowState->GetRuntimeData().posAdjust.getEye();
 		projection.scale = 1.0f;
 		toMatrix(frame.projection, &projection);
-		// The pixel parameters' globals (FUN_1414e00c0): the two tilings and the projected-normals switch.
+		// The pixel parameters' globals from FUN_1414e00c0: the two tilings and the projected-normals switch.
 		frame.projectedGlobals[0] = at(Engine::Address::kProjectedTiling);
 		frame.projectedGlobals[1] = at(Engine::Address::kProjectedTiling2);
 		frame.projectedGlobals[2] = 0.0f;
@@ -187,7 +184,7 @@ namespace DCLF
 		const float mode = a_static[kExtraRowLandBlend * 4];
 		float* proj = a_out + kExtraRowTextureProj * 4;
 		if (mode != kTextureProjShape) {
-			// m = W x P, W the placement as a row-vector matrix (DCLFTextureProjOf); TextureProj's rows are m's columns.
+			// m = W x P, with W the placement as a row-vector matrix. TextureProj's rows are m's columns.
 			const float* p = a_frame.projection;
 			float w[16]{};
 			for (int i = 0; i < 3; ++i) {
@@ -218,10 +215,10 @@ namespace DCLF
 		GeometryConstants constants = a_frame.geometryConstants[object.pipelineIndex];
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
-		// The placement row's (render flag 0x10 already applied: the previous transform is the current one).
+		// The placement row's transforms. Render flag 0x10 is already applied, so previous equals current.
 		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSWorld]], a_placement.world, a_eye);
 		StoreRelative(&constants.vs.floats[vsLayout.offset[kVSPreviousWorld]], a_placement.previousWorld, a_previousEye);
-		// The row's components, the ones SetupGeometry does not write for the pass unwritten (the sentinel), as the engine's.
+		// Components SetupGeometry does not write for this pass keep the unwritten sentinel, as the engine's do.
 		ObjectShading shading = a_shading.shading;
 		auto* const shadingFloats = reinterpret_cast<float*>(&shading);
 		for (std::uint32_t i = 0; i < sizeof(ObjectShading) / sizeof(float); ++i)
@@ -230,14 +227,12 @@ namespace DCLF
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSMaterialData]], shading.materialData, sizeof(shading.materialData));
 		std::memcpy(&constants.ps.floats[psLayout.offset[kPSEmitColor]], shading.emitColor, sizeof(shading.emitColor));
 		constants.ps.floats[psLayout.offset[kPSSSRParams] + 3] = shading.ssrSpecular;
-		// The feature block's variables, for the objects whose they are, not the pipeline template's (Extensions::ShadingBlockRule:
-		// Features/TreeWind's TreeParams and WindTimers.xy for technique 12's).
+		// The feature block's variables for objects that use them, instead of the pipeline template's.
 		const auto& block = Extensions::ShadingBlockRule();
 		if (object.flags & block.objectFlags)
 			for (const auto& variable : block.variables)
 				std::memcpy(&constants.vs.floats[vsLayout.offset[variable.variable]], a_shading.featureBlock + variable.firstWord, variable.floats * sizeof(float));
-		// The extras rows, as the draw completes them. ProjectedUVParams.y is never written by the engine, so it keeps whatever the
-		// template left - the unwritten sentinel.
+		// The extras rows as the draw completes them. The engine never writes ProjectedUVParams.y, so it keeps the unwritten sentinel.
 		float completed[kExtraRows * 4];
 		if (const float* staticRows = ExtraRowsOf(a_tables, a_objectIndex)) {
 			CompleteExtras(staticRows, object.flags, a_placement.world, a_extrasFrame, completed);
@@ -296,8 +291,7 @@ namespace DCLF
 		const auto& object = a_tables.objects[a_objectIndex];
 		const auto& shading = a_shading.shading;
 
-		// Writes a_count floats at a float offset, clipped to the group. Unwritten components (the quiet
-		// NaN ConstantBlock uses as its sentinel) become zero, matching PackConstantGroup.
+		// Writes a_count floats at a float offset, clipped to the group. Unwritten components, the quiet NaN sentinel, become zero as in PackConstantGroup.
 		auto write = [](std::span<std::byte> a_out, std::uint32_t a_offset, std::uint32_t a_count, const float* a_values, std::uint32_t a_available) {
 			if (a_offset == ~0u)
 				return;
@@ -332,7 +326,7 @@ namespace DCLF
 			if (object.flags & kObjectProjectedUV) {
 				write(a_vsOut, a_offsets.vsTextureProj, a_offsets.vsTextureProjSize, rows + kExtraRowTextureProj * 4, 12);
 				const float* params = rows + kExtraRowProjectedParams * 4;
-				// x, then z and w: the engine never writes y (the template's zero stays).
+				// x, then z and w. The engine never writes y, so the template's zero stays.
 				if (a_offsets.psProjectedUVParams[0] != ~0u) {
 					write(a_psOut, a_offsets.psProjectedUVParams[0], 1, params, 1);
 					if (a_offsets.psProjectedUVParamsSize[0] >= 4)
@@ -342,7 +336,7 @@ namespace DCLF
 				write(a_psOut, a_offsets.psProjectedUVParams[2], a_offsets.psProjectedUVParamsSize[2], params + 8, 4);
 			}
 		}
-		// Only the w component of SSRParams is per-object; the rest stays as the template packed it.
+		// Only SSRParams.w is per object. The rest stays as the template packed it.
 		if (a_offsets.psSSRParams != ~0u && a_offsets.psSSRParamsSize > 3) {
 			const std::size_t at = (std::size_t(a_offsets.psSSRParams) + 3) * 4;
 			if (at + 4 <= a_psOut.size()) {
@@ -363,21 +357,17 @@ namespace DCLF
 	{
 		const auto& object = a_tables.objects[a_objectIndex];
 		a_out.ancestorValue = a_tables.ancestorValue[a_objectIndex].value;
-		// The fade root's reference (bits 9-31) is the root states' family's, ORed in with the families' words below.
+		// The fade root reference in bits 9-31 comes from the root states' family, ORed in with the families' words below.
 		a_out.recordFlags = RecordFlagsOf(object.flags, kNoFadeRoot);
-		// The same reference the native draw's AlphaTestRefBuffer carries: threshold / 255, and 0 when the
-		// object is not alpha tested (the shader's test is then compiled out anyway).
-		// A Blood effect's is its threshold whatever its alpha test (AlphaTestRefOf: SetupGeometry's AlphaTestRef.x).
+		// The native AlphaTestRefBuffer value: threshold / 255, or 0 when not alpha tested since the test is then compiled out.
+		// A Blood effect uses its threshold whatever its alpha test.
 		a_out.alphaTestRef = AlphaTestRefOf(object.flags, object.pipelineIndex < a_tables.pipelines.size() ? &a_tables.pipelines[object.pipelineIndex] : nullptr);
-		// The feature block is zero bar the family's record word below (its variables are the shading row's and the feature's: Features/
-		// TreeWind's wind, DCLFTreeWind).
+		// The feature block is zero apart from the family's record word below.
 		std::fill(std::begin(a_out.featureBlock), std::end(a_out.featureBlock), 0u);
-		// The table families' references the record carries, ORed into their words after recordFlags (Api::TableFamily::recordWord:
-		// Features/TreeWind's tree slot and listing generation, never 0, for its wind: DCLFTreeWind; the fade roots' (root + 1) << 9 in
-		// recordFlags, by which the pixel stage reads FadeStateCS's fade).
+		// The table families' references, ORed into their record words, such as TreeWind's tree slot and generation, which is never 0.
 		for (const auto& family : a_tables.families.All())
 			family.WriteRecordWords(reinterpret_cast<std::uint32_t*>(&a_out), a_objectIndex);
-		// Skinning: the palette block's rows in the frame's palettes (FrameValues, PaletteRowsOf).
+		// Skinning: the palette block's rows.
 		const bool skinned = (object.flags & kObjectPaletteBlock) && a_objectIndex < a_tables.boneOffset.size();
 		const auto palette = skinned ? PaletteRowsOf(a_tables.boneOffset[a_objectIndex], a_tables.boneRows[a_objectIndex]) : PaletteRows{};
 		a_out.boneOffset = palette.current;
@@ -385,16 +375,14 @@ namespace DCLF
 		a_out.boneRows = skinned ? a_tables.boneRows[a_objectIndex] : 0u;
 		const bool extras = a_objectIndex < a_tables.extraOffset.size() && a_tables.extraOffset[a_objectIndex] != kNoExtraRows;
 		a_out.extraOffset = extras ? a_tables.extraOffset[a_objectIndex] : 0u;
-		// The LOD fades the pass draws with (MakeShading's rule: MaterialData.x for the Envmap technique, .y and SSRParams.w
-		// with Specular), faded by the draw while the object's fade node has them apply (its placement row's).
+		// The LOD fades the pass draws with, which the draw fades while the object's fade node has them apply.
 		std::uint32_t fades = 0;
 		if (!(object.flags & kObjectNoBindings) && object.pipelineIndex < a_tables.pipelines.size()) {
 			const std::uint32_t pass = a_tables.pipelines[object.pipelineIndex].passDescriptor;
 			fades = ((pass & 0x200u) ? kLodFadeSpecular | ((a_renderFlags & 2) ? 0u : kLodFadeSsr) : 0u) | (((pass >> 24) & 0x3f) == 1 ? kLodFadeEnvmap : 0u);
 		}
 		a_out.lodFades = fades;
-		// A refraction object's variant bits (kRecordRefraction*), from its key; its family's (the Effect port's suppress and billboard bits);
-		// a decal's nudge (kRecordDecalNudge).
+		// Refraction variant bits from the key, the program family's bits, and a decal's nudge.
 		if (!(object.flags & kObjectNoBindings) && object.pipelineIndex < a_tables.pipelines.size()) {
 			const auto& key = a_tables.pipelines[object.pipelineIndex];
 			a_out.recordFlags |= RefractionRecordFlagsOf(key) | FamilyRecordFlagsOf(key, object.flags) | DecalRecordFlagsOf(key);
@@ -403,28 +391,25 @@ namespace DCLF
 
 	void SampleShading(const RE::BSShaderProperty& a_base, std::uint32_t a_pass, bool a_member, BindlessShading& a_out)
 	{
-		// A material port's property (its exact RTTI, resolved at install): the port's shading row.
+		// A material port's property gets the port's shading row.
 		if (const std::uint8_t port = Extensions::PortOfRtti(a_base.GetRTTI())) {
 			Extensions::SamplePortShading(port, a_base, a_pass, a_member, a_out);
 			return;
 		}
 		const auto& a_property = static_cast<const RE::BSLightingShaderProperty&>(a_base);
-		// BSLightingShader::SetupGeometry (engine notes): which components it writes depends on the pass.
-		const bool specular = (a_pass & 0x200u) != 0;              // the pass descriptor's Specular
-		// MaterialData.x (property +0x104, envmapLODFade): SetupGeometry's cases 1, 0xb and 0x10 (Envmap, MultilayerParallax, Eye;
-		// 1414dd040), which Lighting.hlsl's environment map reads under ENVMAP, MULTI_LAYER_PARALLAX and EYE.
+		// Which components SetupGeometry writes depends on the pass.
+		const bool specular = (a_pass & 0x200u) != 0;              // the pass descriptor's Specular bit
+		// MaterialData.x is envmapLODFade at property +0x104, written for Envmap, MultilayerParallax and Eye (1414dd040).
 		const std::uint32_t technique = (a_pass >> 24) & 0x3f;
 		const bool envmap = technique == 1 || technique == 0xb || technique == 0x10;
 		auto& shading = a_out.shading;
-		// Refraction (kRefraction, kTempRefraction): no Lighting pass, but its draw's inputs (Utility.hlsl, DCLF_REFRACTION):
-		// MaterialData.x the refraction LOD fade as the property holds it at +0x104 (GetRenderPasses writes it there, the Utility pass's
-		// EyePos.w), which the draw uses where its LOD fades do not apply; MaterialData.w the material's refractionPower (BSUtilityShader::
-		// SetupMaterial's RefractionPower). Neither is in `written` (no engine Lighting constant is compared with them).
+		// Refraction has no Lighting pass, but its draw reads MaterialData.x, the refraction LOD fade GetRenderPasses leaves at +0x104,
+		// and MaterialData.w, the material's refractionPower. Neither is in written, since no engine Lighting constant compares with them.
 		const bool refraction = a_property.flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kRefraction, RE::BSShaderProperty::EShaderPropertyFlag::kTempRefraction);
 		shading.materialData[0] = (envmap || refraction) ? a_property.envmapLODFade : 0.0f;
 		shading.materialData[1] = specular ? a_property.specularLODFade : 0.0f;
-		// GetRenderPasses leaves materialAlpha * the fade node's currentFade on the property, for whichever camera called it last. A
-		// member's is the material's alone: the draw multiplies its root's fade in (Lighting.hlsl DCLFAlphaFade).
+		// GetRenderPasses leaves materialAlpha times the fade node's currentFade, for whichever camera called it last.
+		// A member uses the material's alone, because the draw multiplies its root's fade in.
 		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(a_property.material);
 		shading.materialData[2] = a_member && material ? material->materialAlpha : a_property.alpha;
 		shading.materialData[3] = refraction && material ? material->refractionPower : 0.0f;
@@ -436,8 +421,7 @@ namespace DCLF
 		shading.emitColor[2] = emissive ? emissive->blue * mult : 0.0f;
 		shading.ssrSpecular = ((GeometryPort::kMainPassRenderFlags & 2) ? 0.0f : 1.0f) * (specular ? a_property.specularLODFade : 0.0f);
 		a_out.padding[0] = a_out.padding[1] = a_out.padding[2] = 0u;
-		// The feature block as its contribution derives it now (Extensions::ShadingBlockRule: Features/TreeWind's tree wind, as
-		// SetupGeometry's case 0xc makes it for a TreeAnim property): its blockWords, the rest zero.
+		// The feature block as its contribution derives it now. The rest is zero.
 		float block[Api::kShadingBlockWords]{};
 		Extensions::DeriveShading(a_property, block);
 		const std::uint32_t words = Extensions::ShadingBlockRule().blockWords;

@@ -2,6 +2,35 @@
 #	define HEIGHTMAP
 #endif
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): the slots each form reads from the heap, the
+// shared constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's
+// fullscreen triangle: the heightmaps' four neighbour coordinates are made here instead. The ripple makers draw their own geometry:
+// their ORG vertex stage below pulls it by device address, which the port writes into the latch's PerFrame words (a ripple maker
+// reads no PerFrame).
+#	define ORG_SHARED_CONSTANTS
+// A ripple maker's PerFrame words hold its geometry's addresses instead (its vertex stage, below).
+#	if !defined(RIPPLE_MAKER_WADING) && !defined(RIPPLE_MAKER_RAIN)
+#		define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	endif
+#	include "Common/DeviceRef.hlsli"
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	if defined(BLEND_HEIGHTMAPS)
+#		define ISWATERDISPLACEMENT_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, HeightMap01Tex, 0) X(SRV, Texture2D<float4>, HeightMap02Tex, 1) X(SAMPLER, SamplerState, HeightMap01Sampler, 0) X(SAMPLER, SamplerState, HeightMap02Sampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	elif defined(NORMALS)
+#		define ISWATERDISPLACEMENT_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, DisplaceMapTex, 0) X(SAMPLER, SamplerState, DisplaceMapSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	elif defined(TEXCOORD_OFFSET)
+#		define ISWATERDISPLACEMENT_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, DisplaySamplerTex, 0) X(SAMPLER, SamplerState, DisplaySamplerSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	elif defined(HEIGHTMAP)
+#		define ISWATERDISPLACEMENT_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, HeightMapTex, 0) X(SAMPLER, SamplerState, HeightMapSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	else
+#		define ISWATERDISPLACEMENT_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	endif
+ORG_PUSH_BLOCK(ISWATERDISPLACEMENT_ORG_RESOURCES(ORG_HANDLE))
+ISWATERDISPLACEMENT_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 struct VS_INPUT
 {
 	float4 Position: POSITION0;
@@ -12,7 +41,7 @@ struct VS_OUTPUT
 {
 	float4 Position: SV_POSITION0;
 	float2 TexCoord: TEXCOORD0;
-#if defined(HEIGHTMAP)
+#if defined(HEIGHTMAP) && !defined(CS_ORG_BINDLESS)
 	float2 TexCoord1: TEXCOORD1;
 	float2 TexCoord2: TEXCOORD2;
 	float2 TexCoord3: TEXCOORD3;
@@ -20,12 +49,61 @@ struct VS_OUTPUT
 #endif
 };
 
-#ifdef VSHADER
+#if defined(VSHADER) && defined(CS_ORG_BINDLESS)
+#	if defined(RIPPLE_MAKER_WADING)
+// The two rows of a 2D affine transform that places the ripple quad (PerGeometry c1, c2).
+static float4 TranslationMatrix0 = OrgEngineRow(PerGeometryAt, 1);
+static float4 TranslationMatrix1 = OrgEngineRow(PerGeometryAt, 2);
+#	endif
+
+// The ripple's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's view ref, FrameSize and Source the
+// 16-bit index buffer's, Padding the vertex stride (low 16 bits) and the first index (high 16 bits). The position is the vertex's
+// first attribute, four floats.
+VS_INPUT PullRippleVertex(uint a_vertexID)
+{
+	const DeviceRef vertices = DeviceRef(PerGeometryAt.FrameSrv, PerGeometryAt.FrameOffset);
+	const DeviceRef indices = DeviceRef(PerGeometryAt.FrameSize, PerGeometryAt.Source);
+	const uint stride = PerGeometryAt.Padding & 0xFFFF;
+	const uint indexNumber = (PerGeometryAt.Padding >> 16) + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(indices, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	VS_INPUT input;
+	input.Position = asfloat(DeviceLoad(uint4, DeviceRefAdd(vertices, index * stride)));
+	input.TexCoord = 0.0.xx;
+	return input;
+}
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	const VS_INPUT input = PullRippleVertex(a_vertexID);
+	VS_OUTPUT vsout;
+	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(RIPPLE_MAKER_WADING)
+	vsout.Position.x = dot(float3(input.Position.xy, 1), TranslationMatrix0.xyz);
+	vsout.Position.y = dot(float3(input.Position.xy, 1), TranslationMatrix1.xyz);
+#	endif
+	vsout.TexCoord = input.TexCoord.xy;
+	return vsout;
+}
+#elif defined(VSHADER)
+#	if defined(RIPPLE_MAKER_WADING)
+cbuffer PerGeometry : register(b2)
+{
+	// The two rows of a 2D affine transform that places the ripple quad.
+	float4 TranslationMatrix0 : packoffset(c1);
+	float4 TranslationMatrix1 : packoffset(c2);
+};
+#	endif
+
 VS_OUTPUT main(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
 
 	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(RIPPLE_MAKER_WADING)
+	vsout.Position.x = dot(float3(input.Position.xy, 1), TranslationMatrix0.xyz);
+	vsout.Position.y = dot(float3(input.Position.xy, 1), TranslationMatrix1.xyz);
+#	endif
 	vsout.TexCoord = input.TexCoord.xy;
 #	if defined(HEIGHTMAP)
 	vsout.TexCoord1 = input.TexCoord.xy + float2(-0.0009765625, -0.0009765625);
@@ -46,27 +124,37 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
-#	if defined(BLEND_HEIGHTMAPS)
+#	if defined(CS_ORG_BINDLESS)
+static float4 PerGeometryRow0 = OrgEngineRow(PerGeometryAt, 0);
+static float4 PerGeometryRow1 = OrgEngineRow(PerGeometryAt, 1);
+static float Time = PerGeometryRow0.x;
+static float BlendAmount = PerGeometryRow0.y;
+static float2 TextureOffset = PerGeometryRow0.zw;
+static float fDamp = PerGeometryRow1.x;
+static float3 RainVars = PerGeometryRow1.yzw;
+static float4 WadingVars = OrgEngineRow(PerGeometryAt, 2);
+#	else
+#		if defined(BLEND_HEIGHTMAPS)
 SamplerState HeightMap01Sampler : register(s0);
 SamplerState HeightMap02Sampler : register(s1);
-#	elif defined(NORMALS)
+#		elif defined(NORMALS)
 SamplerState DisplaceMapSampler : register(s0);
-#	elif defined(TEXCOORD_OFFSET)
+#		elif defined(TEXCOORD_OFFSET)
 SamplerState DisplaySamplerSampler : register(s0);
-#	elif defined(HEIGHTMAP)
+#		elif defined(HEIGHTMAP)
 SamplerState HeightMapSampler : register(s0);
-#	endif
+#		endif
 
-#	if defined(BLEND_HEIGHTMAPS)
+#		if defined(BLEND_HEIGHTMAPS)
 Texture2D<float4> HeightMap01Tex : register(t0);
 Texture2D<float4> HeightMap02Tex : register(t1);
-#	elif defined(NORMALS)
+#		elif defined(NORMALS)
 Texture2D<float4> DisplaceMapTex : register(t0);
-#	elif defined(TEXCOORD_OFFSET)
+#		elif defined(TEXCOORD_OFFSET)
 Texture2D<float4> DisplaySamplerTex : register(t0);
-#	elif defined(HEIGHTMAP)
+#		elif defined(HEIGHTMAP)
 Texture2D<float4> HeightMapTex : register(t0);
-#	endif
+#		endif
 
 cbuffer PerGeometry : register(b2)
 {
@@ -77,6 +165,7 @@ cbuffer PerGeometry : register(b2)
 	float3 RainVars : packoffset(c1.y);
 	float4 WadingVars : packoffset(c2.x);
 };
+#	endif
 
 #	if defined(NORMALS)
 float GetDisplacementNormalValue(float2 texCoord)
@@ -87,13 +176,25 @@ float GetDisplacementNormalValue(float2 texCoord)
 #	endif
 
 #	if defined(HEIGHTMAP)
+#		if defined(CS_ORG_BINDLESS)
+// The vertex shader's four neighbour coordinates, made here: the graph's fullscreen triangle writes TEXCOORD0 only.
+#			define HEIGHTMAP_TEXCOORD1(input) ((input).TexCoord + float2(-0.0009765625, -0.0009765625))
+#			define HEIGHTMAP_TEXCOORD2(input) ((input).TexCoord + float2(-0.0009765625, 0.0009765625))
+#			define HEIGHTMAP_TEXCOORD3(input) ((input).TexCoord + float2(0.0009765625, -0.0009765625))
+#			define HEIGHTMAP_TEXCOORD4(input) ((input).TexCoord + float2(0.0009765625, 0.0009765625))
+#		else
+#			define HEIGHTMAP_TEXCOORD1(input) (input).TexCoord1
+#			define HEIGHTMAP_TEXCOORD2(input) (input).TexCoord2
+#			define HEIGHTMAP_TEXCOORD3(input) (input).TexCoord3
+#			define HEIGHTMAP_TEXCOORD4(input) (input).TexCoord4
+#		endif
 float4 GetHeight(PS_INPUT input, uniform float3 Vars)
 {
 	float2 height = HeightMapTex.Sample(HeightMapSampler, input.TexCoord).xy;
-	float heightLB = HeightMapTex.Sample(HeightMapSampler, input.TexCoord1).x;
-	float heightLT = HeightMapTex.Sample(HeightMapSampler, input.TexCoord2).x;
-	float heightRB = HeightMapTex.Sample(HeightMapSampler, input.TexCoord3).x;
-	float heightRT = HeightMapTex.Sample(HeightMapSampler, input.TexCoord4).x;
+	float heightLB = HeightMapTex.Sample(HeightMapSampler, HEIGHTMAP_TEXCOORD1(input)).x;
+	float heightLT = HeightMapTex.Sample(HeightMapSampler, HEIGHTMAP_TEXCOORD2(input)).x;
+	float heightRB = HeightMapTex.Sample(HeightMapSampler, HEIGHTMAP_TEXCOORD3(input)).x;
+	float heightRT = HeightMapTex.Sample(HeightMapSampler, HEIGHTMAP_TEXCOORD4(input)).x;
 
 	float heightDispersion = -height.x * 4 + (heightLB + heightLT + heightRB + heightRT);
 	float tmp1 = Vars.x * heightDispersion + (height.y - 0.5);

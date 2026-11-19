@@ -1,6 +1,6 @@
-// The scene payload's parts' versions (PayloadPools, D5): per part a backing pool and a chain of versions built from each other on DCLF's
-// state graph, the snapshot's payload naming them, and the frame's payload read from the installed one (PayloadVersions.h).
+// The payload parts' version chains and backing pools, and the frame's payload read from the installed snapshot.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
@@ -24,8 +24,8 @@ namespace DCLF::Draws
 		template <class T>
 		constexpr std::uint64_t Words(std::uint64_t a_elements) { return a_elements * sizeof(T) / 4; }
 
-		// The parts' versions, in PayloadPart order: cs.dclf.payload.<name>. Inputs and geometries are 4-byte words (the shaders read them
-		// as such); the row parts report their device address (the latches name them by it).
+		// Inputs and geometries are 4-byte words because the shaders read them that way.
+		// The row parts need a device address because the latches name them by it.
 		struct PartPool
 		{
 			const char* name;
@@ -36,20 +36,32 @@ namespace DCLF::Draws
 			{ "geometries", 4, false }, { "material-rows", kMaterialRowBytes, true }, { "pipeline-rows", kPipelineRowBytes, true }, { "inputs", 4, false },
 			{ "shadow-rows", sizeof(ShadowMaterialRow), true } } };
 
-		// A class's backings at most: one a game frame in flight may still bind, the newest version and the one being built. A build that
-		// finds none free suspends until one is (the frames meanwhile draw the snapshot they have).
+		/** @brief Part a_part's late-bound buffer. Readers declare it and MakeFramePayload publishes its version. */
+		RenderGraph::LateRefBuffer& PartLate(std::size_t a_part)
+		{
+			static const auto parts = [] {
+				std::array<std::unique_ptr<RenderGraph::LateRefBuffer>, kPayloadParts> made;
+				for (std::size_t k = 0; k < kPayloadParts; ++k)
+					made[k] = std::make_unique<RenderGraph::LateRefBuffer>(fmt::format("cs.dclf.payload.{}.late", kPools[k].name));
+				return made;
+			}();
+			return *parts[a_part];
+		}
+
+		// One backing a frame in flight may still bind, plus the newest version and the one being built.
+		// A build that finds none free waits. The frames keep drawing the snapshot they have.
 		constexpr std::uint32_t kBackingsPerClass = RenderGraphRuntime::kGameFramesInFlight + 2;
 
 		constexpr std::uint64_t kNoTail = ~0ull;   // PartHeld::tailStart: the part has no tails
 		constexpr std::uint64_t kNoFloor = ~0ull;  // PartShared::floorEpoch: no backing holds anything
 
-		/** @brief A version's journal position and the first byte of its tails (kNoTail: none): what a backing that holds it lacks of a later one. */
+		/** @brief A version's journal position and where its tails start. Together they say what a backing at this version lacks. */
 		struct PartHeld
 		{
 			std::uint64_t version = 0, journalEpoch = 0, tailStart = kNoTail;
 		};
 
-		/** @brief Any thread: a part's journal floor (its producer's, after each build) and the report's counters. */
+		/** @brief Any thread. A part's journal floor and report counters. */
 		struct PartShared
 		{
 			std::atomic<std::uint64_t> floorEpoch{ kNoFloor };  // the oldest journal position a backing of the pool holds
@@ -57,7 +69,7 @@ namespace DCLF::Draws
 			std::atomic<std::uint64_t> built{ 0 }, uploadedBytes{ 0 }, copiedBytes{ 0 }, wholeCopies{ 0 }, suspensions{ 0 }, failures{ 0 };
 		};
 
-		/** @brief One posted version's outcome: the coordinator lane's (SceneGraph::PostPayloadPart's done), read by the builder once `done`. */
+		/** @brief One posted version's outcome. The builder reads it once `done` is set. */
 		struct PartPending
 		{
 			std::atomic<bool> done{ false };
@@ -67,7 +79,7 @@ namespace DCLF::Draws
 			std::uint64_t units = 0, serial = 0;  // the source's
 		};
 
-		/** @brief The snapshot builder's: one part's chain. */
+		/** @brief Snapshot builder only. One part's chain. */
 		struct PartChain
 		{
 			std::shared_ptr<org::services::BackingPool> pool;  // made at the part's first post
@@ -89,14 +101,14 @@ namespace DCLF::Draws
 			bool uploaderReported = false;                  // the snapshot builder's
 			std::shared_ptr<const ScenePayload> installed;  // render thread: the frame's (Install)
 		};
-		/** @brief Never destroyed: a version's lease may return to its pool, and a build's outcome arrive, while the process tears down. */
+		/** @brief Never destroyed, because leases and build results can arrive while the process tears down. */
 		PartsState& Parts()
 		{
 			static auto* state = new PartsState();
 			return *state;
 		}
 
-		/** @brief A part's rows in its version's elements (words for Geometries and Inputs). */
+		/** @brief A part's rows in elements. Geometries and Inputs count words. */
 		std::uint64_t RowsOf(const PayloadSource& a_source, PayloadPart a_part)
 		{
 			const auto units = a_source.units[Part(a_part)];
@@ -110,7 +122,6 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief Whether a_source has a_part (the row parts are the main and the shadow payloads'). */
 		bool Present(const PayloadSource& a_source, PayloadPart a_part)
 		{
 			switch (a_part) {
@@ -124,10 +135,10 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief Whether a_part has tails: rows after its journalled ones that are the source's own, written whole into each version. */
+		/** @brief Whether a_part has tails, rows after the journalled ones that are written whole into each version. */
 		constexpr bool Tailed(PayloadPart a_part) { return a_part == PayloadPart::Geometries || a_part == PayloadPart::Inputs; }
 
-		/** @brief The first byte of a_part's tails in a_source (the stream rows, the frame inputs); kNoTail for an untailed part. */
+		/** @brief The first byte of a_part's tails, or kNoTail. */
 		std::uint64_t TailStartOf(const PayloadSource& a_source, PayloadPart a_part)
 		{
 			switch (a_part) {
@@ -140,7 +151,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief A part's journal position in a_source (0: not a kept array's, written whole). */
+		/** @brief A part's journal position. 0 means it is not journalled and is written whole. */
 		std::uint64_t ContentEpochOf(const PayloadSource& a_source, PayloadPart a_part)
 		{
 			switch (a_part) {
@@ -163,7 +174,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief A journal's runs since a_from as byte ranges (a_unitBytes an element of a_count); nullopt where it does not reach back. */
+		/** @brief A journal's runs since a_from as byte ranges. nullopt when it does not reach back that far. */
 		std::optional<std::vector<BufferByteRange>> RunsOf(const ChangeJournal::Snapshot& a_changes, std::uint64_t a_unitBytes, std::uint64_t a_count,
 			std::uint64_t a_from)
 		{
@@ -174,10 +185,7 @@ namespace DCLF::Draws
 			return out;
 		}
 
-		/**
-		 * @brief The bytes a_part's journal in a_source names changed since journal position a_from (through a_source's, which covers
-		 * through the predecessor's: a superset is copied, never too little); nullopt below its floor.
-		 */
+		/** @brief Bytes a_part's journal changed since a_from. A superset is fine, never too little. nullopt below the floor. */
 		std::optional<std::vector<BufferByteRange>> JournalRanges(const PayloadSource& a_source, PayloadPart a_part, std::uint64_t a_from)
 		{
 			switch (a_part) {
@@ -188,7 +196,6 @@ namespace DCLF::Draws
 			case PayloadPart::Geometries:
 				return RunsOf(a_source.geometries->slots.changes, sizeof(GeometryDraw), a_source.geometries->SlotCount(), a_from);
 			case PayloadPart::MaterialRows: {
-				// Journalled by part (EmitMainRowParts).
 				const auto& rows = a_source.main->body->materialRows;
 				return RunsOf(rows.changes, sizeof(MaterialRow) / kMaterialRowParts, rows.Count() * kMaterialRowParts, a_from);
 			}
@@ -204,9 +211,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief TEMP (CS_DCLF_SET_PARITY): version a_version of the inputs as built (its predecessor a_previous's mirror, the delta written
-		 * over it), mirrored per version, against the whole scene list. A difference is an input the GPU reads that the list lacks. The
-		 * inputs' producer's alone (its builds are serial).
+		 * @brief TEMP (CS_DCLF_SET_PARITY): mirrors each inputs version as built, to compare against the whole scene list.
+		 * A difference is an input the GPU reads that the list lacks. Serial, on the inputs' producer.
 		 */
 		std::vector<DrawInput>& MirrorInputs(std::uint64_t a_version, std::uint64_t a_previous, std::size_t a_units)
 		{
@@ -214,7 +220,7 @@ namespace DCLF::Draws
 			std::vector<DrawInput> base;
 			if (const auto it = mirrors.find(a_previous); a_previous && it != mirrors.end())
 				base = it->second;
-			// The predecessor's is kept (a failed build is made again from it), the others go.
+			// Keep the predecessor's mirror because a failed build is redone from it.
 			for (auto it = mirrors.begin(); it != mirrors.end();)
 				it = it->first != a_previous ? mirrors.erase(it) : std::next(it);
 			auto& mirror = mirrors[a_version] = std::move(base);
@@ -257,14 +263,13 @@ namespace DCLF::Draws
 		using DeltaWrite = std::function<void(const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)>;
 
 		/**
-		 * @brief A part's delta (VersionedBufferBuildInput::emitDelta, the producer's thread): its journal's runs since a_from, the
-		 * predecessor's journal position (nullopt: everything, a version with no predecessor), then its tails whole. The data are a_source's,
-		 * which the version's build holds (VersionedBufferBuildInput::keep).
+		 * @brief Emits a part's delta on the producer's thread. The journal's runs since a_from, then its tails whole.
+		 * nullopt a_from means everything.
 		 */
 		void EmitDelta(PayloadPart a_part, const PayloadSource& a_source, std::optional<std::uint64_t> a_from, std::uint64_t a_version, std::uint64_t a_previous,
 			const DeltaWrite& a_write)
 		{
-			// ~0 is past every journal's position: a holder there is sent everything.
+			// ~0 is past every journal position, so a holder there is sent everything.
 			const std::uint64_t from = a_from ? *a_from : ~std::uint64_t{ 0 };
 			const auto sink = [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_write(a_data, a_bytes, a_offset); };
 			switch (a_part) {
@@ -272,8 +277,7 @@ namespace DCLF::Draws
 				a_source.views->objects.Emit(from, sink);
 				break;
 			case PayloadPart::Extras: {
-				// CS_DCLF_PERSISTENT_PARITY: the extras rows are checked by the version that holds them, as it is built (the observer's
-				// mirror of it, its predecessor's with the delta written over it; null without the observer).
+				// CS_DCLF_PERSISTENT_PARITY checks the extras rows against the observer's mirror as each version is built.
 				std::vector<float>* mirror = nullptr;
 				Diagnostics::Notify(Diagnostics::ExtrasSending{ a_version, a_previous, mirror });
 				EmitExtras(a_source.views->extras, from, mirror, sink);
@@ -323,9 +327,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief The producer's thread, after a build (the pool's one acquirer then: the part's builds are serial): the oldest journal
-		 * position a backing of the pool holds, by a_held (the versions known when the build was posted, its own included), published for
-		 * the journals. A backing at a version not known (one whose build failed after writing it) keeps every change.
+		 * @brief Publishes the oldest journal position any backing holds. Runs after a build, when the producer is the pool's only acquirer.
+		 * A backing at an unknown version, such as one a failed build wrote, keeps every change.
 		 */
 		void PublishFloor(org::services::BackingPool& a_pool, const std::vector<PartHeld>& a_held, PartShared& a_shared)
 		{
@@ -346,8 +349,8 @@ namespace DCLF::Draws
 				if (a_event == org::services::BackingPoolEvent::Suspended)
 					shared->suspensions.fetch_add(1, std::memory_order_relaxed);
 			};
-			// One spare: a version builds into one free backing, and a fresh one costs a GPU copy of its predecessor, not an upload, so
-			// more spares (FrameValues' PerFrameSpares, a backing a frame) would only hold VRAM (HexRim: 5 pipeline-row backings, 40 MB).
+			// One spare is enough. A fresh backing costs a GPU copy, not an upload, so more spares only hold VRAM.
+			// On HexRim five pipeline-row backings took 40 MB.
 			return org::services::BackingPool::Create(std::move(hooks), FrameRetirement(),
 				{ .name = fmt::format("cs.dclf.payload.{}", kPools[a_part].name), .maxPerClass = kBackingsPerClass,
 					.framesInFlight = RenderGraphRuntime::kGameFramesInFlight, .spareFree = 1 });
@@ -371,10 +374,9 @@ namespace DCLF::Draws
 				out->products = a_main->body->products;
 				Extensions::CarryPayloadProducts(out->products);
 			}
-			// The geometry table: the main payloads' and the shadow payload's are the same (the publication's stream views and face streams).
+			// The main and shadow payloads share the same geometry table.
 			out->geometries = a_main ? &a_main->body->geometryDraws : &a_shadow->geometries;
-			// The scene list: the region every payload of the publication holds at its head, then the main payloads' frame inputs, then
-			// the shadow payload's (both written whole into each version: they are the frame's).
+			// The scene list is the region, then the main frame inputs, then the shadow inputs. The last two are written whole into each version.
 			out->region = a_main ? &a_main->resident : &a_shadow->regionInputs;
 			out->mainList = a_main ? &a_main->body->inputList : nullptr;
 			out->shadowList = a_shadow ? &a_shadow->inputList : nullptr;
@@ -417,7 +419,7 @@ namespace DCLF::Draws
 						shared.copiedBytes.fetch_add(version->copiedBytes, std::memory_order_relaxed);
 						shared.wholeCopies.fetch_add(version->copiedWhole ? 1u : 0u, std::memory_order_relaxed);
 					} else {
-						// No fallback: the part keeps its last version, the source has no payload, and the next one builds it again.
+						// No fallback. The part keeps its last version and the next source builds it again.
 						chain.failed = true;
 						shared.failures.fetch_add(1, std::memory_order_relaxed);
 						if (!std::exchange(chain.reported, true))
@@ -425,7 +427,7 @@ namespace DCLF::Draws
 								kPartNames[k], pending->held.version, pending->error);
 					}
 				}
-				// The versions no backing holds any more (below the pool's floor) are forgotten; the newest is always known.
+				// Forget versions below the pool's floor. The newest is always kept.
 				const auto floor = s.shared[k].floorVersion.load(std::memory_order_acquire);
 				std::erase_if(chain.held, [&](const PartHeld& a_held) { return a_held.version < floor && a_held.version != chain.lastHeld.version; });
 			}
@@ -447,7 +449,7 @@ namespace DCLF::Draws
 		bool Post(const std::shared_ptr<const PayloadSource>& a_source, const std::shared_ptr<org::runtime::IUploadService>& a_uploads)
 		{
 			auto& s = Parts();
-			// The builds copy from the predecessor on the dedicated upload queue (startup frames precede it: made by the graph's first build).
+			// The builds copy from the predecessor on the dedicated upload queue.
 			if (!a_uploads || !a_uploads->HasDedicatedStreamingQueue()) {
 				if (!std::exchange(s.uploaderReported, true))
 					logger::info("[DCLF] the scene payload's versions wait for the dedicated upload queue: snapshots have no payload until it is made");
@@ -462,18 +464,16 @@ namespace DCLF::Draws
 				if (!Present(source, part))
 					continue;  // the chain keeps its last version for a later source that has the part
 				const auto epoch = ContentEpochOf(source, part);
-				// Changed for this source: its journal moved, its rows, or (a tailed part, or one no journal keeps) the source is another.
+				// A tailed or unjournalled part also changes whenever the source does.
 				const bool changed = !chain.last || source.units[k] != chain.lastUnits || epoch != chain.lastHeld.journalEpoch ||
 				                     ((Tailed(part) || !epoch) && source.serial != chain.lastSerial);
-				// A part whose shrink is due is made again unchanged (into its smaller class): a chain is asked only on change, and a
-				// part that went quiet after the scene shrank would keep its class.
+				// Rebuild a quiet part when its shrink is due. A chain is otherwise asked only on change and would keep its large class.
 				if (!changed && !chain.last->shrinkWindow.Due(PooledBackings::Shrink(), org::services::ShrinkWindow::Clock::now()))
 					continue;
 				if (!chain.pool)
 					chain.pool = MakePool(k);
 				const PartHeld held{ ++chain.versions, epoch, TailStartOf(source, part) };
 				const PartHeld previous = chain.last ? chain.lastHeld : PartHeld{};
-				// The versions a backing may hold, this one's included (the producer's floor reads them; the catch-up looks them up).
 				auto known = std::make_shared<std::vector<PartHeld>>(chain.held);
 				known->push_back(held);
 				const std::shared_ptr<const std::vector<PartHeld>> versions = std::move(known);
@@ -487,19 +487,17 @@ namespace DCLF::Draws
 				input.elementStride = kPools[k].stride;
 				input.elementCount = RowsOf(source, part);
 				input.capacity = std::max<std::uint64_t>(input.elementCount, 1);
-				// A grown class: a quarter's headroom, not the build's power of two (a part that changes every frame keeps a backing a frame
-				// in flight: HexRim's pipeline rows were 4 of 16 MB for 9.5 MB of rows).
+				// Grow with a quarter's headroom, not a power of two. A part that changes every frame keeps a backing per frame in flight.
+				// HexRim's pipeline rows used 4 backings of 16 MB for 9.5 MB of rows.
 				input.growth = org::services::GrowthPolicy::Headroom(25, 64);
-				// A smaller class once the part stays much smaller (its rows' top fell: lowest-first slots); the predecessor's copy is
-				// clipped to this version's rows.
+				// Shrink once the part stays much smaller. The predecessor's copy is clipped to this version's rows.
 				input.shrink = PooledBackings::Shrink();
 				input.flags.deviceAddress = kPools[k].deviceAddress;
 				input.previous = chain.last;
 				input.backingPool = chain.pool;
 				input.predecessorCopy = true;
 				input.keep = a_source;
-				// What a backing at version a_from lacks of the predecessor: the journal's runs since its position, and from the earlier of
-				// its tails' start and the predecessor's on (both sources' own).
+				// What a backing at a_from lacks. The journal's runs since then, plus everything from the earlier tail start on.
 				input.changedSince = [view, part, versions, previousTail = previous.tailStart](std::uint64_t a_from) -> std::optional<std::vector<BufferByteRange>> {
 					const auto it = std::ranges::find(*versions, a_from, &PartHeld::version);
 					if (it == versions->end())
@@ -510,7 +508,7 @@ namespace DCLF::Draws
 							ranges->push_back({ tail, ~std::uint64_t{ 0 } - tail });
 					return ranges;
 				};
-				// The delta: the runs since the predecessor's journal position (everything without one, or from one no journal kept).
+				// Everything when there is no predecessor position.
 				const std::optional<std::uint64_t> from = chain.last && previous.journalEpoch ? std::optional<std::uint64_t>(previous.journalEpoch) : std::nullopt;
 				input.emitDelta = [view, part, from, version = held.version, previousVersion = previous.version](const DeltaWrite& a_write) {
 					EmitDelta(part, *view, from, version, previousVersion, a_write);
@@ -523,7 +521,7 @@ namespace DCLF::Draws
 				pending->held = held;
 				pending->units = source.units[k];
 				pending->serial = source.serial;
-				// The coordinator lane's, once GPU ready or ended: the builder takes it at its next pass (Settle).
+				// The builder picks up the result in its next Settle.
 				const bool accepted = SceneScheduler::Graph().PostPayloadPart(std::move(input), [pending](std::shared_ptr<const PartVersion> a_version, std::string a_error) {
 					pending->version = std::move(a_version);
 					pending->error = std::move(a_error);
@@ -569,6 +567,13 @@ namespace DCLF::Draws
 			Parts().installed = std::move(a_payload);
 		}
 
+		void DeclareReads(org::RenderPassBuilder& a_builder)
+		{
+			RenderGraph::DeclaredRefs unchecked;  // MakeFramePayload's refs are the published versions' own
+			for (std::size_t k = 0; k < kPayloadParts; ++k)
+				PartLate(k).Declare(a_builder, RenderGraph::RefAccess::Read, unchecked);
+		}
+
 		bool MakeFramePayload(PayloadVersions& a_out)
 		{
 			a_out = {};
@@ -581,8 +586,12 @@ namespace DCLF::Draws
 				if (!version)
 					continue;
 				const auto& backing = version->lease;
-				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0, payload.units[k] };
+				const RenderGraph::BufferRef published = PartLate(k).Publish(backing->buffer, version);
+				// Shaders read rows through the ref. The layouts use the address.
+				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0,
+					kPools[k].deviceAddress ? published : RenderGraph::BufferRef{}, payload.units[k] };
 				a_out.backings[k] = backing.Get();
+				RenderGraph::CheckBufferRef(a_out.parts[k].ref, a_out.parts[k].address, backing->byteCapacity, "payload part");
 				if (!a_out.parts[k].srvIndex)
 					return false;
 			}

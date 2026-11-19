@@ -16,18 +16,16 @@
 #include <utility>
 #include <vector>
 
-// The building blocks of DCLF's persistent draw state (dclf-architecture.md, "Persistent draw state"): what the tables
-// log as they change, and the arrays kept across frames from them that the GPU buffers mirror. Every kept structure is
-// one of these rather than its own copy of the protocol.
+// The building blocks of DCLF's persistent draw state, described in dclf-architecture.md, "Persistent draw state":
+// the logs the tables write as they change, and the arrays kept across frames that GPU buffers mirror.
+// Every kept structure uses these instead of its own copy of the protocol.
 namespace DCLF
 {
-	// Whether the kept arrays reuse their storage across builds. Only the CPU tests turn it off, to compare against fresh
-	// storage.
+	// Whether kept arrays reuse their storage across builds. Only the CPU tests turn it off, to compare against fresh storage.
 	inline bool reuseKeptStorage = true;
 	/**
-	 * @brief An append-only log with absolute positions: entry k is at base + k. Readers keep their own position
-	 * (LogCursor); trimming the head, or invalidating the log, leaves a reader behind the base, and a reader behind the
-	 * base reads everything again.
+	 * @brief An append-only log with absolute positions, where entry k is at base + k. Readers keep their own position.
+	 * A reader left behind the base by a trim or an invalidate reads everything again.
 	 */
 	template <class E>
 	struct EventLog
@@ -38,20 +36,20 @@ namespace DCLF
 		std::uint64_t End() const { return base + entries.size(); }
 		std::size_t Size() const { return entries.size(); }
 		void Push(const E& a_entry) { entries.push_back(a_entry); }
-		/** @brief Whether a reader at a_position can read on (it is neither behind the base nor past the end). */
+		/** @brief Whether a reader at a_position can read on. */
 		bool Readable(std::uint64_t a_position) const { return a_position >= base && a_position <= End(); }
-		/** @brief The entries from a_position on (a readable position). */
+		/** @brief The entries from a readable a_position on. */
 		std::span<const E> From(std::uint64_t a_position) const
 		{
 			return std::span<const E>(entries).subspan(static_cast<std::size_t>(a_position - base));
 		}
-		/** @brief Every reader is to read everything again: a gap past the end leaves them all behind the base. */
+		/** @brief Makes every reader read everything again, by leaving a gap past the end. */
 		void Invalidate()
 		{
 			base += entries.size() + 1;
 			entries.clear();
 		}
-		/** @brief Drops the older half once the log holds more than a_max entries (a reader still there reads everything again). */
+		/** @brief Drops the older half once the log holds more than a_max entries. */
 		void Trim(std::size_t a_max)
 		{
 			if (entries.size() <= a_max)
@@ -63,10 +61,9 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief An EventLog whose entries sit in fixed chunks its copies share (the tables' logs, which every published snapshot holds):
-	 * copying one, bringing a copy up to another (assigning) and trimming cost O(chunks), not O(entries). The entries a copy holds never
-	 * change: only the copy at a chunk's end appends to it in place (its fill, claimed atomically); another copy appending there takes
-	 * its own copy of the chunk first. From gives a range (LogRange) for range-for, not a span.
+	 * @brief An EventLog whose entries sit in fixed chunks its copies share, so copy, assign and trim cost O(chunks).
+	 * A copy's entries never change. Only the copy at a chunk's end appends to it in place, claimed atomically.
+	 * Any other copy appending there takes its own copy of the chunk first.
 	 */
 	template <class E>
 	struct SharedEventLog
@@ -76,12 +73,11 @@ namespace DCLF
 		struct Chunk
 		{
 			std::array<E, kChunk> entries;
-			std::atomic<std::uint32_t> filled{ 0 };  // the entries appended: a copy whose end reaches it appends in place
+			std::atomic<std::uint32_t> filled{ 0 };  // entries appended. A copy whose end reaches it appends in place.
 		};
 		/**
-		 * @brief Entries [first, first + count) across the chunks (indices from the first chunk's start). It reads the log's chunk list,
-		 * not its storage: a reader may append to the log it iterates (a NoteChange), and a Push that opens a chunk
-		 * reallocates the list. What it appends is past the range; a Trim or an Invalidate while iterating is not allowed.
+		 * @brief Entries [first, first + count) across the chunks. It reads the chunk list, not storage, so the reader may append while iterating.
+		 * Trim or Invalidate while iterating is not allowed.
 		 */
 		struct LogRange
 		{
@@ -122,7 +118,7 @@ namespace DCLF
 				chunks.back()->filled.store(1, std::memory_order_relaxed);
 			} else if (auto expected = static_cast<std::uint32_t>(slot);
 					   !chunks[c]->filled.compare_exchange_strong(expected, static_cast<std::uint32_t>(slot + 1), std::memory_order_relaxed)) {
-				// Another copy appended past this one's end here: this one's own chunk, with its entries.
+				// Another copy appended past this one's end here, so take a private copy of the chunk.
 				auto own = std::make_shared<Chunk>();
 				std::copy_n(chunks[c]->entries.begin(), slot, own->entries.begin());
 				own->filled.store(static_cast<std::uint32_t>(slot + 1), std::memory_order_relaxed);
@@ -144,7 +140,7 @@ namespace DCLF
 			head = 0;
 			count = 0;
 		}
-		/** @brief Drops the older half once the log holds more than a_max entries: whole chunks let go (a copy holding them keeps them). */
+		/** @brief Drops the older half once the log holds more than a_max entries. A copy holding the chunks keeps them. */
 		void Trim(std::size_t a_max)
 		{
 			if (count <= a_max)
@@ -156,7 +152,7 @@ namespace DCLF
 			base += half;
 			count -= half;
 		}
-		/** @brief The same base and entries (the replay parity's). */
+		/** @brief Same base and entries. */
 		bool operator==(const SharedEventLog& a_other) const
 		{
 			if (base != a_other.base || count != a_other.count)
@@ -170,8 +166,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief A reader's place in an EventLog (or a SharedEventLog), and the tables generation it read from. It continues only in the
-	 * same generation and while its position is readable; otherwise the reader rebuilds from the tables and restarts.
+	 * @brief A reader's place in a log, and the tables generation it read from.
+	 * It continues only in the same generation and while its position is readable. Otherwise it rebuilds from the tables.
 	 */
 	struct LogCursor
 	{
@@ -204,12 +200,8 @@ namespace DCLF
 
 	/**
 	 * @brief What changed in a kept array, by content epoch, for the buffers that mirror it.
-	 *
-	 * Each build that changes anything is one new content epoch (a journal position). The journal keeps every change after its floor
-	 * as (contentEpoch, range) entries, so a holder - a GPU buffer whose contents are at some content epoch - is sent the ranges
-	 * changed since that epoch,
-	 * coalesced; a holder below the floor (or a new buffer, which holds 0) is sent everything. One holder or several (the
-	 * shadow epoch's view slots each hold their own content epoch): BeginBuild trims what the oldest holder still counted has.
+	 * Each build that changes anything is one new content epoch. A buffer at some epoch is sent the ranges changed since, coalesced.
+	 * A buffer below the floor, or a new one at 0, is sent everything. BeginBuild trims what the oldest counted holder already has.
 	 */
 	class ChangeJournal
 	{
@@ -221,19 +213,15 @@ namespace DCLF
 			std::uint64_t count = 0;
 		};
 
-		/** @brief What a build's payload carries: the content epoch, and the changes since the floor. */
+		/** @brief What a build's payload carries: the content epoch and the changes since the floor. */
 		struct Snapshot
 		{
-			std::uint64_t contentEpoch = 0;  // 0: not a kept array's, sent whole
+			std::uint64_t contentEpoch = 0;  // 0 means not a kept array's, so sent whole
 			std::uint64_t floor = 0;
-			std::vector<Entry> entries;  // in content epoch order, as the journal keeps them (ForEachRun relies on it)
+			std::vector<Entry> entries;  // in content epoch order, which ForEachRun relies on
 
-			/** @brief Whether a holder at a_contentEpoch has this snapshot's contents. */
 			bool Holds(std::uint64_t a_contentEpoch) const { return contentEpoch && a_contentEpoch == contentEpoch; }
-			/**
-			 * @brief The runs of a_count elements a holder at a_contentEpoch lacks, coalesced and clipped: a_run(first, count). All of
-			 * them when it holds nothing this journal can build on. Returns the elements sent.
-			 */
+			/** @brief Calls a_run(first, count) for every coalesced run a holder at a_contentEpoch lacks. Returns the elements sent. */
 			template <class Run>
 			std::uint64_t ForEachRun(std::uint64_t a_contentEpoch, std::uint64_t a_count, Run&& a_run) const
 			{
@@ -244,26 +232,22 @@ namespace DCLF
 
 		static constexpr std::size_t kMaxEntries = 1u << 16;
 
-		/**
-		 * @brief A build's start: forgets the changes a holder at a_oldestContentEpoch has (the oldest holder still counted), and
-		 * opens the build, which takes a new content epoch at its first change.
-		 */
+		/** @brief A build's start. Forgets changes the oldest counted holder already has, and opens the build. */
 		void BeginBuild(std::uint64_t a_oldestContentEpoch)
 		{
-			// Clamped to the current epoch: ~0 (no holder holds anything) lets every change go.
+			// Clamped to the current epoch. ~0 means no holder holds anything, so every change goes.
 			a_oldestContentEpoch = std::min(a_oldestContentEpoch, contentEpoch);
 			if (a_oldestContentEpoch > floor) {
 				std::erase_if(entries, [&](const Entry& a_entry) { return a_entry.contentEpoch <= a_oldestContentEpoch; });
 				floor = a_oldestContentEpoch;
 			}
 			if (entries.size() > kMaxEntries) {
-				// A holder that fell this far behind is sent everything.
 				entries.clear();
 				floor = contentEpoch;
 			}
 			changed = false;
 		}
-		/** @brief One element changed (once a build however often it is marked). */
+		/** @brief Marks one element changed. Once per build however often it is marked. */
 		void Mark(std::uint64_t a_index)
 		{
 			Touch();
@@ -274,7 +258,6 @@ namespace DCLF
 			markedAt[a_index] = contentEpoch;
 			entries.push_back({ contentEpoch, a_index, 1 });
 		}
-		/** @brief A range changed. */
 		void MarkRange(std::uint64_t a_first, std::uint64_t a_count)
 		{
 			if (!a_count)
@@ -282,7 +265,7 @@ namespace DCLF
 			Touch();
 			entries.push_back({ contentEpoch, a_first, a_count });
 		}
-		/** @brief Everything changed: every holder is sent everything. The content epoch counts on, so no old one is taken for it. */
+		/** @brief Everything changed. The epoch counts on, so no old epoch is reused. */
 		void Resync()
 		{
 			Touch();
@@ -290,13 +273,9 @@ namespace DCLF
 			floor = contentEpoch;
 		}
 		std::uint64_t ContentEpoch() const { return contentEpoch; }
-		/** @brief Whether this build changed anything. */
 		bool Changed() const { return changed; }
 		Snapshot Take() const { return { contentEpoch, floor, entries }; }
-		/**
-		 * @brief Snapshot::ForEachRun on the journal itself, nothing copied: only while no build changes it (its owner, between
-		 * builds).
-		 */
+		/** @brief ForEachRun on the journal itself without copying. Only valid between builds. */
 		template <class Run>
 		std::uint64_t ForEachRun(std::uint64_t a_contentEpoch, std::uint64_t a_count, Run&& a_run) const
 		{
@@ -304,7 +283,6 @@ namespace DCLF
 		}
 
 	private:
-		/** @brief ForEachRun over a journal's content epoch, floor and entries (a snapshot's or the journal's own). */
 		template <class Run>
 		static std::uint64_t Runs(std::uint64_t a_epoch, std::uint64_t a_floor, std::span<const Entry> a_entries, std::uint64_t a_contentEpoch,
 			std::uint64_t a_count, Run&& a_run)
@@ -315,14 +293,13 @@ namespace DCLF
 				a_run(std::uint64_t{ 0 }, a_count);
 				return a_count;
 			}
-			// The entries are in content epoch order (a build's marks follow the last build's): the holder lacks those from the first
-			// newer than it on, however far back the floor keeps the rest.
+			// Entries are in epoch order, so the holder lacks everything from the first entry newer than it.
 			const auto newer = a_entries.subspan(static_cast<std::size_t>(std::partition_point(a_entries.begin(), a_entries.end(),
 															 [&](const Entry& a_entry) { return a_entry.contentEpoch <= a_contentEpoch; }) -
 														 a_entries.begin()));
-			// Dense dirty tables: a bitmap avoids sorting thousands of single-element entries. Sparse or large arenas sort ranges.
+			// Dense dirty tables use a bitmap to avoid sorting thousands of single-element entries. Sparse or large arenas sort ranges.
 			if (reuseKeptStorage && newer.size() >= 128 && a_count <= (1u << 20) && a_count <= newer.size() * 64) {
-				// The thread's scratch, taken for the call (a nested call on the thread makes its own).
+				// The thread's scratch, taken for the call. A nested call makes its own.
 				auto bits = std::exchange(BitsScratch(), {});
 				bits.assign(static_cast<std::size_t>((a_count + 63) / 64), 0);
 				for (const auto& entry : newer) {
@@ -381,7 +358,7 @@ namespace DCLF
 			RunsScratch() = std::move(runs);
 			return sent;
 		}
-		// Runs' per-thread scratch: no allocation per call once warm.
+		// Per-thread scratch for runs, so nothing allocates once warm.
 		static std::vector<std::uint64_t>& BitsScratch()
 		{
 			static thread_local std::vector<std::uint64_t> bits;
@@ -405,19 +382,19 @@ namespace DCLF
 		std::uint64_t floor = 0;
 		bool changed = false;
 		std::vector<Entry> entries;
-		std::vector<std::uint64_t> markedAt;  // per element: the content epoch that last marked it
+		std::vector<std::uint64_t> markedAt;  // per element, the content epoch that last marked it
 	};
 
 	/**
-	 * @brief The bytes of a kept array's chunk (KeptArray): a write after a view copies one chunk of this, not the array. 16 KB
-	 * keeps a 1 KB material row's write at 16 rows' copy while the chunk table (copied once a build that writes) stays short.
+	 * @brief Bytes per kept array chunk. A write after a view copies one chunk, not the array.
+	 * 16 KB keeps a 1 KB material row's write at 16 rows' copy while the chunk table stays short.
 	 */
 	inline constexpr std::size_t kKeptChunkBytes = 16384;
-	/** @brief A kept array's chunk length (KeptArray's kChunk): chunks of about kKeptChunkBytes, the default. */
+	/** @brief The default chunk length: chunks of about kKeptChunkBytes. */
 	inline constexpr std::size_t kKeptChunkBySize = 0;
 	/**
-	 * @brief Or one contiguous array, copied whole by the first write of a build a view shares it with: for arrays whose users need
-	 * one pointer over many elements (FrameValues' rows and palettes) or write them from many threads after one Mutable().
+	 * @brief One contiguous array instead, copied whole by a build's first write while a view shares it.
+	 * For users that need one pointer over many elements, or write from many threads after one Mutable().
 	 */
 	inline constexpr std::size_t kKeptWhole = ~std::size_t(0);
 	template <class T>
@@ -426,13 +403,13 @@ namespace DCLF
 		return std::bit_floor(std::max<std::size_t>(1, kKeptChunkBytes / sizeof(T)));
 	}
 
-	/** @brief What a kept array copied and reused (cumulative): a reporter diffs it between reports. */
+	/** @brief Cumulative copy and reuse counts. A reporter diffs them between reports. */
 	struct KeptCopyStats
 	{
-		std::uint64_t tableCopies = 0;       // chunk tables copied (the first write of a build a view shares the table with)
-		std::uint64_t chunkCopies = 0;       // chunks copied (the first write to a chunk a view holds)
-		std::uint64_t chunkReuses = 0;       // chunks taken from those every view had released
-		std::uint64_t chunkAllocations = 0;  // chunks allocated
+		std::uint64_t tableCopies = 0;       // the first write of a build a view shares the table with
+		std::uint64_t chunkCopies = 0;       // the first write to a chunk a view holds
+		std::uint64_t chunkReuses = 0;       // taken from chunks every view had released
+		std::uint64_t chunkAllocations = 0;
 		std::uint64_t bytesCopied = 0;
 	};
 
@@ -440,9 +417,8 @@ namespace DCLF
 	class KeptChunkStore;
 
 	/**
-	 * @brief A kept array's elements as views see them: fixed-size chunks (a power of two each, contiguous only within one),
-	 * shared with the array and with other views; immutable once shared. Reads like a const std::vector without data():
-	 * contiguous memory comes as chunk-bounded spans (ForEachSpan).
+	 * @brief A kept array's elements as views see them: fixed power-of-two chunks shared with the array and other views, immutable once shared.
+	 * Reads like a const std::vector without data(). Contiguous memory comes as chunk-bounded spans.
 	 */
 	template <class T>
 	class KeptChunks
@@ -519,7 +495,7 @@ namespace DCLF
 		KeptChunks() = default;
 		explicit KeptChunks(std::uint32_t a_shift) :
 			shift(a_shift) {}
-		/** @brief Elements of one's own (not a kept array's) as one chunk, not copied. */
+		/** @brief Adopts elements of one's own as a single chunk, without copying. */
 		static KeptChunks Adopt(std::shared_ptr<Chunk> a_flat)
 		{
 			KeptChunks out(63);
@@ -537,7 +513,7 @@ namespace DCLF
 		const_iterator begin() const { return { this, 0 }; }
 		const_iterator end() const { return { this, count }; }
 		std::size_t ChunkElements() const { return std::size_t{ 1 } << shift; }
-		/** @brief The elements of [a_first, a_first + a_count) (clipped) as contiguous spans, each within one chunk: a_span(data, count, first). */
+		/** @brief Calls a_span(data, count, first) for [a_first, a_first + a_count), clipped, one chunk at a time. */
 		template <class Span>
 		void ForEachSpan(std::size_t a_first, std::size_t a_count, Span&& a_span) const
 		{
@@ -549,7 +525,6 @@ namespace DCLF
 				at += n;
 			}
 		}
-		/** @brief A flat copy. */
 		operator std::vector<T>() const
 		{
 			std::vector<T> out;
@@ -578,15 +553,12 @@ namespace DCLF
 
 		std::size_t Mask() const { return ChunkElements() - 1; }
 
-		std::vector<std::shared_ptr<Chunk>> chunks;  // ceil(count / ChunkElements()) of them, each ChunkElements() long (an adopted one: count)
+		std::vector<std::shared_ptr<Chunk>> chunks;  // ceil(count / ChunkElements()) chunks. An adopted one is count long.
 		std::size_t count = 0;
 		std::uint32_t shift = 0;
 	};
 
-	/**
-	 * @brief A view's handle on a kept array's elements (shared, immutable). Reads like the shared_ptr<const std::vector> it
-	 * replaced; a vector of one's own (not a kept array's) is adopted as one chunk.
-	 */
+	/** @brief A view's shared, immutable handle on a kept array's elements. A plain vector is adopted as one chunk. */
 	template <class T>
 	class KeptElements
 	{
@@ -597,7 +569,7 @@ namespace DCLF
 			chunks(std::move(a_chunks)) {}
 		KeptElements(std::shared_ptr<std::vector<T>> a_flat) :
 			chunks(a_flat ? std::shared_ptr<const KeptChunks<T>>(std::make_shared<KeptChunks<T>>(KeptChunks<T>::Adopt(std::move(a_flat)))) : nullptr) {}
-		// Never written through: an adopted chunk belongs to no store.
+		// Never written through. An adopted chunk belongs to no store.
 		KeptElements(std::shared_ptr<const std::vector<T>> a_flat) :
 			KeptElements(std::const_pointer_cast<std::vector<T>>(std::move(a_flat))) {}
 
@@ -611,18 +583,15 @@ namespace DCLF
 		std::shared_ptr<const KeptChunks<T>> chunks;
 	};
 
-	/**
-	 * @brief The most bytes between two runs of one emit (KeptView::Spans) that go with them as one span: a 16-byte row's gap of 16
-	 * rows costs less than another upload's bookkeeping.
-	 */
+	/** @brief Most bytes between two runs that are sent as one span. A 16-row gap of 16-byte rows costs less than another upload's bookkeeping. */
 	inline constexpr std::size_t kKeptMergeGapBytes = 256;
 
-	/** @brief A build's view of a kept array: the elements (shared with the array, copy-on-write by chunk) and their changes. */
+	/** @brief A build's view of a kept array: the elements, shared copy-on-write by chunk, and their changes. */
 	template <class T>
 	struct KeptView
 	{
-		// Shared with the array: it copies a chunk before it writes it while a view holds it. Consumers must not
-		// mutate the view; current-frame bindings belong in separate patch storage.
+		// Shared with the array, which copies a chunk before writing it while a view holds it. Never mutate the view.
+		// Current-frame bindings belong in separate patch storage.
 		KeptElements<T> elements;
 		ChangeJournal::Snapshot changes;
 
@@ -630,9 +599,8 @@ namespace DCLF
 		const T* At(std::size_t a_index) const { return elements && a_index < elements->size() ? &(*elements)[a_index] : nullptr; }
 		std::uint64_t ContentEpoch() const { return changes.contentEpoch; }
 		/**
-		 * @brief The elements a holder at a_contentEpoch lacks (ChangeJournal::ForEachRun's runs), as chunk-bounded spans:
-		 * a_span(data, count, first); runs of one chunk at most kKeptMergeGapBytes apart go as one span. None past a_capacity.
-		 * Returns the elements.
+		 * @brief The elements a holder at a_contentEpoch lacks, as chunk-bounded spans. Runs in one chunk within kKeptMergeGapBytes merge.
+		 * Nothing past a_capacity. Returns the elements.
 		 */
 		template <class Span>
 		std::size_t ForEachSpan(std::uint64_t a_contentEpoch, Span&& a_span, std::size_t a_capacity = ~std::size_t(0)) const
@@ -640,9 +608,8 @@ namespace DCLF
 			return elements ? Spans(*elements, changes, a_contentEpoch, a_span, a_capacity) : 0;
 		}
 		/**
-		 * @brief The uploads a holder at a_contentEpoch lacks: a_emit(data, bytes, offset), a run cut where a chunk ends. Returns the bytes
-		 * sent. A holder of a_capacity elements is sent none past them (they wait for its growth: it is at a_contentEpoch for them only
-		 * once it holds them all).
+		 * @brief The uploads a holder at a_contentEpoch lacks, as a_emit(data, bytes, offset), cut at chunk ends. Returns the bytes sent.
+		 * Nothing past a_capacity is sent. Those elements wait for the holder to grow.
 		 */
 		template <class Emit>
 		std::size_t Emit(std::uint64_t a_contentEpoch, Emit&& a_emit, std::size_t a_capacity = ~std::size_t(0)) const
@@ -652,9 +619,8 @@ namespace DCLF
 		void Reset() { *this = {}; }
 
 		/**
-		 * @brief ForEachSpan over any elements (KeptChunks, or a kept array's own std::vector) and changes (a snapshot, or a live
-		 * ChangeJournal: KeptArray::Emit). Two runs in one chunk at most kKeptMergeGapBytes apart go as one span: the elements between
-		 * them are unchanged since a_contentEpoch, so the holder has them already and ends the same, in one upload instead of two.
+		 * @brief ForEachSpan over any elements and changes. Two runs in one chunk within kKeptMergeGapBytes go as one span.
+		 * The holder already has the elements between them, so one upload ends the same as two.
 		 */
 		template <class Elements, class Changes, class Span>
 		static std::size_t Spans(const Elements& a_elements, const Changes& a_changes, std::uint64_t a_contentEpoch, Span&& a_span, std::size_t a_capacity)
@@ -672,7 +638,7 @@ namespace DCLF
 					sent += pending.count;
 				}
 			};
-			// The runs come in order and apart, each a chunk's spans in order.
+			// Runs come in order and apart, and each chunk's spans in order.
 			const auto add = [&](const T* a_data, std::size_t a_count, std::size_t a_first) {
 				if (pending.count && a_first / chunk == pending.first / chunk && (a_first - (pending.first + pending.count)) * sizeof(T) <= kKeptMergeGapBytes) {
 					pending.count = a_first + a_count - pending.first;
@@ -690,7 +656,6 @@ namespace DCLF
 			flush();
 			return sent;
 		}
-		/** @brief Emit over any elements and changes (Spans). */
 		template <class Elements, class Changes, class EmitFn>
 		static std::size_t EmitSpans(const Elements& a_elements, const Changes& a_changes, std::uint64_t a_contentEpoch, EmitFn&& a_emit, std::size_t a_capacity)
 		{
@@ -717,17 +682,14 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief A kept array's own elements (KeptArray::Mutable): reads and writes like a std::vector. Every write first takes the
-	 * chunk table and the written chunk for itself when a view shares them, so a view stays what it was whatever the order of
-	 * writes and views; the chunks it replaced wait (retired) until every view has released them, and are reused.
-	 *
-	 * Single-threaded, except: after Prepare over a range, writes to distinct elements in it ([i], KeptArray::Write/WriteParts) may
-	 * come from many threads until the next single-threaded call, since they only read the sharing counts.
+	 * @brief A kept array's own elements, used like a std::vector. A write first takes private copies of the chunk table and chunk if a view shares them,
+	 * so views never change. Replaced chunks are retired until every view releases them, then reused.
+	 * Single-threaded, except that after Prepare over a range, writes to distinct elements in it may come from many threads.
 	 */
 	template <class T, std::size_t kChunk>
 	class KeptChunkStore
 	{
-		// Functions, not constants: a kept array may be declared while T is incomplete.
+		// Functions, not constants, because a kept array may be declared while T is incomplete.
 		static constexpr std::size_t Length()
 		{
 			constexpr std::size_t length = kChunk == kKeptChunkBySize ? KeptChunkElements<T>() : kChunk;
@@ -740,7 +702,7 @@ namespace DCLF
 
 	public:
 		KeptChunkStore() = default;
-		// A copy shares the elements (each copies before it writes) but not the chunks kept for reuse: those are each store's own.
+		// A copy shares the elements but not the chunks kept for reuse, which each store owns.
 		KeptChunkStore(const KeptChunkStore& a_other) :
 			table(a_other.table) {}
 		KeptChunkStore& operator=(const KeptChunkStore& a_other)
@@ -778,7 +740,7 @@ namespace DCLF
 				t.count = a_count;
 				return;
 			}
-			// The rest of the last chunk (an earlier shrink left its slack as it was), then whole chunks.
+			// The rest of the last chunk, which an earlier shrink left as it was, then whole chunks.
 			if (const std::size_t used = t.count & Mask()) {
 				auto& tail = Own(t.count >> Shift());
 				std::fill(tail.begin() + static_cast<std::ptrdiff_t>(used), tail.begin() + static_cast<std::ptrdiff_t>(std::min(Length(), used + (a_count - t.count))), a_value);
@@ -816,7 +778,7 @@ namespace DCLF
 		}
 		void clear() { resize(0); }
 
-		/** @brief Takes the table and every chunk of [a_first, a_first + a_count) (clipped) for this store: writes there are then concurrent-safe. */
+		/** @brief Takes the table and every chunk of the range for this store, so writes there become concurrent-safe. */
 		void Prepare(std::size_t a_first, std::size_t a_count)
 		{
 			OwnTable();
@@ -826,7 +788,7 @@ namespace DCLF
 			for (std::size_t c = a_first >> Shift(); c <= (end - 1) >> Shift(); ++c)
 				Own(c);
 		}
-		/** @brief Chunks retired while views held them, reused once none does (a build's start). */
+		/** @brief Reuses chunks retired while views held them, once none does. */
 		void BeginBuild()
 		{
 			for (std::size_t i = 0; i < retired.size();) {
@@ -839,14 +801,14 @@ namespace DCLF
 				retired[i] = std::move(retired.back());
 				retired.pop_back();
 			}
-			// The views' last reads of what is reused happen before its next writes.
+			// The views' last reads of reused chunks happen before the next writes.
 			std::atomic_thread_fence(std::memory_order_acquire);
 		}
 		std::shared_ptr<const KeptChunks<T>> Share() const { return table; }
 		const KeptCopyStats& Stats() const { return stats; }
 
 	private:
-		/** @brief The chunk table, copied first while a view shares it (its chunk pointers: each chunk is then shared until written). */
+		/** @brief The chunk table, copied first if a view shares it. */
 		void OwnTable()
 		{
 			if (table.use_count() == 1) [[likely]]
@@ -854,13 +816,13 @@ namespace DCLF
 			table = std::make_shared<KeptChunks<T>>(*table);
 			++stats.tableCopies;
 		}
-		/** @brief Chunk a_chunk to write, copied first while a view holds it. */
+		/** @brief Chunk a_chunk for writing, copied first if a view holds it. */
 		Chunk& Own(std::size_t a_chunk)
 		{
 			OwnTable();
 			auto& chunk = table->chunks[a_chunk];
 			if (chunk.use_count() == 1) [[likely]] {
-				// A view that let go of it just now read it before this write.
+				// A view that just let go read it before this write.
 				std::atomic_thread_fence(std::memory_order_acquire);
 				return *chunk;
 			}
@@ -872,7 +834,7 @@ namespace DCLF
 			chunk = std::move(next);
 			return *chunk;
 		}
-		/** @brief A chunk of this store's own: one every view released, or a new one. Its contents are the caller's to set. */
+		/** @brief A chunk of this store's own, reused or new. The caller sets its contents. */
 		std::shared_ptr<Chunk> Take()
 		{
 			if (reuseKeptStorage && !free.empty()) {
@@ -884,7 +846,7 @@ namespace DCLF
 			++stats.chunkAllocations;
 			return std::make_shared<Chunk>();
 		}
-		/** @brief A chunk this store no longer has: reusable now if no view holds it, else once none does (BeginBuild). */
+		/** @brief Gives up a chunk. Reusable now if no view holds it, otherwise at BeginBuild once none does. */
 		void Drop(std::shared_ptr<Chunk>&& a_chunk)
 		{
 			if (!reuseKeptStorage || !a_chunk)
@@ -896,16 +858,15 @@ namespace DCLF
 		}
 
 		std::shared_ptr<KeptChunks<T>> table = std::make_shared<KeptChunks<T>>(Shift());
-		std::vector<std::shared_ptr<Chunk>> free;     // no view holds them: reused first
-		std::vector<std::shared_ptr<Chunk>> retired;  // replaced or dropped while a view held them (freed here, never on a view's thread)
-		std::size_t peakChunks = 0;                   // the most the table had: what is kept for reuse
+		std::vector<std::shared_ptr<Chunk>> free;     // no view holds them, so reused first
+		std::vector<std::shared_ptr<Chunk>> retired;  // replaced while a view held them. Freed here, never on a view's thread.
+		std::size_t peakChunks = 0;                   // the most the table had, which sets what is kept for reuse
 		KeptCopyStats stats;
 	};
 
 	/**
-	 * @brief A kept array's own elements as one contiguous std::vector (kKeptWhole): the first Mutable() of a build copies it whole
-	 * while a view holds it, into a spare every view has released. After that Mutable(), writes to distinct elements may come from
-	 * many threads. Views see it as one chunk (KeptChunks::Adopt).
+	 * @brief A kept array's elements as one contiguous std::vector. A build's first Mutable() copies it whole into a released spare if a view holds it.
+	 * After that, writes to distinct elements may come from many threads. Views see it as one chunk.
 	 */
 	template <class T>
 	class KeptWholeStore
@@ -930,7 +891,7 @@ namespace DCLF
 				elements = std::make_shared<std::vector<T>>(*elements);
 				return *elements;
 			}
-			// Reuse storage only after every view has released it; copy the whole array so a build cannot write an outstanding view.
+			// Reuse storage only after every view released it, and copy the whole array so a build never writes an outstanding view.
 			std::shared_ptr<std::vector<T>> next;
 			for (auto it = spare.begin(); it != spare.end(); ++it) {
 				if (it->use_count() == 1) {
@@ -947,7 +908,7 @@ namespace DCLF
 				next = std::make_shared<std::vector<T>>();
 			}
 			*next = *elements;
-			if (spare.size() < 6)  // views live across frames (publications hold their payloads)
+			if (spare.size() < 6)  // views live across frames, because publications hold their payloads
 				spare.push_back(std::move(elements));
 			elements = std::move(next);
 			return *elements;
@@ -965,12 +926,10 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief An array kept across builds and mirrored by GPU buffers: copy-on-write by chunk against the views the payloads hold
-	 * (a write copies only the chunk it touches), and journalled (ChangeJournal), so each buffer is sent what changed since the
-	 * content epoch it holds. kChunk: elements a chunk (a power of two), kKeptChunkBySize (about kKeptChunkBytes), or kKeptWhole.
-	 *
-	 * The journal is single-threaded. Parallel writers: PrepareWrites over the range (owner thread), Write/WriteParts to distinct
-	 * elements of it from any thread, then the marks (Mark/MarkParts) on the owner thread, in a deterministic order.
+	 * @brief An array kept across builds and mirrored by GPU buffers. Copy-on-write by chunk against the views payloads hold, and journalled
+	 * so each buffer is sent only what changed since its content epoch.
+	 * The journal is single-threaded. For parallel writes: PrepareWrites on the owner thread, Write or WriteParts to distinct elements from any thread,
+	 * then Mark or MarkParts on the owner thread in a deterministic order.
 	 */
 	template <class T, std::size_t kChunk = kKeptChunkBySize>
 	class KeptArray
@@ -978,26 +937,19 @@ namespace DCLF
 	public:
 		using Elements = std::conditional_t<kChunk == kKeptWhole, KeptWholeStore<T>, KeptChunkStore<T, kChunk>>;
 
-		/** @brief A build's start (ChangeJournal::BeginBuild); chunks every view released are reusable again. */
+		/** @brief A build's start. Released chunks become reusable again. */
 		void BeginBuild(std::uint64_t a_oldestContentEpoch)
 		{
 			journal.BeginBuild(a_oldestContentEpoch);
 			elements.BeginBuild();
 		}
-		/** @brief The elements: KeptChunks (std::vector for kKeptWhole). */
 		decltype(auto) Get() const { return elements.Get(); }
 		std::size_t Size() const { return elements.size(); }
-		/**
-		 * @brief The elements to change; what changes is to be marked. Chunked: each chunk copied as it is first written while a view
-		 * holds it (single-threaded, see PrepareWrites). kKeptWhole: the std::vector, copied whole first while a view holds it.
-		 */
+		/** @brief The elements to change. Mark what changes. Chunks are copied as first written while a view holds them. */
 		decltype(auto) Mutable() { return elements.Mutable(); }
-		/**
-		 * @brief Takes the chunks of [a_first, a_first + a_count) for writing up front (copying those a view holds): until the next
-		 * single-threaded call, Write/WriteParts/Mutable()[i] to distinct elements of the range are safe from many threads.
-		 */
+		/** @brief Takes the range's chunks for writing up front, so writes to distinct elements are safe from many threads until the next single-threaded call. */
 		void PrepareWrites(std::size_t a_first, std::size_t a_count) { elements.Prepare(a_first, a_count); }
-		/** @brief Writes an element only when its bytes differ, unmarked; true when it did. Concurrent-safe in a prepared range. */
+		/** @brief Writes an element only if its bytes differ, unmarked. Returns whether it did. Concurrent-safe in a prepared range. */
 		bool Write(std::size_t a_index, const T& a_value)
 		{
 			if (std::memcmp(&std::as_const(elements)[a_index], &a_value, sizeof(T)) == 0)
@@ -1005,10 +957,7 @@ namespace DCLF
 			elements[a_index] = a_value;
 			return true;
 		}
-		/**
-		 * @brief Writes an element when any of its a_parts (<= 64) equal slices differs, unmarked: the mask of those that did (MarkParts
-		 * marks them). Concurrent-safe in a prepared range.
-		 */
+		/** @brief Writes an element when any of its a_parts equal slices differ, unmarked. Returns the mask of differing parts. Concurrent-safe in a prepared range. */
 		std::uint64_t WriteParts(std::size_t a_index, const T& a_value, std::size_t a_parts)
 		{
 			static_assert(std::is_trivially_copyable_v<T>);
@@ -1023,13 +972,13 @@ namespace DCLF
 				elements[a_index] = a_value;
 			return mask;
 		}
-		/** @brief Marks element a_index's parts in a_mask (WriteParts): part p is a_index * a_parts + p in the journal. */
+		/** @brief Marks element a_index's parts in a_mask. Part p is a_index * a_parts + p in the journal. */
 		void MarkParts(std::size_t a_index, std::uint64_t a_mask, std::size_t a_parts)
 		{
 			for (; a_mask; a_mask &= a_mask - 1)
 				journal.Mark(a_index * a_parts + static_cast<std::size_t>(std::countr_zero(a_mask)));
 		}
-		/** @brief Writes and marks an element only when its bytes differ; true when it did. */
+		/** @brief Writes and marks an element only if its bytes differ. Returns whether it did. */
 		bool Set(std::size_t a_index, const T& a_value)
 		{
 			if (!Write(a_index, a_value))
@@ -1037,10 +986,7 @@ namespace DCLF
 			journal.Mark(a_index);
 			return true;
 		}
-		/**
-		 * @brief Writes an element and marks only those of its a_parts equal slices whose bytes differ: an array written this way has a
-		 * journal of parts (element i's part p is i * a_parts + p), and its views are emitted by part. Returns the parts marked.
-		 */
+		/** @brief Writes an element and marks only the parts that differ. Such an array's journal and views are by part. Returns the parts marked. */
 		std::size_t SetParts(std::size_t a_index, const T& a_value, std::size_t a_parts)
 		{
 			const std::uint64_t mask = WriteParts(a_index, a_value, a_parts);
@@ -1050,7 +996,7 @@ namespace DCLF
 		void Mark(std::size_t a_index) { journal.Mark(a_index); }
 		void MarkRange(std::uint64_t a_first, std::uint64_t a_count) { journal.MarkRange(a_first, a_count); }
 		void Resync() { journal.Resync(); }
-		/** @brief Empty, and every holder sent everything again (the content epoch counts on). */
+		/** @brief Empties the array and sends every holder everything again. */
 		void Clear()
 		{
 			elements.clear();
@@ -1059,16 +1005,13 @@ namespace DCLF
 		std::uint64_t ContentEpoch() const { return journal.ContentEpoch(); }
 		bool Changed() const { return journal.Changed(); }
 		KeptView<T> View() const { return { KeptElements<T>(elements.Share()), journal.Take() }; }
-		/**
-		 * @brief View().Emit without the view's copies (no journal entries copied, no elements shared): the live journal's runs over the
-		 * array's own elements. Only while nothing writes the array (its owner, between builds).
-		 */
+		/** @brief View().Emit without copying anything, straight from the live journal. Only valid between builds. */
 		template <class EmitFn>
 		std::size_t Emit(std::uint64_t a_contentEpoch, EmitFn&& a_emit, std::size_t a_capacity = ~std::size_t(0)) const
 		{
 			return KeptView<T>::EmitSpans(elements.Get(), journal, a_contentEpoch, a_emit, a_capacity);
 		}
-		/** @brief The elements themselves, for a view that is not journalled (content epoch 0: sent whole). */
+		/** @brief The elements themselves, for a non-journalled view sent whole. */
 		KeptElements<T> Shared() const { return KeptElements<T>(elements.Share()); }
 		const KeptCopyStats& CopyStats() const { return elements.Stats(); }
 
@@ -1076,7 +1019,6 @@ namespace DCLF
 		Elements elements;
 		ChangeJournal journal;
 	};
-	/** @brief A kept array of one contiguous std::vector (kKeptWhole). */
 	template <class T>
 	using KeptWholeArray = KeptArray<T, kKeptWhole>;
 
@@ -1086,7 +1028,7 @@ namespace DCLF
 		std::vector<std::uint32_t> list;
 		std::vector<std::uint8_t> mark;
 
-		/** @brief Lists a_index; false when it was listed already. */
+		/** @brief Lists a_index. Returns false if it was already listed. */
 		bool Add(std::uint32_t a_index)
 		{
 			if (mark.size() <= a_index)
@@ -1098,7 +1040,7 @@ namespace DCLF
 			return true;
 		}
 		bool Contains(std::uint32_t a_index) const { return a_index < mark.size() && mark[a_index]; }
-		/** @brief Unlists the element at list position a_at (the last takes its place). */
+		/** @brief Unlists the element at list position a_at. The last one takes its place. */
 		void RemoveAt(std::size_t a_at)
 		{
 			mark[list[a_at]] = 0;

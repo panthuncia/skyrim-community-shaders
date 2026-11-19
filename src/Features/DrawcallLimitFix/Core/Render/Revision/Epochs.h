@@ -1,7 +1,7 @@
 #pragma once
 
-// A scene revision's epochs (the schedule's, resolved) and their traits, and the views drawn by epochs of their own.
-// Self-contained (features include it); Internal.h includes it in its order.
+// A scene revision's epochs and their traits, and the views drawn by epochs of their own.
+// Self-contained because features include it.
 
 #include "Features/DrawcallLimitFix/Api/Epochs.h"
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
@@ -16,29 +16,21 @@
 
 namespace DCLF::Draws
 {
-	/*
-	 * A scene revision's epochs are the schedule's (Schedule/Frame.cpp: Api::EpochDef), resolved once at the end of InstallFeatures
-	 * (ResolveSchedule): an epoch is its row's index. Its shape and recording slots (SceneRevisions), the per-epoch counters, the coverage
-	 * and the reports follow that order; the fixed arrays they live in hold kMaxEpochs, and their loops run to EpochCount().
-	 */
+	// An epoch is its row index in the schedule, resolved once at the end of InstallFeatures.
+	// Per-epoch arrays hold kMaxEpochs, and loops run to EpochCount().
 	constexpr std::uint32_t kMaxEpochs = 12;
 	constexpr std::uint32_t kNoEpoch = ~0u;
 
-	/**
-	 * @brief The views drawn by epochs of their own (ViewEpoch.cpp): the reflection's faces and the first-person view. The engine views
-	 * (Api/Views.h), in Core's slot order (Views/ViewSlots.h).
-	 */
+	/** @brief The views drawn by epochs of their own, such as the reflection faces and first person. */
 	using ViewKind = Api::EngineView;
 	constexpr std::size_t kViews = static_cast<std::size_t>(ViewKind::Count);
 	constexpr std::size_t ViewIndex(ViewKind a_kind) { return static_cast<std::size_t>(a_kind); }
 
-	// Index of a drawing segment's shape (Resources::frames): the main epochs' (Api::MainShape).
 	constexpr std::size_t kDepthShape = static_cast<std::size_t>(Api::MainShape::Depth), kColourShape = static_cast<std::size_t>(Api::MainShape::Colour);
-	// Index of the shadow epoch's shape (Api::EpochDef::shapeIndex): the shadow views' and the occlusion maps', its one; kShadowShapes, how
-	// many there are.
+	// The shadow epoch has one shape, which holds both the shadow views and the occlusion maps.
 	constexpr std::uint32_t kShadowShape = 0, kShadowShapes = 1;
 
-	/** @brief What a revision's shape slot of an epoch holds: a main segment's shape, the shadow epoch's variants, a view's. */
+	/** @brief What kind of shape an epoch records against. */
 	enum class ShapeKind : std::uint8_t
 	{
 		Main,
@@ -46,12 +38,8 @@ namespace DCLF::Draws
 		View,
 	};
 	/**
-	 * @brief An epoch's traits: its segment and name, the shape it records against (its kind and its index there: the main segment,
-	 * the shadow epoch's 0, the ViewKind), the epoch whose shape it shares (kNoEpoch: none; always an earlier one), the class whose
-	 * toggle gates the shared shape and the epoch's part in the claims (Count: none), and whether the frame's claims need its recordings.
-	 * A hosted epoch (Api::EpochDef::hostedBy: the reflection's, first person's depth) names its host (hostedBy, an earlier Main epoch,
-	 * whose segment it has), and the host them (hostsMask: a bit each, by row; 0: none): the host's recordings carry the hosted epochs'
-	 * passes, a hosted one has none of its own.
+	 * @brief An epoch's traits. sharesWith is always an earlier epoch. A hosted epoch has no recordings of its own.
+	 * Its passes are recorded inside its host's recordings, and the host lists it in hostsMask.
 	 */
 	struct EpochTraits
 	{
@@ -66,23 +54,20 @@ namespace DCLF::Draws
 		std::uint32_t hostsMask = 0;
 	};
 	static_assert(kMaxEpochs <= 32, "EpochTraits::hostsMask (and a host commit's drawn bits) hold an epoch a bit");
-	/** @brief Any thread, after InstallFeatures (0 before): the schedule's epochs. */
+	/** @brief The number of epochs. Zero before InstallFeatures. Any thread. */
 	std::uint32_t EpochCount();
-	/** @brief Any thread, after InstallFeatures: epoch a_epoch's traits (a_epoch < EpochCount()). */
+	/** @brief Epoch a_epoch's traits. Any thread, after InstallFeatures. */
 	const EpochTraits& EpochTraitsOf(std::uint32_t a_epoch);
-	/** @brief Any thread, after InstallFeatures: the epoch recording a_shape's a_index without sharing it (resolved at install). */
+	/** @brief The epoch that records a shape itself rather than sharing it. Any thread, after InstallFeatures. */
 	std::uint32_t EpochOfShape(ShapeKind a_shape, std::uint32_t a_index);
-	/** @brief Any thread, after InstallFeatures: the epoch whose id is a_id (kNoEpoch: none). A search: look it up once. */
+	/** @brief The epoch with id a_id, or kNoEpoch. This is a search, so look it up once. */
 	std::uint32_t EpochById(std::string_view a_id);
-	/**
-	 * @brief A view's epochs, from the schedule: the one recording its shape, then the one sharing it (kNoEpoch: none), and their segments
-	 * (none: the first's again; a hosted epoch's, its host's).
-	 */
+	/** @brief A view's epochs: the one recording its shape, then the one sharing it, or kNoEpoch. */
 	struct ViewEpochs
 	{
 		std::array<std::uint32_t, 2> epochs{ kNoEpoch, kNoEpoch };
 		std::array<RenderGraphRuntime::Segment, 2> segments{};
 	};
-	/** @brief Any thread, after InstallFeatures: a_kind's epochs (resolved at install). */
+	/** @brief a_kind's epochs. Any thread, after InstallFeatures. */
 	const ViewEpochs& ViewEpochsOf(ViewKind a_kind);
 }

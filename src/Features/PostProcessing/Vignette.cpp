@@ -133,6 +133,19 @@ void Vignette::CompileRasterShaders()
 	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\Vignette", {}, shaderInfos);
 }
 
+Vignette::VignetteCB Vignette::Constants(float2 a_res) const
+{
+	Settings effective = settings;
+	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
+		effective.FocalLength = std::clamp(cam->FocalLengthMM / std::max(cam->EffectiveSensorWidthMM, 0.1f), 0.1f, 2.0f);
+	}
+	return {
+		.settings = effective,
+		.AspectRatio = a_res.y / a_res.x / effective.Anamorphism,
+		.RcpDynRes = float2(1.f) / a_res
+	};
+}
+
 void Vignette::Draw(TextureInfo& inout_tex)
 {
 	if (!owner || !owner->GetFullscreenVS())
@@ -143,19 +156,9 @@ void Vignette::Draw(TextureInfo& inout_tex)
 	globals::profiler->BeginPass("PostProcessing::Vignette");
 	auto context = globals::d3d::context;
 
-	Settings effective = settings;
-	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
-		effective.FocalLength = std::clamp(cam->FocalLengthMM / std::max(cam->EffectiveSensorWidthMM, 0.1f), 0.1f, 2.0f);
-	}
-
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
-	VignetteCB data = {
-		.settings = effective,
-		.AspectRatio = res.y / res.x / effective.Anamorphism,
-		.RcpDynRes = float2(1.f) / res
-	};
-	vignetteCB->Update(data);
+	vignetteCB->Update(Constants(res));
 
 	{
 		PostProcessingRaster::RasterPass pass(context);

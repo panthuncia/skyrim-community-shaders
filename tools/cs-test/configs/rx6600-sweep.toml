@@ -1,0 +1,27 @@
+# Converted from tools/cs-ab/scenarios/rx6600-sweep.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600: a camera sweep at the newest save to provoke device losses (hang markers on). The sweep driver
+# moves the mouse side to side for a set time after tgm. tgm first: a wolf attacks the player at the newest
+# save.
+# The exit comes 7200 frames after tgm (about 90 s): the sweep driver (tools/cs-test/sweep.ps1) moves the mouse for 60 s of it.
+extends = ["guest"]
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[basicrhi]
+vk_crash_markers = "1"   # the adopted device's own markers (DXVK enables VK_AMD_buffer_marker under DXVK_DEBUG=hang): a loss or hang names the graph pass
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 7200
+do = "exit"
+
+[expect]
+reach = "world-ready"

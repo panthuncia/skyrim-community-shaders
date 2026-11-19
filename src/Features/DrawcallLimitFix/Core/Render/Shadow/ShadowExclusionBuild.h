@@ -1,8 +1,7 @@
 #pragma once
 
-// What the shadow exclusion contribution's build is handed (Api::ShadowExclusionContribution, Api/ShadowViews.h): one mode's exclusion
-// build out of the shadow participant's payload (ShadowEngine::BuildPayload), the candidates it judges and the mode's inputs as the
-// payload has them, and the exclusion it answers (opaque to Core). Self-contained: the contribution's feature includes it.
+// The input handed to a shadow exclusion contribution for one shadow mode, and the slot for its answer.
+// The answer's type belongs to the contributing feature and is opaque to Core.
 
 #include "Features/DrawcallLimitFix/Api/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
@@ -22,9 +21,8 @@ namespace DCLF
 namespace DCLF::Api
 {
 	/**
-	 * @brief One mode's exclusion build: the Sun source's (the cascades' mode, over the sun candidates) or the Point source's (the
-	 * paraboloid mode, over the light candidates, with the reach words), from the build's tables and the payload's list. The snapshot
-	 * builder's thread (a pool task each when both build).
+	 * @brief One exclusion build for the sun cascades or the point light paraboloids.
+	 * Runs on the snapshot builder's thread, or as a pool task each when both modes build.
 	 */
 	class ShadowExclusionBuild
 	{
@@ -41,20 +39,20 @@ namespace DCLF::Api
 		ShadowSource source;
 		const std::shared_ptr<const EntrySpace>& candidates;
 		const SceneTables& tables;
-		std::uint32_t modeBits = 0;             // the mode's views' bits (ShadowPayload::modeBits): what selects its inputs
-		std::uint64_t membership = 0;           // ShadowPayload::membership of the mode (0 without the kept state)
-		std::uint32_t frameNumber = 0;          // the payload's inputs' frame
-		std::uint32_t tablesGeneration = 0;     // and tables generation
-		// The objects that joined and left the mode's region inputs in the kept build keptBuild (ShadowPayload::keptBuild, joined, left;
-		// 0: none): what a cache that read the inputs as of the build before follows. movesValid false: the build retook the mode whole.
+		std::uint32_t modeBits = 0;             // view bits that select this mode's inputs
+		std::uint64_t membership = 0;           // 0 without the kept state
+		std::uint32_t frameNumber = 0;
+		std::uint32_t tablesGeneration = 0;
+		// Objects that joined and left the mode's region inputs since the previous kept build, for incremental caches.
+		// movesValid is false when the build retook the whole mode, so a cache must rebuild.
 		std::uint64_t keptBuild = 0;
 		bool movesValid = false;
 		std::span<const std::uint32_t> joined, left;
-		std::shared_ptr<void> result;           // the build's answer, the contribution's own type (null: none)
+		std::shared_ptr<void> result;           // null means no answer
 
-		/** @brief The paraboloid mode's (the Point source's culls' reach words). */
+		/** @brief The point light mode, whose culls use the reach words. */
 		bool Paraboloid() const { return source == ShadowSource::Point; }
-		/** @brief The mode's inputs, as ShadowPayload::ForEachInput(mode) visits them: the region's, then the frame's own. */
+		/** @brief Visits the region's inputs, then the frame's own, in the same order as ShadowPayload::ForEachInput. */
 		template <class F>
 		void ForEachInput(F&& a_visit) const
 		{
@@ -66,7 +64,7 @@ namespace DCLF::Api
 				if (input.view.mask & modeBits)
 					a_visit(input);
 		}
-		/** @brief ForEachInput's first part: the mode's inputs of the region. */
+		/** @brief The region part of ForEachInput. */
 		template <class F>
 		void ForEachRegionInput(F&& a_visit) const
 		{
@@ -75,7 +73,7 @@ namespace DCLF::Api
 					if (input.view.mask & modeBits)
 						a_visit(input);
 		}
-		/** @brief ForEachInput's second part: the mode's inputs of the frame's own list (face shapes; a few). */
+		/** @brief The frame list part of ForEachInput. It holds only a few face shapes. */
 		template <class F>
 		void ForEachListInput(F&& a_visit) const
 		{

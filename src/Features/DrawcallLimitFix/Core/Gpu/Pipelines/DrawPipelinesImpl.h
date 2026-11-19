@@ -1,10 +1,8 @@
-// DrawPipelines::Impl, shared by the pipeline translation units: DrawPipelines.cpp (the public face, the lane's pass, the engine
-// states), MainPipelines.cpp (Z and colour), ShadowPipelines.cpp, ForwardPipelines.cpp (forward and refraction) and
-// FamilyPipelines.cpp (the draw families). Also the helpers more than one of them uses; nothing here is called per draw.
+// DrawPipelines::Impl and helpers shared by the pipeline translation units. Nothing here runs per draw.
 
 #pragma once
 
-// The including units' block (each starts with it): volk must precede every Vulkan header in a translation unit.
+// volk must precede every Vulkan header in a translation unit.
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -26,6 +24,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
@@ -52,15 +51,17 @@
 
 namespace DCLF
 {
-	// Inline: unqualified in DCLF as the one translation unit's anonymous namespace was, without sharing DCLF's linkage names.
+	// Inline so the names stay unqualified, as in the old single unit's anonymous namespace, without sharing DCLF's linkage names.
 	inline namespace DrawPipelinesDetail
 	{
 		/**
-		 * @brief Whether a fragment program defeats early depth testing: it discards, writes depth or the sample mask, or writes memory.
-		 * Such a pipeline is in the shadow views' discarding class (kShadowDiscards), drawn after the others.
+		 * @brief Whether a fragment program defeats early depth testing by discarding or writing depth, sample mask or memory.
+		 * Such shadow pipelines go in the discarding class, drawn after the others.
 		 */
 		inline bool FragmentDefersDepth(std::span<const std::byte> a_spirv)
 		{
+			if (DxilStages::IsDxil(a_spirv))
+				return DxilStages::Fragment(a_spirv).defersDepth;
 			const std::size_t words = a_spirv.size() / 4;
 			if (words < 5)
 				return true;
@@ -90,10 +91,16 @@ namespace DCLF
 			return false;
 		}
 
-		/** @brief Which of FragDepth and SampleMask a fragment program writes (their BuiltIn decorations), for its state class. */
+		/** @brief Which of FragDepth and SampleMask a fragment program writes, for its state class. */
 		inline void FragmentExports(std::span<const std::byte> a_spirv, bool& a_depth, bool& a_sampleMask)
 		{
 			a_depth = a_sampleMask = false;
+			if (DxilStages::IsDxil(a_spirv)) {
+				const auto facts = DxilStages::Fragment(a_spirv);
+				a_depth = facts.exportsDepth;
+				a_sampleMask = facts.exportsSampleMask;
+				return;
+			}
 			const std::size_t words = a_spirv.size() / 4;
 			auto word = [&](std::size_t i) {
 				std::uint32_t w;
@@ -118,14 +125,13 @@ namespace DCLF
 		}
 		inline constexpr std::uint32_t kMaxLoggedFailures = 8;
 
-		// Register classes as shifted by the SPIR-V builds (ShaderPrograms.h), set 0. DCLF_BINDLESS builds declare a cbuffer at the draw's
-		// push binding for the object index; the address words beside it feed the layout's indirect ranges.
+		// Register classes as shifted by the SPIR-V builds, set 0.
 		inline constexpr std::uint32_t kRecordAddressBinding = kDrawPushBinding;
-		// The texture registers the vertex stage may declare: t121 (shading) to t127 (records); t125 is pixel-only but in the run.
+		// The vertex stage may declare t121 to t127. t125 is pixel-only but inside the run.
 		inline constexpr std::uint32_t kObjectBufferBinding = kBindingShiftT + kObjectBufferRegister;
 		inline constexpr std::uint32_t kVertexTextureBinding = kBindingShiftT + kShadingBufferRegister;
 		inline constexpr std::uint32_t kVertexTextureCount = kObjectBufferRegister - kShadingBufferRegister + 1;
-		inline constexpr std::uint32_t kDescriptorHeapBindings = 1000000;  // DXC's ResourceDescriptorHeap bindings (BasicRHI maps them)
+		inline constexpr std::uint32_t kDescriptorHeapBindings = 1000000;  // DXC's ResourceDescriptorHeap bindings
 
 		inline bool InRange(std::uint32_t a_binding, std::uint32_t a_first, std::uint32_t a_count)
 		{
@@ -158,11 +164,13 @@ namespace DCLF
 				bool mapped = binding.set == 0;
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
-					mapped = mapped && (InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters) || binding.binding == kRecordAddressBinding);
+					// The two push blocks, the draw's (b190) and the pass's (b191).
+					mapped = mapped && (InRange(binding.binding, kBindingShiftB, kConstantBufferRegisters) || binding.binding == kRecordAddressBinding ||
+										   binding.binding == kFramePushBinding);
 					break;
 				case Kind::Texture:
 				case Kind::StorageBuffer:
-					// The pixel stage maps the whole t range; the vertex stage only the object-buffer run.
+					// The pixel stage maps the whole t range, the vertex stage only the object-buffer run.
 					mapped = mapped && (a_pixel ? InRange(binding.binding, kBindingShiftT, kTextureRegisters) : InRange(binding.binding, kVertexTextureBinding, kVertexTextureCount));
 					break;
 				case Kind::Sampler:
@@ -178,8 +186,7 @@ namespace DCLF
 			}
 		}
 
-		// A pulled Lighting stage (DCLF_PULLED) reads its rows itself: it may declare none of a row's bindings (b0-b2, b4, material
-		// textures and samplers, shadow mask), which the Z-prepass's layout leaves out.
+		// A pulled stage reads its rows itself, so it may declare none of a row's bindings. The Z-prepass layout leaves them out.
 		inline void CheckPulledBindings(const SpirvReflection& a_module, bool a_pixel)
 		{
 			CheckBindings(a_module, a_pixel);
@@ -198,17 +205,16 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Identity of a main pipeline's Z-prepass pipeline (Built::zKey): its pulled stages' SPIR-V and depth state. Slots with
-		 * equal keys share a depth pipeline, Z-prepass bucket and draw call (IndirectState::zGroups); rows and vertex layout are read per
-		 * draw. No pixel stage unless it defers the depth test (FragmentDefersDepth): it only runs the alpha test.
+		 * @brief Identity of a Z-prepass pipeline. Slots with equal keys share a depth pipeline, bucket and draw call.
+		 * There is no pixel stage unless it defers the depth test for the alpha test.
 		 */
 		struct ZPipelineKey
 		{
-			std::uint64_t vertex = 0, pixel = 0;  // wyhash of the modules; pixel 0 without a pixel stage
+			std::uint64_t vertex = 0, pixel = 0;  // wyhash of the modules, pixel 0 without a pixel stage
 			std::uint32_t vertexBytes = 0, pixelBytes = 0;
 			std::uint32_t cull = 0, depthWrite = 0, depthFunc = 0;
 			std::uint32_t depthBias = 0, depthBiasClamp = 0, slopeScaledDepthBias = 0;  // the floats' bits
-			// 1 for terrain group 1 (RasterTerrainGroup), whose bucket has a near-block twin (PlanZBuckets); it holds no other slot.
+			// 1 for terrain group 1, whose bucket has a near-block twin. It holds no other slot.
 			std::uint32_t terrainNear = 0, padding = 0;
 
 			bool operator==(const ZPipelineKey&) const = default;
@@ -226,8 +232,8 @@ namespace DCLF
 			for (const auto& binding : a_module.bindings) {
 				if (binding.binding >= kDescriptorHeapBindings)
 					continue;
-				if (binding.binding == kRecordAddressBinding)
-					continue;  // push data, not a DrawBindings entry (and 1u << 190 is not a shift)
+				if (binding.binding == kRecordAddressBinding || binding.binding == kFramePushBinding)
+					continue;  // push data, not a DrawBindings entry
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
 					(a_pixel ? a_usage.pixelConstants : a_usage.vertexConstants) |= 1u << (binding.binding - kBindingShiftB);
@@ -248,7 +254,7 @@ namespace DCLF
 			}
 		}
 
-		// The Lighting variables by index (ShaderConstants::LightingVS, LightingPS), named as ShaderCache's GetVariableIndices matches them.
+		// Named as ShaderCache's GetVariableIndices matches them.
 		inline constexpr std::string_view kLightingVSNames[] = { "World", "PreviousWorld", "EyePosition", "LandBlendParams", "TreeParams", "WindTimers", "TextureProj",
 			"IndexScale", "WorldMapOverlayParameters", "LeftEyeCenter", "RightEyeCenter", "TexcoordOffset", "HighDetailRange", "FogParam", "FogNearColor", "FogFarColor",
 			"Bones" };
@@ -268,25 +274,19 @@ namespace DCLF
 			return a_pixel ? std::span<const std::string_view>(kLightingPSNames) : std::span<const std::string_view>(kLightingVSNames);
 		}
 
-		/*
-		 * No DCLF pipeline has input assembly: every vertex stage pulls its attributes (DCLF_PULLED_VERTICES, DCLF_PULLED), so the
-		 * pipelines have no vertex input state, which an execution set's pipelines would otherwise have to share. A key's vertex layout
-		 * must hold the required inputs of its vertex stage (ShaderPrograms::Program::vertexAttributes).
-		 */
+		// No DCLF pipeline has vertex input, which an execution set would otherwise have to share. Every vertex stage pulls its attributes,
+		// so a key's vertex layout must hold the inputs its vertex stage needs.
 		inline void CheckVertexAttributes(std::uint32_t a_attributes, std::uint64_t a_vertexLayout)
 		{
-			// Some skinned eye meshes omit TEXCOORD2. The native input assembler supplies
-			// zero for that scalar; DCLFPullFloat does the same without reading a stream.
+			// Some skinned eye meshes omit TEXCOORD2. The native input assembler supplies zero, and DCLFPullFloat does the same.
 			constexpr std::uint32_t optionalEyeParameter = 1u << 8;
 			if (const std::uint32_t missing = a_attributes & ~optionalEyeParameter & ~VertexLayoutAttributes(a_vertexLayout))
 				throw std::runtime_error(fmt::format("vertex attributes {:03X} (BSGraphics::Vertex::Attribute bits) are not in the geometry's layout {:016X}", missing,
 					a_vertexLayout));
 		}
-		// Mixed into the main and shadow recipes' fixedFunctionKey: a pipeline built with an input layout (before the vertex stages
-		// pulled their attributes) is never the artifact a recipe finds.
+		// Salts the recipes so a pipeline built with an input layout is never the artifact a recipe finds.
 		inline constexpr std::uint64_t kPulledVerticesSalt = 0x5055'4C4C'5645'5254ull;
 
-		// Initialize's pipeline layout ranges.
 		inline rhi::LayoutBindingRange LayoutRange(std::uint32_t a_binding, std::uint32_t a_count, rhi::ShaderStage a_stage, rhi::LayoutRangeSource a_source, std::size_t a_offset,
 			bool a_samplers = false)
 		{
@@ -300,7 +300,7 @@ namespace DCLF
 			range.samplers = a_samplers;
 			return range;
 		}
-		// A range whose record (or pushed address) is at a_word of push range a_root.
+		// A range whose record or pushed address is at a_word of push range a_root.
 		inline rhi::LayoutBindingRange RangeFrom(rhi::LayoutBindingRange a_range, std::uint32_t a_root, std::uint32_t a_word)
 		{
 			a_range.addressRootIndex = a_root;
@@ -314,11 +314,9 @@ namespace DCLF
 		inline rhi::LayoutBindingRange FromMaterialRow(rhi::LayoutBindingRange a_range) { return RangeFrom(a_range, 0, kDrawPushMaterialRow); }
 		inline rhi::LayoutBindingRange FromFrameRecord(rhi::LayoutBindingRange a_range) { return RangeFrom(a_range, 1, kFramePushRecord); }
 
-		// Initialize's layouts' ranges (MainPipelines.cpp, ShadowPipelines.cpp).
 		std::vector<rhi::LayoutBindingRange> MainLayoutRanges(bool a_pulled);
 		std::vector<rhi::LayoutBindingRange> ShadowLayoutRanges();
 
-		// Two keys' differing fields ("name a -> b") and differing bit count.
 		struct KeyDifference
 		{
 			std::uint32_t bits = 0;
@@ -333,10 +331,8 @@ namespace DCLF
 		};
 
 		/**
-		 * @brief Everything of one variant's pipeline but its two shader modules (PipelineDesc::State): the fixed-function state as the
-		 * build passes it, and the fragment interface of its pixel module. An indirect execution set's pipelines must agree in all of it
-		 * (VK_EXT_device_generated_commands: static and dynamic state, fragment outputs, FragDepth and SampleMask), so it is what a
-		 * state class is keyed by. No vertex input: no DCLF pipeline has any (CheckVertexAttributes).
+		 * @brief Everything of one variant's pipeline but its shader modules. An execution set's pipelines must agree on all of it
+		 * (VK_EXT_device_generated_commands), so this keys a state class.
 		 */
 		struct PipelineStateDesc
 		{
@@ -347,19 +343,18 @@ namespace DCLF
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			rhi::PrimitiveTopology topology = rhi::PrimitiveTopology::TriangleList;
 			rhi::PipelineFlags flags = rhi::PipelineFlags_None;
-			// The pixel module's: the attachments it writes, whether there is one, FragDepth and SampleMask, a deferred depth test.
 			std::uint32_t outputLocations = 0;
 			bool hasPixel = false, exportsDepth = false, exportsSampleMask = false, defersDepth = false;
 		};
-		/** @brief A state class's key: both variants' state, as a set index selects the same entry of both variants' sets. */
+		/** @brief A state class's key, both variants' state, since a set index selects the same entry in both variants' sets. */
 		struct StateClassKey
 		{
 			std::array<PipelineStateDesc, kVariantCount> variants{};
 		};
 
 		/**
-		 * @brief Each field of a_state, a value apiece, as SameState compares them: the blend attachments as the Vulkan backend expands
-		 * them (max(targets, attachments) of them, an index past the last attachment reading the last: rhi_vulkan.cpp), the floats by bits.
+		 * @brief Each field of a_state as SameState compares them. Blend attachments are expanded as the Vulkan backend does
+		 * (rhi_vulkan.cpp), and floats compare by bits.
 		 */
 		template <class Field>
 		void StateFields(const PipelineStateDesc& a_state, Field&& a_field)
@@ -400,10 +395,7 @@ namespace DCLF
 			a_field("defers depth", a_state.defersDepth);
 		}
 
-		/**
-		 * @brief Whether two keys are one state class: every field of both variants (StateFields). a_fields, when given, gets the fields
-		 * that differ ("depth: depthFunc 3 -> 4"), for the set class parity.
-		 */
+		/** @brief Whether two keys are one state class. a_fields gets the differing fields, for the set class parity. */
 		inline bool SameState(const StateClassKey& a_left, const StateClassKey& a_right, KeyDifference* a_fields = nullptr)
 		{
 			bool same = true;
@@ -447,16 +439,16 @@ namespace DCLF
 		struct Entry
 		{
 			std::uint32_t index = kNotReady;  // handed out once a published set version holds the pipeline
-			std::uint32_t slot = kNotReady;   // its index in the sets, from its admission
+			std::uint32_t slot = kNotReady;
 			bool failed = false;
 		};
-		/** @brief A RequestLighting key, with the pipeline slot that asked. */
+		/** @brief A RequestLighting key and the slot that asked. */
 		struct LightingRequest
 		{
 			PipelineKey key{};
 			std::uint32_t slot = ~0u;
 		};
-		/** @brief A RequestShadow key, with the casters' key (no mode bits or view state) and occlusion view, for the warnings. */
+		/** @brief A RequestShadow key, with the casters' key and occlusion view for the warnings. */
 		struct ShadowRequest
 		{
 			ShadowPipelineKey viewKey{};
@@ -465,48 +457,39 @@ namespace DCLF
 		};
 
 		/**
-		 * @brief A version of the state classes' indirect pipeline sets and their signatures, holding the admitted pipelines [0, applied).
-		 *
-		 * Frames keep the version they record with (IndirectState::version). New pipelines are written only into a version nothing else
-		 * references, at indices it never held, then published. So a set is never written while a recording reads it or sizes preprocess
-		 * memory against it (VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071), and no entry submitted work may use is rewritten
-		 * (VUID-VkWriteIndirectExecutionSetPipelineEXT-index-11029).
+		 * @brief One version of the state classes' execution sets and signatures. New pipelines are written only into a version nothing
+		 * references, at indices it never held, then published. Recordings keep the version they used, so a set is never written while
+		 * in use (VUID-VkGeneratedCommandsInfoEXT-preprocessSize-11071, VUID-VkWriteIndirectExecutionSetPipelineEXT-index-11029).
 		 */
 		struct SetVersion
 		{
-			/**
-			 * @brief A state class's sets (one per variant: a pipeline has the same index in both) and their signatures, holding its first
-			 * applied members (Lane::classMembers), and the handles written at each index, which the set class parity reads.
-			 */
+			/** @brief A state class's sets, one per variant with the same index in both, and their signatures. */
 			struct ClassSets
 			{
 				std::array<rhi::IndirectPipelineSetPtr, kVariantCount> sets;
 				std::array<rhi::CommandSignaturePtr, kVariantCount> signatures;
 				std::array<std::vector<rhi::PipelineHandle>, kVariantCount> written;
-				std::array<std::uint32_t, kVariantCount> capacity{};  // what each set was made to hold
+				std::array<std::uint32_t, kVariantCount> capacity{};
 				std::uint32_t applied = 0;
 			};
-			std::vector<ClassSets> classes;  // by state class, in creation order
-			// By set index in [0, applied): class << kSetClassShift | index in the class (IndirectState::classOf).
+			std::vector<ClassSets> classes;
+			// By set index: class << kSetClassShift | index in the class.
 			std::vector<std::uint32_t> classOf;
-			// [0, applied), held while a recording holds the version.
+			// Held while a recording holds the version.
 			std::vector<org::services::PipelinePayload> pipelines;
-			// Each pipeline's Z-prepass group, and each group's first pipeline (whose pulled depth pipeline is the group's).
 			std::vector<std::uint32_t> zGroupOf, zGroupFirst;
 			std::uint32_t applied = 0;
 		};
-		// The shadow views' pipelines, versioned the same way; their plain draws bind each by index (ShadowIndirectState).
+		// The shadow views' pipelines, versioned the same way.
 		struct ShadowSetVersion
 		{
-			// [0, applied), held while a recording holds the version, with their vertex layouts and classes.
 			std::vector<org::services::PipelinePayload> pipelines;
 			std::vector<std::uint64_t> layouts;
 			std::vector<std::uint8_t> discards;
 			std::uint32_t applied = 0;
 		};
-		// As many versions as are held at once: the published one, those of frames being recorded, and those of kept recordings (ORG's
-		// recording reuse holds the version a recording bound while it may be resubmitted). A new one is made when none is free, so a
-		// new pipeline never waits for a recording.
+		// As many versions as are held at once. A new one is made when none is free, so a new pipeline never waits for a recording.
+		// ORG's recording reuse can hold a version while a recording may be resubmitted.
 		template <class Version>
 		struct Versions
 		{
@@ -514,7 +497,7 @@ namespace DCLF
 			std::atomic<std::shared_ptr<Version>> published;
 			// Previous generations' versions, dropped once nothing holds them.
 			std::vector<std::shared_ptr<Version>> retired;
-			std::uint32_t handedOut = 0;  // the pipelines whose Entry::index is set
+			std::uint32_t handedOut = 0;  // pipelines whose Entry::index is set
 			bool failureLogged = false;
 
 			void Retire()
@@ -529,13 +512,13 @@ namespace DCLF
 
 			enum class PublishResult
 			{
-				Current,    // the published version already holds every admitted pipeline
-				Published,  // a version was brought up to them and published
-				Waiting,    // every other version is still held: the admissions wait for a later frame
-				Failed,     // a set operation failed
+				Current,
+				Published,
+				Waiting,  // every other version is still held, so admissions wait
+				Failed,
 			};
 
-			/** @brief Brings an unreferenced version up to a_admitted (a_apply writes [applied, a_admitted)) and publishes it. */
+			/** @brief Brings an unreferenced version up to a_admitted and publishes it. */
 			template <class Apply>
 			PublishResult Publish(std::uint32_t a_admitted, Apply&& a_apply)
 			{
@@ -543,7 +526,6 @@ namespace DCLF
 				const auto current = published.load();
 				if (current && current->applied == a_admitted)
 					return PublishResult::Current;
-				// A free one (unreferenced, and unreachable until published), or a new one.
 				auto free = std::ranges::find_if(owned, [&](const std::shared_ptr<Version>& a_version) {
 					return !a_version || (a_version != current && a_version.use_count() == 1);
 				});
@@ -551,12 +533,12 @@ namespace DCLF
 					free = owned.insert(owned.end(), nullptr);
 				{
 					auto& version = *free;
-					// Every other owner has let go: whatever a recording did with it happened before this.
+					// Every other owner has let go, so whatever a recording did with it happened before this.
 					std::atomic_thread_fence(std::memory_order_acquire);
 					if (!version)
 						version = std::make_shared<Version>();
 					if (!a_apply(*version)) {
-						// Start that version over: what it holds may be partial.
+						// Start over, since what it holds may be partial.
 						version.reset();
 						return PublishResult::Failed;
 					}
@@ -569,49 +551,47 @@ namespace DCLF
 
 		rhi::Device device{};
 		rhi::PipelineLayoutPtr layout;
-		// The shadow views' layout (kShadowPushWords): pass-wide blocks pushed per view.
 		rhi::PipelineLayoutPtr shadowLayout;
-		// The Z-prepass's plain draws: their layout and a DrawSequence tail's signature.
 		rhi::PipelineLayoutPtr zLayout;
 		rhi::CommandSignaturePtr zDrawSignature;
-		// The draw families' draw signatures, by family (Api::DrawFamilySignature::DrawInstanced: a plain DrawInstanced under zLayout). Their
-		// pipelines are the lane's (Lane::families).
+		// Draw families' signatures. Their pipelines belong to the lane.
 		std::array<rhi::CommandSignaturePtr, kDrawFamilyLanes> familySignatures;
+		// A 20-byte record, an instance word then DrawInstanced's arguments. D3D12 reads both, Vulkan only the draw.
+		rhi::CommandSignaturePtr familyInstanceWordSignature;
+		/** @brief a_family's draw signature, or null if it could not be made. Valid after InstallFeatures. */
+		const rhi::CommandSignaturePtr& FamilySignature(Api::DrawFamily a_family) const
+		{
+			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
+			return instanceWord ? familyInstanceWordSignature : familySignatures[static_cast<std::size_t>(a_family)];
+		}
 		struct FamilyBuilt
 		{
 			rhi::PipelinePtr depth;
-			std::array<rhi::PipelinePtr, 2> colours;  // by colour program (Api::DrawFamilyProgram::colours; the second null with one)
+			std::array<rhi::PipelinePtr, 2> colours;  // the second is null with one colour program
 		};
-		// Render thread: what it has asked of the lane already, so it asks each once.
-		std::array<bool, kDrawFamilyLanes> familyAsked{};  // by draw family (RequestFamily)
-		bool refractionAsked = false;  // the refraction pipeline (RequestRefraction)
+		// Render thread. Each is asked of the lane only once.
+		std::array<bool, kDrawFamilyLanes> familyAsked{};
+		bool refractionAsked = false;
 		ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forwardAsked;
 		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout->GetHandle(); }
-		// The shadow views' plain indirect draw: a DrawSequence's tail as an indexed draw from the index pool (StoreShadowSequence).
+		// The refraction's plain indirect draw. On D3D12 the instance word comes first.
 		rhi::CommandSignaturePtr shadowDrawSignature;
-		// The shadow views' draws: their arguments alone (kShadowDrawBytes), the rest being their caster rows.
 		rhi::CommandSignaturePtr shadowViewDrawSignature;
 		bool supported = false;
-		bool deviceGenerated = false;  // DrawPipelines::DeviceGenerated: the classes' execution sets and signatures are made
-		bool gpuDriven = false;        // DrawPipelines::GpuDriven: counted indirect draws, so the GPU path's buckets draw
+		bool d3d12 = false;  // layouts of root constants alone, plain draws only
+		bool deviceGenerated = false;
+		bool gpuDriven = false;
+		bool depthClipDisable = false;
 		bool attempted = false;
 		org::services::PipelineService service;
-		/**
-		 * @brief A pipeline's hot reload registration (RenderGraphRuntime::PipelineRegistry; dclf-hot-reload.md), made with its request:
-		 * its source, how to build it again (its program from the files as they are now, then the same build with the same inputs), and
-		 * the program it is built from now. Registered once admitted; the lane keeps the slot where it keeps the payload.
-		 */
+		/** @brief A pipeline's hot reload registration: how to rebuild it and the program it is built from now. */
 		struct Live
 		{
 			org::services::LivePipelineDesc desc;
-			std::uint64_t fingerprint = 0;  // its program's (ShaderPrograms::Program::fingerprint)
-			std::uint64_t builtFor = 0;     // its program's sources generation
+			std::uint64_t fingerprint = 0;
+			std::uint64_t builtFor = 0;  // its program's sources generation
 		};
-		/**
-		 * @brief A_program's kind's registration: a rebuild takes the program from a_rebuildProgram (a ShaderPrograms::Rebuild* call, any
-		 * thread) and, when it differs from the one built with (or the reload is forced), runs a_build on DCLF's build pool, as the
-		 * service's build runs a_build on the lane's program.
-		 */
+		/** @brief A program kind's hot reload registration. A rebuild runs on DCLF's build pool only when the program changed or is forced. */
 		template <class P, class RebuildProgram, class BuildPayload>
 		static std::shared_ptr<const Live> MakeLive(std::string a_id, std::string a_source, const P& a_program, RebuildProgram a_rebuildProgram, BuildPayload a_build)
 		{
@@ -625,7 +605,7 @@ namespace DCLF
 					const std::uint64_t fingerprint = a_rebuilt->fingerprint;
 					if (fingerprint == a_request.fingerprint && !a_request.force)
 						return a_done({ .fingerprint = fingerprint });
-					// The pipeline on DCLF's build pool, as the service's builds (the program's last compile may have completed anywhere).
+					// The program's last compile may have completed on any thread.
 					auto task = [a_rebuilt, a_build, a_done, fingerprint] {
 						try {
 							a_done({ .payload = a_build(*a_rebuilt), .fingerprint = fingerprint });
@@ -641,7 +621,7 @@ namespace DCLF
 			live->builtFor = a_program.sourcesGeneration;
 			return live;
 		}
-		/** @brief The lane, a pipeline admitted: its slot in the registry (null without a registration, or without the registry). */
+		/** @brief The lane. A newly admitted pipeline's registry slot, or null without a registry. */
 		static std::shared_ptr<org::services::LivePipelineSlot> RegisterLive(const std::shared_ptr<const Live>& a_live, const org::services::PipelinePayload& a_payload)
 		{
 			auto* registry = RenderGraphRuntime::PipelineRegistry();
@@ -650,11 +630,8 @@ namespace DCLF
 			return registry->Register(a_live->desc, a_payload, a_live->fingerprint, a_live->builtFor);
 		}
 
-		/*
-		 * Build completions: each callback pushes its artifact (on the building thread, or inline on the requesting thread for a cached
-		 * pipeline) and wakes the lane, which drains them. Each carries its request's generation; one from before a target or format
-		 * change is dropped. And its registration (Live).
-		 */
+		// Build completions. Each callback pushes its artifact and wakes the lane, which drains them.
+		// A completion from before a target or format change is dropped by its generation.
 		struct MainDone
 		{
 			PipelineKey key;
@@ -684,8 +661,8 @@ namespace DCLF
 		};
 		struct RefractionDone
 		{
-			std::uint32_t generation = 0;              // the main set's (the main depth's format)
-			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the refraction normals' it was built for
+			std::uint32_t generation = 0;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the refraction normals format it was built for
 			org::services::PipelineArtifact artifact;
 			std::shared_ptr<const Live> live;
 		};
@@ -693,22 +670,21 @@ namespace DCLF
 		{
 			EventQueue<MainDone, 1024> main;
 			EventQueue<ShadowDone, 1024> shadow;
-			std::array<EventQueue<FamilyDone, 16>, kDrawFamilyLanes> family;  // by draw family
+			std::array<EventQueue<FamilyDone, 16>, kDrawFamilyLanes> family;
 			EventQueue<ForwardDone, 256> forward;
 			EventQueue<RefractionDone, 16> refraction;
-			// Requests to the lane, and the lane's engine-state requests to the render thread (CaptureEngineStates replies).
+			// Requests to the lane, and the lane's engine-state requests back to the render thread.
 			EventQueue<LightingRequest, 1024> requests;
 			EventQueue<ShadowRequest, 1024> shadowRequests;
 			EventQueue<ForwardPipelineKey, 256> forwardRequests;
-			std::array<std::atomic<bool>, kDrawFamilyLanes> familyRequest{};  // by draw family
+			std::array<std::atomic<bool>, kDrawFamilyLanes> familyRequest{};
 			std::atomic<bool> refractionRequest{ false };
 			EventQueue<std::uint32_t, 64> stateRequests;
 		};
-		// Never freed: a build may complete while the process tears down.
+		// Never freed, because a build may complete while the process tears down.
 		Completions* completions = new Completions;
 
-		// The builds run on DCLF's preparation pool (BuildExecutor.h), not a thread each. A shader reload's start and its swap wake the lane
-		// (FollowSources, AdoptLivePipelines).
+		// Builds run on DCLF's preparation pool. A shader reload's start and its swap wake the lane.
 		Impl()
 		{
 			service.Configure(BuildSubmitter());
@@ -716,7 +692,7 @@ namespace DCLF
 				registry->AddListener([] { WakePipelineLane(); });
 		}
 
-		// Render thread: the shadow view rasterizer states by id - 1; the lane reads the posted copy (FrameInput::shadowStates).
+		// Render thread. The lane reads the posted copy.
 		struct ShadowRasterState
 		{
 			float depthBias = 0.0f;
@@ -724,15 +700,14 @@ namespace DCLF
 			float slopeScaledDepthBias = 0.0f;
 			rhi::CullMode cull = rhi::CullMode::Back;
 			bool frontCCW = false;
+			// D3D11's DepthClipEnable. Off clamps depth to the viewport's range instead of clipping.
+			bool depthClip = true;
 
 			bool operator==(const ShadowRasterState&) const = default;
 		};
 		std::vector<ShadowRasterState> shadowRasterStates;
 
-		/**
-		 * @brief Render thread: the engine's FrontCounterClockwise, read once from its table; empty until the table holds a state. Every
-		 * entry has the same winding, and Community Shaders' per-cascade copies are copies of it.
-		 */
+		/** @brief Render thread. The engine's FrontCounterClockwise, read once. Every entry and every CS cascade copy has the same winding. */
 		std::optional<bool> EngineFrontCCW()
 		{
 			if (!engineFrontCCW) {
@@ -747,25 +722,20 @@ namespace DCLF
 		}
 		std::optional<bool> engineFrontCCW;
 		std::uint32_t loggedShadowRasterFailures = 0;
-		// A build's result: both variants' pipelines and the registers the shaders read.
 		struct Built
 		{
 			std::array<rhi::PipelinePtr, kVariantCount> pipelines;
-			// Per variant: the Z-prepass pixel stage reads far less than the colour one.
+			// Per variant. The Z-prepass pixel stage reads far less than the colour one.
 			std::array<RegisterUsage, kVariantCount> usage;
-			bool discards = false;  // a shadow pipeline whose pixel stage defers the depth test (FragmentDefersDepth)
-			// A main pipeline's Z-prepass plain-draw pipeline (pulled stages) and its identity, shared by equal keys.
+			bool discards = false;
+			// Shared by equal Z keys.
 			rhi::PipelinePtr pulledDepth;
-			// A forward or main key's plain colour draws' pipeline (the pulled stages, the colour variant's state; ForwardDrawPass, the colour
-			// pass): null for any other key, and for one whose pulled stages would not build (its range is then drawn device-generated).
+			// Null when the pulled stages would not build. That range then draws device-generated.
 			rhi::PipelinePtr pulledColour;
-			// An effect decal key's plain depth draws' pipeline (the pulled stages, the depth variant's state; the decal depth pass's decal
-			// buckets): null for any other key (a Lighting key's are its pulledDepth).
 			rhi::PipelinePtr pulledDecalDepth;
 			ZPipelineKey zKey;
-			std::shared_ptr<const ConstantTables> tables;  // a main pipeline's stages' (ConstantTableOf)
-			// A main pipeline's both variants' state (PipelineDesc::State): the state class whose execution sets it goes in. Not the pulled
-			// depth pipeline's, which plain draws bind.
+			std::shared_ptr<const ConstantTables> tables;
+			// Not the pulled depth pipeline's state, which plain draws bind.
 			StateClassKey stateClass;
 		};
 
@@ -776,53 +746,46 @@ namespace DCLF
 			float depthBiasClamp = 0.0f;
 			float slopeScaledDepthBias = 0.0f;
 			rhi::BlendState blend{};
-			bool valid = false;  // false: a state object was missing or used something the RHI cannot express
-			// An opaque key's: only the blend (its write masks) is the engine's; depth and bias stay the opaque pass's.
+			bool valid = false;  // false if a state object was missing or the RHI cannot express it
+			// An opaque key takes only the engine's blend write masks. Depth and bias stay the opaque pass's.
 			bool blendOnly = false;
 		};
-		// The opaque groups' write modes (alphaBlendWriteMode), as the engine draws them: alpha-tested (accumulation hint 2) writes
-		// every channel (mode 10); plain opaque (hint 0) leaves RT0's alpha alone (mode 1), so a shader alpha below 1 never reaches
-		// the G-buffer.
+		// As the engine draws them, alpha-tested writes every channel (mode 10). Plain opaque leaves RT0's alpha alone (mode 1),
+		// so a shader alpha below 1 never reaches the G-buffer.
 		static constexpr std::uint32_t kOpaqueWriteMode = 1, kAlphaTestedWriteMode = 10;
-		ankerl::unordered_dense::map<std::uint32_t, EngineState> engineStates;  // by RasterStateBits
+		ankerl::unordered_dense::map<std::uint32_t, EngineState> engineStates;
 		std::uint32_t loggedStateFailures = 0;
 
 		static bool ToRHI(D3D11_BLEND a_factor, rhi::BlendFactor& a_out);
 		static bool ToRHI(D3D11_BLEND_OP a_op, rhi::BlendOp& a_out);
 
-		/** @brief The engine's state objects for these state bits, in RHI terms. */
 		EngineState ReadEngineState(std::uint32_t a_stateBits, std::string& a_error);
 
-		/** @brief Render thread -> lane, latest-wins, posted whole (PostInput): what the builds need that only the render thread can read. */
+		/** @brief What the builds need that only the render thread can read. Posted whole, latest wins. */
 		struct FrameInput
 		{
 			TargetFormats targets;
-			std::uint32_t targetsGeneration = 0;  // DrawPipelines::generation, whose targets these are
-			// Engine states by RasterStateBits (CaptureEngineStates): every one asked for, valid or not.
+			std::uint32_t targetsGeneration = 0;
+			// Every state asked for, valid or not.
 			std::shared_ptr<const ankerl::unordered_dense::map<std::uint32_t, EngineState>> states;
-			std::optional<bool> frontCCW;      // EngineFrontCCW, once the engine's table holds a state
-			RE::BSShader* lighting = nullptr;  // the Lighting shader the programs' defines are of (EngineShaders::Lighting)
-			// By program family: the engine shader its programs' defines are of (its programSource: the Effect port's BSEffectShader).
+			std::optional<bool> frontCCW;
+			RE::BSShader* lighting = nullptr;
 			std::array<const void*, Extensions::kProgramFamilies> familySource{};
-			// Rasterizer states by id - 1, append-only: a newer list holds every id an older one did.
 			RE::BSShader* utility = nullptr;
 			DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
 			std::shared_ptr<const std::vector<ShadowRasterState>> shadowStates;
-			// SetFamilyInputs, by draw family (its programs' and its forward program's shader: tree LOD's DistantTree); SetViewForwardTargets,
-			// by view (its keys').
 			std::array<RE::BSShader*, kDrawFamilyLanes> drawFamilySource{};
 			std::array<ForwardTargets, Extensions::kEngineViews> viewTargets{};
-			// SetRefractionInputs.
 			RE::BSShader* refractionUtility = nullptr;
 			DXGI_FORMAT refractionFormat = DXGI_FORMAT_UNKNOWN;
 			std::uint8_t refractionWriteMask = 0xF;
 		};
 		LatestSlot<FrameInput> inputSlot;
-		FrameInput renderInput;                       // render thread: what it posts, as last posted
-		std::vector<std::uint32_t> pendingStateBits;  // render thread: asked for by the lane, not readable yet (no deferred pass yet)
-		LatestSlot<PipelineCatalog> catalogSlot;      // lane -> the scene lane (TakeCatalog)
+		FrameInput renderInput;
+		std::vector<std::uint32_t> pendingStateBits;  // asked for by the lane but not readable until the deferred pass
+		LatestSlot<PipelineCatalog> catalogSlot;
 
-		/** @brief Render thread: posts the current frame inputs and wakes the lane. */
+		/** @brief Render thread. Posts the current frame inputs and wakes the lane. */
 		void PostInput(const DrawPipelines& a_owner)
 		{
 			renderInput.targets = a_owner.targets;
@@ -831,7 +794,6 @@ namespace DCLF
 			WakePipelineLane();
 		}
 
-		/** @brief A family's counters (read by the report, relaxed). */
 		struct FamilyCounters
 		{
 			std::atomic<std::uint32_t> requested{ 0 }, ready{ 0 }, failed{ 0 }, setPublishes{ 0 }, setWaits{ 0 }, zPipelines{ 0 }, zDepthOnly{ 0 };
@@ -841,18 +803,17 @@ namespace DCLF
 					counter->store(0, std::memory_order_relaxed);
 			}
 		};
-		/** @brief A forward view's pipeline: built, its build queued or done, or failed for good (this generation). */
+		/** @brief A forward pipeline: built, queued, or failed for good this generation. */
 		struct ForwardEntry
 		{
 			org::services::PipelinePayload built;
-			std::shared_ptr<org::services::LivePipelineSlot> slot;  // built's (AdoptLivePipelines)
+			std::shared_ptr<org::services::LivePipelineSlot> slot;
 			bool requested = false;
 			bool failed = false;
 		};
 		/**
-		 * @brief One keyed family of the lane's pipelines (main set, shadow set, forward): entries, every key asked for, keys parked on
-		 * their program or an input, counters. A change of what they are built for starts a new generation (StartOver): queued builds
-		 * finish and their completions are dropped.
+		 * @brief One keyed family of the lane's pipelines. A change of what they are built for starts a new generation.
+		 * Queued builds still finish, and their completions are dropped.
 		 */
 		template <class Key, class Hash, class E, class Asked>
 		struct PipelineFamily
@@ -861,15 +822,15 @@ namespace DCLF
 			ankerl::unordered_dense::map<Key, E, Hash> entries;
 			std::uint32_t failedEntries = 0;
 			Asked asked;
-			// Keys waiting on their program (by id), retried when UpdateLane finishes it; keys waiting on an input, retried on input change.
+			// Keys waiting on their program are retried when it finishes. Keys waiting on an input are retried when it changes.
 			ankerl::unordered_dense::map<std::uint64_t, std::vector<Key>> programWaiters;
 			std::vector<Key> blocked;
 			std::uint32_t loggedFailures = 0;
 			FamilyCounters counters;
 
-			/** @brief At capacity, counting queued builds (every unfailed entry takes a slot). */
+			/** @brief At capacity, counting queued builds. */
 			bool Full() const { return entries.size() - failedEntries >= kMaxPipelines; }
-			/** @brief a_key's program can never be made: its objects stay native. */
+			/** @brief a_key's program can never be made, so its objects stay native. */
 			void FailForGood(const Key& a_key)
 			{
 				entries.try_emplace(a_key).first->second.failed = true;
@@ -898,7 +859,7 @@ namespace DCLF
 				failedEntries = 0;
 				++generation;
 				counters.Zero();
-				// Every key asked for is requested again once the new inputs are in (DrainLane retries blocked).
+				// Every key is requested again once the new inputs are in.
 				programWaiters.clear();
 				blocked.clear();
 				for (const auto& request : asked) {
@@ -910,68 +871,56 @@ namespace DCLF
 			}
 		};
 
-		/**
-		 * @brief The lane's state: touched only by its passes (DrainLane), one at a time on the coordinator, except the counters (read by
-		 * the report). Its own family is the main set, keyed by PipelineKey with the slot that first asked.
-		 */
+		/** @brief The lane's state. Only its passes touch it, one at a time on the coordinator, except the report's counters. */
 		struct Lane : PipelineFamily<PipelineKey, PipelineKeyHash, Entry, ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash>>
 		{
-			std::shared_ptr<const FrameInput> input;  // the newest taken
-			ankerl::unordered_dense::set<std::uint32_t> statesAsked;  // engine state bits asked of the render thread
-			ShaderPrograms::Finished finishedPrograms;               // UpdateLane's, per pass (every kind's)
+			std::shared_ptr<const FrameInput> input;
+			ankerl::unordered_dense::set<std::uint32_t> statesAsked;
+			ShaderPrograms::Finished finishedPrograms;
 			Versions<SetVersion> versions;
-			std::vector<org::services::PipelinePayload> setPipelines;  // index -> Built, admitted (not necessarily published)
-			// By index: setPipelines' registry slot (AdoptLivePipelines takes what a reload swapped into it).
+			std::vector<org::services::PipelinePayload> setPipelines;  // admitted, not necessarily published
 			std::vector<std::shared_ptr<org::services::LivePipelineSlot>> setSlots;
-			std::uint64_t registryGeneration = 0;  // PipelineRegistry::Generation as last adopted
-			// Z-prepass groups: each pipeline's (numbered as first admitted), and each group's first pipeline.
+			std::uint64_t registryGeneration = 0;
 			std::vector<std::uint32_t> zGroupOf, zGroupFirst;
 			ankerl::unordered_dense::map<ZPipelineKey, std::uint32_t, ZPipelineKeyHash> zGroups;
-			std::vector<std::array<RegisterUsage, kVariantCount>> usage;  // by set index, then variant
-			std::vector<std::shared_ptr<const ConstantTables>> constantTables;  // by set index
-			// State classes (Built::stateClass), numbered as first admitted: each pipeline's word (by set index: class << kSetClassShift |
-			// index in the class), each class's members (set indices, in admission order) and each key's class.
+			std::vector<std::array<RegisterUsage, kVariantCount>> usage;
+			std::vector<std::shared_ptr<const ConstantTables>> constantTables;
+			// State classes in admission order, each pipeline's class word, and each class's members.
 			std::vector<std::uint32_t> classOf;
 			std::vector<std::vector<std::uint32_t>> classMembers;
 			ankerl::unordered_dense::map<StateClassKey, std::uint32_t, StateClassHash, StateClassEqual> classIndex;
-			std::atomic<std::uint32_t> stateClasses{ 0 }, largestClass{ 0 };  // Stats', relaxed
-			// CS_DCLF_SET_PARITY: each published version's classes against their members (CheckClasses), and its counts for Stats (relaxed).
+			std::atomic<std::uint32_t> stateClasses{ 0 }, largestClass{ 0 };
 			Diagnostics::ParityCounter classParity;
 			std::atomic<std::uint64_t> classParityChecks{ 0 }, classParityMismatches{ 0 };
-			std::string recreatedBy;  // the set's last recreation, for NearestKey's warnings
+			std::string recreatedBy;  // for the warnings
 			std::uint64_t revision = 0;
-			bool dirty = false;  // the catalog to publish at the end of the pass
-			// Stats::families, by program family.
+			bool dirty = false;  // publish the catalog at the end of the pass
 			struct ProgramFamilyCounters
 			{
 				std::atomic<std::uint32_t> requested{ 0 }, ready{ 0 }, failed{ 0 };
 			};
 			std::array<ProgramFamilyCounters, Extensions::kProgramFamilies> programFamilyCounters;
-			/**
-			 * @brief The shadow views' set, kept as the main set: keyed by view key (with mode bits and view state), built for the shadow map
-			 * format, its own versions. Its generation is PipelineCatalog::shadowGeneration.
-			 */
+			/** @brief The shadow views' set, kept like the main set but built for the shadow map format. */
 			struct Shadow : PipelineFamily<ShadowPipelineKey, ShadowPipelineKeyHash, Entry, ankerl::unordered_dense::map<ShadowPipelineKey, ShadowRequest, ShadowPipelineKeyHash>>
 			{
 				Versions<ShadowSetVersion> versions;
-				// By index, admitted: the pipeline, its vertex layout and its class (kShadowDiscards), and the pipeline's registry slot.
 				std::vector<org::services::PipelinePayload> setPipelines;
 				std::vector<std::shared_ptr<org::services::LivePipelineSlot>> setSlots;
 				std::vector<std::uint64_t> layouts;
 				std::vector<std::uint8_t> discards;
-				std::string recreatedBy;  // the set's last recreation, for NearestShadowKey's warnings
+				std::string recreatedBy;  // for the warnings
 			};
 			Shadow shadow;
-			/** @brief A draw family's two pipelines, rebuilt with each new main set (RecreateMainSet), under the main set's generation. */
+			/** @brief A draw family's two pipelines, rebuilt with each new main set. */
 			struct FamilyLane
 			{
-				bool asked = false;          // RequestFamily has arrived: built from here on, for every generation
-				bool requested = false;      // this generation's build is queued
-				bool failed = false;         // this generation's build failed, or the program did
+				bool asked = false;  // built from here on, for every generation
+				bool requested = false;
+				bool failed = false;
 				bool programFailed = false;  // for good
 				org::services::PipelinePayload built;
-				std::shared_ptr<org::services::LivePipelineSlot> slot;  // built's (AdoptLivePipelines)
-				// Earlier generations' builds, and those a shader reload replaced, kept for the process: a recording may still draw with them.
+				std::shared_ptr<org::services::LivePipelineSlot> slot;
+				// Kept for the process, because a recording may still draw with them.
 				std::vector<org::services::PipelinePayload> retired;
 				struct Counters
 				{
@@ -979,46 +928,39 @@ namespace DCLF
 				};
 				Counters counters;
 			};
-			std::array<FamilyLane, kDrawFamilyLanes> families;  // by draw family
-			/** @brief The refraction pipeline, rebuilt with each new main set (RecreateMainSet) or new normals format / write mask. */
+			std::array<FamilyLane, kDrawFamilyLanes> families;
+			/** @brief The refraction pipeline, rebuilt with each new main set, normals format or write mask. */
 			struct Refraction
 			{
-				bool asked = false;          // RequestRefraction has arrived
-				bool requested = false;      // this build is queued
-				bool failed = false;         // this build failed, or the program did
+				bool asked = false;
+				bool requested = false;
+				bool failed = false;
 				bool programFailed = false;  // for good
-				DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the format requested or built for
+				DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 				org::services::PipelinePayload built;
-				std::shared_ptr<org::services::LivePipelineSlot> slot;  // built's (AdoptLivePipelines)
-				// Earlier builds, and those a shader reload replaced, kept for the process: a recording may still draw with them.
+				std::shared_ptr<org::services::LivePipelineSlot> slot;
+				// Kept for the process, because a recording may still draw with them.
 				std::vector<org::services::PipelinePayload> retired;
 				struct Counters
 				{
 					std::atomic<std::uint32_t> requested{ 0 }, ready{ 0 }, failed{ 0 };
 				};
 				Counters counters;
-				/** @brief Starts over: the build is retired (kept for the process), the program's verdict kept. */
+				/** @brief Retires the build, keeping it for the process, and keeps the program's verdict. */
 				void Reset();
 			};
 			Refraction refraction;
-			/**
-			 * @brief The forward pipelines, built for the forward targets (rebuilt by RecreateForward). No set: recordings bind each by
-			 * handle, so every build is kept for the process. Programs by ShaderPrograms::ForwardProgramId, a draw family's by its lane slot's
-			 * forwardProgramId.
-			 */
+			/** @brief The forward pipelines. Recordings bind each by handle with no set, so every build is kept for the process. */
 			struct Forward : PipelineFamily<ForwardPipelineKey, ForwardPipelineKeyHash, ForwardEntry, ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash>>
 			{
-				std::vector<org::services::PipelinePayload> retired;  // earlier targets' builds, kept for the process
+				std::vector<org::services::PipelinePayload> retired;  // kept for the process
 			};
 			Forward forward;
-			std::uint64_t servicePass = 0;  // PublishReady's fence value: the service's displaced payloads retire at once (DrainLane)
+			std::uint64_t servicePass = 0;  // the service's displaced payloads retire at once
 		};
 		Lane lane;
 
-		/**
-		 * @brief Publishes a family's admitted pipelines (Versions::Publish) and hands out the published indices (a_onReady per key).
-		 * Returns what the publication did (Published: a new version is the published one).
-		 */
+		/** @brief Publishes a family's admitted pipelines and hands out the published indices. */
 		template <class Family, class Version, class Publish, class OnReady>
 		typename Versions<Version>::PublishResult PublishAdmitted(Family& a_family, Versions<Version>& a_versions, std::uint32_t a_admitted, const char* a_what, Publish&& a_publish, OnReady&& a_onReady)
 		{
@@ -1044,70 +986,51 @@ namespace DCLF
 			return result;
 		}
 
-		/** @brief The lane's pass (SetPipelineLaneDrain). */
 		static void DrainLaneThunk();
 		void DrainLane();
-		/** @brief The lane: requests a_key's program, then its pipeline, or parks it until what it lacks arrives. */
+		/** @brief Requests a key's program, then its pipeline, or parks it until what it lacks arrives. */
 		void TryRequest(const PipelineKey& a_key);
-		/** @brief TryRequest's warning for a build it requested (a_slot: the pipeline slot that asked), with its nearest requested relative. */
+		/** @brief Warns about an on-demand build, with its nearest requested relative. */
 		void LogOnDemandBuild(const PipelineKey& a_key, Api::ProgramFamily a_family, std::uint32_t a_slot) const;
-		/** @brief The lane: the main pass's targets changed; every key is built again into a new set. */
+		/** @brief The main targets changed, so every key is built again into a new set. */
 		void RecreateMainSet(const TargetFormats& a_from, const TargetFormats& a_to);
-		/** @brief RecreateMainSet's: the main set, the draw families' and refraction started over (a_by: why, for the warnings). */
 		void ResetMainSet(std::string a_by);
-		/** @brief RecreateShadowSet's: the shadow set started over. */
 		void ResetShadowSet(std::string a_by);
-		/** @brief RecreateForward's: the forward pipelines started over, the built ones kept for the process. */
+		/** @brief Starts the forward pipelines over, keeping the built ones for the process. */
 		void ResetForward();
-		/**
-		 * @brief The lane, when a shader reload moved the sources (ShaderPrograms::FollowSources dropped its program entries): every key
-		 * parked on a program, and every key whose program or build failed, requested again with the inputs (DrainLane's RetryBlocked).
-		 */
+		/** @brief After a shader reload moved the sources, request every parked or failed key again. */
 		void RetryAfterSourcesMoved();
 		/**
-		 * @brief The lane, each pass before admitting: once PipelineRegistry::Generation moved, every pipeline whose slot a reload swapped
-		 * takes the slot's payload where the lane keeps it (the sets' indices, the forward entries, the draw families, refraction). A set
-		 * that changed gets new versions (Versions::Retire; the next publication applies every index from the new payloads, its state
-		 * classes and Z-prepass groups taken again), the catalog is published again with them, and the scene lane's next revision binds
-		 * them. The one reload step for every kind.
+		 * @brief Once a reload swapped pipeline slots, take the new payloads wherever the lane keeps them. Changed sets get new versions
+		 * and the catalog is published again. This is the one reload step for every kind.
 		 */
 		void AdoptLivePipelines();
-		/** @brief AdmitLane's and ReindexMainSet's: a_index's Z-prepass group and state class (AdmitToClass), in admission order. */
+		/** @brief a_index's Z-prepass group and state class, in admission order. */
 		void IndexMainBuilt(std::uint32_t a_index, const Built& a_built);
-		/** @brief AdoptLivePipelines': the main set's groups and classes made again from its pipelines, in index order. */
+		/** @brief Rebuilds the main set's groups and classes from its pipelines, in index order. */
 		void ReindexMainSet();
-		/** @brief The lane: admits completed builds, publishes a set version, hands out their indices. */
+		/** @brief Admits completed builds, publishes a set version and hands out their indices. */
 		void AdmitLane();
-		/** @brief The lane: TryRequest for a shadow view key. */
 		void TryRequestShadow(const ShadowPipelineKey& a_key);
-		/** @brief The lane: the shadow map format changed; every shadow key is built again into a new set. */
+		/** @brief The shadow map format changed, so every shadow key is built again into a new set. */
 		void RecreateShadowSet(DXGI_FORMAT a_from, DXGI_FORMAT a_to);
-		/** @brief The lane: AdmitLane for the shadow views' set. */
 		void AdmitShadow();
-		/** @brief The lane: TryRequest for a draw family's pipelines, once asked for. */
 		void TryRequestFamily(Api::DrawFamily a_family);
-		/** @brief The lane: TryRequestFamily for every draw family. */
 		void TryRequestFamilies();
-		/** @brief The lane: the draw families RequestFamily has asked for since the last pass, asked from here on. */
 		void TakeFamilyRequests();
-		/** @brief The lane: the draw families' keys and pipelines that waited on the programs a_finished names, tried again. */
+		/** @brief Retries draw family keys that waited on the finished programs. */
 		void RetryFamilyPrograms(const ShaderPrograms::Finished& a_finished);
-		/** @brief The lane: TryRequest for a forward key. */
 		void TryRequestForward(const ForwardPipelineKey& a_key);
-		/** @brief The lane: TryRequest for the refraction pipeline, once asked for. */
 		void TryRequestRefraction();
-		/** @brief The lane: the forward targets changed; every forward key is built again. */
+		/** @brief The forward targets changed, so every forward key is built again. */
 		void RecreateForward(const ForwardTargets& a_from, const ForwardTargets& a_to);
-		/** @brief The lane: admits completed draw family and forward builds. */
 		void AdmitFamiliesAndForward();
 		void PublishCatalog();
-		/** @brief The lane: NearestKey for a shadow view key, among the shadow keys requested. */
 		std::string NearestShadowKey(const ShadowPipelineKey& a_key) const;
-		/** @brief The lane, for the on-demand warnings: the requested key nearest a_key (fewest differing bits) and what differs. */
+		/** @brief For warnings. The requested key with the fewest differing bits, and what differs. */
 		std::string NearestKey(const PipelineKey& a_key) const;
 		static std::string DescribeKey(const PipelineKey& a_key)
 		{
-			// A family's key is named by its key name ("effect"), a Lighting key by its technique.
 			const auto family = KeyFamily(a_key.rasterFlags);
 			return fmt::format("VS {:08X} PS {:08X} pass {:08X} ({}), raster {:X}, vertex layout {:016X}", a_key.vertexDescriptor, a_key.pixelDescriptor,
 				a_key.passDescriptor,
@@ -1117,13 +1040,10 @@ namespace DCLF
 
 		bool Initialize();
 
-		/** @brief Initialize's command signatures (false when a required one could not be made). */
+		/** @brief Initialize's command signatures. False when a required one could not be made. */
 		bool CreateDrawSignatures();
 
-		/**
-		 * @brief A triangle-list graphics pipeline description (no pixel stage when a_pixel is empty), without vertex input; Create throws
-		 * on failure.
-		 */
+		/** @brief A triangle-list pipeline description with no vertex input. Create throws on failure. */
 		struct PipelineDesc
 		{
 			PipelineDesc(rhi::PipelineLayoutHandle a_layout, std::span<const std::byte> a_vertex, std::span<const std::byte> a_pixel, DXGI_FORMAT a_depthFormat) :
@@ -1141,7 +1061,7 @@ namespace DCLF
 			rhi::SubobjBlend blend{};
 			rhi::SubobjRTVs targets{};
 			rhi::SubobjDSV depthFormat;
-			rhi::SubobjInputLayout input{};  // always empty: the vertex stages pull their attributes (CheckVertexAttributes)
+			rhi::SubobjInputLayout input{};  // always empty, the vertex stages pull their attributes
 			rhi::SubobjFlags flags{};
 
 			/** @brief Adds a colour target, blended per its index's blend attachment. */
@@ -1155,10 +1075,7 @@ namespace DCLF
 				for (std::uint32_t i = 0; i < a_targets.colorCount; ++i)
 					Colour(a_targets.colors[i]);
 			}
-			/**
-			 * @brief Its state class's part (PipelineStateDesc): everything Create passes but the two modules, and the fragment interface of
-			 * its pixel module (a_pixel, that module reflected).
-			 */
+			/** @brief The state class part: everything Create passes but the modules, plus the pixel module's fragment interface. */
 			PipelineStateDesc State(const SpirvReflection& a_pixel) const
 			{
 				PipelineStateDesc state;
@@ -1167,7 +1084,7 @@ namespace DCLF
 				state.blend = blend.bs;
 				state.targets = targets.rt;
 				state.depthFormat = depthFormat.dsv;
-				state.topology = rhi::PrimitiveTopology::TriangleList;  // Create's
+				state.topology = rhi::PrimitiveTopology::TriangleList;
 				state.flags = flags.flags;
 				state.hasPixel = hasPixel;
 				if (hasPixel) {
@@ -1185,12 +1102,12 @@ namespace DCLF
 					rhi::Make(layout), rhi::Make(vertex), rhi::Make(raster), rhi::Make(depth), rhi::Make(blend), rhi::Make(targets), rhi::Make(depthFormat),
 					rhi::Make(topology), rhi::Make(input), rhi::Make(flags), rhi::Make(pixel),
 				};
-				// DXVK_PIPELINE_STATS: the pipeline's statistics are logged under its name.
+				// DXVK_PIPELINE_STATS logs statistics under this name.
 				const std::string label = fmt::format("DCLF {}", a_what);
 				rhi::vulkan::set_pipeline_statistics_label(label.c_str());
 				const auto result = a_device.CreatePipeline(items, static_cast<std::uint32_t>(std::size(items)) - (hasPixel ? 0u : 1u), a_out);
 				rhi::vulkan::set_pipeline_statistics_label(nullptr);
-				// DXVK_SHADER_DUMP_PATH: the pixel stage's SPIR-V beside DXVK's dumps, named by the label.
+				// DXVK_SHADER_DUMP_PATH: dump the pixel stage's SPIR-V beside DXVK's dumps.
 				if (static const char* dump = std::getenv("DXVK_SHADER_DUMP_PATH"); dump && *dump && hasPixel && pixel.bytecode.data) {
 					std::string file = label;
 					for (auto& c : file)
@@ -1204,7 +1121,7 @@ namespace DCLF
 			}
 		};
 
-		/** @brief A SPIR-V module's hash (pipeline service recipes, Z-prepass groups). */
+		/** @brief A SPIR-V module's hash. */
 		static std::uint64_t ModuleHash(const std::vector<std::byte>& a_module) { return ankerl::unordered_dense::detail::wyhash::hash(a_module.data(), a_module.size()); }
 
 		/** @brief Parses SPIR-V modules, or throws. */
@@ -1218,77 +1135,55 @@ namespace DCLF
 			return out;
 		}
 
-		/**
-		 * @brief A draw family's pipelines (TryRequestFamily), as Api::DrawFamilyBuild::DepthThenEqualColour builds them, one colour pipeline
-		 * per colour program (a_colours: Api::DrawFamilyProgram::colours; the program's stages must match it); named with its label
-		 * ("tree LOD depth", "tree LOD colour", and a second colour program's "<label> colour 2").
-		 */
+		/** @brief A draw family's depth pipeline and one colour pipeline per colour program. */
 		static org::services::PipelinePayload BuildDrawFamily(rhi::Device a_device, rhi::PipelineLayoutHandle a_zLayout, const ShaderPrograms::DrawProgram* a_program,
 			std::uint8_t a_colours, TargetFormats a_targets, rhi::BlendState a_blend, bool a_frontCCW, std::string_view a_label);
 
 		/**
-		 * @brief The refraction pipeline: one attachment (FUN_1414b4860 binds kREFRACTION_NORMALS alone as RT0), main depth LESS_EQUAL
-		 * without writes (its depth mode 1), write mode 2's mask, no culling: the pixel stage discards one-sided back faces itself.
+		 * @brief The refraction pipeline. FUN_1414b4860 binds kREFRACTION_NORMALS alone as RT0 with depth LESS_EQUAL and no writes.
+		 * No culling, because the pixel stage discards one-sided back faces itself.
 		 */
 		static org::services::PipelinePayload BuildRefraction(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, const ShaderPrograms::ShadowProgram* a_program,
 			DXGI_FORMAT a_format, DXGI_FORMAT a_depthFormat, std::uint8_t a_writeMask, bool a_frontCCW);
 
-		/** @brief A forward pipeline. A second target (first-person motion vectors) is written unblended: those members are opaque. */
+		/** @brief A forward pipeline. A second target for first-person motion vectors is written unblended, since those members are opaque. */
 		static org::services::PipelinePayload BuildForward(rhi::Device a_device, rhi::PipelineLayoutHandle a_zLayout, const ShaderPrograms::ForwardProgram* a_program,
 			ForwardTargets a_targets, rhi::CullMode a_cull, bool a_frontCCW);
 
 		/**
-		 * @brief A ForwardOrDecal family key's pipelines (Api::ProgramBuild::ForwardOrDecal: the Effect port's keys), following Build's
-		 * forward or decal rules (a decal uses the DEFERRED pixel stage). An attachment the pixel stage does not output keeps its contents
-		 * (write mask 0), as DXVK builds the engine's pipeline: DEFERRED without Normals/MotionVectorsNormals writes neither. Its Z key is
-		 * never shared (a_slot's salt); the depth variant of a forward key is never drawn (no Z-prepass bucket: PlanZBuckets). Named by
-		 * a_keyName ("effect color", "effect depth").
+		 * @brief A forward or decal key's pipelines. An attachment the pixel stage does not output keeps its contents, as DXVK builds the
+		 * engine's pipeline. Its Z key is never shared.
 		 */
 		static org::services::PipelinePayload BuildForwardOrDecal(const ProgramFamilySlot& a_slot, std::string_view a_keyName, rhi::Device a_device,
 			rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key, const ShaderPrograms::Program* a_program, TargetFormats a_targets,
 			EngineState a_state, bool a_frontCCW);
-		/**
-		 * @brief A forward key's plain colour draws' pipeline into a_built (Built::pulledColour): a_vertex and a_pixel (pulled) under a_zLayout,
-		 * with a_colour's state. A pulled stage that would not build leaves it null, logged (a few): the key's other pipelines stand.
-		 */
+		/** @brief A forward key's plain colour pipeline. If the pulled stages will not build it stays null and the key's other pipelines stand. */
 		static void BuildPulledColour(rhi::Device a_device, rhi::PipelineLayoutHandle a_zLayout, const std::vector<std::byte>& a_vertex, const std::vector<std::byte>& a_pixel,
 			const PipelineDesc& a_colour, std::string_view a_name, Built& a_built, rhi::PipelinePtr Built::* a_into = &Built::pulledColour);
 
 		static org::services::PipelinePayload Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key,
 			const ShaderPrograms::Program* a_program, TargetFormats a_targets, EngineState a_state, bool a_frontCCW);
 
-		/**
-		 * @brief One shadow pipeline: the Utility permutation, depth only (write, LESS, as the engine's shadow pass), with the view's
-		 * bias, cull and winding. A two-sided caster draws without culling, as the engine's Utility pass does.
-		 */
+		/** @brief One shadow pipeline, depth only with LESS and writes. A two-sided caster draws without culling, as the engine's Utility pass does. */
 		static org::services::PipelinePayload BuildShadow(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, ShadowPipelineKey a_key,
 			const ShaderPrograms::ShadowProgram* a_program, DXGI_FORMAT a_depthFormat, ShadowRasterState a_state);
 
-		// DrawSequence's command signature (Records.h), created with the class's set it selects from.
 		bool CreateSignature(SetVersion::ClassSets& a_class, std::uint32_t a_variant);
-		/** @brief The lane (AdmitLane): a_index's place in its state class (Built::stateClass), the class made when it is the first of it. */
+		/** @brief a_index's place in its state class, making the class when it is the first. */
 		void AdmitToClass(const Built& a_built, std::uint32_t a_index);
-		/** @brief The lane (AdmitLane's publish): every class's sets of a_version brought up to its members among [0, a_admitted). */
+		/** @brief Brings every class's sets of a_version up to its members below a_admitted. */
 		bool ApplyClasses(SetVersion& a_version, std::uint32_t a_admitted);
 		/**
-		 * @brief The lane, CS_DCLF_SET_PARITY (AdmitLane, a version just published): every class of a_version against its members. Each
-		 * member's class word round-trips, its state equals its class's initial pipeline's (SameState: one that differs is drawn with the
-		 * initial's fixed-function state), the handle written at its index is its own, every pipeline is in exactly one class, and no two
-		 * classes are one state. Counted in Lane::classParity, each failure logged at once.
+		 * @brief CS_DCLF_SET_PARITY. Checks every class of a just-published version against its members.
+		 * A member whose state differs from its class's first pipeline would draw with the wrong fixed-function state.
 		 */
 		void CheckClasses(const SetVersion& a_version);
-		/**
-		 * @brief CheckClasses' members of one class a_class of a_version (a_members: the lane's, in admission order): each one's class word,
-		 * its state against the class's initial pipeline's, the handles written at its index; a_seen counts each pipeline's classes.
-		 */
+		/** @brief CheckClasses for one class. */
 		template <class Check>
 		static void CheckClassMembers(const SetVersion& a_version, std::uint32_t a_class, const std::vector<std::uint32_t>& a_members,
 			std::vector<std::uint8_t>& a_seen, Check&& a_check);
 
-		/**
-		 * @brief Writes [a_applied, a_admitted) into a_set, creating it (initial pipeline 0, to hold a_capacity) and its signatures if
-		 * absent.
-		 */
+		/** @brief Writes [a_applied, a_admitted) into a_set, creating it and its signatures if absent. */
 		template <class GetPipeline, class CreateSignatures>
 		bool ApplyToSet(rhi::IndirectPipelineSetPtr& a_set, std::uint32_t a_applied, std::uint32_t a_admitted, std::uint32_t a_capacity, const char* a_name, GetPipeline&& a_pipeline,
 			CreateSignatures&& a_createSignatures)

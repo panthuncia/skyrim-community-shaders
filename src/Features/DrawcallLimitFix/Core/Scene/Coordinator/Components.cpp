@@ -1,5 +1,4 @@
-// The features' coordinator components (scene lane): their states, the residency points' calls to their hooks (Api::CoordinatorComponent),
-// and the coordinator's services their context reaches (Api::CoordinatorComponentContext).
+// The features' coordinator components on the scene lane: their states, the calls to their hooks, and the services their context reaches.
 
 #include "Internal.h"
 
@@ -90,7 +89,7 @@ namespace DCLF::Api
 
 	void CoordinatorComponentContext::PublishDelta(std::shared_ptr<const void> a_delta) const
 	{
-		// Pending until the deltas are taken (TakeDeltas): DeltasPending counts them, so the next pass publishes.
+		// DeltasPending counts them, so the next pass publishes.
 		auto& requests = coordinator.componentDeltaRequests;
 		if (requests.size() <= component)
 			requests.resize(std::size_t(component) + 1);
@@ -189,8 +188,7 @@ namespace DCLF::Api
 
 	Mark CoordinatorComponentContext::MarkRoot(const void* a_key, std::uint64_t a_token, std::uint8_t a_side, bool a_ownHide) const
 	{
-		// A root another mark names (another component's, or this one's under another token) is this one's from here: the displaced
-		// mark's hide goes with it unless this one owns it too. Marked again under the same token, the root keeps a hide it owns.
+		// A root another mark names becomes this one's. The displaced mark's hide goes with it unless this one owns it too.
 		auto& marks = coordinator.rootMarks;
 		const auto [at, inserted] = marks.try_emplace(a_key);
 		Mark displaced;
@@ -205,7 +203,6 @@ namespace DCLF::Api
 			}
 		}
 		at->second = { Mark{ CoordinatorComponentId{ component }, a_token, a_side }, ownHide };
-		// Its own hide the component's from here (HiddenForWalk).
 		if (a_ownHide)
 			coordinator.mirror.SetGated(a_key, true);
 		return displaced;
@@ -270,12 +267,11 @@ namespace DCLF::Api
 		if (it == coordinator.tracked.end())
 			return;
 		auto& entry = it->second;
-		// Its verdict taken again: always, or only when it was classified (an unclassified entry's evaluation is pending already).
+		// An unclassified entry's evaluation is pending already.
 		if ((a_flags & kRequeueReevaluateAlways) || ((a_flags & kRequeueReevaluate) && entry.candidateFrame != 0)) {
 			entry.candidateFrame = 0;
 			coordinator.pendingEvaluation.push_back(it->first);
 		}
-		// Its slots committed again by the next commit (queued at its start).
 		if (a_flags & kRequeueSlots)
 			for (const std::uint32_t slot : { entry.slot, entry.layerSlot })
 				if (slot != kNoObjectSlot)
@@ -284,7 +280,6 @@ namespace DCLF::Api
 
 	void CoordinatorComponentContext::SubtreeEntries(const void* a_root, std::vector<const void*>& a_out, bool& a_lacking) const
 	{
-		// One walk of the mirror: the subtree as the tracking walks it (MirrorSubtree), its tracked geometries.
 		std::vector<std::pair<RE::BSGeometry*, Ineligible>> found;
 		if (!coordinator.mirror.Node(a_root))
 			a_lacking = true;
@@ -487,7 +482,7 @@ namespace DCLF::Scene
 
 	void Coordinator::SetEntryVeto(const void* a_entry, std::uint8_t a_veto)
 	{
-		// One byte: Hold and Observe exclude each other.
+		// Hold and Observe exclude each other.
 		if (a_veto != 0 && a_veto != Api::kVetoHold && a_veto != Api::kVetoObserve) {
 			static std::uint32_t logged = 0;
 			if (logged++ < 4)
@@ -506,15 +501,14 @@ namespace DCLF::Scene
 				++(a_veto == Api::kVetoHold ? vetoHeld : vetoObserved);
 			entry.veto = a_veto;
 		}
-		// Observed from here: ready only by an evaluation under this Observe (an earlier record of the slot is not this one's).
+		// Ready only by an evaluation under this Observe.
 		if (a_veto == Api::kVetoObserve)
 			for (const std::uint32_t slot : { entry.slot, entry.layerSlot })
 				if (slot != kNoObjectSlot && slot < observedSlots.size())
 					observedSlots[slot] = {};
 		if (!settling)
 			return;
-		// In the settle, this commit: a Hold applies none to the entry's slots; an Observe dropped applies the phases the commit recorded of
-		// each slot it last evaluated for the entry. Otherwise the requeued slots carry the change to the next commit.
+		// In the settle a Hold applies nothing and a dropped Observe applies the recorded phases. Otherwise requeued slots carry the change.
 		if (a_veto == Api::kVetoHold) {
 			for (const std::uint32_t slot : { entry.slot, entry.layerSlot })
 				if (slot != kNoObjectSlot)
@@ -545,7 +539,6 @@ namespace DCLF::Scene
 		state.layerSlot = entry.layerSlot;
 		state.reason = static_cast<std::uint8_t>(entry.candidateReason);
 		state.veto = entry.veto;
-		// Its slot's commit state: its base's, else its layer's.
 		if (const std::uint32_t slot = entry.slot != kNoObjectSlot ? entry.slot : entry.layerSlot; slot != kNoObjectSlot) {
 			state.waitCause = slot < setWaitCause.size() ? setWaitCause[slot] : std::uint8_t{ 0 };
 			state.waitWhy = slot < setWaitWhy.size() ? setWaitWhy[slot] : std::uint8_t{ 0 };
@@ -580,7 +573,6 @@ namespace DCLF::Scene
 
 	void Coordinator::UnmarkDetached(const void* a_root, std::span<const void* const> a_nodes)
 	{
-		// A root detached loses its mark (its hide ungated), then its component hears of it (its entries leave with their own erasure).
 		auto leave = [&](const void* a_key) {
 			const auto at = rootMarks.find(a_key);
 			if (at == rootMarks.end())
@@ -630,7 +622,6 @@ namespace DCLF::Scene
 
 	void Coordinator::ComponentsReportText(Api::ReportPoint a_point, std::string& a_text)
 	{
-		// The features' text lines and the components', in registration order.
 		for (const auto& reportLines : Extensions::RegisteredReportLines()) {
 			if (reportLines.point != a_point)
 				continue;
@@ -643,7 +634,6 @@ namespace DCLF::Scene
 
 	void Coordinator::ComponentsReportLines(Api::ReportPoint a_point, std::uint32_t a_frame)
 	{
-		// The features' logged lines and the components' (their text logged as one line when not empty), in registration order.
 		for (const auto& reportLines : Extensions::RegisteredReportLines()) {
 			if (reportLines.point != a_point)
 				continue;

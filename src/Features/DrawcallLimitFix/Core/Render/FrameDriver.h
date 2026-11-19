@@ -1,12 +1,7 @@
 #pragma once
 
-// The frame's DCLF work at each engine point, render thread: the scene frame's start (the publication installed, its claims, the
-// coordinator's requests served, the frame values kicked), the shadow views, the depth commit, EarlyPrepass and Prepass, the occlusion
-// maps (the shadow views listed through Core's Shadow/ShadowPoints.h, from the engine's shadow-light selection, which Features/Shadows/Engine's
-// hooks reach; the views' coverage, the maps' readiness and the shadow epoch with the maps taken through the shadow epochs' handlers there:
-// Api/ShadowEpochs.h, Features/Shadows/Engine's), the main pass's points (their bookkeeping, and the main view's handlers there: Api/PrimaryView.h, Features/MainView's capture and
-// colour epoch), the views' work at their points (Api::ViewPoint), and Present's end of frame. The feature file's hooks call it; it reads the scene through
-// Scene::FrameView and drives IndirectDraws.
+// FrameDriver runs DCLF's render-thread work at each engine point of the frame, from the scene frame's start to Present.
+// The feature's hooks call it. It reads the scene through Scene::FrameView and drives IndirectDraws.
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 
@@ -22,102 +17,105 @@ namespace RE
 
 namespace DCLF
 {
+	/**
+	 * @brief Native mode with segments. Runs the build point at Renderer::Begin, before the frame's schedule is chosen.
+	 * BeginFrame then skips it for that frame.
+	 */
+	void BuildPointAtFrameStart(std::uint64_t a_frame);
+
 	class FrameDriver
 	{
 	public:
 		static FrameDriver& Get();
 
-		/** @brief The render thread's time in the frame's DCLF points since the last report. */
+		/** @brief Render-thread time in DCLF's frame points since the last report. */
 		struct Counters
 		{
 			struct Timing
 			{
-				double eventsMs = 0.0;  // Present's, and the frame start's requests and captures (ServeFrameRequests)
-				double buildMs = 0.0;   // EarlyPrepass's posts and material serving
+				double eventsMs = 0.0;  // Present, plus frame-start requests and captures
+				double buildMs = 0.0;
 				double buildMaxMs = 0.0;
-				double sceneMs = 0.0;  // the shadow views' points, a frame's counted at BeforeShadowMaps (the scene passes are the coordinator's, timed by its pump)
+				double sceneMs = 0.0;  // shadow view points only. Scene passes are timed by the coordinator's pump.
 				double sceneMaxMs = 0.0;
 				std::uint32_t frames = 0;
 			} timing;
 		};
 		Counters& ReportCounters() { return counters; }
 
-		/** @brief The occlusion maps' frames since the last take (Features/OcclusionMaps' report line), with what the line reads beside them now. */
+		/** @brief Occlusion map frame counts since the last take. */
 		struct OcclusionFrames
 		{
-			// Per occlusion view (kOcclusionSky, kOcclusionPrecipitation): the maps left to the engine (DCLF not ready), and the frames the
-			// engine culled and registered the map's scene, and the frames DCLF drew it while some occluder was not yet a member.
+			// Per occlusion view: maps left to the engine, frames the engine culled the map's scene,
+			// and frames DCLF drew it while some occluder was not yet a member.
 			std::array<std::uint32_t, 2> native{};
 			std::array<std::uint32_t, 2> engine{};
 			std::array<std::uint32_t, 2> joining{};
-			// Per occlusion view, now: the map's phase's members the frame's set lacks (FrameView::SetLacking).
+			// Per occlusion view, now: members of the map's phase the frame's set lacks.
 			std::array<std::uint32_t, 2> lacking{};
-			std::uint32_t withheld = 0;  // the maps' member passes withheld (PassCapture's, last frame)
+			std::uint32_t withheld = 0;  // last frame's
 		};
-		/** @brief Render thread, at the report: the occlusion maps' frames since the last take (reset), and the set's lacking and withheld counts now. */
+		/** @brief Render thread. Returns and resets the occlusion map counts. */
 		OcclusionFrames TakeOcclusionFrames();
 
 		/**
-		 * @brief Main::Draw's early point, every frame. a_running false (DCLF not loaded or switched off): the coordinator's passes apply
-		 * the events alone and the switch catch-ups they ask for are served (a_installed). True when DCLF runs this frame.
+		 * @brief Main::Draw's early point, every frame. With a_running false the coordinator's passes still apply events.
+		 * True when DCLF runs this frame.
 		 */
 		bool BeginFrame(bool a_running, bool a_installed);
-		/**
-		 * @brief Before the Present (in menus too, once installed): what the frame puts in DXVK's stream before the present sends it on
-		 * (the CPU pipeline's frame signal), and the frame values' signal on the copy queue before DXVK presents.
-		 */
+		/** @brief Before Present, in menus too. Queues the CPU pipeline's frame signal and the frame values' signal before DXVK presents. */
 		void BeforePresent();
-		/** @brief After the Present (in menus too, once installed): the frame's ends, its report, a load screen noted, the engine references released. */
+		/** @brief After Present, in menus too. Ends the frame and writes its report. */
 		void EndFrame(bool a_running);
 		/**
-		 * @brief The engine's shadow-light selection (NiCamera::CalculateAndDrawShadowCasterLights, Features/Shadows/Engine's hooks), while
-		 * DCLF runs: before it keeps its first light, the frame's shadow views begun and their coverage decided (the epochs'
-		 * beforeShadowCasters); as it keeps each light, before its Accumulate, the light's views; once it returns, the views listed from
-		 * DCLF's selection. Every shadow view's registration is thus withheld by this frame's coverage.
+		 * @brief Called around the engine's shadow-light selection while DCLF runs. Coverage is decided before the first light is kept,
+		 * so every shadow view's registration follows this frame's coverage.
 		 */
 		void BeforeShadowCasters();
 		void ShadowCasterKept(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
+		/** @brief Render thread, before and after the engine's focus accumulation of a_light. */
+		void ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin);
 		void ShadowCastersSelected();
 		void BeforeShadowMaps();
 		void AfterShadowMaps();
-		/**
-		 * @brief Main::RenderDepth's world-drawn point, while DCLF runs: the depth commit (IndirectDraws::CaptureDepthPass), running the
-		 * views' work there inside its epoch's execution (ViewPoint::DepthCommitted: the frame's reflection faces and first-person depth,
-		 * which the depth epoch hosts); after it when the depth epoch did not commit.
-		 */
+		/** @brief Main::RenderDepth's world-drawn point. Runs the depth commit with the hosted view work inside it. */
 		void DepthCommitted();
 		void EarlyPrepass();
 		void Prepass();
 		/**
-		 * @brief The occlusion maps (DrawcallLimitFix::OcclusionReady and OcclusionNeedsEngine): at the shadow maps, before the engine draws
-		 * them, whether DCLF draws a map in the frame's shadow epoch (taken: AfterShadowMaps hands the shadow epoch the maps taken); at the
-		 * engine's occlusion point, whether the engine renders it whole (the shadow epoch did not draw it).
+		 * @brief At the shadow maps, whether DCLF draws the map in this frame's shadow epoch.
+		 * At the engine's occlusion point, whether the engine must render it whole.
 		 */
 		bool OcclusionReady(std::uint32_t a_map, bool a_running);
-		/** @brief After OcclusionNeedsEngine: the map is held (StartupHold.h): rendered without the engine's cull (SetupMask skipped). */
+		/** @brief Whether the map is held, which means it renders without the engine's cull. */
 		bool OcclusionHeld(std::uint32_t a_map) const;
 		bool OcclusionNeedsEngine(std::uint32_t a_map, bool a_running);
-		/** @brief Where the main pass's opaque batches start: the engine's pending state applied, then the main view's capture (Api::PrimaryViewContribution). */
+		/** @brief Start of the main pass's opaque batches. Applies the engine's pending state, then captures the main view. */
 		void BeforeOpaquePass();
-		/** @brief Where they end: the main view's colour epoch (Api::PrimaryViewContribution::afterOpaque). */
+		/** @brief End of the opaque batches. Runs the main view's colour epoch. */
 		void AfterOpaquePass();
-		/** @brief A native lighting draw in the main pass: SetupGeometry's projected textures noted, and the observers told. */
+		/** @brief A native lighting draw in the main pass. */
 		void NativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
 
 	private:
-		/** @brief Every view's work at a_point (Extensions::ViewEntry::work), the views in slot order. */
+		/** @brief Runs every view's work at a_point, in slot order. */
 		void RunViewWork(Api::ViewPoint a_point);
 
-		/** @brief The shadow views' time this frame so far (from BeforeShadowCasters), counted whole at BeforeShadowMaps. */
+		/** @brief Adds shadow view time for this frame. It is counted at BeforeShadowMaps. */
 		void AddShadowViewsTime(std::chrono::steady_clock::time_point a_start);
 
 		Counters counters;
-		double shadowViewsMs = 0.0;       // the shadow views' points this frame, until BeforeShadowMaps counts them
-		OcclusionFrames occlusionFrames;  // native and engine only: the rest is read at the take
-		bool frameRan = false;            // a scene frame ran since the last Present
-		std::uint32_t occlusionHeld = 0;  // the maps OcclusionNeedsEngine held this frame (StartupHold.h)
-		std::uint32_t occlusionWanted = 0;  // the maps OcclusionReady took for the frame's shadow epoch, until AfterShadowMaps
-		std::uint32_t occlusionDrawn = 0;   // the maps the frame's shadow epoch drew (OcclusionNeedsEngine's answer)
-		std::uint32_t captureFrame = ~0u;   // the frame whose main-pass bindings have been captured (Api::PrimaryViewContribution::beforeOpaque)
+		double shadowViewsMs = 0.0;
+		OcclusionFrames occlusionFrames;  // native and engine only, the rest is read at the take
+		bool frameRan = false;  // since the last Present
+		std::uint32_t occlusionHeld = 0;
+		std::uint32_t occlusionWanted = 0;  // until AfterShadowMaps
+		std::uint32_t occlusionDrawn = 0;
+		std::uint32_t occlusionEverDrawn = 0;  // an engine draw of one of these is a re-entry
+		// Per map, frames in a row the engine would have drawn it whole. A map DCLF never drew counts as a re-entry only
+		// for kOcclusionReentryFrames, so a map it cannot draw at all is not held forever.
+		std::array<std::uint32_t, 32> occlusionNeedStreak{};
+		static constexpr std::uint32_t kOcclusionReentryFrames = 300;
+		std::uint32_t captureFrame = ~0u;
 	};
 }

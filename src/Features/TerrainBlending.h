@@ -92,11 +92,33 @@ public:
 	void ResetDepth();
 	/** @brief Restores the original vertex shader and marks render targets dirty after terrain depth rendering. */
 	void ResetTerrainDepth();
-	/** @brief Blends the main and terrain depth buffers using a compute shader dispatch. */
+	/**
+	 * @brief Blends the main and terrain depth buffers: the render graph's pass at the DepthDone anchor (ORGTerrainBlending), or a
+	 * compute shader dispatch and the copy of the main depth into the terrain depth (the mask) on D3D11.
+	 */
 	void BlendPrepassDepths();
 
+	/**
+	 * @brief The blended depth's view the depth table and D3D11 readers get (a_16bit: the R16 one): the graph texture's export on
+	 * the ORG path, else the D3D11 texture's. Null before either exists.
+	 */
+	ID3D11ShaderResourceView* GetBlendedDepthSRV(bool a_16bit = false) const;
+
+	/** @brief The mask the terrain draws read at t55: the graph's mask on the ORG path, else the terrain depth (holding the main depth). */
+	ID3D11ShaderResourceView* GetMaskSRV() const;
+
+	/**
+	 * @brief The D3D11 blended depths, for the D3D11 path or after the ORG path stopped (ORGTerrainBlending): makes them if needed and,
+	 * while the depth table names a blended depth, points it at them.
+	 */
+	void UseD3D11BlendedDepth();
+
+	// The D3D11 path's blended depths; on the ORG path made only when it returns to D3D11 (CreateBlendedDepthTextures).
 	Texture2D* blendedDepthTexture = nullptr;
 	Texture2D* blendedDepthTexture16 = nullptr;
+
+	/** @brief Makes the D3D11 blended depths if they do not exist yet. */
+	void CreateBlendedDepthTextures();
 
 	RE::BSGraphics::DepthStencilData terrainDepth;
 

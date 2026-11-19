@@ -1,5 +1,4 @@
-// LocalLights' report lines (LocalLights.h), self-scheduled by what they report: the light rooms' and light selection's parity lines every
-// 300 selections (LightSelectionParity's window).
+// The light selection's parity lines, logged every 300 selections.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalLights.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/Diagnostics/LightSelectionParity.h"

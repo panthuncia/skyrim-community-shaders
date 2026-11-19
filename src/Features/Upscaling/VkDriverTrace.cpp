@@ -1,5 +1,7 @@
 #include "VkDriverTrace.h"
 
+#include "RenderGraph/Switches.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -159,11 +161,9 @@ namespace VkDriverTrace
 
 	void Install(VkInstance a_instance, VkPhysicalDevice a_physicalDevice, VkDevice a_device)
 	{
-		char v[2] = {};
-		tracing = GetEnvironmentVariableA("CS_VK_DRIVER_TRACE", v, sizeof(v)) && v[0] == '1';
-		char clientValue[16] = {};
-		if (GetEnvironmentVariableA("CS_VK_CLIENT_PRIORITY", clientValue, sizeof(clientValue)))
-			clientPriority = std::strtof(clientValue, nullptr);
+		tracing = Switches::On("CS_VK_DRIVER_TRACE");
+		if (const auto clientValue = Switches::Value("CS_VK_CLIENT_PRIORITY"); !clientValue.empty())
+			clientPriority = std::strtof(clientValue.c_str(), nullptr);
 
 		wchar_t system[MAX_PATH]{};
 		(void)GetSystemDirectoryW(system, MAX_PATH);
@@ -187,9 +187,7 @@ namespace VkDriverTrace
 		getMemory2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2>(getInstanceProc(a_instance, "vkGetPhysicalDeviceMemoryProperties2"));
 		physicalDevice = a_physicalDevice;
 
-		char list[256] = {};
-		if (GetEnvironmentVariableA("CS_VK_PRIORITY", list, sizeof(list))) {
-			std::string text = list;
+		if (const std::string text = Switches::Value("CS_VK_PRIORITY"); !text.empty()) {
 			for (size_t at = 0; at < text.size();) {
 				const size_t end = std::min(text.find(',', at), text.size());
 				const size_t equals = text.find('=', at);
@@ -198,9 +196,7 @@ namespace VkDriverTrace
 				at = end + 1;
 			}
 		}
-		char spill[256] = {};
-		if (GetEnvironmentVariableA("CS_VK_SPILL", spill, sizeof(spill))) {
-			std::string text = spill;
+		if (const std::string text = Switches::Value("CS_VK_SPILL"); !text.empty()) {
 			for (size_t at = 0; at < text.size();) {
 				const size_t end = std::min(text.find(',', at), text.size());
 				spilled.push_back(text.substr(at, end - at));

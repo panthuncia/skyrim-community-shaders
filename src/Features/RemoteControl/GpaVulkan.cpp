@@ -6,6 +6,7 @@
 #	include "Features/RemoteControl/Gpa.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -96,6 +97,13 @@ namespace GpuCounters::detail
 
 			bool Register(const DxvkOrgInteropDeviceInfo& a_info, void* a_dxvkModule, org::GraphHost& a_host)
 			{
+				// Native mode (no DXVK module): GPUPerfAPI must be initialized before the device exists and needs VK_AMD_gpa_interface
+				// on it, which only the DXVK path arranges (GpaBeforeDeviceCreation).
+				if (!a_dxvkModule) {
+					unavailable = "native mode: GPUPerfAPI's Vulkan backend needs DXVK's device (its early initialization and VK_AMD_gpa_interface)";
+					logger::warn("[GPA] {}; no Vulkan capture", unavailable);
+					return false;
+				}
 				const auto module = static_cast<HMODULE>(a_dxvkModule);
 				emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
 				const auto setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));
@@ -112,7 +120,7 @@ namespace GpuCounters::detail
 				g_getInstanceProcAddr = a_info.getInstanceProcAddr;
 				openInfo.get_instance_proc_addr = &GetInstanceProcAddrForGpa;
 				openInfo.get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(a_info.getInstanceProcAddr(a_info.instance, "vkGetDeviceProcAddr"));
-				lead = a_host.FrameSlots() + 1;
+				lead = a_host.FramesInFlight() + 1;
 				host = &a_host;
 
 				g_backend = this;
@@ -238,7 +246,7 @@ namespace GpuCounters::detail
 						}
 						g_session.store(session, std::memory_order_release);
 						g_recording.store(true, std::memory_order_release);
-						host->RequestRebuild();
+						RenderGraph::Builds::RequestAll("GPA profiling");
 						armGeneration = host->BuildGeneration();
 						phaseFrame = frame;
 						phase = Phase::Arming;
@@ -258,7 +266,7 @@ namespace GpuCounters::detail
 				case Phase::Measuring:
 					// PresentBegin closed the measured frame: no more samples are recorded.
 					g_recording.store(false, std::memory_order_release);
-					host->RequestRebuild();
+					RenderGraph::Builds::RequestAll("GPA profiling");
 					disarmGeneration = host->BuildGeneration();
 					drainFrame = 0;
 					phase = Phase::Draining;
@@ -319,7 +327,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					host->RequestRebuild();
+					RenderGraph::Builds::RequestAll("GPA profiling");
 				// The session's command buffers may still execute: it is released once they cannot (Advance is not called
 				// without a capture, so the next capture's Begin waits for Idle and this drains on its own frames).
 				ReleaseSession();
@@ -491,7 +499,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					host->RequestRebuild();
+					RenderGraph::Builds::RequestAll("GPA profiling");
 				ReleaseSession();
 				return Finished(std::move(a_error));
 			}

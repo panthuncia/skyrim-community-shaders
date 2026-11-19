@@ -78,8 +78,11 @@ then indirect draws. Each object is drawn once, by DCLF or by the engine, never 
     objects, refraction, effects, particles and billboards in a forward epoch.
 -   **Every shadow view:** the sun's cascades and their volumetric lighting copy, spot lights, point lights' paraboloids and the
     focus shadows.
--   **Both occlusion maps** while Skylighting is loaded: Skylighting's sky occlusion map and the precipitation mask.
--   **The water reflection's** plain cube faces, and **the first-person** view.
+-   **The occlusion maps:** the precipitation mask with or without Skylighting, and Skylighting's sky occlusion map while it is
+    loaded.
+-   **The water reflection's** plain cube faces, and **the first-person** view (on by default).
+-   **Lighting with or without Light Limit Fix:** without it each draw takes its point lights from the frame's point light table
+    ([Point lights without Light Limit Fix](#point-lights-without-light-limit-fix)).
 -   **Object classes:** static and dynamic Lighting geometry, terrain, trees (with GPU tree wind), skins of any number of
     partitions, actors and NPC faces, effects, particles, billboards, decals, and object, terrain and tree LOD.
 
@@ -194,9 +197,8 @@ DCLF is persistent: once a frame installs claims, no frame hands drawing back to
 -   **Tickets for recordings.** A live epoch's recording waits for the slot its unsubmitted ticket holds. The build point gives
     back the tickets of epochs the last frame did not submit (no water in view) while recordings are outstanding
     (`ReleaseTicketsForRecordings`, `GraphHost::ReleaseEpochTicket`); the frame-start wait does the same every 16 ms.
--   **Revision-driven epochs are required.** DCLF draws only from scene revisions' recordings, which need ORG's async,
-    revision-driven epochs (`CS_ORG_ASYNC_EPOCHS`, `CS_ORG_REUSE_RECORDINGS`). Without them `BuildPoint` sets `failed`
-    (`Core/Render/Revision/Coverage.cpp`).
+-   **Revision-driven epochs.** DCLF draws only from scene revisions' recordings, which ORG's async, revision-driven epochs
+    make. They are always on in the graph modes.
 -   **A toggle withdraws nothing.** It takes effect for the frames only when a publication committed under it is installed
     ([Ownership and withholding](#ownership-and-withholding)).
 
@@ -245,6 +247,60 @@ Present and frame start and apply their batches as usual: the unloading world's 
 world's attaches track what comes. There is no rescan. The tables are not written while the load is up (`BuildScenePhase`), and
 the first category capture after it is forced: the cells that came are walked from it, the ones that went are dropped. A load
 screen's frames are claims-less whatever their snapshot.
+
+**The hold** (`Core/Render/LoadHold.{h,cpp}`, 5.5.1). The loading screen stays up after every load until DCLF draws the load's
+objects, so the engine draws none of them and nothing pops in. No frame is black and none is handed to the engine.
+-   **The menu is kept open.** The load coordinator (SE 13214 / AE 13363) ends a load by posting the loading menu's close
+    (+0x211: `UIMessageQueue::AddMessage("Loading Menu", kHide)`, before `SetLoadingScreenActive(false)` at +0x401). The hold keeps that
+    message and posts it itself when it ends. The menu keeps presenting through the engine's own path (the main thread's frames draw
+    it over the world, as during its fade-out), and it pauses the game (its flags 0x20803: kPausesGame, no kFreezeFrameBackground, so
+    `Main::Draw` still renders the world under it: AE `FUN_140643c00` takes the freeze-frame branch only for flag 0x20).
+-   **The world's frames run under it.** From the world's first frame start under the kept menu (`LoadHold::OnFrameStart`), the load
+    is done: `FrameView::IsLoadingScreenUp` answers false (`LoadHold::MenuHeld`), so those frames build the tables, the coordinator
+    walks the load's cells, the culls' membership joins and the claims are published and installed as in any frame. The loading
+    screen's own iterations (the serving thread's) still read as a load until then.
+-   **Withheld meanwhile.** Every pass of DCLF's classes (Lighting, grass included, Effect, DistantTree, and their Utility depth and
+    shadow passes) into a view DCLF draws is withheld at registration (`PassCapture::HeldByLoad`: the main views and a group renderer made
+    this frame, any shadow-map caster pass, the reflection faces, the occlusion maps), member or not; grass's passes with them, so Grass
+    Optimizations' `DrawVanilla` is never reached. The sun's whole skip and the occlusion maps without the engine's cull are kept
+    (`NoteHeld`), as the startup hold did.
+-   **Settled** (`LoadHold::OnFrameEnd`, two world frames in a row): the installed publication is built and was committed two frames
+    after the world's first one (its pass joined the first frame's culls; a load that changed nothing counts after eight frames); none
+    of its slots waits on a transient reason (`ScenePublication::TransientWaiting`, `kSetTransientWaits`: pipeline, material, shadow
+    mask, shared lookups, geometry, shadow pipelines, constants, the scene buffers' growth, a shadow diffuse); the claims are installed
+    and the same as the last frame's; no draw family waits for its pipelines or recording (`IndirectDraws::DrawFamiliesWaiting`); no view
+    was held. Then the close is posted (the menu fades out at the UI's next pass), and the frames from there draw the adopted snapshot
+    that carried it. The reasons left out (decal slot, layer partner, the reflection's forward pipeline, the refraction pipeline) wait
+    on what a load does not bring.
+-   **Bounded.** A hold whose waiting does not shrink for 5 s, or one that lasts 60 s, ends too, and logs what still waits by reason
+    (`[DCLF] load hold: released after ...`). It hands nothing back: what is not ready is withheld until it is (below).
+-   **A load with no loading menu** (the coordinator showed none: TES +0x137/+0x138) holds the presents instead: the frame before the
+    load stays on screen, the frame's work flushed as a present would send it (`DrawcallLimitFix::LoadHoldsPresents`, `Hooks.cpp`);
+    not with frame generation. A loading screen that starts during a hold ends it
+    (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
+-   **A re-entry** holds the presents the same way (`LoadHold::BeginReentry`): a frame outside a load whose shadow views DCLF would
+    draw but cannot yet, because the graph has a rebuild requested (re-imported shadow maps, as after a `coc` into an interior or a
+    closed map: `IndirectDraws::ShadowViewCapacity`) or the shadow epoch is not recorded yet (`DecideShadowCoverage`). The engine
+    would draw every caster otherwise. It ends as a load's hold does, the frame with no such condition counting as covered; one
+    that ended at a stall or the cap is not started again until a frame without its condition. Frame generation is not held.
+-   **The settled signal** is the coordinator's (`ScenePublication::settled`: its pass built the scene and no slot waits on a
+    transient reason); the render thread adds the draw families, the views' coverage and the claims.
+-   **Grass stands down** during a hold (`GrassShared::SetDclfOwned`, from the family's `Owned` callback), whether or not DCLF
+    owns the family yet: Grass Optimizations and Grass Collision do not run inside withheld passes.
+-   **Shortening it:** while the load is up, each batch's records' diffuse views (`PropertyRecord::diffuseHeld`, a reference the
+    capture holds) are asked for early: their base mips (`TextureStreaming::RequestBase`) and their imports
+    (`Coordinator::PrewarmLoadTextures`). The imports are kept until the hold ends, so the bindings the tables make after the load
+    are answered from the import registry. Pipeline keys are not: they come from the joins, and the lane keeps every key it was
+    asked for the session.
+-   Lines: `[DCLF] load hold: started (...)`; `the world's first frame under the kept loading menu, T ms after the load's end`;
+    one at the end, `[DCLF] load hold: N frames, T ms (the loading menu kept open), settled; ...; waited for: the load's
+    publication N frames, waiting objects N frames (at most: pipeline N, ...), claims changing N frames, draw families N
+    frames, a view not covered N frames`; `[DCLF] load prewarm: N diffuse textures asked for during the load, ...`. Outside
+    loads, at most every 10 s while anything is: `[DCLF] not ready, withheld: N passes of waiting objects (...), N passes
+    waiting for base mips, N of M frames with a draw family waiting; handed to the engine: N passes of DCLF's classes
+    (refused, or not bound yet)`.
+-   One line a load: `[DCLF] load hold: N frames, T ms (the loading menu kept open), settled; ...`. The test harness's frame counts
+    skip the hold (`FrameView::LoadShown`), so a run and its `CS_DCLF=0` baseline stay in step.
 
 ## Threads
 
@@ -343,8 +399,10 @@ Everything under attached cells' Static, Dynamic, MultiBound and Actor category 
 
 Markers and water are not tracked. The render thread makes the category capture (`Scene::Channels::CategoryCapture`; the scene
 work reads no TES, cell or portal graph), and makes it again only when the category signature moves, a pass saw a detach, or a
-load ended. `CategorySignature` folds in each portal graph's list, and the signature is recomputed only on a watched edit
-(`SceneTracker::WatchCategoryNodes`, `CategoryEdits`). `Coordinator::RefreshCategoryNodes` diffs it. Tracked entries are indexed
+load ended. The signature (`ReadCategorySignature`) folds in each portal graph's list, and it is recomputed only on a watched edit
+(`SceneTracker::WatchCategoryNodes`, `CategoryEdits`). The unheld roots (the particle manager's masters) are not in it: an edit of
+their owner's array (`SceneTracker::UnheldEdits`) makes a capture that is the last one with those roots gathered again
+(`DeriveUnheldCapture`). `Coordinator::RefreshCategoryNodes` diffs it. Tracked entries are indexed
 by category node (`categoryMembers`), so a cell going away drops its members without a scan.
 
 ### The scene mirror
@@ -650,8 +708,11 @@ phase (`Core/Scene/Model/SceneSet.h`, `Core/Scene/Coordinator/SceneSet.cpp`).
     (`kNoPartitions`) and decals too.
 -   **A claim is the whole object**: it joins the set in every phase it takes part in once everything every one of them draws it
     with is ready (`MainReady`, `PhaseReady`), and leaves all of them together.
--   **Readiness is judged by events and readiness sources, never a scan.** A member being rebound leaves first (`LeaveSet`,
-    `MarkSetApply`) and keeps its claim until the publication that carries its new record. A moved source requeues the slots
+-   **Readiness is judged by events and readiness sources, never a scan.** A drawn member being rebound keeps its record, its claim
+    and its current binding while its next binding is not drawable yet (`Coordinator::StageBinding`, which references and keeps used
+    the next pipeline and material so they are built and resolved). The joins switch it once `MainReadyWith` holds for the next
+    binding: it then leaves (`LeaveSet`, `MarkSetApply`) and is readmitted by the same pass's commit, so the publication that carries
+    the new record draws it and no frame lacks it. A layered record still leaves while it rebinds. A moved source requeues the slots
     waiting on it; the scene buffers' fit also requeues the members past it, since the fit can shrink (a newly adopted set naming
     smaller buffers, as at startup) and a member past it has no build input (`CommitReadinessSources`).
 -   **`ApplySet`** applies the commits inside `PublishScene` into `Tables::setPhases`, the record's `kObjectMember` and the lacking
@@ -671,8 +732,15 @@ phase (`Core/Scene/Model/SceneSet.h`, `Core/Scene/Coordinator/SceneSet.cpp`).
 -   **The claims** (`SetSnapshot`, published to the hooks through `PassCapture::PublishSet` and to DCLF's readers as
     `FrameView::FrameClaims`) are installed with the revision from the same publication, so a frame draws exactly the set its
     claims name.
--   **A member DCLF cannot draw this frame is the engine's.** The stand-in hands the registration any bound member not in the
-    frame's set (`PrimaryCull::MemberDrawable`), so a pipeline still compiling delays a draw and never makes a hole.
+-   **An object DCLF cannot draw yet is nobody's.** A bound, eligible object that waits (`setWaiting`: a pipeline compiling, a texture
+    importing, a buffer to grow) is published with the claims as pending (`SetSnapshot::pending`, `Coordinator::FillPending`), with the
+    phases it takes part in. The stand-in hands it to the registration (`PrimaryCull::MemberDrawable`), and the registration hooks
+    withhold it there as they withhold a member (`SetSnapshot::WithheldPhasesOf`), so it shows the frame DCLF draws it: a delay, never
+    an engine draw. A draw family that waits for its pipelines is withheld the same way (`PassCapture::SetFamilyWithheld`). Until 5.5.1
+    the engine drew such an object, vouched under the flush latch (`dclf: not claimed (...)`, deleted). What the engine still gets of
+    DCLF's classes: an object DCLF refuses, and one not bound yet (attached since the last publication). In guest mode the flush latch
+    skips those engine draws and in native mode the engine's D3D11 calls do nothing, so there such an object is drawn by nobody until
+    DCLF draws it. The main camera's report line counts them (`drawn by nobody`).
 -   **A claim follows what the CPU submitted, not what the GPU rasterised.** An occluded member stays a member, and the engine
     still does not draw it.
 
@@ -1134,7 +1202,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
 -   **The revision assembler** (`AssembleRevision`, ORG's `RevisionAssembler`): one fragment per slot (the versions, a shape per
     epoch and shadow or occlusion variant, a recording per epoch). An unchanged fragment is inherited, so an unchanged revision is
     cheap. A failed or dropped recording (dropped by a graph build) makes the revision again.
--   **Recording reuse** (ORG, `CS_ORG_REUSE_RECORDINGS`): an epoch's recordings are kept per frame slot and submitted again while
+-   **Recording reuse** (ORG): an epoch's recordings are kept per frame slot and submitted again while
     their shape holds; no code in a pass's `Record` runs per frame. Measured: host ticket preparation median 186 to 43 us. Kept
     recordings carry no Tracy GPU zones or ORG pass timestamps, so DCLF's GPU time is measured by frame time and Tracy.
 -   **The ticket rule.** A pass's prepared invocation holds only what its recording depends on; everything a commit knows goes into
@@ -1142,7 +1210,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
     stop at the row's count. A pass's revision is its buffers' named-version serials plus a shape, never a per-frame counter. A
     breach cost about 2.6 ms a frame of re-prepared tickets (`CS_ORG_EPOCH_STATS=1` reports "prepared again after the feature's
     inputs changed").
--   **A graph per epoch.** Each segment of the epoch order is a graph of its own (`CS_ORG_EPOCHS`; ORG's
+-   **A graph per epoch.** Each segment of the epoch order is a graph of its own (ORG's
     `extern/OpenRenderGraph/docs/persistent-epochs.md`), built from the same extensions with only its passes and their resources. A
     graph condition names the epochs it changes, so a cell or pipeline switch rebuilds those epochs alone, with no device wait. In
     the phase-2 tour, a condition change rebuilt epochs 3, 1, 2, 6 and 8 in 0.04-6.75 ms and kept light culling's.
@@ -1152,7 +1220,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
     -   The render thread's admission, handoff and commit cost about as much as closed epochs did. In the optimized build
         (2026-11-01, Whiterun), the submit phases sum to 79 us a frame over the five epochs, against 84 us closed.
     -   The handoff lists a predicted plan needs are recorded once per frame slot and submitted again.
--   **In-stream epochs.** The async epochs' graphics work runs inside DXVK's command list (`CS_ORG_IN_STREAM`; "Ordering against
+-   **In-stream epochs.** The async epochs' graphics work runs inside DXVK's command list ("Ordering against
     D3D11" in `render-graph.md`). DXVK's list is split only where a segment waits for compute work that waits for the stream: 1.3
     times a frame, the Z-prepass's compute entry, against 6 when every epoch was enqueued behind it.
 
@@ -1419,8 +1487,11 @@ reaches the batch renderer, so the native loop has nothing to draw. Not calling 
     cross-fade. It also withholds tree LOD's passes while the `TreeInstances` family is DCLF's.
 -   Registration is concurrent (the scene lists build on `gJobList_SceneListAccumCulling`); captured entries go into a buffer with
     an atomic cursor, drained once a frame by the render thread, for observers only: DCLF draws nothing from registrations.
--   The engine draws a member for one frame when DCLF first draws it, because the claim is published after the colour epoch: the
-    same pixels twice, not a hole.
+-   A load's hold withholds every pass of DCLF's classes into these views, member or not ([Load screens](#load-screens)), and a waiting
+    object's passes are withheld as a member's ([The DCLF set](#the-dclf-set)): the engine draws none of DCLF's objects before DCLF does.
+-   **Group renderers made mid-frame.** The engine makes a geometry group's renderer at the group's first pass, during the
+    registrations, after `RefreshMainRenderers`; `WithholdMain` reads the main accumulators' groups live for a renderer the set does not
+    hold (`MainRendererNow`).
 
 The shadow views' claims are the same, per shadow render mode, from the shadow build's claim sets; the sun's registrations and
 culls are below ([The sun's cascades without DCLF's objects](#the-suns-cascades-without-dclfs-objects)).
@@ -1655,6 +1726,46 @@ shader is `<- LIGHTING SHADER`.
     indirect pipeline set needs one layout for all its pipelines (BasicRHI `IndirectPipelineSetDesc`).
 -   **The sampler table** is a copy of the renderer's own D3D11 sampler states, read at its AE address (`GpuTextures.cpp`).
 
+### Point lights without Light Limit Fix
+
+The engine gives each Lighting pass its own point lights in PerGeometry (`SetupGeometry`'s point light routine, AE `0x1414df650`:
+`PointLightPosition`, `PointLightColor`, `ShadowLightMaskSelect`, the count in `NumLightNumShadowLight`). A DCLF pipeline's
+PerGeometry block is shared by every object it draws, and its template pass has the sun alone, so without Light Limit Fix (whose
+clustered lights replace them) a DCLF Lighting draw had no point lights. Now:
+-   **The table.** Every commit latches the frame's point lights into PS b3 (`LatchFrameRows`, `Common/DCLFPointLights.hlsli`: a count,
+    then up to `kPointLightTableLights` rows of position and radius, colour, flags). The size has one source, `GpuLayouts.h`'s
+    `kPointLightTableLights` (128); DCLF's program build passes it to the shaders as `DCLF_POINT_LIGHT_TABLE_LIGHTS`. PS b3 is Light
+    Limit Fix's `StrictLightData` register, unused without it. The table is the light volumes contribution's
+    (`Api::LightVolumesContribution::pointLights`, Features/LocalLights' `LocalShadowLights::SamplePointLights`), active while the
+    "light limit fix" classify input is off. It holds the lights the engine's light selection (`FUN_1414fcf80`) can give a pass,
+    valued as the point light routine writes them: the shadow lights, the selection's kept lights after the sun, with their mask
+    indices; then `ShadowSceneNode::activeLights` in order, less a frustum-culled light (`+0x5C` 0xFF) or a hidden one. Colour is
+    the diffuse times the NiLight's fade and the BSLight's `lodDimmer`; positions are absolute, as the object rows.
+-   **Shadow rows first.** A shadow light has a channel (its mask index + 1) only for mask indices 0-3, the four bits of
+    `DCLFLocalShadowMask`. `SamplePointLightTable` stable-partitions the rows: the lights with a channel first, then every other
+    light, a shadow light with a mask index of 4 or more among them as a plain light. The shader counts a draw's first
+    `ShadowCount` lights as its shadow lights and reads `shadowColor[channel - 1]` for them, so a plain row before a shadow row
+    would read `shadowColor[0xFFFFFFFF]` (it did before the partition).
+-   **Each draw's lights** (`DCLFSelectPointLights`, in `Lighting.hlsl` under `DCLF_POINT_LIGHTS`): a shadow light when its channel is in
+    the draw's shadow mask (`DCLFShadowLightMask`, BuildDrawsCS's volumes: the engine's mask bits), then a plain light when its sphere
+    meets the object's bound (the placement row's), at most seven, in the table's order. The vanilla light loop then runs with each
+    light's position less the view's `CameraPosAdjust`.
+-   **Its cost.** The selection's inputs are the draw's (its object's bound and shadow mask), so its result is the same for every
+    pixel of the draw, but the pixel stage makes it: up to the table's 128 rows for each wave of pixels. The selection belongs
+    once per object (dclf-roadmap.md 3.7): BuildDrawsCS already selects the object's shadow lights there from the same bound, and
+    the vertex stage is the worse place (the loop for every vertex, and two more flat interpolants, which cost the pulled terrain
+    shader a warp of occupancy before).
+-   **PS b3's place.** The shared light slot holds two blocks: its first half starts with the zero block the main shadow layout reads
+    (`MainShadowLayoutPush`), and its second half is PS b3 (`kSharedLightBlockOffset`): zeroed once with Light Limit Fix loaded,
+    the table without it.
+-   **Accepted differences.** The engine's light assignment (`FUN_1414a1540`) fills a geometry's light list from its rooms and
+    portals and in its own order; DCLF's test is the bound against the light's sphere, in `activeLights`' order, so a draw near a
+    room boundary or under more than seven lights can take other lights than the engine's pass. A non-shadow light takes a landscape
+    draw only when it affects land (`+0x61`), the rule the engine applies to shadow lights. First-person draws take the world's lights,
+    as they do with Light Limit Fix; the engine's first-person passes take the first-person scene's.
+-   **Not covered.** The Effect shader's Lighting variant without Light Limit Fix (`kEffectVariantLightingNoLlf`) stays native; it
+    reads its own PerGeometry lights and could read the same table.
+
 ### Rows and bindings
 
 **Per-object rows** (`Core/Shading/LightingConstants.h`, read by `package/Shaders/Common/DCLFObjects.hlsli` as structured buffers by
@@ -1720,6 +1831,57 @@ indirect pipelines are then unavailable.
 buffer (`SceneBuffers::facePositions`, the set's) serve every epoch. The set requires the face positions at the highest face region,
 and the per-object buffers - the visibility and frustum words, the reported verdicts - as one unit group at the tables' objects
 (`RequireSceneTables`), so a segment or a mode never has more inputs than its buffers hold.
+
+### Frame graph textures
+
+A CS feature ported to ORG writes its output in an anchor epoch and publishes it (render-graph.md, "Publishing a graph resource to
+other epochs"). Its integration lists the ids its register can hold (`Api::FrameTexture::graphResources`, beside `view`). One
+rule then decides each read:
+
+> A commit reads the graph resource when the view it resolved is the export of a published id its passes declared. Otherwise it
+> imports the view.
+
+`Extensions::GraphTextureIndex` is that rule. The colour commit (`ResolveFrameTextures`), the reflection faces
+(`ResolveViewFrameTextures`) and grass's collision texture (`BindCollision`) all call it. The view is what the commit resolved:
+the registration's `view`, or the captured view when it has none or its null view leaves the captured one. Nothing reads the
+producer's state at resolve time: a commit resolves after the capture, and by then the producer may have bound something else.
+
+-   **Declared by registration.** The colour passes declare every registered id that was ever published
+    (`Extensions::DeclareGraphTextures`, `PublishedResources::IsRegistered`). A withdrawn id stays registered with every graph, so it
+    stays declared. A producer's Publish or Withdraw changes only the commit's choice, never DCLF's main resources. The declared set
+    grows only on an id's first Publish, which rebuilds every graph through the published extension anyway.
+-   **The faces** declare only the ids of frame textures with a view (`FacesGraphTextureIds`). A registration without a view reads
+    null there. Their epoch is earlier in the frame than most producers', so they read the previous frame's contents.
+-   **Grass** reads Grass Collision's texture (t100) from its draw row. Its main passes declare `GrassShared::kCollisionGraphId`
+    (`MainDeclare`), and the depth commit applies the rule to the texture Grass Collision handed over.
+-   **More than one id.** A register that can hold either of two textures lists both (Dynamic Cubemaps' t30: the reflections
+    cubemap, or the environment one in frames without a water reflection). Each id is declared once, also when two registers read
+    one texture (Cloud Shadows' t25 and t26).
+-   **No view.** A register DCLF reads only as the captured view (Screen Space Shadows' t45, Light Limit Fix's t102 and t103,
+    Terrain Blending's scene depth at t17, Cloud Shadows' self-shadowing input at t26) registers without a `view`. The colour
+    commit reads the captured view, which on the producer's ORG path is its export.
+-   **The log.** Each change of path is logged once per reader and register: `[DCLF] frame texture <name> (t<n>) reads the graph
+    resource '<id>' (descriptor <i>)` or `... reads its D3D11 view`; the faces' lines start `[DCLF] the faces' frame texture`, and
+    grass's `[DCLF] grass collision`. A colour commit that imports a published export logs `[DCLF] t<n> reads the D3D11 export of
+    the published '<id>'` once per register and id: its integration does not list that id.
+
+LLF's culling buffers use the same idea for buffers (`Api::FrameGraphBuffers`), registered by its own extension. A buffer twin can be
+published the same way, and its `indices` callback then answers with `PublishedResources::ShaderResourceIndex`.
+
+Switching an integration when its feature is ported:
+
+1.  The feature creates its output as a non-aliased twin (`History` or `Persistent`, or exported while D3D11 readers remain).
+2.  It names the id in its ORG header (`static constexpr std::string_view kXxxId`) and calls `PublishedResources::Publish(twin)`
+    after creating it and right after every `Resize`, and `Withdraw(id)` in its client's `onFailed` and whenever it leaves its ORG
+    path.
+3.  The integration adds the id to its registration's `graphResources`. `view` stays as it is: on the ORG path it must answer the
+    export, since the rule compares views. A register with no view of its own registers without one.
+4.  Check one run's log for the `reads the graph resource` line and compare `dclf:shot` images with the feature's switch on and off.
+
+Open defect (2026-11-09): switching the path mid-scene lost the device on the RX 6600 in both directions, within a frame of
+`Main-pass graph resources` being logged again. A run that starts on either path is clean. The suspect was the new main resources
+a path change made; since 2026-11-10 a path change no longer makes them. Recheck before a producer flips its graph path while a
+cell is loaded.
 
 ### Object rows
 
@@ -1787,9 +1949,12 @@ pass, so it was not kept.
     blocks in the driver (up to 20 ms measured while streaming). `ResolveBinding` imports inline only for the frame's textures. A
     failed sampler creation is logged once and returns no index, so the draws that need it are skipped (`GpuTextures::Sampler`).
 -   **Buffers**: `dxvkGetInteropResourceInfo` (`src/RenderGraph/DxvkOrgInterop.h`) returns the Vulkan handle and device address and
-    marks the resource stable. Buffers the game can map are rejected (`Ineligible::UnstableBuffer`). A cleared slot's import leases
-    go to the next execution committed and are held until the GPU retires it: DCLF draws game buffers by device address, which DXVK
-    does not see (a released chunk's memory once went to the next streamed buffer while a submitted pass still drew it).
+    marks the resource stable. Buffers the game can map are rejected (`Ineligible::UnstableBuffer`; `Coordinator::NoteUnstable`
+    counts them by cause and logs the first 16, `[DCLF] unstable buffer:`; dclf-roadmap.md 4.7). A cleared slot's import leases
+    go to the next execution committed and are held until the GPU retires it: DCLF draws game buffers through buffer view refs over
+    their device addresses, which DXVK does not see (a released chunk's memory once went to the next streamed buffer while a submitted
+    pass still drew it). A lease's ref is a view pair of the VkBuffer's BasicRHI import (`RenderGraph::ImportBufferRef`), shared by the
+    chunk's buffers and held by the lease.
 -   **RenderDoc**: with `renderdoc.dll` loaded the device has no `VK_EXT_descriptor_heap`, so the render graph cannot start and DCLF
     is off for the session, with the reason logged.
 
@@ -1993,13 +2158,15 @@ Core keeps the ranges, the `kRasterForward` bits, `ForwardSortCS`, the shared ep
     draws, refraction and first person's forward part. Why: `core.forward-sort` can only sort within a pipeline (with
     `CS_DCLF_FORWARD_PLAIN=0`, a state class), because a draw's pipeline is fixed by the range it is in, and those lists then draw in
     creation order whatever their depth. Smoke drew over the log in front of it, and no fixed order of the lists is right: flames
-    in front of logs and smoke behind them interleave. Off, or with the epoch not in DXVK's stream (`CS_ORG_IN_STREAM=0`), the GPU path runs.
+    in front of logs and smoke behind them interleave. Off, or with the epoch not recording at execution (guest without DXVK's external commands;
+    `RenderGraphRuntime::RecordsAtExecution`), the GPU path runs. Native mode records at execution inline, so the family runs there too.
     -   **What is shared.** `Direct::ColourCommitted` makes the views, pool jobs run `CullBatch`, `ForwardReached` is the trigger,
         `RecordForwardSite` sorts and records on DXVK's CS thread, and `core.forward-direct` is the late pass, in both modes.
     -   **What differs, by `FrameSlot::ownsEpochs`.** False in a GPU-driven frame: the slot is one of `State::forwardSlots`, never waited for, and
         retires by a `SubmittedRetirementPoint` taken at `EndFrame`, not by a frame signal. It takes no host frame slot, and no site opens
         but the forward family's. The graph runs the epoch itself, so `ForwardReached` hands the run to the late pass in DXVK's stream, ahead of
-        the execution (`HandOffRun`). ORG records a pass per frame only in an external epoch, so this needs the epoch in the stream. Without
+        the execution (`HandOffRun`); in native mode directly, as the epoch records the pass inline during its submission. ORG records a
+        pass per frame only at execution, so this needs the epoch in the stream (guest) or inline recording (native). Without
         this frame's cull frame nothing is handed off and the frame draws no forward objects (`FORWARD SKIPPED` on the `[CPU]` line),
         because the recording would otherwise wait on a later frame, which a frame's start may wait on this frame's GPU work for.
     -   **Root state: a read-only observer (`KickCpuFrameState`'s `a_observer`, `Features/Fades/FadeCpuStage.cpp`).** `FadeStateCS` stays the fades'
@@ -2013,7 +2180,7 @@ Core keeps the ranges, the `kRasterForward` bits, `ForwardSortCS`, the shared ep
         plain draws read, so without it plain decals draw nothing. The colour dispatch gets `forwardCapacity` and `refractionCapacity` 0, so the
         build stages no forward draw. The shape keeps both, for the epoch's `empty`, `PrepareRefraction` and the layout. First person's forward
         slots map to no bucket (`GraphConditions::firstPersonForwardDirect`, its colour epoch in the stream).
-    -   **First person** (`CS_DCLF_FIRST_PERSON`, off by default: the engine draws it). `DepthCommitted` in a GPU-driven frame opens no site. It
+    -   **First person** (`CS_DCLF_FIRST_PERSON`, on by default). `DepthCommitted` in a GPU-driven frame opens no site. It
         only culls the hosted view with that commit. `FirstPersonColourReached` hands off to `view.direct`, which records the forward part alone.
     -   **Accepted differences against the GPU path.** No HZB test: the depth test still hides the pixels, at the cost of their overdraw. Frustum
         by sphere (the CPU cull's). LOD selection reads the observer's this-frame state while the shaders read `t120`, the GPU's state a frame
@@ -2051,6 +2218,14 @@ Lighting geometry with `kRefraction` or `kTempRefraction` (heat haze, streams, i
     material row's `TexcoordOffset` and t0 (the refraction normal map), skins with the record's palette, computes the refraction LOD
     fade from the frame's `LodFadeFrame` and emits nothing past its end; `RefractionPower` is folded into `TexCoord0.w`. The pixel
     stage is the engine's; it discards a one-sided object's back faces.
+-   **Under a billboard node** (heat haze cards over fires and forges: `L2_warp`, `Plane05` under an `NiBillboardNode`; the census's
+    `lighting: billboard` class before): a skinless BSTriShape refraction leaf under exactly one billboard node is admitted with the
+    billboards' turned shapes (`Extensions::BillboardTurnedRefraction`, `Coordinator::BillboardModeOf`). Its placement row is the
+    billboard row (`BillboardRow.h`: the unturned world, the base and pivot, and the face mode in `PreviousWorld[1].w`, since the
+    refraction record has no bits left for it). The key's spare bits hold the mode + 1 (`kRasterRefractionBillboardShift`: the
+    Lighting key bits mean nothing for a key whose Lighting pipeline is never drawn), which sets `kRecordRefractionBillboard` (bit 8,
+    free on a refraction record: no refraction object is a decal). The vertex stage then turns the world to `CameraView`'s axes about
+    the pivot (`DCLFBillboardWorldOfMode`), as Effect.hlsl turns an effect billboard.
 
 ### The Effect shader in the forward epoch
 
@@ -2063,8 +2238,9 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
 -   **What DCLF draws**: blended static meshes (hint 1) in the forward sort; decals (hints 2/3) in the decal groups (`DEFERRED` pixel
     stage); skinned effects through the palettes; opaque effects (below); the Lighting variant (`kEffectLighting`); weapon blood.
 -   **Still variants** (`EffectVariantBit`, `Ineligible::EffectVariant`), the engine's: a shape that is not a `BSTriShape` or
-    particle system, a skin mismatch, a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
-    (`kEffectLighting` with `kCloudLOD`), Lighting without Light Limit Fix, projected UV, an unrecognised blend pair, and the
+    particle system, a skin mismatch (the Skinned bit without a skin instance; a skin instance without the bit, a rigid skin,
+    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
+    with `CS_DCLF_EFFECT_CLOUD_LIGHT=0`, Lighting without Light Limit Fix, projected UV, an unrecognised blend pair, and the
     particle causes.
 -   **Membership.** The synthetic pass is derived from the property every time (`PrimaryCull::MembershipPass`); `PassCapture` keeps no
     effect registration.
@@ -2082,14 +2258,21 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
 -   **Pipelines.** An effect key has no Z-prepass pipeline (no Z bucket); its constant tables are the effect variables'. A forward
     key's pair is not held to its depth variant at all, and a decal key's depth variant is drawn only by the decal depth pass with
     the colour frame record.
--   **The Lighting variant** is ported unless `kCloudLOD` (light 0 is the cloud light) or Light Limit Fix is not loaded (point lights
-    would be the pass's own). Point lights are Light Limit Fix's clusters; a register the capture lacks leaves the pair not drawable
-    (the engine draws it), never drawn wrong.
+-   **The Lighting variant** is ported unless Light Limit Fix is not loaded (point lights would be the pass's own). Point lights are
+    Light Limit Fix's clusters; a register the capture lacks leaves the pair not drawable (the engine draws it), never drawn wrong.
+    Light 0 is the sun (`ShadowSceneNode` `+0x200`, frame row c18), or for a `kCloudLOD` property the cloud light (`+0x208`,
+    `FUN_1414fcf80`; frame row c20, `SampleEffectCloudLight`). The shading row's `MaterialData.w` is 1 for a `kCloudLOD` property
+    and `Effect.hlsl` picks the row by it (`CS_DCLF_EFFECT_CLOUD_LIGHT`, default on; 0 leaves them the engine's).
 -   **Effect decals**: decal group 1 (hint 2) or 2 (hint 3), blend mode from the pair, write mode 11 (10 for group 1 with
     MotionVectorsNormals), `kObjectDecal`. The member decal's chain key (`decalKey`) is ordered by the pass enum, so a group's
     effect decals precede its Lighting ones, as the engine draws them.
 -   **Skinned effects** read `DCLFPalettes` at the record's bone offsets (`GetBoneTransformMatrixBindless`). A skinned blended effect
-    is a forward object; a skinned decal a decal.
+    is a forward object; a skinned decal a decal. The descriptor's Skinned and MotionVectorsNormals bits come from the shape's own
+    vertex description (`GeometryRecord::shapeVertexDesc`, BSGeometry `+0x148`, as `FUN_1414bde90` reads it), not the renderer
+    data's: a skinned shape's renderer data is another TriShape.
+-   **Rigid skins** (`CS_DCLF_EFFECT_RIGID_SKINS`, default off): a skin instance under a descriptor without the Skinned bit. The
+    engine's skin path still draws each partition, with the unskinned vertex shader and World from the geometry's world
+    (SetupGeometry writes World only when the descriptor's bit 3 is clear); DCLF draws the partition slots with its placement row.
 -   **Weapon blood**: the descriptor's Blood bit; the record's alpha test reference = threshold / 255 (`AlphaTestRefOf`); the two
     globals `BSTempEffectWeaponBlood` writes each update are a frame value.
 
@@ -2099,6 +2282,14 @@ A hint 0 effect (no blending alpha property, no Falloff, depth tested and writte
 1 with `opaqueEffect`: Deferred, blend mode 0, write mode 1, no depth bias, membership hint 0 (`DeriveEffectDescriptors`;
 `CS_DCLF_OPAQUE_EFFECTS`, needs decals). It is an occludee culled once in the colour segment, and the decal depth pass writes its
 depth before the colour pass. A property alpha below one would make the engine's pass blended; DCLF keeps it opaque.
+
+#### Falloff without blending
+
+An effect mesh with `kFalloff` and no blending alpha property is hint 1 in `GetRenderPasses` (the descriptor's Falloff alone), and
+the alpha setup (`FUN_14150bc80`, no blending alpha property) leaves blending off while the property alpha is one; below one it
+blends alpha over. DCLF draws it in the forward sort with blend mode 0 and the property's depth flags (`EffectDrawOf`;
+`CS_DCLF_EFFECT_FALLOFF`, default on; 0 leaves it the engine's as `effect-opaque`). While it fades (property alpha below one) the
+engine blends it and DCLF does not, as with the opaque effects.
 
 ### Particles
 
@@ -2121,6 +2312,13 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 -   **Draw**: `Effect.hlsl` `PARTICLES` under `DCLF_PARTICLE_PULL`: no vertex input but `SV_VertexID`, corners pulled
     (`DCLFParticleInput`). A forward object culled with the snapshot's bound and sorted by its centre.
 -   First-person particle members are expanded faced to the first-person eye.
+-   **Master particle systems** (`CS_DCLF_MASTER_PARTICLES`, default on; `Features/Particles/MasterParticles.cpp`; roadmap 1.4):
+    the particle manager's `BSMasterParticleSystem`s are parentless children of its array. They are unheld roots
+    (`Api::UnheldRootsContribution`): category nodes filed under themselves, held by key alone, because the engine removes an
+    idle master once its count is below 3. Their exits are events: the manager's child edits and remove-all through
+    SceneWriterFramework, and a hook on the manager's update that pushes the detach before it clears an idle master's slot. The
+    category capture runs inside the contribution's gate, so no removal falls between a master's listing and its capture. Blood
+    impact sprays are masters fed by the impact effect's emitters.
 
 ### Billboards and aligned particles
 
@@ -2372,7 +2570,7 @@ keeps on the node. One hidden without a visible full tree leaves a hole.
     `allVisible` (`PackGroup`) and pushes it as an intended event, applied only where it changes the records. Events go through a
     lock-free queue; `Drain` applies them in push order on the render thread.
 -   **Tables** (`TreeLodTables.h`, layout `TreeInstancesLayout.h`): versioned shape rows (translation, mesh slot, record count, type
-    extent), 75 instance records per shape slot, mesh rows (vertex and index device addresses leased through `GpuResources`, stride,
+    extent), 75 instance records per shape slot, mesh rows (vertex and index buffer view refs leased through `GpuResources`, stride,
     index count, UV offset), a draw row, and the visible list. They grow by requirements posted with the revision's inputs; the depth
     commit uploads only changed slots and meshes (`UploadTreeLod`).
 -   **Cull** (`TreeLodCullCS.hlsl`): phase 1 one thread per record (skipped past the count or at scale 0; frustum by the sphere holding
@@ -2447,6 +2645,17 @@ the parities.
     focus targets, for whichever light hosts them. The casters are the members whose fade root is the target's
     (`BuildDrawsLatch::focusRoot`). A view is drawn over the whole slice with the sub-rectangle's viewport transform folded into the
     matrices (`FocusToSlice`).
+    -   **Hidden actor parts are focus-only casters.** The focus accumulation registers the target's subtree whole, hidden parts
+        too: in first person the player's hidden third-person body casts only into the focus shadow. Such a part (`Ineligible::Hidden`
+        under a referenced actor node, while Features/Actors admits actors, and a caster: `Coordinator::HiddenFocusCaster`) gets a
+        shadow-only record marked focus-only (`kObjectFocusOnly`: `kObjectShadowOnly` with `kObjectDecal`, which no other shadow-only
+        record carries). The shadow input keeps the marker (`ShadowEntry`); the CPU path's lane flag (`kLaneFocusOnly`) and
+        BuildDrawsCS drop it in every view without a focus root, so cascades and local lights do not draw it, as the engine's culls
+        skip a hidden node. The set claims it in the caster phases, so the registration hooks withhold its engine passes. A camera
+        switch stores `kHidden` on both roots, and the hidden events reclassify the parts.
+    -   **A geometry group's renderer made during a shadow registration** (in no published set yet) belongs to the registering
+        accumulator's view: the registration detour notes the accumulator on its thread, and `PassCapture::ShadowModeOfBatch` looks
+        it up among the covered views' accumulators (`SetShadowAccumulators`), as `MainRendererNow` does for the main views.
 -   **When the list is decided**: inside `CalculateAndDrawShadowCasterLights` (`Features/Shadows/Engine/ShadowCasterPoints.cpp`), at
     three points: `FrameDriver::BeforeShadowCasters` begins the views and decides coverage (`IndirectDraws::DecideShadowCoverage`),
     `ShadowCasterKept` runs at each kept light's slot write (`ShadowViews::AddCaster`), and `ShadowCastersSelected` lists them
@@ -2461,7 +2670,9 @@ the parities.
     passes declare, so the render thread makes them (`ShadowSlotsRequest`) and builds the graph with them. Either growth is a new
     shadow latch layout. A view is never left native for want of a slot.
 -   **Still the engine's**: the scissor rectangle, `UpdateCamera` and its focus counterpart themselves, and a view whose rasterizer
-    state no pipeline can express (wireframe, no depth clip).
+    state no pipeline can express: wireframe, or depth clip off on a device without `depthClamp` or with
+    `CS_DCLF_SHADOW_DEPTH_CLAMP=0`. Such a view is counted as `raster-state` in the `[DCLF] shadow views:` line's not-ready
+    reasons (`CS_DCLF_STATS=1`), and its state is warned about once (`shadow view rasterizer state not expressible`).
 
 #### Local shadow masks
 
@@ -2518,7 +2729,10 @@ passes (render modes `0x10`/`0x11`, `GetRenderPasses_ShadowMapOrMask`) are not w
 -   **The view's rasterizer state.** Each view draws with its own: depth bias, slope, clamp and cull, as the engine binds it. A view's
     state is its rasterizer table entry at cull mode 1, not the renderer's current one (the Utility shader sets the cull mode per pass,
     so the renderer's is whatever drew last); a view with no entry at 1 (the volumetric copy) takes its entry at 0. A two-sided caster
-    draws without culling (`kRasterTwoSided`). CS's `ShadowmapCascadeRasterizerFix` swaps per-cascade states in around the cascade
+    draws without culling (`kRasterTwoSided`). A state with `DepthClipEnable` off draws with depth clamped to the viewport's range
+    (`ShadowRasterState::depthClip` to BasicRHI's `RasterState::depthClip`, Vulkan `depthClamp`, as DXVK draws it), where
+    `FixedFunctionFeatureInfo::depthClipDisable` says the device can; `CS_DCLF_TEST_SHADOW_CLAMP=1` draws every view so, to exercise
+    the path with the engine's states (all of which clip). CS's `ShadowmapCascadeRasterizerFix` swaps per-cascade states in around the cascade
     loop only. States are registered by `DrawPipelines::ShadowRasterStateId` from `EngineRasterStates()`; the id is
     `ShadowPipelineKey::viewState`, a mode's states are sorted lists (`ModeRasterStates`: casters and volumetric-only), and a shadow
     input names a key slot resolved through the view's state row (`BuildDrawsLatch::pipelineMapOffset`). Not a union of every raster
@@ -2587,11 +2801,11 @@ passes (render modes `0x10`/`0x11`, `GetRenderPasses_ShadowMapOrMask`) are not w
         reason (`EngineOnlyCull::NoteWholeCull`; warned once each, and a `<- WHOLE ENGINE CULL` line in the primary cull's report). A light
         whose views DCLF has not made yet casts no shadow until they exist, and point lights cull empty on frames without a current
         exclusion (a cell change), so neither falls back.
-    -   **The startup hold** (`Core/Render/StartupHold.{h,cpp}`). After the session's first load, DCLF's sun cascades and occlusion maps
-        are not covered for a few dozen frames (its views come from frames that draw the world). The hold keeps the sun's whole skip
-        and renders those maps without the engine's cull (`OcclusionHeld`), while the CS overlay draws the screen black
-        (`DrawcallLimitFix::StartupBlackout`); it ends after two covered frames (measured: 27 frames) or at 600. Left: the main
-        camera's one frame before DCLF's first snapshot, which the engine draws whole.
+    -   **A load's hold** (`Core/Render/LoadHold.{h,cpp}`, [Load screens](#load-screens)). After every load, DCLF's sun cascades and
+        occlusion maps are not covered for a few dozen frames (its views come from frames that draw the world). While the hold lasts it
+        keeps the sun's whole skip and renders those maps without the engine's cull (`OcclusionHeld`), behind the loading menu it keeps
+        open; a frame with a view held is not settled. Until 5.5.1 this was the startup hold, for the session's first load only, under a
+        black screen drawn by the CS overlay.
     -   Test runs: `CS_DCLF_TEST_REFUSE=<name>,...` refuses geometry by node name as an unstable buffer, so any class can be engine-only.
     -   Without the subset such a caster had no shadow at all: on test2, a RaceMenu-morphed body or BodySlide outfit (a dynamic vertex
         buffer, before `MorphedPartitionCopy`) drew natively in the main view and cast nothing. The first few are logged (`shadow
@@ -2746,7 +2960,8 @@ with set phase `kSetReflection` and view bit `kViewReflection`.
     (`ReflectionFaces::SetRootsOwned`: `kLodRoots`, LOD land and objects, while both LOD classes are on and the swaps gated;
     `kTreeRoot`, LOD trees, while the faces draw tree LOD). `AddLodRoot` then skips the add-root (`FUN_1405275e0`) at all three LOD
     call sites (`0x14052080d` land, `0x140520826` objects, `0x14052083f` trees), so the engine neither culls nor registers them; the
-    sky's stays (`IndirectDraws::ViewLodRootsOwned`). The engine's face draws are then only the sky (about 21 passes). An
+    sky's stays (`IndirectDraws::ViewLodRootsOwned`). These four (`0x140520854` the sky's) are the cube camera's only roots: no cell
+    root is ever added (Ghidra, 2026-11-11). The engine's face draws are then only the sky (about 21 passes). An
     `OwnRenderers` view's residue under those roots is watched (`PassCapture::WatchViewResidue`).
 -   **Withholding**: the cube camera's accumulators (`+0x1A0`, `+0x1A8`) are the view's own renderers (`SetViewRenderers`,
     `SetViewWithholdActive`).
@@ -2784,7 +2999,12 @@ alpha test on; the sky tests without writing.
 The player's first-person skeleton is a category root of the one scene, drawn by two view epochs, the depth one hosted by the depth
 epoch (Features/FirstPerson; Core's view
 engine, `Core/Render/Epochs/ViewEpoch*.cpp`, `Core/Render/Views/ViewSlots.h`, shared with the reflection faces;
-`CS_DCLF_FIRST_PERSON`, needs skinned and actors; `CS_DCLF_FIRST_PERSON_DECALS`).
+`CS_DCLF_FIRST_PERSON`, on by default, needs skinned and actors; `CS_DCLF_FIRST_PERSON_DECALS`).
+-   **Coverage** (`Covered`): the latch, both epochs covered, the depth copy imported, no rebuild pending, and a way to draw its
+    forward part. That part has no plain buckets, so a GPU-driven graph without device-generated commands (AMD, Intel) draws it only
+    through the direct forward family (`GraphConditions::firstPersonForwardDirect`). Without either, the engine keeps the whole view.
+    It was off by default until 2026-11 because the engine's few dozen draws cost less than the two epochs (0.15 ms in the
+    hand-back sweep); it is on because coverage that depends on a switch is engine work left on the render thread.
 -   **Membership**: the first-person root (`CaptureRoot`), its geometry tracked like an actor's. Set phase `kSetFirstPerson`, view bit
     `kViewFirstPerson`, never `kViewMain`, a caster or an occluder bit. The classification stops at the root before the hidden test
     (its `kHidden` is the view's). A first-person slot takes part for opaque, alpha-tested and forward keys; never for refraction or
@@ -2947,6 +3167,10 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     views: the reflection's faces into their cube and first person's depth, `ViewSites.cpp`), colour (decal depth, main colour,
     the families' colour, the second pass), forward (forward and refraction) and first person's colour (`fp.colour-render`).
     Every site records into secondaries of the CS thread's (`SiteFrame.h`, `SiteOut`).
+    That is guest mode. **In native mode** (Vulkan and D3D12; `Direct::SitesInline`, `parity/dclf-cpu.md`) the sites' epochs are not
+    external: `Direct::ExecuteEpoch` submits each through `RenderGraphRuntime::ExecuteEpoch`, its commit opens the run, and the late pass
+    records the draws inline into the epoch's own primary list during the submission, on the render thread, with no secondaries. The
+    frame signal is a BasicRHI list of its own (`RenderGraphRuntime::EmitCommands`) in both modes.
 -   **One descriptor model.** BasicRHI and DXVK must bind the same model in DXVK's command buffer: with DXVK on descriptor
     buffers and BasicRHI on heaps, NVIDIA fetched garbage descriptors in the callbacks' draws (render-graph.md, "External
     commands in DXVK's command buffer"). The graph runs on descriptor buffers alone, with BasicRHI's shaders lowered to them
@@ -2970,7 +3194,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     DCLF's retirement clock counts those signals with the host's submissions (`Core/Runtime/FrameRetirement.h`).
 
 **The modes and cadences.**
--   `dclf:cpu-record=indirect` (the default off NVIDIA; NVIDIA defaults to `serial`, whose pushed colour saves 0.21 ms of GPU time on an RTX 5080): each cull job writes its batch's draws into its frame slot's draw buffer
+-   `dclf:cpu-record=indirect` (the default on every vendor, `DefaultRecordMode` in `Toggles.cpp`; `serial`, with pushed colour, was 0.21 ms of GPU time faster on an RTX 5080 and 0.5 ms on an RX 6600): each cull job writes its batch's draws into its frame slot's draw buffer
     (`Direct/Recorder.h`, `IndirectDraw`), and the CS thread records one indirect draw per run of a pipeline. An indirect draw cannot
     push per draw, so a draw's instance names its record, which holds its sequence's index and its object word
     (`kDirectFlagDrawRecords`, `DCLFDrawSequence`). Colour therefore always uses the pulled pipelines; `kExpPushedColour` and
@@ -2978,7 +3202,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     `serial`: the CS thread records each culled batch as it arrives, in list order (a reorder
     window by batch index). `parallel`: each cull job records its plain-list batches into a secondary of its own (a command
     pool per worker and frame slot); the callback executes them in list order. Decals, forward and refraction are one ordered
-    stream on the CS thread in both.
+    stream on the CS thread in both. Native mode makes no secondaries: `parallel` records as `indirect` there (`Direct::FrameMode`).
 -   `dclf:cpu-cadence-<view>=frame|snapshot`: a view culled and recorded every frame, or once per batch set. A per-snapshot
     view (`PrepareSnapshotView`) is culled per frame on the set's first frame and, beside it, culled again with the snapshot's
     spheres against the view as that frame captured it and recorded into one simultaneous-use secondary; the set's later frames
@@ -2986,7 +3210,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     index pool, push words, map row and pipelines' set version) and dropped when the draws' index ranges move. The recording is
     made at the set's first frame, not on the snapshot builder: the builder has no captured view until a frame has one. Main is
     always per frame, and so are the main camera's other lists (their culls are kAccumulated's) and first person (its colour
-    site draws its depth view's batches).
+    site draws its depth view's batches). Native mode records every view per frame (no secondaries there).
 
 **What is live.** Every site above: CPU mode covers every DCLF epoch whose site is live (`Direct::ShadowSiteLive`,
 `ViewSiteLive`; the shadow site with DCLF's shadows on, a view with its feature on).
@@ -3012,14 +3236,16 @@ Per-snapshot views pop at their edges.
 ## What the engine still draws
 
 DCLF claims whole objects in the phases it draws; the engine keeps:
--   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist),
-    temporary effects outside DCLF's categories (blood impact particles), and the effect variants not ported (sky objects, wireframe,
-    cloud lighting, Lighting without Light Limit Fix, projected UV, unrecognised blend pairs, Falloff without blending, membrane,
-    strip and mesh particle systems, skins or nested billboards under billboards).
+-   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist,
+    blood impact sprays; the engine's only with `CS_DCLF_MASTER_PARTICLES=0`), and the effect variants not ported (sky objects,
+    wireframe, the effect Lighting variant without Light Limit Fix, projected UV, unrecognised blend pairs, membrane, strip and mesh
+    particle systems, skins or nested billboards under billboards, Lighting leaves under billboards).
 -   **By state**: an object not yet a member (the engine draws it until the publication that claims it is installed), a pair a
-    register is missing for, a texture still importing, an object whose geometry buffer the game can map (`UnstableBuffer`).
--   **By view**: first-person refraction; the reflection's modes `0x19` and `0x1B`; the reflection faces' sky; a shadow view whose
-    rasterizer state no pipeline expresses; the occlusion maps without Skylighting.
+    register is missing for, a texture still importing, an object whose geometry buffer the game can map (`UnstableBuffer`; none
+    in Whiterun with this load order, a RaceMenu body morph elsewhere).
+-   **By view**: first-person refraction; the reflection's modes `0x19` and `0x1B`; the reflection faces' sky (on ORG with
+    `CS_ORG_SKY`; the cube camera has no other root once DCLF skips the LOD ones: dclf-roadmap.md 1.2); a shadow view whose
+    rasterizer state no pipeline expresses (wireframe, or no depth clip without depth clamp); the occlusion maps without Skylighting.
 -   **Mixed entries** keep the engine's culls whole, though DCLF still draws their members.
 
 `CS_DCLF_CENSUS=1` counts every pass a registration hook hands on to a batch renderer, by view and class, and gives each Lighting

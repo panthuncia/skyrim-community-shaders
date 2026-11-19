@@ -5,9 +5,8 @@
 #include <cstdint>
 #include <string>
 
-// What a holder of engine references alone keeps alive: the references whose object nothing else holds (its count 1, the holder's),
-// and the geometries under those (a detached subtree's root keeps its children). Read on the holder's own thread, which holds every
-// object it reads; a sole-held subtree is reached by nothing else, so its walk races no engine edit.
+// What only one holder's engine references keep alive, meaning objects whose count is 1, and the geometries under them.
+// Read on the holder's own thread. A sole-held subtree is reached by nothing else, so its walk races no engine edit.
 
 namespace DCLF::Diagnostics
 {

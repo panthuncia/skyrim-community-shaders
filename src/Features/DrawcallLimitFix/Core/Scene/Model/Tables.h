@@ -1,8 +1,8 @@
 #pragma once
 
-// SceneTables: the scene's object, geometry, pipeline and material slots and every column parallel to them, with the change and
-// write logs the persistent consumers read and the retirement list for freed slots. The coordinator owns and writes the live copy
-// on the scene-work thread; a publication carries an immutable copy that the render thread and the builds read.
+// SceneTables holds the scene's object, geometry, pipeline and material slots and every column parallel to them, plus the change
+// logs and the retirement list. The coordinator writes the live copy on the scene lane. A publication carries an immutable copy
+// that the render thread and the builds read.
 
 #include <array>
 #include <atomic>
@@ -30,7 +30,7 @@ namespace DCLF
 {
 	inline constexpr std::uint32_t kNoObjectSlot = ~0u;
 
-	/** @brief What a change-log entry changed (SceneTables::changeLog), by the columns its consumers read. */
+	/** @brief What a change-log entry changed, grouped by the columns its consumers read. */
 	enum ChangeCause : std::uint32_t
 	{
 		kChangeBindings = 1u << 0,    // flags, material, pipeline (the draw's too), the fade distance, whether it has a fade node
@@ -42,22 +42,19 @@ namespace DCLF
 		kChangeGeometry = 1u << 6,    // geometry slot, the draw's geometry half, face stream, the object's geometry
 		kChangeMembership = 1u << 7,  // residency
 	};
-	// No placement, palette or shading: those are FrameValues', never a column.
+	// Placement, palette and shading are FrameValues' rows, never a column.
 	inline constexpr std::uint32_t kChangeCauseCount = 8;
-	// What a shadow input carries (IndirectDraws' shadow build). Not placements: a caster's bound and sun entry are its record's.
+	// A caster's bound and sun entry come from its record, so placement is not a shadow input.
 	inline constexpr std::uint32_t kShadowChangeCauses = kChangeShadow | kChangeBindings | kChangeGeometry | kChangeSkin | kChangeMembership;
-	// The retired bit keeps its name: kChangeAll notes still count it, and the reports print it.
+	// kChangeAll notes still set the retired bit, so it keeps its name in reports.
 	inline constexpr std::array<const char*, kChangeCauseCount> kChangeCauseNames{ "bindings", "lights", "tree", "skin", "extras", "shadow", "geometry",
 		"membership" };
 	inline constexpr std::uint32_t kChangeAll = (1u << kChangeCauseCount) - 1;
 
-	/** @brief The scene phase's flags the accumulate phase's patch keeps; the rest of an object's flags are the patch's. */
+	/** @brief The flags the accumulate patch keeps from the scene phase. It owns the rest. */
 	inline constexpr std::uint32_t kSceneKeptFlags = kObjectPaletteBlock | kObjectNoShadow | kObjectVolumetricOnly | kObjectShadowOnly;
 
-	/**
-	 * @brief The scene's tables: the object, geometry, pipeline and material records and every column parallel to them. The
-	 * coordinator writes its own copy; the frame and the draws read a publication's immutable copy (ScenePublication::tables).
-	 */
+	/** @brief The coordinator writes its own copy. The frame and the draws read a publication's immutable copy. */
 	struct SceneTables
 	{
 		std::vector<ObjectRecord> objects;
@@ -72,20 +69,16 @@ namespace DCLF
 		std::vector<GeometryImport> geometryImports;  // parallel to geometries
 		std::vector<PipelineKey> pipelines;
 		std::vector<MaterialRecord> materials;
-		// Parallel to materials: session-unique, new whenever the record is (re)evaluated but not when only its frame floats are
-		// written. Consumers compare this instead of the record's 2.3 KB.
+		// Session-unique, new whenever the record is evaluated again but not when only its frame floats change.
+		// Consumers compare this instead of the 2.3 KB record.
 		std::vector<std::uint32_t> materialVersion;
-		// Parallel to materials: new whenever only the record's frame floats are written (RefreshMaterialSignatures,
-		// RefreshMaterialTransforms).
+		// New whenever only the record's frame floats are written.
 		std::vector<std::uint32_t> materialFrameVersion;
-		// What MainBuild's kept bindings key on, new (NextVersion) whenever a covered value changes: a pipeline's PerGeometry
-		// floats and what its pairs' records read of it (key, permutation; the technique's are its TechniqueRow's).
+		// What MainBuild's kept bindings key on. New whenever a pipeline's PerGeometry floats or what its pairs read of it change.
 		std::vector<std::uint32_t> pipelineBindingVersion;    // parallel to pipelines
-		// Write stamp of the pipeline family (PipelineFamily), bumped by every write of it (sizes included): the publication copies
-		// the family only when it moved. Pipeline slots are written right after their allocation (AllocatePipelineSlot notes it).
+		// Bumped by every write of the pipeline family, so the publication copies the family only when it moved.
 		std::uint64_t pipelinesStamp = 0;
 		void NotePipelinesWrite() { ++pipelinesStamp; }
-		/** @brief The pipeline family's members of two tables, each pair to a_member (the publication's copy, its checks). */
 		template <class T, class F>
 		static void PipelineFamily(T& a_left, T& a_right, F&& a_member)
 		{
@@ -96,34 +89,27 @@ namespace DCLF
 		}
 		std::uint32_t versionCounter = 0;
 		std::uint32_t NextVersion() { return ++versionCounter; }
-		// No shading (MaterialData, EmitColor, SSRParams.w, emissive multiplier, wetness): FrameValues' rows (BindlessShading),
-		// sampled at frame start for the slots the walk names (ShadingItem).
+		// Shading values are not here. They are FrameValues' rows, sampled at frame start for the slots the walk names.
 		std::vector<ObjectAncestorValue> ancestorValue;       // parallel to objects
-		// The features' table families (Api::TableFamily; Features/TreeWind's trees, the fade roots: Features/Fades/FadeRoots.h): their
-		// columns, stamps, the objects' references into them and their rows' tags. Published with the rest: a family is copied only when its
-		// stamp moved.
+		// The features' table families. A family is copied into a publication only when its stamp moved.
 		Extensions::TableFamilies families;
-		// The published entry classes' members (Api::EntryClassContribution::published: Features/Actors' actor-owned), by class: the slots
-		// whose shading fields are their owner's (Api/ShadingFields.h: Integrations/AdvancedSkin's SkinPerGeometry, the owning actor's
-		// wetness); zero for every other slot. Values are FrameValues' (the fields' captures); these say who has one.
+		// Members of the published entry classes, whose shading fields belong to their owner. The values themselves are FrameValues'.
 		struct ClassMembers
 		{
 			std::vector<std::uint32_t> objects;  // sorted by object index (the walk sorts it)
-			// By slot: its owner's group (0: not a member) and its identity (incarnations included). Membership only: the render thread's
-			// fields keep their own from the changes.
+			// By slot, the owner's group (0 when not a member) and identity.
 			struct Owner
 			{
 				std::uint64_t group = 0, identity = 0;
 			};
 			std::vector<Owner> owners;
-			// The membership writes in order, moved onto the publication log for the render thread's fields (PublicationDeltas::classMembers).
+			// Moved onto the publication log for the render thread's fields.
 			std::vector<Api::ClassMemberChange> changes;
-			/** @brief Whether the slot is a member (in an owner's group). */
 			bool Grouped(std::uint32_t a_slot) const { return a_slot < owners.size() && owners[a_slot].group; }
 		};
-		// Write only through SetClassMembers / ClearClassMembers (the objects: the walk's).
+		// Write only through SetClassMembers / ClearClassMembers.
 		std::array<ClassMembers, Extensions::kPublishedEntryClasses> classMembers;
-		/** @brief a_slot's membership of every published class: a_class's in a_group (0 or None: no class's), every other's none. */
+		/** @brief Sets a_slot's membership in a_class and clears it in every other published class. */
 		void SetClassMembers(std::uint32_t a_slot, Api::EntryClass a_class, std::uint64_t a_group, std::uint64_t a_identity, bool a_resetValue = false)
 		{
 			for (const auto c : Extensions::PublishedEntryClasses()) {
@@ -144,7 +130,6 @@ namespace DCLF
 				members.changes.push_back({ 0, 0, 0, false, true });
 			}
 		}
-		/** @brief Whether a published class has membership writes not yet moved onto the log. */
 		bool ClassMemberChangesPending() const
 		{
 			for (const auto& members : classMembers)
@@ -152,23 +137,17 @@ namespace DCLF
 					return true;
 			return false;
 		}
-		// Multi-partition skins (CS_DCLF_SKIN_PARTITIONS): bit i draws partition i along nextPartition from geometryIndex; 0 for
-		// one geometry. A LOD skin's (kMeshLOD under a fade node) is the cumulative superset (row 3), narrowed by the draw.
+		// Bit i draws partition i along nextPartition from geometryIndex, 0 for one geometry. A LOD skin holds the union of its levels.
 		std::vector<std::uint16_t> skinPartitions;            // parallel to objects
-		// A LOD skin's partitions per level (byte L: level L's row of the engine's table). BuildDraws picks by FadeStateCS's level,
-		// never the node's (+0x152, which GetRenderPasses reads), so the record is written once.
+		// Byte L is level L's partitions. BuildDraws picks by FadeStateCS's level, never the node's, so the record is written once.
 		std::vector<std::uint32_t> skinLodPartitions;         // parallel to objects
-		// The property that supplied each pipeline's per-frame constants, for RefreshFrameConstants to re-evaluate. (Frame globals
-		// are FrameCapture's.) The coordinator's alone: not published (a publication's is empty).
+		// The property that supplied each pipeline's per-frame constants. The coordinator's alone, empty in a publication.
 		std::vector<RE::BSShaderProperty*> geometryTemplate;  // parallel to pipelines
-		// PerTechnique values (plus filter modes and shadow mask), one row per TechniqueKey, shared by its pipelines. Evaluated
-		// when made (TechniqueRowFor) and when TechniqueInputs move (RefreshTechniqueRows). Never freed: a few dozen.
+		// One row per TechniqueKey, shared by its pipelines. Never freed, there are only a few dozen.
 		std::vector<std::uint32_t> techniqueKeys;
 		ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> techniqueRow;  // TechniqueKey -> row
 		std::vector<std::uint32_t> pipelineTechnique;  // parallel to pipelines: its row
-		// The constants packed into pipeline rows: the render thread's pipeline blocks (GeometryPort), applied by the coordinator
-		// (ApplyConstantsPosts), and the technique rows it evaluates from FrameGlobals. A change draws with the next publication.
-		// Without them a pipeline is not drawable (MainReady, MainBuild::PackPipelines).
+		// The constants packed into pipeline rows. Without them a pipeline is not drawable.
 		struct PipelineConstantsRow
 		{
 			GeometryConstants constants{};
@@ -187,8 +166,7 @@ namespace DCLF
 			bool valid = false;
 		};
 		std::vector<TechniqueConstantsRow> techniqueConstants;  // parallel to techniqueKeys
-		// Bumped by every write of pipelineConstants or techniqueConstants (sizes included): the publication copies them only when
-		// it moved; the set's readiness reads it.
+		// The publication copies the constants only when this moved. The set's readiness reads it too.
 		std::uint64_t constantsStamp = 0;
 		void NoteConstantsWrite() { ++constantsStamp; }
 		bool PipelineConstantsCurrent(std::size_t a_pipeline) const
@@ -204,40 +182,33 @@ namespace DCLF
 			       techniqueConstants[pipelineTechnique[a_pipeline]].valid;
 		}
 		const TechniqueConstantsRow& TechniqueOf(std::size_t a_pipeline) const { return techniqueConstants[pipelineTechnique[a_pipeline]]; }
-		/** @brief Whether the pipeline's technique binds the shadow mask (TechniqueKey's low bit). */
 		bool TechniqueShadowMask(std::size_t a_pipeline) const { return (techniqueKeys[pipelineTechnique[a_pipeline]] & 1u) != 0; }
 		std::vector<PipelinePermutation> permutations;        // parallel to pipelines
 		std::vector<DrawSequence> draws;  // one per object (templates: pipelineIndex is the table index)
-		// The fixed main ranges (Api/MainRanges.h): each object's slot in its range of the colour segment's second pass, in the order the
-		// range's feature gives (Features/Decals: the decals', in the engine's draw order - group, technique bucket, batch list, chain
-		// position), and each range's slots. The colour epoch writes the draw, or a zero-count one, to that fixed slot so overlapping
-		// objects keep their order (an atomic append would not). ~0u for objects in none. Every changed ordinal notes its slot.
+		// Each object's fixed slot in its main range, in the order the range's feature gives, or ~0u. The colour epoch writes a draw
+		// or a zero-count one to that slot so overlapping objects keep their order, which an atomic append would not.
 		std::vector<std::uint32_t> rangeOrdinal;  // parallel to objects (sized by the writer: Features/Decals' OrderDecals)
 		std::array<std::uint32_t, Api::kFixedMainRanges> rangeCount{};
-		// Skinning (CS_DCLF_SKINNED): each skinned object's block in FrameValues' palettes (NiSkinInstance::boneMatrices and
-		// prevBoneMatrices, three float4 rows a bone) and its row count. A block stays the slot's while the palette size holds
-		// (PlaceBones / FreeBones); capacity grows in kBoneGrowRows steps, moving no block.
+		// Each skinned object's block in FrameValues' palettes, three float4 rows a bone. Capacity grows in kBoneGrowRows steps and moves no block.
 		static constexpr std::uint32_t kBoneGrowRows = 4096;
 		std::vector<std::uint32_t> boneOffset;  // parallel to objects, in rows
 		std::vector<std::uint32_t> boneRows;    // parallel to objects
-		// The free rows below boneTop, coalesced (first row -> rows): a block of any size (a skin's palette, a palette rows class's block:
-		// a particle member's quads) takes the first run that holds it, so skeletons and particle systems of every size coming and going
-		// reuse each other's rows instead of raising boneTop (exact-size lists left most of a large list's palettes free).
+		// Free rows below boneTop, coalesced as first row -> rows. Blocks of any size take the first run that fits, so skins and particle
+		// systems reuse each other's rows instead of raising boneTop.
 		std::map<std::uint32_t, std::uint32_t> boneFree;
-		/** @brief A retired block's rows back to boneFree (its retirement's, SceneSet): merged with its neighbours, boneTop lowered past a free top. */
+		/** @brief Merges with its neighbours and lowers boneTop past a free top. */
 		void ReturnBones(std::uint32_t a_offset, std::uint32_t a_rows);
 		std::uint32_t boneTop = 0;       // rows handed out (past the last block in use)
 		std::uint32_t boneCapacity = 0;  // rows the blocks span (FrameValues' palettes hold twice as many)
 		std::uint32_t BoneCapacity() const { return boneCapacity; }
-		/** @brief The slot's block for a palette of a_rows rows (its own when the size is the same): its first row. */
+		/** @brief Keeps the slot's own block when the size is the same. Returns its first row. */
 		std::uint32_t PlaceBones(std::uint32_t a_slot, std::uint32_t a_rows);
 		void FreeBones(std::uint32_t a_slot);
-		// Per-object extras (kExtraRows float4 rows; kObjectLandBlend / kObjectProjectedUV), filled at Prepass by
-		// RefreshFrameConstants and sent to the extras buffer (t126). A block persists while the object's patch holds it.
+		// Per-object extras, filled at Prepass and sent to the extras buffer (t126). A block persists while the object's patch holds it.
 		std::vector<float> extraRows;
 		std::vector<std::uint32_t> extraOffset;  // parallel to objects
 		std::vector<std::uint32_t> extraFree;    // freed blocks' row offsets
-		// Every block written, allocated or freed (row offset), for the published tables to replay.
+		// Every block written, allocated or freed, for the published tables to replay.
 		SharedEventLog<std::uint32_t> extrasBlockLog;
 		void NoteExtrasBlock(std::uint32_t a_offset) { extrasBlockLog.Push(a_offset); }
 		std::uint32_t AllocateExtras()
@@ -262,33 +233,22 @@ namespace DCLF
 				extraOffset[a_slot] = kNoExtraRows;
 			}
 		}
-		// The Utility technique each object casts with, without a view's mode bits (ShadowViews.h: ShadowUtilityTechnique), and
-		// why the engine would not draw it into a shadow map. Decided by the scene phase, since every shadow view is drawn before
-		// the accumulate phase. 0 and ShadowReject::NotLighting for a non-caster.
+		// The Utility technique each object casts with, and why the engine would not draw it into a shadow map. Decided by the scene
+		// phase, because every shadow view is drawn before the accumulate phase.
 		std::vector<std::uint32_t> shadowTechnique;  // parallel to objects
 		std::vector<std::uint8_t> shadowReject;      // parallel to objects (ShadowReject)
-		// Per occlusion view, parallel to objects: the Utility technique the map draws it with (Skylighting::OcclusionTechnique),
-		// 0 when none or the map is off (Extensions::OcclusionOn). Alpha-tested ones use shadowDiffuse / shadowMaterial.
+		// Per occlusion view, the Utility technique the map draws each object with, or 0.
 		std::array<std::vector<std::uint32_t>, kOcclusionViews> occlusionTechnique;
-		// The object's entry in the sun's full-frustum culling processes' objectArray (Coordinator::ResolveSunEntry), null when
-		// never tested (an actor's: its cell's container): the entry's listed root. Bound: BindlessPlacement::sunEntry; the node is for
-		// diagnostics.
+		// The object's entry in the sun's full-frustum cull objectArray. Null when never tested, as for actors.
 		std::vector<const RE::NiAVObject*> listedRoot;  // parallel to objects
-		// Whether the property has a fade node (LodFadeNodeOf), whose centre is the placement row's: for the fade-out test and the
-		// draw's specular and envmap LOD fades.
 		std::vector<std::uint8_t> hasFadeNode;  // parallel to objects
-		// A member's fade-out distance (kObjectFadeTest, AccumulatedPass::fadeDistance), against its fade node's centre
-		// (BindlessPlacement::lodFadeNode): > 0 scaled by the camera's LOD factor, < 0 unscaled. Meaningless without the flag.
+		// Meaningless without kObjectFadeTest. Positive values scale with the camera's LOD factor, negative ones do not.
 		std::vector<float> fadeDistance;  // parallel to objects
-		// Which slots hold a resident record (PrimaryCull's).
 		std::vector<std::uint8_t> residentSlot;  // parallel to objects
-		// Each slot's DCLF set phases (SetPhase bits, 0: not a member), written by CommitSet alone; every build selects by them
-		// (kObjectMember is the main phase's copy for the GPU). Every write notes the slot (the change log with the record's
-		// kObjectMember, else publicationLog).
+		// Written by CommitSet alone, and every build selects by it. kObjectMember is the main phase's copy for the GPU.
 		std::vector<std::uint8_t> setPhases;  // parallel to objects
-		// The change log (dclf-architecture.md, "Persistent draw state"): each write that changes a slot's columns appends the
-		// slot and causes. Consumers read from their own LogCursor; one behind the trim, or on a new tables generation, rereads all.
-		// The tables' logs are SharedEventLogs: every published snapshot shares their chunks (PublishTables assigns them).
+		// Each write that changes a slot's columns appends the slot and causes. A consumer one behind the trim, or on a new tables
+		// generation, rereads everything. Published snapshots share these logs' chunks.
 		struct Change
 		{
 			std::uint32_t slot = 0;
@@ -304,18 +264,13 @@ namespace DCLF
 			for (std::uint32_t bits = a_causes; bits; bits &= bits - 1)
 				++changeCounts[std::countr_zero(bits)];
 		}
-		// Every write of a geometry slot's columns, which the published tables replay and GeometryStore repacks by.
 		SharedEventLog<std::uint32_t> geometryLog;
 		void NoteGeometry(std::uint32_t a_slot) { geometryLog.Push(a_slot); }
-		// Material slots whose versions changed (every write of a record), for MainBuild::UpdateRegionPairs and the publication's replay.
 		SharedEventLog<std::uint32_t> materialLog;
 		void NoteMaterial(std::uint32_t a_slot) { materialLog.Push(a_slot); }
-		// Object slots whose published columns changed with no change-log note: the columns no change-log consumer reads (setPhases,
-		// layerBase and layerOf of a link's other end, rangeOrdinal) where the write notes nothing. The publication replays them with
-		// the logged slots; nothing else reads it.
+		// Object slots whose published columns changed with no change-log note. Only the publication's replay reads it.
 		SharedEventLog<std::uint32_t> publicationLog;
 		void NotePublished(std::uint32_t a_slot) { publicationLog.Push(a_slot); }
-		/** @brief Every reader of the change log resyncs. */
 		void InvalidateChangeLog()
 		{
 			changeLog.Invalidate();
@@ -323,7 +278,7 @@ namespace DCLF
 			extrasBlockLog.Invalidate();
 			publicationLog.Invalidate();
 		}
-		/** @brief A slot's columns, everything a persistent consumer builds from, for the writers to compare against. */
+		/** @brief Everything a persistent consumer builds from, for writers to compare against. */
 		struct Columns
 		{
 			ObjectRecord object{};
@@ -345,60 +300,45 @@ namespace DCLF
 			std::uint8_t shadowReject = 0, resident = 0, hasFadeNode = 0;
 		};
 		Columns ColumnsOf(std::uint32_t a_slot) const;
-		/** @brief What differs between two snapshots of a slot, as ChangeCause bits. */
 		static std::uint32_t CausesBetween(const Columns& a_before, const Columns& a_after);
-		/** @brief Notes what a write changed, against the snapshot taken before it. */
 		void NoteWrite(std::uint32_t a_slot, const Columns& a_before) { NoteChange(a_slot, CausesBetween(a_before, ColumnsOf(a_slot))); }
-		// The vertex stream (Api/VertexStreams.h): per stream object (an NPC face shape, Features/Faces') its row - its vertices (its head's
-		// snapshot, leased) and their range of the stream's buffer, uploaded on a new generation. Written and updated in place by the
-		// component that follows the stream's entry class (Features/Faces': its heads' publications); read as data by the builds.
+		// The vertex stream rows, written in place by the component that follows the stream's entry class.
 		std::vector<Api::VertexStreamRow> streamRows;
 		std::vector<std::uint32_t> streamRow;  // parallel to objects: index in streamRows, or kNoStreamRow
 		std::vector<std::uint32_t> streamRowFree;
-		// The (source, first) of every row freed since the walk's end took them (Features/Faces' component frees the range once no row
-		// of the shape holds it).
 		std::vector<std::pair<const void*, std::uint32_t>> streamRowsReleased;
-		/** @brief Writes a slot's stream row: in place when it has one, else at a free index. */
 		void SetStreamRow(std::uint32_t a_slot, Api::VertexStreamRow a_row);
 		void ClearStreamRow(std::uint32_t a_slot);
-		// An alpha-tested caster's diffuse view and material (its binding key); null otherwise. The shadow build reads only the
-		// material's texture transform, which BSLightingShaderPropertyFloatController moves between Main::Draw and BeforeShadowMaps.
+		// An alpha-tested caster's diffuse view and material. The shadow build reads only the material's texture transform, which
+		// BSLightingShaderPropertyFloatController moves between Main::Draw and BeforeShadowMaps.
 		std::vector<ID3D11ShaderResourceView*> shadowDiffuse;    // parallel to objects
 		std::vector<const RE::BSShaderMaterial*> shadowMaterial;  // parallel to objects
-		// The distinct diffuse views among them (a few hundred), so lookups refresh per view rather than per caster.
+		// Distinct views, so lookups refresh per view rather than per caster.
 		std::vector<ID3D11ShaderResourceView*> shadowTextureSet;
 		ankerl::unordered_dense::set<ID3D11ShaderResourceView*> shadowTextureSeen;
-		// Shadow texture membership transitions for Coordinator::UpdateSharedBindings (true: bind, false: release).
 		std::vector<std::pair<ID3D11ShaderResourceView*, bool>> shadowTextureChanges;
 		void TakeShadowTextureChanges(std::vector<std::pair<ID3D11ShaderResourceView*, bool>>& a_out)
 		{
 			a_out.clear();
 			a_out.swap(shadowTextureChanges);
 		}
-		// The distinct shadow keys the casters need, without mode bits (a handful): compiled for, then built per view mode.
 		std::vector<ShadowPipelineKey> shadowKeysUsed;
-		// The same for the occlusion maps' occluders: complete techniques (RenderDepth included), no mode bits.
+		// Occluders use complete techniques, RenderDepth included.
 		std::array<std::vector<ShadowPipelineKey>, kOcclusionViews> occlusionKeysUsed;  // per occlusion view
 
 		/**
 		 * @brief The three shared tables keep their slots across frames.
 		 *
-		 * A slot lives while objects reference it (Coordinator::UpdateSlotReferences); the drain runs before the loop, so no object
-		 * of the frame points at a reused slot. Columns are listed once (GeometryColumns, PipelineColumns, MaterialColumns).
-		 *
-		 * The used sets are the slots members' records name (KeepResidentsAlive rebuilds them when membership changes). Being in
-		 * the set certifies a slot's raw engine pointers (lighting template, material key) for evaluation; CheckObjectSlots holds
-		 * every bound record to it. Keys are kept per slot so a freed slot finds its map entry and a cached index can be checked.
+		 * A slot lives while objects reference it. The drain runs before the loop, so no object of the frame points at a reused slot.
+		 * Being in a used set certifies a slot's raw engine pointers for evaluation. CheckObjectSlots holds every bound record to it.
 		 */
 		static constexpr std::uint32_t kSlotFree = ~0u;  // a geometryLastUsed never written; ResolveGeometrySlot's "no slot"
 		SlotTable geometrySlots, pipelineSlots, materialSlots;
 		std::vector<std::uint32_t> geometryLastUsed;  // parallel to geometries: the walk's last write (PassStamp)
 		std::vector<const RE::BSGraphics::TriShape*> geometrySlotKey;
-		// A layer's geometry slot (Coordinator::ResolveLayerGeometrySlot): its key is the shape's second index list (a
-		// BSGraphics::IndexBuffer standing in geometrySlotKey, never read as a TriShape).
+		// A layer's geometry key is the shape's second index list, never read as a TriShape.
 		std::vector<std::uint8_t> geometryLayerKey;  // parallel to geometries
 		std::vector<std::pair<const RE::BSShaderMaterial*, std::uint32_t>> materialSlotKey;
-		// The used sets, in slot order: 64 slots per word.
 		std::vector<std::uint64_t> usedMaterialBits, usedPipelineBits;
 		static bool BitSet(const std::vector<std::uint64_t>& a_bits, std::size_t a_slot) { return a_slot / 64 < a_bits.size() && ((a_bits[a_slot / 64] >> (a_slot % 64)) & 1); }
 		template <class F>
@@ -440,7 +380,7 @@ namespace DCLF
 				usedPipelineBits[a_slot / 64] &= ~(1ull << (a_slot % 64));
 		}
 		bool PipelineUsed(std::size_t a_slot) const { return BitSet(usedPipelineBits, a_slot); }
-		// Each table's columns: a_column(vector, initial value...) for every vector parallel to it.
+		// Each table's columns. a_column(vector, initial value...) runs for every vector parallel to it.
 		template <class F>
 		void GeometryColumns(F&& a_column)
 		{
@@ -469,30 +409,23 @@ namespace DCLF
 			a_column(materialSlotKey);
 		}
 
-		// Object slots persist while the object has a record; a free slot holds FreeObjectRecord(), and a walk sweeps the slots it
-		// did not write. Walk parity's reference build (denseWalk) writes densely instead.
-		// Parallel to objects: the walk (walkSerial) that last wrote the slot. The coordinator's alone: not published (a
-		// publication's holds zeros).
+		// Object slots persist while the object has a record. A walk sweeps the slots it did not write.
+		// objectSeen is the coordinator's alone and holds zeros in a publication.
 		std::vector<std::uint32_t> objectSeen;
-		// New on every tracked insertion, including detach/reattach and pointer reuse.
+		// New on every tracked insertion, including detach and reattach and pointer reuse.
 		std::vector<std::uint64_t> objectIdentity;  // parallel to objects; zero for a free slot
 		std::vector<std::uint64_t> objectGroup;  // actor siblings share this ID
-		// Parallel to objects: the flags as the scene phase wrote them. The accumulate phase patches the record in place; the delta
-		// walk restores each patched slot's scene half from here.
+		// The flags as the scene phase wrote them. The delta walk restores each patched slot's scene half from here.
 		std::vector<std::uint32_t> sceneFlags;
-		// A multi-index shape's main-pass layer (Coordinator::Tracked::layerSlot, drawn from its second index list) is an object
-		// of its own: layerBase maps layer slot -> base slot, layerOf base -> layer, else kNoObjectSlot. Parallel to objects. The
-		// publication replays both ends of a link with either's change-log note (the layer's write notes it); a write that changes
-		// one end with no note of either notes it on publicationLog (ResetObject).
+		// A multi-index shape's layer is an object of its own. layerBase maps layer to base and layerOf base to layer, else kNoObjectSlot.
+		// The publication replays both ends of a link when either end has a change-log note.
 		std::vector<std::uint32_t> layerBase;
 		std::vector<std::uint32_t> layerOf;
 		bool IsLayer(std::uint32_t a_slot) const { return a_slot < layerBase.size() && layerBase[a_slot] != kNoObjectSlot; }
 		std::vector<std::uint32_t> objectFree;
 		std::uint32_t liveObjects = 0;
 		/**
-		 * @brief What was freed since the last publication and is not on a free list yet: nothing is freed while a published
-		 * version that may name it lives. PublishTables moves it into the retirement chain (Coordinator::retirement), which returns
-		 * it once every publication up to then is gone (Coordinator::RecycleRetired). SlotTables keep their own (TakeRetiring).
+		 * @brief Freed slots wait here until no published version can name them. PublishTables moves them into the retirement chain.
 		 */
 		enum RetiredKind : std::uint8_t
 		{
@@ -522,23 +455,19 @@ namespace DCLF
 		{
 			retiring.push_back({ a_kind, a_owner, a_slot, a_extra, slotEpoch });
 		}
-		/** @brief An object slot freed: retiring until no publication names it (ResetObject first). */
+		/** @brief Call ResetObject first. */
 		void RetireObject(std::uint32_t a_slot)
 		{
 			Retire(kRetiredObject, a_slot);
 			++objectsRetiring;
 		}
-		/** @brief The live objects: neither free nor retiring. */
 		std::uint32_t CountLive() const { return static_cast<std::uint32_t>(objects.size() - objectFree.size() - objectsRetiring); }
-		// The retirement chain's node is the publications' (ScenePublication::retirementHold), not the tables': a reader keeping tables
-		// keeps no slot from reuse and no import alive.
+		// The retirement chain node is held by publications, not tables. A reader that keeps only tables keeps no slot from reuse.
 		std::uint64_t publishedSequence = 0;  // the scene publication it was published with (the retirement report's held snapshots)
-		/** @brief Grows every per-object array to a_count, the new slots free. */
 		void GrowObjects(std::size_t a_count);
-		/** @brief Returns a slot to the free state (not to the free list). */
+		/** @brief Returns a slot to the free state, but not to the free list. */
 		void ResetObject(std::uint32_t a_slot);
 
-		/** @brief Drops the per-frame arrays, and the per-object ones too unless the slots persist. */
 		void ClearFrame(bool a_keepObjects);
 		void Clear();
 	};

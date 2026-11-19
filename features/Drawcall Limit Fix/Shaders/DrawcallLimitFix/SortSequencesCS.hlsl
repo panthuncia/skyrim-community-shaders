@@ -1,30 +1,26 @@
-// Drawcall Limit Fix: the scatter of the sort by pipeline (Main/FrameLayout.h, DrawSort). BuildDrawsCS appended this
-// segment's colour sequences to the staging buffer, each with its rank among its sort key's and counted per key (a state class's
-// keys are contiguous: its first key plus the pipeline's index in it); the prefix sum (RenderGraph/PrefixSumCS.hlsl) turned the
-// counts into each key's first slot over every class. A staged sequence carries its class's main sub-range's first slot in its
-// instanceCount word and its class's first key in its firstInstance word (GpuLayouts.h, the class table), so sequence i goes to
-// its class's first slot plus its key's place within the class plus its rank, and those words are restored (1, 0). Each class's
-// call then executes its pipelines' draws together, switching pipeline once per pipeline rather than per draw. Every slot of each
-// class's [first, first + its count) is written exactly once.
+// Drawcall Limit Fix. The scatter step of the sort by pipeline. BuildDrawsCS staged each colour sequence with its rank under its
+// sort key, and a prefix sum turned the per-key counts into first slots. Each sequence goes to its class's first slot plus its
+// key's place plus its rank, and the staged words are restored. Each class's call then switches pipeline once per pipeline
+// rather than per draw. Every slot is written exactly once.
 
-// Must match SortSequencesConstants (Draws/IndirectDraws/Main/FrameLayout.h).
+// Must match SortSequencesConstants in Main/FrameLayout.h.
 cbuffer SortSequencesConstants : register(b0)
 {
 	uint StagingIndex;    // ByteAddressBuffer: DrawSequence[DrawLimit], as BuildDrawsCS appended them
-	uint RanksIndex;      // ByteAddressBuffer: uint[DrawLimit], each the sequence's sort key << 20 | its rank among the key's
+	uint RanksIndex;      // ByteAddressBuffer, each sequence's sort key << 20 | its rank
 	uint OffsetsIndex;    // ByteAddressBuffer: uint[kSortKeys], each key's first slot
-	uint CountIndex;      // ByteAddressBuffer: the draw count words (kCountDrawn, the sequences appended)
+	uint CountIndex;      // ByteAddressBuffer, the draw count words
 	uint SequencesIndex;  // RWByteAddressBuffer: DrawSequence[], what the draw executes
-	uint SequenceStride;  // bytes: DrawSequence (BuildDrawsCS's kSequenceStride)
-	uint DrawLimit;       // the draws' range: BuildDrawsCS's PhaseTwoBase
+	uint SequenceStride;  // bytes, BuildDrawsCS's kSequenceStride
+	uint DrawLimit;       // BuildDrawsCS's PhaseTwoBase
 	uint Padding;
 }
 
 static const uint kCountDrawn = 0;
 static const uint kSortRankBits = 20;  // BuildDrawsCS's
 static const uint kSortRankMask = (1u << kSortRankBits) - 1;
-static const uint kInstanceCountOffset = 120;  // the staged class's first slot (BuildDrawsCS)
-static const uint kFirstInstanceOffset = 132;  // the staged class's first sort key (BuildDrawsCS)
+static const uint kInstanceCountOffset = 120;  // the staged class's first slot
+static const uint kFirstInstanceOffset = 132;  // the staged class's first sort key
 
 [numthreads(64, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID)
 {

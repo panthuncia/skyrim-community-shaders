@@ -1,5 +1,4 @@
-// LocalShadowLights' render-thread sample from DCLF's light selection and light views (the Spot and Point sources' cameras), and the
-// per-object mask test.
+// Samples the local shadow lights from DCLF's selection and light views. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalShadowLights.h"
 
@@ -18,9 +17,7 @@ namespace DCLF
 	LocalShadowLights LocalShadowLights::Sample()
 	{
 		LocalShadowLights out;
-		// DCLF's selection: the lights CalculateActiveShadowCasterLights keeps, a light once (the sun's slots are the sun's),
-		// their mask indices, and per shadowmap descriptor what its cull tests (its source's camera, Shadows/Local's Lights board:
-		// Process2's planes).
+		// Each light appears once. Its volumes are the planes each descriptor's cull tests (Process2).
 		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
 		const auto* selection = LightSelection::Get().Current(sceneFrame);
 		if (!selection)
@@ -33,7 +30,7 @@ namespace DCLF
 			Light sampled;
 			sampled.maskBit = 1u << (selected.maskIndex & 31);
 			sampled.affectsLand = Engine::At<std::uint8_t>(shadowLight, 0x61) != 0;
-			// Gated only while the atlas holding its context was encoded (the commits publish that atlas).
+			// Gated only when the atlas holding its context was encoded.
 			if (selected.portalContext && selected.portalContextIndex != ~0u && !selection->portalContexts.empty())
 				sampled.portalContext = selected.portalContextIndex + 1;
 			if (const auto* niLight = shadowLight->light.get()) {
@@ -62,5 +59,39 @@ namespace DCLF
 			out.lights.push_back(std::move(sampled));
 		}
 		return out;
+	}
+
+	std::uint32_t LocalShadowLights::SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity)
+	{
+		std::uint32_t count = 0;
+		const auto put = [&](const RE::BSLight* a_light, std::uint32_t a_maskIndex) {
+			const auto* niLight = a_light ? a_light->light.get() : nullptr;
+			if (count >= a_capacity || !niLight || niLight->GetFlags().any(RE::NiAVObject::Flag::kHidden))
+				return;
+			const auto& data = niLight->GetLightRuntimeData();
+			auto& out = a_out[count++];
+			out.position[0] = niLight->world.translate.x;
+			out.position[1] = niLight->world.translate.y;
+			out.position[2] = niLight->world.translate.z;
+			out.radius = data.radius.x;
+			// Diffuse times the NiLight's fade times the BSLight's lodDimmer (+0x14).
+			const float scale = data.fade * a_light->lodDimmer;
+			out.color[0] = scale * data.diffuse.red;
+			out.color[1] = scale * data.diffuse.green;
+			out.color[2] = scale * data.diffuse.blue;
+			out.shadowMaskIndex = a_maskIndex;
+			out.affectsLand = a_light->affectLand;
+		};
+		if (const auto* selection = LightSelection::Get().Current(Scene::FrameView::Get().GetFrame()))
+			for (const auto& selected : selection->locals)
+				if (selected.light != selection->sun)
+					put(selected.light, selected.maskIndex);
+		// ShadowSceneNode's active lights (+0x130).
+		auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		if (sceneNode)
+			for (const auto& entry : sceneNode->GetRuntimeData().activeLights)
+				if (const auto* light = entry.get(); light && light->frustrumCull != 0xFFu)
+					put(light, ~0u);
+		return count;
 	}
 }

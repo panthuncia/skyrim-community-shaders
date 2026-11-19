@@ -1,6 +1,6 @@
 #pragma once
 
-// The draws area's observers (Diagnostics/Draws/*.cpp), subscribed by InstallDraws (DrawsInstall.cpp) to the hook points of Events.h.
+// The draws area's observers, subscribed by InstallDraws to the hook points of Events.h.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 
@@ -41,12 +41,12 @@ namespace DCLF::Diagnostics
 	struct MainEpochOutcome;
 	struct AdoptedBound;
 
-	// The culling's counters, every run (CullCounters.cpp).
+	// Culling counters, every run.
 	void NoteCullLatch(const CullLatchWritten& a_written);
 	void ReadCullCounters(const MainEpochDone& a_epoch);
-	// A frame texture the commit could not resolve, described once per register, every run (TextureCommit.cpp).
+	// Described once per register, every run.
 	void DescribeUnresolvedFrameTexture(const FrameTextureUnresolved& a_unresolved);
-	// The main commits' warnings and setup log, every run (CommitLog.cpp).
+	// Commit warnings and setup log, every run.
 	void LogUnfilledFrameBuffer(const FrameBufferUnfilled& a_unfilled);
 	void LogFadeInputsVaried(const FadeInputsVaried& a_varied);
 	void LogShortBuffers(const ShortBuffersDrawn& a_drawn);
@@ -55,14 +55,14 @@ namespace DCLF::Diagnostics
 	void CheckBuildParity(const MainEpochDone& a_epoch);
 	// CS_DCLF_SET_PARITY (SetParity.cpp).
 	void CheckSetParity(const MainEpochDone& a_epoch);
-	// CS_DCLF_SET_PARITY: the colour epoch's state class sub-ranges against its shape's class plan (SetClassParity.cpp).
+	// CS_DCLF_SET_PARITY. State class sub-ranges against the shape's class plan.
 	void CheckSetClassParity(const MainEpochDone& a_epoch);
-	// CS_DCLF_PERSISTENT_PARITY: the frame values' rows and palettes against the engine's (FrameValuesParity.cpp; render thread, waits for
-	// the frame's producer). a_fresh: the plan the walk made this frame (its slots' rows are the next frame's).
+	// CS_DCLF_PERSISTENT_PARITY. Frame value rows and palettes against the engine's. Render thread, waits for the producer.
+	// a_fresh is the plan the walk made this frame, whose rows are the next frame's.
 	void CheckFrameValues(const SceneTables& a_tables, const PlacementPlan* a_fresh);
-	// CS_DCLF_CAPTURE_POINT_PARITY: at the frame's first deferred lighting draw (CapturePoint.cpp).
+	// CS_DCLF_CAPTURE_POINT_PARITY, at the frame's first deferred lighting draw.
 	void CheckCapturePoint();
-	// CS_DCLF_PERSISTENT_PARITY: the kept stores against rebuilds (KeptChecks.cpp), the view masks (ViewMasks.cpp).
+	// CS_DCLF_PERSISTENT_PARITY. Kept stores against rebuilds, and view masks.
 	void MirrorExtras(const ExtrasSending& a_sending);
 	void CheckExtras(const ExtrasSent& a_sent);
 	void CheckObjectRecords(const StoreUpdated<Draws::ObjectRecordStore>& a_updated);
@@ -71,34 +71,30 @@ namespace DCLF::Diagnostics
 	void CheckKeptShadow(const ShadowBuilt& a_built);
 	void CheckExclusionReuse(const ExclusionRebuilt& a_rebuilt);
 	void CheckViewMasks(const DrawsBuiltAhead& a_built);
-	// CS_DCLF_PERSISTENT_PARITY: the sealed set (NamedParity.cpp): every address a snapshot's draws embed against its sealed set; the
-	// commits' targets named and current in the adopted set; the recordings' resolves of buffers their set does not name; and every
-	// shape's ranges and counts within the named versions of the buffers it indexes.
+	// CS_DCLF_PERSISTENT_PARITY. Sealed set checks of embedded addresses, commit targets, recording resolves and shape ranges.
 	void CheckSnapshotAddresses(const SnapshotSealed& a_sealed);
 	void CheckCommitTarget(const CommitTargetStaged& a_staged);
 	void CheckShapeCapacities(const RevisionShapesMade& a_made);
 	void CheckNamedResolves();
-	// The shadow epochs' checks (ShadowChecks.cpp): CS_DCLF_BUILD_PARITY's index pool; the views against the engine's (CS_DCLF_SET_PARITY
-	// or CS_DCLF_PERSISTENT_PARITY); the sun entry (CS_DCLF_PERSISTENT_PARITY).
+	// Shadow epoch checks of the index pool, the views against the engine's, and the sun entry.
 	void CheckIndexPool(const IndexPoolUpdated& a_updated);
 	void CheckShadowTarget(const ShadowTargetPredicted& a_predicted);
 	void CheckOwnViewport(const OwnShadowViewport& a_own);
 	void CheckOwnCamera(const OwnShadowCamera& a_own);
 	void CheckSunEntry(const ShadowViewLatched& a_latched);
-	// CS_DCLF_TARGET_PROBE: the objects whose bound covers the pixel (ColourProbes.cpp).
+	// CS_DCLF_TARGET_PROBE. The objects whose bound covers the pixel.
 	void ProbeTarget(const MainCullViewProj& a_cull);
-	// CS_DCLF_FOLIAGE_PARITY: the compare pass's program and readbacks, its passes after the colour draws (Foliage.cpp).
+	// CS_DCLF_FOLIAGE_PARITY. The compare pass and its readbacks.
 	void MakeFoliageCompare(const FoliageRecordMade& a_made);
 	void AppendFoliagePasses(const MainGraphPasses& a_passes);
-	// CS_DCLF_FRAME_TRACE: every frame's adoption, coverage, main epochs, retirement point and the F10 marker (FrameTrace.cpp); the colour
-	// commit's slot's last colour counts, from NoteCullLatch.
+	// CS_DCLF_FRAME_TRACE. Every frame's adoption, coverage, main epochs, retirement point and the F10 marker.
 	void TraceSnapshotAdopted(const SnapshotAdopted& a_adopted);
 	void TraceEpochCoverage(const EpochCoverageDecided& a_decided);
 	void TraceMainEpoch(const MainEpochOutcome& a_outcome);
 	void TraceAdoptedBound(const AdoptedBound& a_bound);
 	void TraceColourCounts(const Draws::CounterReadback& a_readback, std::uint32_t a_slot);
-	// CS_DCLF_SET_PARITY: every resident slot's shading row sampled, every 60 colour epochs (FrameValuesParity.cpp).
+	// CS_DCLF_SET_PARITY. Every resident slot's shading row sampled, every 60 colour epochs.
 	void CheckShadingSampled(const SceneTables& a_tables);
-	// CS_DCLF_PERSISTENT_PARITY: the catalog's constant tables against ShaderCache's (ConstantTables.cpp).
+	// CS_DCLF_PERSISTENT_PARITY. The catalog's constant tables against ShaderCache's.
 	void CheckConstantTables(const RE::BSShader& a_lighting, const Lookups& a_lookups);
 }

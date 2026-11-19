@@ -1,7 +1,6 @@
 #pragma once
 
-// Tree LOD's hook points: its mirror's (Mirror, render thread), for its parity's observers (Diagnostics/TreeLodParity.cpp), and its depth
-// commit's hole (the commit hook, render thread), for its log and report count (Diagnostics/TreeLodReport.cpp).
+// Tree LOD's hook points for its parity observers and its depth-commit hole log. Render thread.
 
 #include <cstdint>
 

@@ -1,5 +1,4 @@
-// The coordinator's residents (scene lane): the resident set's slots marked, dropped and kept alive, and the fade nodes held for the
-// slots' listings (the components list theirs at the same points: Components.cpp; the fade roots': Features/Fades/FadeRoots.cpp).
+// The coordinator's residents on the scene lane: resident slots marked, dropped and kept alive, and fade nodes held for the slots' listings.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -7,13 +6,12 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 
 #include "Features/DrawcallLimitFix/Diagnostics/ParityCounter.h"
+#include "Utils/SwitchFile.h"
 
 namespace DCLF::Scene
 {
 	namespace
 	{
-		// The pipeline templates' parity (KeepResidentsAlive; scene lane only, the coordinator is one): its counters, reported every
-		// kTemplateReportChecks checks.
 		Diagnostics::ParityCounter templateParity;
 		std::uint64_t templateParityPasses = 0;
 		constexpr std::uint32_t kTemplateParityOffset = 37;
@@ -25,7 +23,6 @@ namespace DCLF::Scene
 		NoteResidentTouched(a_slot);
 		if (residentPos.size() <= a_slot)
 			residentPos.resize(std::max<std::size_t>(a_slot + 1, tables.objects.size()), kNotResident);
-		// The accumulate phase notes the join, and a patch that changed, with the rest of its write.
 		ComponentsResident(a_slot);
 		if (residentPos[a_slot] != kNotResident) {
 			residentPatches[residentPos[a_slot]] = a_patch;
@@ -51,8 +48,9 @@ namespace DCLF::Scene
 		residents.pop_back();
 		residentPatches.pop_back();
 		residentPos[a_slot] = kNotResident;
+		UnstageBinding(a_slot);
 		ComponentsLeft(a_slot);
-		// The scene work's drops reach PrimaryCull as set changes (ApplySet); the accumulate phase's, at once.
+		// Scene work drops reach PrimaryCull as set changes. The accumulate phase's reach it at once.
 		if (a_slot < tables.objectGeometry.size() && tables.objectGeometry[a_slot]) {
 			if (!holdPrimaryNotes)
 				PrimaryCull::Get().NoteMemberLost(tables.objectGeometry[a_slot]);
@@ -65,7 +63,7 @@ namespace DCLF::Scene
 		}
 		if (a_restore)
 			ResetAccumulatedHalf(a_slot);
-		// A layer and its base are members together (WriteLayer): the other leaves too.
+		// A layer and its base are members together.
 		const std::uint32_t partner = tables.IsLayer(a_slot) ? tables.layerBase[a_slot] : a_slot < tables.layerOf.size() ? tables.layerOf[a_slot] : kNoObjectSlot;
 		if (partner != kNoObjectSlot)
 			DropResidentSlot(partner, a_restore);
@@ -90,6 +88,48 @@ namespace DCLF::Scene
 		}
 		residents.clear();
 		residentPatches.clear();
+		for (const auto& [slot, staged] : stagedBindings)
+			ReleaseStagedReferences(staged);
+		stagedBindings.clear();
+	}
+
+	void Coordinator::ReleaseStagedReferences(const StagedBinding& a_staged)
+	{
+		tables.pipelineSlots.Release(a_staged.pipeline, a_staged.pipelineGeneration);
+		tables.materialSlots.Release(a_staged.material, a_staged.materialGeneration);
+	}
+
+	void Coordinator::AddStagedReferences(const StagedBinding& a_staged)
+	{
+		tables.pipelineSlots.AddRef(a_staged.pipeline, a_staged.pipelineGeneration);
+		tables.materialSlots.AddRef(a_staged.material, a_staged.materialGeneration);
+	}
+
+	void Coordinator::StageBinding(std::uint32_t a_slot, std::uint32_t a_pipeline, std::uint32_t a_material)
+	{
+		auto [it, fresh] = stagedBindings.try_emplace(a_slot);
+		if (!fresh && it->second.pipeline == a_pipeline && it->second.material == a_material)
+			return;
+		if (!fresh)
+			ReleaseStagedReferences(it->second);
+		// Referenced like a record's binding, or the sweep would free the slots before they are ready.
+		it->second = { a_pipeline, a_material, tables.pipelineSlots.Generation(a_pipeline), tables.materialSlots.Generation(a_material) };
+		AddStagedReferences(it->second);
+		NoteResidentTouched(a_slot);
+		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
+		if (cellTrace && a_slot < tables.objects.size())
+			logger::info("[DCLF] cell trace: pass {} frame {} slot {} {} keeps drawing pipeline {} material {} until pipeline {} material {} is ready", passSerial, sceneFrame, a_slot,
+				static_cast<const void*>(tables.objectGeometry[a_slot]), tables.objects[a_slot].pipelineIndex, tables.objects[a_slot].materialIndex, a_pipeline, a_material);
+	}
+
+	void Coordinator::UnstageBinding(std::uint32_t a_slot)
+	{
+		const auto it = stagedBindings.find(a_slot);
+		if (it == stagedBindings.end())
+			return;
+		ReleaseStagedReferences(it->second);
+		stagedBindings.erase(it);
+		NoteResidentTouched(a_slot);
 	}
 
 	void Coordinator::KeepResidentsAlive()
@@ -101,7 +141,6 @@ namespace DCLF::Scene
 		if (materialMembers.size() < tables.materials.size())
 			materialMembers.resize(tables.materials.size(), 0);
 		std::vector<std::uint32_t> pipelinesTouched, materialsTouched;
-		// A resident's keys now (none for a slot that is not resident).
 		auto keysOf = [&](std::uint32_t a_slot) {
 			ResidentCounted keys;
 			if (!IsResidentSlot(a_slot) || a_slot >= tables.objects.size())
@@ -111,34 +150,49 @@ namespace DCLF::Scene
 			keys.material = object.materialIndex;
 			return keys;
 		};
+		if (stagedCounted.size() < tables.objects.size())
+			stagedCounted.resize(tables.objects.size());
+		auto stagedKeysOf = [&](std::uint32_t a_slot) {
+			ResidentCounted keys;
+			if (const auto it = stagedBindings.find(a_slot); it != stagedBindings.end() && IsResidentSlot(a_slot))
+				keys = { it->second.pipeline, it->second.material };
+			return keys;
+		};
+		auto uncountIn = [&](SlotMembers& a_pipelines, ResidentCounted& a_was, std::uint32_t a_slot) {
+			if (a_was.pipeline != ResidentCounted::kNone) {
+				a_pipelines.Remove(a_was.pipeline, a_slot);
+				pipelinesTouched.push_back(a_was.pipeline);
+			}
+			if (a_was.material != ResidentCounted::kNone && a_was.material < materialMembers.size()) {
+				--materialMembers[a_was.material];
+				materialsTouched.push_back(a_was.material);
+			}
+			a_was = {};
+		};
+		auto countIn = [&](SlotMembers& a_pipelines, ResidentCounted& a_counted, const ResidentCounted& a_keys, std::uint32_t a_slot) {
+			if (a_keys.pipeline == ResidentCounted::kNone)
+				return;
+			a_pipelines.Add(a_keys.pipeline, a_slot);
+			pipelinesTouched.push_back(a_keys.pipeline);
+			if (materialMembers.size() <= a_keys.material)
+				materialMembers.resize(std::size_t(a_keys.material) + 1, 0);
+			++materialMembers[a_keys.material];
+			materialsTouched.push_back(a_keys.material);
+			a_counted = a_keys;
+		};
 		auto uncount = [&](std::uint32_t a_slot) {
-			auto& was = counted[a_slot];
-			if (was.pipeline != ResidentCounted::kNone) {
-				pipelineMembers.Remove(was.pipeline, a_slot);
-				pipelinesTouched.push_back(was.pipeline);
-			}
-			if (was.material != ResidentCounted::kNone && was.material < materialMembers.size()) {
-				--materialMembers[was.material];
-				materialsTouched.push_back(was.material);
-			}
-			was = {};
+			uncountIn(pipelineMembers, counted[a_slot], a_slot);
+			uncountIn(stagedPipelineMembers, stagedCounted[a_slot], a_slot);
 		};
 		auto count = [&](std::uint32_t a_slot) {
-			const auto keys = keysOf(a_slot);
-			if (keys.pipeline == ResidentCounted::kNone)
-				return;
-			pipelineMembers.Add(keys.pipeline, a_slot);
-			pipelinesTouched.push_back(keys.pipeline);
-			if (materialMembers.size() <= keys.material)
-				materialMembers.resize(std::size_t(keys.material) + 1, 0);
-			++materialMembers[keys.material];
-			materialsTouched.push_back(keys.material);
-			counted[a_slot] = keys;
+			countIn(pipelineMembers, counted[a_slot], keysOf(a_slot), a_slot);
+			countIn(stagedPipelineMembers, stagedCounted[a_slot], stagedKeysOf(a_slot), a_slot);
 		};
 		if (residentMaintenanceDirty) {
-			// Every residency ended, or the tables were reset: everything counted again.
 			DCLF_ZONE("CS.DCLF.Accumulate.RebuildResidentMaintenance");
 			counted.assign(tables.objects.size(), ResidentCounted{});
+			stagedCounted.assign(tables.objects.size(), ResidentCounted{});
+			stagedPipelineMembers.Clear();
 			pipelineMembers.Clear();
 			materialMembers.assign(tables.materials.size(), 0);
 			tables.ClearUsed();
@@ -147,8 +201,7 @@ namespace DCLF::Scene
 			ComponentsRecount(true, {});
 			residentMaintenanceDirty = false;
 		} else {
-			// The slots named since: their old keys out (all of them first: a fade root freed and listed again for another node
-			// within the frame), then their keys now.
+			// Take all old keys out first, since a fade root can be freed and listed again for another node within the frame.
 			std::sort(residentsTouched.begin(), residentsTouched.end());
 			residentsTouched.erase(std::unique(residentsTouched.begin(), residentsTouched.end()), residentsTouched.end());
 			for (const std::uint32_t slot : residentsTouched)
@@ -160,29 +213,23 @@ namespace DCLF::Scene
 			ComponentsRecount(false, residentsTouched);
 		}
 		residentsTouched.clear();
-		// The used sets: a pipeline or material is used while a resident holds it. The joins marked theirs as they bound; one
-		// whose join failed is no resident's.
 		pipelinesTouched.insert(pipelinesTouched.end(), joinMarkedPipelines.begin(), joinMarkedPipelines.end());
 		materialsTouched.insert(materialsTouched.end(), joinMarkedMaterials.begin(), joinMarkedMaterials.end());
 		joinMarkedPipelines.clear();
 		joinMarkedMaterials.clear();
 		for (const std::uint32_t p : pipelinesTouched)
-			tables.SetPipelineUsed(p, pipelineMembers.Count(p) != 0);
+			tables.SetPipelineUsed(p, pipelineMembers.Count(p) != 0 || stagedPipelineMembers.Count(p) != 0);
 		for (const std::uint32_t m : materialsTouched)
 			tables.SetMaterialUsed(m, m < materialMembers.size() && materialMembers[m] != 0);
-		// A pipeline's lighting template is its first member's held property (SlotProperty). It moves where the first member may
-		// change, a pipeline whose membership changed (pipelinesTouched), and where that member's entry takes another property: a leaf
-		// update's swap (HoldProperties, on PushLeafUpdate) rewrites no slot, so it notes the slot (NoteResidentTouched), whose recount
-		// touches its pipeline. The old reference goes to the retirement chain, so the template takes the new one this pass.
+		// A pipeline's lighting template is its first member's held property. A leaf update's property swap rewrites no slot, so it notes
+		// the slot here to have its pipeline recounted.
 		auto templateOf = [&](std::uint32_t a_pipeline) {
-			const std::uint32_t slot = pipelineMembers.First(a_pipeline);
+			const std::uint32_t slot = pipelineMembers.Count(a_pipeline) ? pipelineMembers.First(a_pipeline) : stagedPipelineMembers.First(a_pipeline);
 			return slot != ~0u ? SlotProperty(slot) : nullptr;
 		};
 		for (const std::uint32_t p : pipelinesTouched)
-			if (pipelineMembers.Count(p) && p < tables.geometryTemplate.size())
+			if ((pipelineMembers.Count(p) || stagedPipelineMembers.Count(p)) && p < tables.geometryTemplate.size())
 				tables.geometryTemplate[p] = templateOf(p);
-		// The parity (CS_DCLF_PERSISTENT_PARITY, every 60 passes): every pipeline's template against its first member's property now;
-		// a difference is a held property that moved with no recount of its slot.
 		if (Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kTemplateParityOffset)) {
 			auto& tp = templateParity;
 			for (std::uint32_t p = 0; p < pipelineMembers.lists.size() && p < tables.geometryTemplate.size(); ++p)
@@ -207,13 +254,11 @@ namespace DCLF::Scene
 		const auto it = geometry ? tracked.find(const_cast<RE::BSGeometry*>(geometry)) : tracked.end();
 		if (it != tracked.end() && it->second.fadeNodeRef.get() == a_node)
 			return it->second.fadeNodeRef;
-		// The mirror names another node than the entry holds (a field no capture brought): taken now, as at a capture (AcquireFadeNode).
 		if (it != tracked.end()) {
 			HandBack(std::move(it->second.fadeNodeRef));
 			if (AcquireFadeNode(it->second, a_node, "a listing"))
 				return it->second.fadeNodeRef;
 		}
-		// Asked of the render thread: listed when its answer comes (ApplyFadeNodeAnswers).
 		++referenceStats.fadeRootsUnowned;
 		return nullptr;
 	}

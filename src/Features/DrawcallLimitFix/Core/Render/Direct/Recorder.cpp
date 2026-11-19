@@ -1,6 +1,6 @@
-// The CPU-driven pipeline's recorder (Recorder.h): a culled batch's direct draws, one plain indexed draw a resident sequence.
+// The CPU-driven pipeline's recorder: one plain indexed draw per resident sequence of a culled batch.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Recorder.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/IndexPool.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
+#include "RenderGraph/Backend.h"
 
 #include <rhi.h>
 
@@ -27,7 +28,7 @@ namespace DCLF::Direct
 {
 	namespace
 	{
-		// The words a direct draw pushes per draw: its sequence's address through kDirectDrawPushFlags (BeginList zeroes the rest once).
+		// Words a direct draw pushes per draw. BeginList zeroes the rest once.
 		constexpr std::uint32_t kDirectDrawWords = kDirectDrawPushFlags + 1;
 		static_assert(kZDrawPushSequences == 0 && kShadowDrawPushSequences == 0 && kDirectDrawWords <= kDrawPushWords);
 
@@ -36,11 +37,15 @@ namespace DCLF::Direct
 			a_words[0] = static_cast<std::uint32_t>(a_value);
 			a_words[1] = static_cast<std::uint32_t>(a_value >> 32);
 		}
+		void Split(std::uint32_t* a_words, RenderGraph::BufferRef a_ref)
+		{
+			a_words[0] = a_ref.viewSlot;
+			a_words[1] = a_ref.byteOffset;
+		}
 
 		/**
-		 * @brief Binds the list's layout and the push data its draws keep: the frame (or view) words, then for every layout but the main
-		 * one the draw range zeroed, the set's row bases and the frame's animated rows (each draw pushes its first kDirectDrawWords). a_main:
-		 * the main layout, a pushed colour draw's (kExpPushedColour), whose draws push their whole range.
+		 * @brief Binds the list's layout and the push data its draws share. a_main is the main layout of a pushed colour list,
+		 * whose draws push their whole range.
 		 */
 		void BindListLayout(RecordContext& a_context, bool a_main)
 		{
@@ -58,28 +63,28 @@ namespace DCLF::Direct
 			a_context.mainLayoutBound = a_main;
 			if (a_main)
 				return;
-			// The draw range whole, once: each draw then pushes its first kDirectDrawWords.
+			// Zero the whole draw range once. Each draw then pushes only its first kDirectDrawWords.
 			const std::uint32_t zeros[kDrawPushWords]{};
 			list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, zeros);
-			// The set's row bases (its sequences' rows are relative), kept by every draw's push of its first words.
+			// The sequences' rows are relative to these bases.
 			std::uint32_t bases[4]{};
 			const auto& set = a_context.set;
 			if (a_context.pass == RecordPass::Shadow) {
-				Split(bases + 2, set.shadowRowsBase);
+				Split(bases + 2, set.shadowRowsRef);
 			} else {
-				Split(bases, set.pipelineRowsBase);
-				Split(bases + 2, set.materialRowsBase);
+				Split(bases, set.pipelineRowsRef);
+				Split(bases + 2, set.materialRowsRef);
 			}
 			list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushRowBases, 4, bases);
-			// The main rows' animated rows read from the frame's copy (the texture transforms' TexcoordOffset).
-			if (a_context.pass != RecordPass::Shadow && bindings.animatedRows) {
+			// Animated rows from the frame's copy, for the texture transforms' TexcoordOffset.
+			if (a_context.pass != RecordPass::Shadow && bindings.animatedRowsRef) {
 				std::uint32_t animated[2]{};
-				Split(animated, bindings.animatedRows);
+				Split(animated, bindings.animatedRowsRef);
 				list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushAnimatedRows, 2, animated);
 			}
 		}
 
-		/** @brief The key's pipeline under the main layout a pushed list draws set index a_index with (null: its pulled one). */
+		/** @brief The key's own pipeline under the main layout for a pushed list, or null to use the pulled one. */
 		rhi::PipelineHandle PushedPipeline(const RecordContext& a_context, std::uint32_t a_index)
 		{
 			if (!a_context.pushedColour)
@@ -89,7 +94,7 @@ namespace DCLF::Direct
 			return a_index < pipelines.size() ? pipelines[a_index] : rhi::PipelineHandle{};
 		}
 
-		/** @brief The pulled pipeline bucket a_bucket binds in a_pass (ViewBuckets), and a shadow view's its vertex layout; null: none. */
+		/** @brief The pulled pipeline a bucket binds in a pass, and a shadow view's vertex layout. Null for none. */
 		rhi::PipelineHandle PulledBucketPipeline(const ViewBatchSet& a_set, ViewType a_view, RecordPass a_pass, const RecordBindings& a_bindings, std::uint32_t a_bucket, std::uint64_t& a_vertexLayout)
 		{
 			a_vertexLayout = 0;
@@ -115,7 +120,7 @@ namespace DCLF::Direct
 				return index < bindings.main->plainDepth.size() ? bindings.main->plainDepth[index] : rhi::PipelineHandle{};
 			case RecordPass::Shadow:
 				{
-					// The bucket is a key slot: its pipeline is the view's map row's (kNone, past the set: none yet).
+					// The bucket is a key slot, so its pipeline comes from the view's map row.
 					const auto& shadow = *bindings.shadow;
 					if (index >= bindings.shadowMapRow.size())
 						return {};
@@ -130,7 +135,7 @@ namespace DCLF::Direct
 			}
 		}
 
-		/** @brief The pipeline bucket a_bucket binds in the context's pass: a pushed list's own, else its pulled one. */
+		/** @brief The pipeline a bucket binds, pushed if available, else pulled. */
 		rhi::PipelineHandle BucketPipeline(const RecordContext& a_context, std::uint32_t a_bucket, std::uint64_t& a_vertexLayout)
 		{
 			if (a_context.pushedColour && (a_context.pass == RecordPass::Depth || a_context.pass == RecordPass::Colour)) {
@@ -144,14 +149,11 @@ namespace DCLF::Direct
 			return PulledBucketPipeline(a_context.set, a_context.view, a_context.pass, a_context.bindings, a_bucket, a_vertexLayout);
 		}
 
-		/**
-		 * @brief Binds a_bucket's pipeline unless it is bound (a shadow bucket's vertex layout with it); false: the bucket has none (its
-		 * draws are skipped, as a GPU bucket without one).
-		 */
+		/** @brief Binds a_bucket's pipeline unless already bound. False when the bucket has none, and its draws are skipped. */
 		bool BindBucket(RecordContext& a_context, std::uint32_t a_bucket)
 		{
 			if (a_context.pass == RecordPass::Refraction || a_bucket == a_context.boundBucket)
-				return a_context.boundPipeline.valid();  // the refraction's: BeginList's
+				return a_context.boundPipeline.valid();  // refraction's, bound by BeginList
 			a_context.boundBucket = a_bucket;
 			const rhi::PipelineHandle previous = a_context.boundPipeline;
 			a_context.boundPipeline = BucketPipeline(a_context, a_bucket, a_context.boundVertexLayout);
@@ -170,11 +172,7 @@ namespace DCLF::Direct
 			return a_context.boundPipeline.valid();
 		}
 
-		/**
-		 * @brief One resident sequence's draw: its address, the layout's second address and vertex layout word as the GPU path's plain
-		 * draws push them per call (RecordBucketDraw, ShadowViewPass, RefractionDrawPass), the draw's object word with
-		 * kDirectFlagObjectWord, then its arguments with the index pool's first of its geometry slot.
-		 */
+		/** @brief One sequence's direct draw, pushing the same words the GPU path's plain draws push, then its arguments. */
 		bool DrawSequenceDirect(RecordContext& a_context, std::uint32_t a_sequence, std::uint32_t a_objectWord)
 		{
 			const auto& set = a_context.set;
@@ -190,8 +188,7 @@ namespace DCLF::Direct
 				return false;
 			auto& list = a_context.list;
 			if (a_context.mainLayoutBound) {
-				// A device-generated draw's Constant argument (its sequence's bytes 4-99, BuildDrawsCS's StoreSequence): the rows placed at
-				// the set's bases (an animated material row at its row of the frame's copy), their blocks from them, the draw's object word.
+				// The sequence's bytes 4-99 as a device-generated draw's Constant argument, with rows placed at the set's bases.
 				const DrawSequence* source = set.Sequence(a_sequence);
 				if (!source)
 					return false;
@@ -210,16 +207,22 @@ namespace DCLF::Direct
 				list.DrawIndexed(args.indexCount, 1, poolFirst + args.firstIndex, 0, 0);
 				return true;
 			}
-			a_context.runWordsPushed = false;
+			// A D3D12 run's signature left its last instance in the instance word, so reset it to 0 for direct draws.
+			if (std::exchange(a_context.runWordsPushed, false) && a_context.indirect && a_context.indirect->signatureFor) {
+				const std::uint32_t zero = 0;
+				list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDrawPushInstance, 1, &zero);
+			}
 			std::uint32_t words[kDirectDrawWords]{};
-			Split(words + kZDrawPushSequences, set.sequencesAddress + std::uint64_t(a_sequence) * sizeof(DrawSequence));
+			Split(words + kZDrawPushSequences, set.sequencesRef + std::uint64_t(a_sequence) * sizeof(DrawSequence));
 			switch (a_context.pass) {
 			case RecordPass::Shadow:
-				// The layout's rows word 0, as ShadowViewPass's (each draw's row is its sequence's); its bucket's vertex layout.
 				Split(words + kShadowDrawPushVertexLayout, a_context.boundVertexLayout);
 				break;
 			case RecordPass::Refraction:
-				Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrame);
+				if (bindings.lodFadeFrameRef)
+					Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrameRef);
+				else
+					Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrame);
 				break;
 			default:
 				words[kZDrawPushOffsetDepth] = bindings.offsetDepth ? 1u : 0u;
@@ -234,14 +237,13 @@ namespace DCLF::Direct
 			return true;
 		}
 
-		// The cross-fade copy's object word bit (Records.h, kObjectCrossfadeCopy; DCLFAlphaFade's a_copy).
+		// Records.h's kObjectCrossfadeCopy.
 		constexpr std::uint32_t kCrossfadeCopyBit = 1u << 30;
-		// CulledBatch::drawMasks: every sequence, none as the copy.
 		constexpr std::uint32_t kDrawAll = 0xFFFFu;
 
 		/**
-		 * @brief Whether a lane's sequence a_sequence (its index among the lane's) is drawn under a_mask (CulledBatch::drawMasks), and its
-		 * object word. A lane's sequences past the mask's 16 are drawn when it draws all of them, never as the copy.
+		 * @brief Whether a lane's sequence is drawn under a_mask, and its object word. Sequences past the mask's 16 are drawn only
+		 * when all are, never as the copy.
 		 */
 		bool SequenceDrawn(std::uint32_t a_mask, std::uint32_t a_sequence, std::uint32_t a_objectWord, std::uint32_t& a_word)
 		{
@@ -255,10 +257,10 @@ namespace DCLF::Direct
 			return true;
 		}
 
-		/** @brief A kept lane's draws: its consecutive sequences (its partitions) a_mask draws, with its bucket's pipeline and its object word. */
+		/** @brief Draws a kept lane's sequences that a_mask selects. */
 		void DrawLane(RecordContext& a_context, const ViewBatch& a_batch, std::uint32_t a_lane, std::uint32_t a_objectWord, std::uint32_t a_mask)
 		{
-			// A cull-only lane (kLaneCullOnly: no sequences, its bucket unread) draws nothing.
+			// A cull-only lane has no sequences and draws nothing.
 			const std::uint32_t count = a_batch.sequenceCount ? a_batch.sequenceCount[a_lane] : 1u;
 			if (!(a_mask & kDrawAll) || !count)
 				return;
@@ -300,12 +302,12 @@ namespace DCLF::Direct
 			}
 		}
 
-		/** @brief A forward draw's sort key (ForwardSortCS.hlsl, SortKey) and what records it. */
+		/** @brief A forward draw's sort key, as in ForwardSortCS.hlsl. */
 		struct ForwardDraw
 		{
 			float depth = 0.0f;
 			std::uint32_t group = 0;
-			std::uint32_t ordinal = 0;  // 0: a plain draw
+			std::uint32_t ordinal = 0;  // 0 for a plain draw
 			std::uint32_t object = 0;
 			std::uint32_t first = 0;
 			std::uint32_t sequence = 0;
@@ -313,7 +315,7 @@ namespace DCLF::Direct
 			std::uint32_t objectWord = 0;
 		};
 
-		// ForwardSortCS.hlsl's Before: whether a draws before b in the blended order.
+		// Matches ForwardSortCS.hlsl's Before.
 		bool Before(const ForwardDraw& a, const ForwardDraw& b)
 		{
 			if (a.depth != b.depth)
@@ -329,11 +331,14 @@ namespace DCLF::Direct
 			return a.first < b.first;
 		}
 
-		/** @brief A batch's indirect draws of a part (CulledBatch::runs), one a run, each binding its pipeline unless it is bound. */
+		/** @brief A batch's indirect draws for one part, one per run. */
 		void RecordRuns(RecordContext& a_context, const CulledBatch& a_batch, std::uint32_t a_part)
 		{
 			auto& list = a_context.list;
 			const IndirectBuffer& buffer = *a_context.indirect;
+			const rhi::CommandSignatureHandle signature = buffer.signatureFor ? buffer.signatureFor(a_context.layout) : buffer.signature;
+			if (!signature.valid())
+				return;
 			const auto sameHandle = [](rhi::PipelineHandle a, rhi::PipelineHandle b) { return a.index == b.index && a.generation == b.generation; };
 			std::uint32_t drawn = 0;
 			for (std::uint32_t r = a_batch.runStart[a_part]; r < a_batch.runStart[a_part + 1]; ++r) {
@@ -343,10 +348,9 @@ namespace DCLF::Direct
 					list.BindPipeline(run.pipeline);
 					++a_context.binds;
 				}
-				// A direct draw's words, a shadow pipeline's layout, or the list's first run: the run's words.
 				if (bind || !a_context.runWordsPushed) {
 					std::uint32_t words[kDirectDrawWords]{};
-					Split(words + kZDrawPushSequences, a_context.set.sequencesAddress);
+					Split(words + kZDrawPushSequences, a_context.set.sequencesRef);
 					if (a_context.pass == RecordPass::Shadow)
 						Split(words + kShadowDrawPushVertexLayout, run.vertexLayout);
 					else
@@ -356,11 +360,11 @@ namespace DCLF::Direct
 					++a_context.pushes;
 					a_context.runWordsPushed = true;
 				}
-				// BindBucket's state: a later direct draw binds its bucket again.
+				// Forces a later direct draw to bind its bucket again.
 				a_context.boundBucket = ~0u;
 				a_context.boundPipeline = run.pipeline;
 				a_context.boundVertexLayout = run.vertexLayout;
-				list.ExecuteIndirect(buffer.signature, buffer.buffer, std::uint64_t(run.first) * sizeof(IndirectDraw), {}, 0, run.count);
+				list.ExecuteIndirect(signature, buffer.buffer, std::uint64_t(run.first) * sizeof(IndirectDraw) + buffer.argumentsOffset, {}, 0, run.count);
 				++a_context.indirects;
 				drawn += run.count;
 			}
@@ -368,7 +372,7 @@ namespace DCLF::Direct
 			CountDrawn(a_context, drawn);
 		}
 
-		// The recording thread's merge buffer: reused, grown to the largest forward list it has sorted (never shared, never capped).
+		// Per recording thread, reused and grown to the largest forward list, never shared.
 		thread_local std::vector<ForwardDraw> forwardDraws;
 	}
 
@@ -386,7 +390,7 @@ namespace DCLF::Direct
 		case ViewType::Refraction:
 			return RecordPass::Refraction;
 		default:
-			return RecordPass::Shadow;  // Sun, Spot, Point, SkyOccluder, PrecipOccluder
+			return RecordPass::Shadow;
 		}
 	}
 
@@ -404,24 +408,24 @@ namespace DCLF::Direct
 		                                                                                    bindings.main->zLayout;
 		if (!layout.valid() || (a_context.pass == RecordPass::Refraction && !bindings.main->refraction.valid()))
 			return false;
+		a_context.layout = layout;
 		auto& list = a_context.list;
 		list.SetDescriptorHeaps(bindings.resourceHeap, bindings.samplerHeap);
 		list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
-		// A colour list binds the main layout at its first bucket with a colour pipeline (BindBucket). The pushed pipelines are the main
-		// set's, built for the main pass's formats: the reflection's faces draw into the cube's (R16G16B16A16 against the main target's
-		// R11G11B10), so they keep their own view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911).
-		a_context.pushedColour = !a_context.indirect && bindings.main && bindings.main->layout.valid() &&
-		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && ExperimentOn(kExpPushedColour) &&
+		// Pushed pipelines are built for the main pass's formats. The reflection faces draw into an R16G16B16A16 cube, so they keep
+		// their view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911). D3D12 builds no unpulled pipelines.
+		a_context.pushedColour = !a_context.indirect && !::RenderGraph::Backend::IsD3D12() && bindings.main && bindings.main->layout.valid() &&
+		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && a_context.mainTargets && ExperimentOn(kExpPushedColour) &&
 		                              !bindings.main->colour.empty()) ||
 		                          (a_context.pass == RecordPass::Depth && ExperimentOn(kExpPushedDepth) && !bindings.offsetDepth && !bindings.main->depth.empty()));
 		BindListLayout(a_context, false);
 		a_context.runWordsPushed = false;
 		if (a_context.indirect) {
 			std::uint32_t records[2]{};
-			Split(records, a_context.indirect->address);
+			Split(records, a_context.indirect->ref);
 			list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDirectDrawPushDrawRecords, 2, records);
 		}
-		list.SetIndexBuffer(rhi::IndexBufferView{ bindings.indexPool, 0, 0, rhi::Format::R16_UInt });  // the whole buffer
+		list.SetIndexBuffer(rhi::IndexBufferView{ bindings.indexPool, 0, 0, rhi::Format::R16_UInt });
 		if (a_context.pass == RecordPass::Refraction) {
 			a_context.boundBucket = 0;
 			a_context.boundPipeline = bindings.main->refraction;
@@ -438,7 +442,7 @@ namespace DCLF::Direct
 			return indices;
 		const ViewBatch& batch = *a_batch.batch;
 		const RecordPass pass = PassOf(a_view, a_depthPass);
-		// Main's colour pass: the terrain groups apart (RecordTerrainGroup draws them in the second pass).
+		// Main colour draws the terrain groups apart, in the second pass.
 		const bool parts = a_view == ViewType::Main && pass == RecordPass::Colour;
 		const auto partOf = [&](std::uint32_t a_lane) -> std::uint32_t {
 			if (!parts)
@@ -446,7 +450,7 @@ namespace DCLF::Direct
 			const std::uint32_t flags = FlagsOf(batch, a_lane);
 			return (flags & kLaneTerrainGroup1) ? 1u : (flags & kLaneTerrainGroup2) ? 2u : 0u;
 		};
-		// The most it can write, by part, and the most runs: each part's draws are consecutive in the buffer.
+		// Each part's draws are consecutive in the buffer.
 		std::array<std::uint32_t, 3> mostDraws{}, mostRuns{}, lastBucket{ ~0u, ~0u, ~0u };
 		for (std::uint32_t k = 0; k < a_batch.count; ++k) {
 			const std::uint32_t lane = a_batch.lanes[k];
@@ -505,13 +509,14 @@ namespace DCLF::Direct
 				if (poolFirst == Draws::IndexPool::kNoRange)
 					continue;
 				const std::uint32_t at = cursor[part]++;
-				// A run goes on while its pipeline does: buckets sharing one (the Z groups') make one run.
+				// Buckets sharing a pipeline, such as the Z groups, make one run.
 				IndirectRun* open = runEnd[part] > runBase[part] ? &runs[runEnd[part] - 1] : nullptr;
 				if (!open || !sameHandle(open->pipeline, pipeline[part]) || open->vertexLayout != layout[part])
 					open = new (&runs[runEnd[part]++]) IndirectRun{ pipeline[part], layout[part], at, 0u };
 				++open->count;
-				// Write-combined memory: written in order, never read.
+				// Write-combined memory, so write in order and never read.
 				IndirectDraw& draw = mapped[at];
+				draw.instance = at;
 				draw.indexCount = args->indexCount;
 				indices += args->indexCount;
 				draw.instanceCount = 1;
@@ -522,7 +527,6 @@ namespace DCLF::Direct
 				draw.objectWord = word;
 			}
 		}
-		// The parts' runs, closed up.
 		std::uint32_t written = runEnd[0];
 		a_batch.runStart[0] = 0;
 		a_batch.runStart[1] = written;
@@ -546,7 +550,7 @@ namespace DCLF::Direct
 		}
 		const std::uint32_t before = a_context.drawn;
 		const ViewBatch& batch = *a_batch.batch;
-		// Main's colour pass: the terrain groups draw in the second pass (RecordTerrainGroup).
+		// Main colour draws the terrain groups in the second pass.
 		const bool skipTerrain = a_context.view == ViewType::Main && a_context.pass == RecordPass::Colour;
 		for (std::uint32_t k = 0; k < a_batch.count; ++k) {
 			const std::uint32_t lane = a_batch.lanes[k];
@@ -575,14 +579,14 @@ namespace DCLF::Direct
 			const ViewBatch& batch = *culled->batch;
 			for (std::uint32_t k = 0; k < culled->count; ++k) {
 				const std::uint32_t lane = culled->lanes[k];
-				// The sphere's nearest point to the plane: the casters nearest the light first.
+				// The sphere's nearest point to the plane, so casters nearest the light go first.
 				const float distance = batch.cx ? a_plane[0] * batch.cx[lane] + a_plane[1] * batch.cy[lane] + a_plane[2] * batch.cz[lane] + a_plane[3] - batch.r[lane] : 0.0f;
 				nearest = (std::min)(nearest, distance);
 				farthest = (std::max)(farthest, distance);
 				items.push_back({ distance, 0u, batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u, culled, k });
 			}
 		}
-		// Slabs of the depth range, each drawn by pipeline (fewer binds), nearest slab first; one slab a draw (a_slabs 0): by distance alone.
+		// Nearest slab first, each drawn by pipeline for fewer binds. With a_slabs 0, sort by distance alone.
 		if (a_slabs && farthest > nearest) {
 			const float scale = static_cast<float>(a_slabs) / (farthest - nearest);
 			for (auto& item : items)
@@ -638,7 +642,7 @@ namespace DCLF::Direct
 			for (std::uint32_t k = 0; k < culled->count; ++k) {
 				const std::uint32_t lane = culled->lanes[k];
 				const std::uint32_t object = batch.object[lane];
-				// StageForwardKey: a BSOrderedNode group's leaf at its node's centre (its ordinal in forwardSort.w), else at its bound's.
+				// A BSOrderedNode group's leaf sorts at its node's centre, otherwise at its bound's centre.
 				ForwardDraw draw{};
 				draw.object = object;
 				draw.bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
@@ -654,7 +658,7 @@ namespace DCLF::Direct
 						draw.group = (std::bit_cast<std::uint32_t>(centre[0]) * 0x9E3779B1u) ^ (std::bit_cast<std::uint32_t>(centre[1]) * 0x85EBCA77u) ^
 						             (std::bit_cast<std::uint32_t>(centre[2]) * 0xC2B2AE3Du);
 				}
-				// Each of its sequences (partitions) is a staged draw of its own, as the GPU path stages them.
+				// Each sequence is staged as its own draw, as on the GPU path.
 				const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
 				for (std::uint32_t s = 0; s < count; ++s) {
 					if (!SequenceDrawn(mask, s, laneWord, draw.objectWord))
@@ -688,7 +692,6 @@ namespace DCLF::Direct
 		if (from >= to)
 			return;
 		const std::uint32_t before = a_context.drawn;
-		// In list order: the batches are, and each one's kept lanes are in lane order.
 		for (const CulledBatch* culled : a_batches) {
 			if (!culled || !culled->batch)
 				continue;
@@ -719,20 +722,19 @@ namespace DCLF::Direct
 			const auto& family = families[f];
 			if (!draw.pipelines || !draw.arguments.valid() || !family.taken || !family.contribution.main.record)
 				continue;
-			// A family's colour tests EQUAL against its depth draw, under the Z-prepass layout and frame push data (MainViewPasses).
+			// A family's colour tests EQUAL against its depth draw.
 			if (colour) {
 				list.BindLayout(bindings.main->zLayout);
 				list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, bindings.framePush.data());
 			}
-			// One phase: no HZB in the CPU pipeline, so the depth draw is phase 1's (its single-phase cull writes those arguments).
+			// No HZB in the CPU pipeline, so the depth draw is phase 1's.
 			family.contribution.main.record({ list, colour ? Api::DrawFamilyPass::Colour : Api::DrawFamilyPass::Depth, draw.pipelines, draw.row, draw.arguments, {}, {} });
 			++drawn;
 		}
-		// Each family's draw (its indirect executions) counted as one of the main view's: a site that drew only families drew something.
+		// Counts each family's draw so a site that drew only families still counts as drawing.
 		a_context.drawn += drawn;
 		CountDrawn(a_context, drawn);
-		// The families bound their own pipelines and draw words: the next lane binds its bucket again (and pushes its own words), and
-		// a pushed colour lane the main layout.
+		// The families bound their own pipelines and words, so the next lane must rebind.
 		a_context.boundBucket = ~0u;
 		a_context.boundPipeline = {};
 		a_context.mainLayoutBound = false;
@@ -743,6 +745,7 @@ namespace DCLF::Direct
 		if (a_secondary.BeginSecondary(a_inheritance) != rhi::Result::Ok)
 			return false;
 		RecordContext context{ a_secondary, a_context.set, a_context.view, a_context.viewIndex, a_context.site, a_context.depthPass, a_context.bindings, a_context.counters };
+		context.mainTargets = a_context.mainTargets;
 		const bool begun = BeginList(context);
 		if (begun)
 			RecordBatch(context, a_batch);

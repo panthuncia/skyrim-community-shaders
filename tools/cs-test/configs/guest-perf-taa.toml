@@ -1,0 +1,2 @@
+# guest, the TAA perf sample (perf-taa.toml).
+extends = ["guest", "perf-taa"]

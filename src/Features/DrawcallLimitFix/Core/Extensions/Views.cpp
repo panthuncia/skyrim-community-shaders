@@ -1,6 +1,6 @@
-// The views' entries (see the header): the features' contributions and work, and what the per-object paths read of them.
+// The views' entries: the features' contributions and work, and what the per-object paths read of them.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -12,7 +12,7 @@ namespace DCLF::Extensions
 		ViewEntry& EntryOf(ViewSet& a_set, Api::EngineView a_view) { return a_set.views[static_cast<std::size_t>(a_view)]; }
 		auto& WorkAt(ViewEntry& a_entry, Api::ViewPoint a_point) { return a_entry.work[static_cast<std::size_t>(a_point)]; }
 
-		/** @brief A shape into an entry, its strings copied (PointShape points the shape's views at them once the entry is in place). */
+		/** @brief Copies a shape into an entry with its strings. PointShape points the views at them once the entry is in place. */
 		void SetShape(ViewEntry& a_entry, const Api::ViewShape& a_shape)
 		{
 			a_entry.shape = a_shape;
@@ -34,7 +34,7 @@ namespace DCLF::Extensions
 			shape.labels = { a_entry.labels[0], a_entry.labels[1], a_entry.labels[2], a_entry.labels[3], a_entry.labels[4] };
 		}
 
-		/** @brief A feature's contribution into its view's entry (Registry refused incomplete ones and a second for a view). */
+		/** @brief Copies a feature's contribution into its view's entry. */
 		void FillRegistered(ViewEntry& a_entry, const Api::ViewContribution& a_view)
 		{
 			a_entry.registered = true;
@@ -57,7 +57,7 @@ namespace DCLF::Extensions
 			a_entry.residueDue = a_view.residueDue;
 		}
 
-		/** @brief The set's phases and view bits from its entries (the view bits by phase: ResolveViewBits). */
+		/** @brief The set's phases and view bits from its entries. */
 		void DeriveViewPhases(ViewSet& a_set)
 		{
 			for (const auto& entry : a_set.views) {
@@ -69,10 +69,7 @@ namespace DCLF::Extensions
 			}
 		}
 
-		/**
-		 * @brief The root views, the set decision's order (the CategoryRoot views first) and the InMainRenderers and OwnRenderers views, in
-		 * slot order.
-		 */
+		/** @brief The root views, the decision order with CategoryRoot views first, and the renderer view lists, in slot order. */
 		void DeriveOrders(ViewSet& a_set)
 		{
 			for (std::size_t v = 0; v < a_set.views.size(); ++v) {
@@ -94,10 +91,7 @@ namespace DCLF::Extensions
 					a_set.decideOrder[a_set.decideCount++] = static_cast<Api::EngineView>(v);
 		}
 
-		/**
-		 * @brief The view of a forward key without view bits (the pipeline lane's ForwardKeyView). Fails the install for view bits that
-		 * are Core's (two-sided, tree LOD) or another view's, or a second view without any.
-		 */
+		/** @brief The view for forward keys without view bits. Fails the install for bits that clash, or a second view with none. */
 		void DeriveForwardKeyViews(ViewSet& a_set)
 		{
 			constexpr std::uint32_t coreBits = ForwardPipelineKey::kForwardTwoSided | ForwardPipelineKey::kForwardTreeLod;
@@ -129,7 +123,6 @@ namespace DCLF::Extensions
 		for (const auto& view : a_views)
 			if (view.view < Api::EngineView::Count)
 				FillRegistered(EntryOf(set, view.view), view);
-		// The features' work, in registration order, on a view a feature took.
 		for (const auto& work : a_work) {
 			auto& entry = EntryOf(set, work.view);
 			if (!entry.registered)
@@ -139,15 +132,13 @@ namespace DCLF::Extensions
 		DeriveViewPhases(set);
 		DeriveOrders(set);
 		DeriveForwardKeyViews(set);
-		// The view root contributions (Registry refused incomplete ones and a second for a root).
 		for (std::size_t r = 0; r < kViewRoots; ++r) {
 			set.rootOwned[r] = a_roots[r].root < Api::ViewRoot::Count ? a_roots[r].owned : nullptr;
 			set.rootBits |= set.rootOwned[r] ? Api::ViewRootBit(static_cast<Api::ViewRoot>(r)) : 0u;
 		}
-		// The cull hidden sources (Registry refused incomplete ones), in registration order.
 		set.cullHiddenSources.assign(a_cullHidden.begin(), a_cullHidden.end());
 		Detail::resolvedViews = std::move(set);
-		// The shapes' views into the strings where they now stand.
+		// Point the shapes' views at the strings where they now live.
 		for (auto& entry : Detail::resolvedViews.views)
 			PointShape(entry);
 	}
@@ -165,7 +156,7 @@ namespace DCLF::Api
 {
 	void CullHiddenNodes::Add(const RE::NiAVObject* a_node)
 	{
-		// A hidden source's bit is not read (FirstPerson's skeleton: hidden for every view the scene serves, whatever it is now).
+		// A Hidden source's bit is not read, as for FirstPerson's skeleton, which is hidden for every view the scene serves.
 		if (a_node)
 			list.emplace_back(a_node, hidden || Engine::IsHidden(a_node));
 	}

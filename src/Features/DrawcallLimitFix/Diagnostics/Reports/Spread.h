@@ -7,7 +7,7 @@
 
 namespace DCLF::Reports
 {
-	/** @brief avg / p95 / max of a_values (sorted here) with a_decimals decimals, "-" without any. */
+	/** @brief avg / p95 / max of a_values with a_decimals decimals, or "-" when empty. Sorts a_values. */
 	inline std::string Spread(std::vector<double>& a_values, int a_decimals = 3)
 	{
 		if (a_values.empty())
@@ -20,7 +20,7 @@ namespace DCLF::Reports
 		return fmt::format("{:.{}f}/{:.{}f}/{:.{}f}", sum / double(a_values.size()), a_decimals, a_values[p95], a_decimals, a_values.back(), a_decimals);
 	}
 
-	/** @brief p50 / p95 / max of a_values (sorted here), "-" without any. */
+	/** @brief p50 / p95 / max of a_values, or "-" when empty. Sorts a_values. */
 	template <class T>
 	std::string Percentiles(std::vector<T>& a_values)
 	{

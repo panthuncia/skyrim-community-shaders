@@ -1,6 +1,5 @@
-// The diagnostic capture's scene-lane sections: the fade census (FadeCensus) and the growth lines (SceneGrowthLines). Both run on the
-// scene lane, at a pass's end, only when a capture asks. Core knows no feature: the fade census is whatever the registrations at
-// Api::ReportPoint::CaptureCensus write (Features/Fades' "fade roots"), called with their component's context as the report's are.
+// The diagnostic capture's scene-lane sections, run at a pass's end only when a capture asks. Core knows no feature, so the
+// fade census is whatever the registrations write.
 
 #include "Internal.h"
 
@@ -29,7 +28,7 @@ namespace DCLF::Scene
 				reportLines.text(text);
 			else if (reportLines.componentText)
 				reportLines.componentText({ tables, ComponentState(reportLines.component.index), *this, reportLines.component.index }, text);
-			// One JSON document per registration; one that does not parse is kept as its text.
+			// A document that does not parse is kept as text.
 			auto parsed = json::parse(text, nullptr, false);
 			if (parsed.is_discarded())
 				parsed = text;
@@ -57,7 +56,6 @@ namespace DCLF::Scene
 		lines.push_back(fmt::format("material dependents {}", materialDependents.size()));
 		lines.push_back(fmt::format("material owners {}", materialOwners.size()));
 		lines.push_back(fmt::format("mirror unused records {}", mirror.UnusedRecords()));
-		// The registrations' lines ("<name> <value>\n" each).
 		for (const auto& reportLines : Extensions::RegisteredReportLines()) {
 			if (reportLines.point != Api::ReportPoint::CaptureGrowth)
 				continue;

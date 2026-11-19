@@ -1,18 +1,11 @@
 #pragma once
 
-// The scene revisions' participants: each shape kind's owner (ShapeKind: the main segments and the views, Impl's; the shadow epoch, the
-// occlusion maps' views in it, the shadow engine's), with the steps the revision producer (MakeRevision), the revision inputs
-// (PostRevisionInputs) and the builds ahead (PostAheadContext, RunAhead) take of each. Registered at Impl's construction, one per ShapeKind in its order
-// (Impl::participants), the order every loop calls them in, which is the order these steps ran in when the producer named each kind.
-// Called per make, post and build ahead, never per object.
-// Part of IndirectDraws' implementation: included by Impl.h, before the struct.
+// The scene revision participants, one per ShapeKind. Each owns its kind's part of making a revision, posting inputs and building
+// payloads ahead. They are always called in ShapeKind order, once per make, post or build, never per object.
 
 namespace DCLF
 {
-	/**
-	 * @brief A make (MakeRevision, the snapshot builder's): the producer's state, its publication (what its shapes are made from), and
-	 * what the main participant's requirements hand the others' and the shapes (the participants' own scratch is theirs).
-	 */
+	/** @brief One revision make. Holds the publication and what the main participant's requirements pass on to the others. */
 	struct RevisionMake
 	{
 		ImplProducer& producer;
@@ -21,24 +14,22 @@ namespace DCLF
 		const Lookups& lookups;
 		const PipelineCatalog* catalog = nullptr;
 		IndirectState indirect;
-		// By draw family, its pipelines as the catalog has them, and whether it has them.
 		std::array<FamilyPipelines, Extensions::kDrawFamilies> familyPipelines;
 		std::array<bool, Extensions::kDrawFamilies> familyOn{};
 		std::array<bool, kViews> viewOn{};
 		std::array<ZBucketPlan, 2> zPlans;
-		// The colour segment's state class sub-ranges (PlanSetClasses), from the main layout RequireMain left and indirect's classes.
 		std::shared_ptr<const SetClassPlan> classPlan;
 		std::array<std::vector<LatchedCopy>, 2> mainLatched;
-		// The lookups' entries the requirements and the shapes read of the pipeline slots, as one witness (LookupsWitness, Producer.cpp).
+		// One hash over the pipeline slot lookups that the requirements and shapes read.
 		std::uint64_t lookupsWitness = 0;
 	};
 
 	namespace Draws
 	{
-		/** @brief Producer: a latched-copies block holding a_copies (none: nothing asked). Revision/Producer.cpp. */
+		/** @brief Require a latched-copies block for a_copies. Nothing is required when a_copies is empty. */
 		void RequireLatchedBlock(GrowthBuild& a_build, LatchHandle a_latch, const std::vector<LatchedCopy>& a_copies);
 
-		/** @brief RevisionShapesKey's hash: each value mixed into the current group's word. */
+		/** @brief Mixes values into the current group's word of the shapes key. */
 		struct ShapesKeyMixer
 		{
 			ImplProducer::ShapesKey& key;
@@ -65,10 +56,7 @@ namespace DCLF
 		};
 	}
 
-	/**
-	 * @brief A build ahead's (RunAhead's, the snapshot builder's) once its main build finished: what a participant's payload is built
-	 * from, and the publication it goes in.
-	 */
+	/** @brief What a participant builds its payload from in a build ahead, and the publication it goes into. */
 	struct AheadBuild
 	{
 		ImplSnapshotBuilder::DrawPublication& out;
@@ -79,41 +67,34 @@ namespace DCLF
 		const std::shared_ptr<const EntrySpace>& sunCandidates;
 		const std::shared_ptr<const EntrySpace>& lightCandidates;
 		const TablesContentEpochs& oldestTables;
-		const PayloadFloors& payloads;  // the payload parts' pools: their journals' oldest positions a backing holds
-		ResidentRegion& mainRegion;      // the main build's region (BuildCache::region), as it left it
-		MainRows::PairStats& stats;      // the stages' times
+		const PayloadFloors& payloads;  // oldest journal position each payload pool's backing still holds
+		ResidentRegion& mainRegion;
+		MainRows::PairStats& stats;
 	};
 
 	class RevisionParticipant
 	{
 	public:
-		/**
-		 * @brief The snapshot builder (MakeRevision): what the set must hold for its shapes - its buffers' sequences and counts, its latch
-		 * layout reserved (grown) - from the make's publication. The views' after the others', so they read the main layout and pipelines.
-		 */
+		/** @brief Require the buffers and latch layout this kind's shapes need. Views run last because they read the main layout. */
 		virtual void RequireSequences(RevisionMake& a_make, GrowthBuild& a_build) = 0;
-		/** @brief The snapshot builder: the latched-copies blocks its commits latch into, after every participant's sequences. */
+		/** @brief Require the latched-copies blocks. Runs after every participant's RequireSequences. */
 		virtual void RequireLatched(RevisionMake&, GrowthBuild&) {}
-		/** @brief The snapshot builder: the set sealed, before the shapes key: what it notes of the make (a bound its shapes outgrew). */
+		/** @brief Called after the set is sealed and before the shapes key, for example to note a bound the shapes outgrew. */
 		virtual void NoteSealed(RevisionMake&) {}
-		/** @brief The snapshot builder: its parts of the shapes key (RevisionShapesKey), each into its group. */
+		/** @brief Mix this kind's parts into the shapes key. */
 		virtual void MixShapesKey(const RevisionMake& a_make, Draws::ShapesKeyMixer& a_mixer) const = 0;
-		/** @brief The snapshot builder: its shapes (ImplProducer::RevisionProducer::made), from the sealed set and the main layout. */
+		/** @brief Make this kind's shapes from the sealed set and the main layout. */
 		virtual void MakeShapes(RevisionMake& a_make, const NamedVersions& a_sealed, const MainLayout& a_layout) = 0;
-		/** @brief Render thread (PostRevisionInputs): its part of the revision inputs, as the frame has it now. */
+		/** @brief Render thread. Post this kind's part of the revision inputs. */
 		virtual void PostInputs(RevisionInputs&) {}
-		/** @brief Render thread (PostAheadContext, the frame's start): its part of the ahead context the next builds take. */
+		/** @brief Render thread, at frame start. Fill this kind's part of the context for the next builds ahead. */
 		virtual void PrepareAhead(ImplSnapshotBuilder::AheadContext&) {}
 		/**
-		 * @brief The snapshot builder (RunAhead): the half of its payload that needs no main build, ahead of BuildPayload (which runs it
-		 * itself when RunAhead did not). It reads of a_build only the stream views (out.streams, made), the context, the tables, the
-		 * lookups, the frame and generation, the candidates, the oldest content epochs (oldestTables, payloads: read only) and adds to
-		 * its own stats; it never touches mainRegion or the main payloads, and writes nothing into a_build.out (BuildPayload does), so it
-		 * may run beside the main build. Every call is followed by BuildPayload of the same build ahead (one abandoned is carried into the
-		 * next build's).
+		 * @brief The part of the payload that needs no main build. It runs beside the main build, so it must not touch mainRegion or
+		 * write into a_build.out. BuildPayload of the same build always follows.
 		 */
 		virtual void BuildPayloadShared(const AheadBuild&) {}
-		/** @brief The snapshot builder (RunAhead, after the main build): its payload of the publication, into a_build.out. */
+		/** @brief Build this kind's payload into a_build.out, after the main build. */
 		virtual void BuildPayload(const AheadBuild&) {}
 
 	protected:

@@ -1,10 +1,7 @@
-// CS_DCLF_MIRROR_PARITY, the records: the render thread captures a slice of the tracked objects live at the frame's start (the probe, asked
-// by the coordinator once a frame), and the next pass compares it with the mirror after its events. A field that differs is
-// - evented: an event without values named the object since it was last captured (a hook that carries no value yet);
-// - late: the next batch names it (an update of the field, or an event without values: pushed after the drain);
-// - missed: nothing named it (a writer no hook sees).
-// An update names only its fields: a field it did not carry that differs is late or missed. CS_DCLF_MIRROR_WATCH=parity arms its
-// watchpoints on what the check found stale.
+// Mirror record parity. The render thread captures a slice of tracked objects live at frame start, and the next pass compares
+// it with the mirror after its events. A differing field is "evented" when a value-less event named the object since its last
+// capture, "late" when the next batch names it, and "missed" when nothing does, meaning a writer no hook sees.
+// CS_DCLF_MIRROR_WATCH=parity arms watchpoints on what the check found stale.
 
 #include "SceneObservers.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -24,10 +21,7 @@ namespace DCLF::Diagnostics
 	{
 		using V = SceneView;
 
-		/**
-		 * @brief The last probe's pending differences resolved by this batch's event keys (late or missed), then this probe against the mirror (a
-		 * difference whose object an event of the probe's batch named is evented, else pending).
-		 */
+		/** @brief Resolves the last probe's pending differences as late or missed, then checks this probe against the mirror. */
 		void Check(const SceneMirror& a_mirror, const MirrorProbe& a_probe, const SceneMirror::KeySet& a_eventKeys, const SceneMirror::FieldMap& a_eventFields)
 		{
 			auto& m = SceneDiagnostics().mirror;
@@ -35,7 +29,6 @@ namespace DCLF::Diagnostics
 			auto& pending = m.pending;
 			auto& named = m.named;
 			const auto& geometries = V::mirrorGeometries(a_mirror);
-			// The last probe's: an event without values since names the object, or updates its fields (late), or nothing does (missed).
 			for (auto& [pendingKey, p] : pending) {
 				const void* key = reinterpret_cast<const void*>(pendingKey & ~std::uintptr_t(7));
 				const auto fields = a_eventFields.find(pendingKey);
@@ -46,7 +39,7 @@ namespace DCLF::Diagnostics
 						++into[f];
 						if (!late && t.firstMissedBy[p.type][f].empty()) {
 							t.firstMissedBy[p.type][f] = p.what;
-							// A property or an alpha has no name: a geometry naming it (once per field and report).
+							// A property or alpha has no name, so name a geometry that uses it, once per field and report.
 							if (p.type == 2 || p.type == 3)
 								for (const auto& [geometryKey, geometry] : geometries)
 									if (p.type == 2 ? (geometry.property == key || geometry.layerProperty == key) : geometry.alpha == key) {
@@ -69,14 +62,14 @@ namespace DCLF::Diagnostics
 					m.missedWatchedFields = p.fields;
 					logger::info("[DCLF] mirror watch: missed {} on {}, armed at the next frame", p.what, key);
 				}
-				// The compatibility monitor's offenders: a writer no hook sees, by the object's owning reference.
+				// Missed writes feed the compatibility monitor's offenders, by owning reference.
 				if (!late)
 					PlayerParity::NoteMissed(key, p.owner, p.type, p.fields, p.what);
 				if (!late && t.firstMissed.empty())
 					t.firstMissed = std::move(p.what);
 			}
 			pending.clear();
-			// Only what the mirror holds (an event names many objects out of the world).
+			// Only what the mirror holds. An event names many objects outside the world.
 			for (const void* key : a_eventKeys)
 				if (V::mirrorHolds(a_mirror, key))
 					named.insert(key);
@@ -89,13 +82,13 @@ namespace DCLF::Diagnostics
 					return;
 				}
 				std::uint32_t differ = a_mirror->Differ(a_live);
-				// A frame-local hide (MirrorProbe::frameLocalHidden): the engine's, between its hide and show.
+				// The engine hides frame-local nodes between its own hide and show.
 				if (a_type == 0 && std::ranges::binary_search(a_probe.frameLocalHidden, a_live.key))
 					differ &= ~SceneCapture::NodeRecord::kHidden;
 				if (!differ)
 					return;
 				std::string what = fmt::format("{} {} '{}': {}", SceneMirror::kTypeNames[a_type], a_live.key, a_name ? a_name : "", a_fields(differ));
-				// The values, mirror -> live, of the fields worth seeing.
+				// Mirror and live values of the fields worth seeing.
 				if constexpr (std::is_same_v<std::decay_t<decltype(a_live)>, SceneCapture::NodeRecord>) {
 					if (differ & (SceneCapture::NodeRecord::kFadeNear | SceneCapture::NodeRecord::kFadeFar | SceneCapture::NodeRecord::kFadeType))
 						what += fmt::format(" (near {} -> {}, far {} -> {}, type {} -> {}; captured frame {} thread {}, updated frame {}, probed frame {})", a_mirror->fadeNear,
@@ -108,7 +101,7 @@ namespace DCLF::Diagnostics
 							a_mirror->currentFade, a_live.currentFade, a_mirror->fadeLevel, a_live.fadeLevel, a_mirror->fadeDoor, a_live.fadeDoor, a_mirror->capturedFrame,
 							a_mirror->thread, a_mirror->updatedFrame, a_live.capturedFrame);
 					if (differ & SceneCapture::NodeRecord::kBody) {
-						// The live chain NonFixedBody reads, from the probe's key (alive: the probe just read it).
+						// The probe just read this key, so it is alive.
 						const auto* node = static_cast<const RE::NiAVObject*>(a_live.key);
 						const auto* collision = node->collisionObject.get();
 						const auto* ni = collision ? const_cast<RE::NiCollisionObject*>(collision)->AsBhkNiCollisionObject() : nullptr;
@@ -171,7 +164,7 @@ namespace DCLF::Diagnostics
 				compare(3, a, a_mirror.Alpha(a.key), SceneMirror::Fields<SceneCapture::AlphaRecord>, nullptr, 0u);
 		}
 
-		/** @brief A line of the tally: the counts by record type and field, named. */
+		/** @brief A tally line of counts by record type and field. */
 		std::string TallyLine(const char* a_label, const std::array<std::array<std::uint64_t, SceneMirror::kMaxFields>, SceneMirror::kTypes>& a_counts)
 		{
 			std::string out;
@@ -191,7 +184,7 @@ namespace DCLF::Diagnostics
 
 		void OnCaptureApplied(const MirrorCaptureApplied& a_event)
 		{
-			// The objects a capture took are named by no event since.
+			// A capture clears the names of the objects it took.
 			auto& named = SceneDiagnostics().mirror.named;
 			for (const auto& n : a_event.records.nodes)
 				named.erase(n.key);
@@ -227,16 +220,15 @@ namespace DCLF::Diagnostics
 
 		void OnEventsCollecting(const EventsCollecting&)
 		{
-			// The probe the render thread posted, taken before the drains (so every event older than its capture is in this batch or an
-			// earlier one).
+			// Taken before the drains, so every event older than its capture is in this batch or an earlier one.
 			auto& m = SceneDiagnostics().mirror;
 			m.batchProbe = m.probePosted.Take();
 		}
 
 		void OnEventsApplied(const MirrorEventsApplied& a_event)
 		{
-			// The objects the batch's events without values named: a field the probe finds different on one of them has a hook that carries
-			// no value. The fade, property, node and hidden events' values are updates.
+			// A field differing on an object named by a value-less event has a hook that carries no value.
+			// Fade, property, node and hidden events carry values, so they are updates.
 			auto& m = SceneDiagnostics().mirror;
 			const auto engineChannels = Extensions::RegisteredEngineChannels();
 			for (std::size_t k = 0; k < a_event.channelKeys.size(); ++k)
@@ -249,9 +241,8 @@ namespace DCLF::Diagnostics
 
 		void PostProbeRequest(const Scene::Coordinator& a_store)
 		{
-			// The next slice of the coordinator's tracked set, each geometry held by the request (a copy of its entry's reference: the entry
-			// may let go before the render thread captures it), asked of the render thread once a frame and one at a time. The render thread
-			// drops the references.
+			// The next slice of tracked objects, asked of the render thread once a frame, one at a time. The request holds each geometry,
+			// since its entry may let go before the capture. The render thread drops the references.
 			auto& m = SceneDiagnostics().mirror;
 			const auto& tracked = V::tracked(a_store);
 			const std::uint32_t sceneFrame = V::sceneFrame(a_store);
@@ -275,9 +266,9 @@ namespace DCLF::Diagnostics
 
 		void OnCheckPoint(const On<ScenePoint::MirrorCheckPoint>&)
 		{
-			// With the pass's events all drained: the applied batch's probe against the mirror; the next probe asked of the render thread.
+			// All events drained. Check the applied batch's probe and ask for the next.
 			auto& m = SceneDiagnostics().mirror;
-			// The compatibility monitor just turned on: what its observers kept while they were off is stale (the events since were not seen).
+			// The monitor just turned on, so whatever its observers kept while off is stale.
 			if (PlayerParity::TakeReset()) {
 				m.pending.clear();
 				m.named.clear();
@@ -312,7 +303,7 @@ namespace DCLF::Diagnostics
 
 		void OnProbePoint(const On<ScenePoint::MirrorProbePoint>&)
 		{
-			// Render thread, the frame's start. CS_DCLF_MIRROR_WATCH=parity: what the last check found stale, watched from here.
+			// Render thread, frame start. Watch what the last check found stale.
 			auto& m = SceneDiagnostics().mirror;
 			if (const void* property = m.watchProperty.exchange(nullptr, std::memory_order_acq_rel))
 				MirrorWatch::ArmProperty(property);
@@ -324,16 +315,14 @@ namespace DCLF::Diagnostics
 				const auto typeFields = m.watchMissedTypeFields.load(std::memory_order_relaxed);
 				MirrorWatch::ArmMissed(missed, static_cast<std::uint8_t>(typeFields >> 24), typeFields & 0xFFFFFFu);
 			}
-			// The slice the coordinator asked for (the newest: an older one is dropped here, with its references).
+			// Take the newest slice and drop older ones with their references.
 			std::shared_ptr<MirrorProbeRequest> request;
 			m.probeRequests.Drain([&request](std::shared_ptr<MirrorProbeRequest>&& a_request) { request = std::move(a_request); });
 			if (!request)
 				return;
 			DCLF_ZONE("CS.DCLF.Ingest.ProbeMirror");
-			// Live (the update done, before the culls): each geometry's records and its ancestors' up to the world's root, each object once.
-			// Each geometry is held by the request.
-			// Each record's owning reference too (the nearest with user data, the geometry's own or an ancestor's), for the compatibility
-			// monitor's offenders: a geometry's records, and each ancestor below that reference's root.
+			// Capture live after the update, before the culls. Each geometry's records and its ancestors' up to the world root, once each.
+			// Each record also gets its owning reference, the nearest with user data, for the monitor's offenders.
 			auto probe = std::make_unique<MirrorProbe>();
 			auto& records = probe->records;
 			{
@@ -372,7 +361,7 @@ namespace DCLF::Diagnostics
 					owned = owned && ancestor != root;
 				}
 			}
-			// To the next pass, which takes it before its drains; the next request may follow.
+			// The next pass takes it before its drains.
 			m.probePosted.Post(std::move(probe));
 			m.probeAsked.store(false, std::memory_order_release);
 			WakeScenePass(SceneWake::Capture);
@@ -411,7 +400,7 @@ namespace DCLF::Diagnostics
 	{
 		void OnFadeStaticsPlaced(const FadeStaticsPlaced& a_event)
 		{
-			// CS_DCLF_MIRROR_WATCH: a placed node in the world, its statics just set, is watched for the next writer.
+			// A placed node in the world just had its statics set, so watch it for the next writer.
 			if (SceneCapture::InWorld(a_event.fade))
 				MirrorWatch::Arm(a_event.fade);
 		}
@@ -424,7 +413,7 @@ namespace DCLF::Diagnostics
 
 	void InstallMirrorParity(bool a_switchable)
 	{
-		// Switchable: the compatibility monitor's (PlayerParity.h), on only while the player has it on.
+		// Switchable observers belong to the compatibility monitor and run only while the player has it on.
 		const auto subscribe = [a_switchable]<class Event>(void (*a_observer)(const Event&)) {
 			if (a_switchable)
 				SubscribeSwitchable<Event>(a_observer);

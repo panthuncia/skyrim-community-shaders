@@ -1,0 +1,2 @@
+# Native Vulkan, the shadow flicker burst with the dlss upscale method.
+extends = ["native-vulkan", "flicker-dlss"]

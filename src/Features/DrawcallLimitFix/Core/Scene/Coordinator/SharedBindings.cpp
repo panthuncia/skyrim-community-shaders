@@ -1,4 +1,4 @@
-// Coordinator::UpdateSharedBindings and its helpers (SharedBindings.h), scene lane.
+// Coordinator::UpdateSharedBindings and its helpers. Scene lane.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -7,11 +7,9 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		// GpuTextures' diagnostic source tags: the projected textures from 32, the technique mask 48, a caster's diffuse 192.
-		constexpr std::uint32_t kProjectedSourceTag = 32;
-		constexpr std::uint32_t kMaskSourceTag = 48;
-		constexpr std::uint32_t kShadowSourceTag = 192;
-		// The masks' change-set parity's pass offset (Diagnostics::ParityDue).
+		constexpr std::uint32_t kProjectedSourceTag = GpuTextures::Tag(GpuTextures::Source::Projected);
+		constexpr std::uint32_t kMaskSourceTag = GpuTextures::Tag(GpuTextures::Source::Mask);
+		constexpr std::uint32_t kShadowSourceTag = GpuTextures::Tag(GpuTextures::Source::ShadowDiffuse);
 		constexpr std::uint32_t kMaskParityOffset = 41;
 	}
 
@@ -20,13 +18,12 @@ namespace DCLF::Scene
 		DCLF_ZONE("CS.DCLF.Scene.SharedBindings");
 		auto& sb = sharedBindings;
 		const std::uint32_t answeredKinds = DrainSharedReplies();
-		// The shadow textures answered (an answer for one the index has let go meanwhile is dropped with arrived).
+		// An answer for a texture the index let go of meanwhile is dropped.
 		if (answeredKinds & (1u << SharedBindings::kShadow))
 			for (const auto& answer : sb.arrived)
 				ResolveShadowTextureBinding(answer.first);
 		TakeFixedBindings();
 		FollowRelocatedSharedTextures();
-		// The projected textures: a new capture's views asked for (the capture holds them meanwhile), else the pending ones answered.
 		if (auto capture = channels.projectedPosted.load(std::memory_order_acquire); capture != sb.projectedSeen) {
 			sb.projectedSeen = std::move(capture);
 			++sb.stats.projectedCaptures;
@@ -35,7 +32,6 @@ namespace DCLF::Scene
 			ResolveProjectedBindings(sb.projectedPending);
 		}
 		ResolveMaskBindings();
-		// The shadow textures the dependency index added or removed since the last pass (RefreshShadowSets, the walk's).
 		std::vector<std::pair<ID3D11ShaderResourceView*, bool>> changes;
 		tables.TakeShadowTextureChanges(changes);
 		ApplyShadowTextureChanges(changes);
@@ -49,8 +45,7 @@ namespace DCLF::Scene
 	void Coordinator::FollowRelocatedSharedTextures()
 	{
 		auto& sb = sharedBindings;
-		// A superseded import holds its old storage, and that storage's chunk, while it is held here. Each asks for the new storage's
-		// import, and draws with the one it holds until answered.
+		// A superseded import holds its old storage while held here. Each asks for the new import and draws with the old one until answered.
 		std::vector<ID3D11ShaderResourceView*> moved;
 		for (const auto& [view, owner] : lookups.shadowTextureOwners)
 			if (GpuTextures::Superseded(owner.get()))
@@ -74,8 +69,7 @@ namespace DCLF::Scene
 	std::uint32_t Coordinator::DrainSharedReplies()
 	{
 		auto& sb = sharedBindings;
-		// The answers since the last pass, each to every kind that waited on its view. An answer nobody waits on any more lets its owner go
-		// here: the last release of an import, or of its descriptor, runs on the cleanup queue (ResourceCleanupQueue::Make).
+		// An owner's last release runs on the cleanup queue, never on this thread.
 		std::uint32_t answeredKinds = 0;
 		sb.replies.Drain([&](GpuTextures::Reply&& a_reply) {
 			if (a_reply.cookie != sb.cookie) {
@@ -99,7 +93,7 @@ namespace DCLF::Scene
 				auto& cached = sb.cache[a_reply.view];
 				cached.owner = a_reply.binding.owner;
 				cached.index = a_reply.binding.index;
-				// Amortized: each answer cached looks at two other entries and drops one whose import nobody holds any more.
+				// Amortized cleanup of entries whose import nobody holds.
 				for (std::uint32_t i = 0; i < 2 && !sb.cache.empty(); ++i) {
 					sb.cacheSweep = (sb.cacheSweep + 1) % sb.cache.size();
 					if (const auto swept = sb.cache.begin() + static_cast<std::ptrdiff_t>(sb.cacheSweep); swept->second.owner.expired())
@@ -114,9 +108,7 @@ namespace DCLF::Scene
 	void Coordinator::TakeFixedBindings()
 	{
 		auto& sb = sharedBindings;
-		// The fixed bindings, as the render thread last published them with the import context: made there once, read here. Written into
-		// the lookups where they differ: the null texture and the samplers are the shadow builds' too, so either moves both
-		// generations, and is a new shared version.
+		// The null texture and the samplers are the shadow builds' too, so a change moves both generations.
 		if (auto fixed = GpuTextures::Get().Fixed(); fixed != sb.fixed) {
 			sb.fixed = std::move(fixed);
 			const std::uint32_t nullTexture = sb.fixed ? sb.fixed->null.index : Lookups::kNone;
@@ -147,21 +139,18 @@ namespace DCLF::Scene
 	void Coordinator::ResolveMaskBindings()
 	{
 		auto& sb = sharedBindings;
-		// Each used pipeline's technique mask, from its row (the rows follow this pass's frame sample: RefreshTechniqueRows). The row's
-		// view is the frame's shadow mask target, which the frame's capture holds.
+		// The row's view is the frame's shadow mask target, which the frame's capture holds.
 		if (sb.masks.size() < tables.pipelines.size())
 			sb.masks.resize(tables.pipelines.size());
 		if (lookups.pipelines.size() < tables.pipelines.size())
 			lookups.pipelines.resize(tables.pipelines.size());
-		// Only the masks that may have moved: every used one when a technique row's bindings or the texture generation moved, else the
-		// pipelines made (AccumulatePhase marks them) or newly used since the last pass, and those still asked for or held.
+		// Only the masks that may have moved. Every used one when a row's bindings or the texture generation moved.
 		auto* frameMask = FrameGlobals::Current().shadowMaskHeld.get();
 		{
 			auto& w = sb.work;
 			const std::uint32_t textureGeneration = GpuTextures::Get().Generation();
 			bool sweep = textureGeneration != sb.textureGenerationSeen;
 			sb.textureGenerationSeen = textureGeneration;
-			// A row made since (with its pipeline, marked) is only recorded; a row whose bindings moved moves every mask that reads it.
 			const std::size_t rowsSeen = sb.techniqueSeen.size();
 			sb.techniqueSeen.resize(tables.techniqueConstants.size(), 0);
 			for (std::size_t r = 0; r < tables.techniqueConstants.size(); ++r) {
@@ -176,7 +165,6 @@ namespace DCLF::Scene
 					sb.MarkMask(static_cast<std::uint32_t>(word * 64 + std::countr_zero(added)));
 				sb.usedSeen[word] = used[word];
 			}
-			// What ResolveMaskBinding keeps without a look-up: the entry resolved for the row's view, in this generation, settled.
 			auto stands = [&](std::uint32_t a_slot) {
 				const auto& mask = sb.masks[a_slot];
 				const auto& technique = tables.TechniqueOf(a_slot).value;
@@ -203,7 +191,6 @@ namespace DCLF::Scene
 				for (const std::uint32_t slot : dirty)
 					resolve(slot);
 			}
-			// The parity: every used mask the change set left stands as a full look-up would find it, or is looked up next pass.
 			if (Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kMaskParityOffset))
 				Tables::ForEachBit(tables.usedPipelineBits, [&](std::uint32_t a_slot) {
 					if (a_slot >= tables.pipelines.size() || a_slot >= sb.masks.size() || !tables.TechniqueConstantsValid(a_slot))
@@ -225,8 +212,7 @@ namespace DCLF::Scene
 				++sb.stats.shadowAdded;
 				ResolveShadowTextureBinding(view);
 			} else if (const auto it = sb.shadowTextures.find(view); it != sb.shadowTextures.end()) {
-				// Out of the lookups' table at once (its casters have gone), its owner with it: the last release runs on the cleanup queue,
-				// whichever holder of a publication naming it lets go last.
+				// Its casters have gone. The owner's last release runs on the cleanup queue.
 				if (it->second.pending)
 					--sb.shadowPending;
 				sb.shadowTextures.erase(it);
@@ -243,7 +229,6 @@ namespace DCLF::Scene
 	void Coordinator::SealSharedBindingBlock()
 	{
 		auto& sb = sharedBindings;
-		// The shared entries' binding block: the owners of what they name, sealed again when one changed.
 		if (sb.sharedChanged) {
 			std::vector<std::shared_ptr<const void>> owners;
 			owners.reserve(1 + GpuTextures::kSamplerCount + lookups.projectedOwners.size());
@@ -264,8 +249,7 @@ namespace DCLF::Scene
 		auto& sb = sharedBindings;
 		if (const auto it = sb.arrived.find(a_view); it != sb.arrived.end())
 			return it->second;
-		// An answer kept, here or by the material bindings (a caster's diffuse is its material's t0): an owner alive holds the view, so its
-		// address names the same view still.
+		// A caster's diffuse is its material's t0. A live owner holds the view, so its address still names the same view.
 		auto known = [&](auto& a_cache, GpuTextures::Binding& a_out) {
 			const auto it = a_cache.find(a_view);
 			if (it == a_cache.end())
@@ -281,7 +265,7 @@ namespace DCLF::Scene
 			++sb.stats.cached[a_kind];
 			return binding;
 		}
-		// Asked once per view in flight; the request takes its own reference on the view at once (the caller's holds it until then).
+		// The request takes its own reference on the view at once.
 		auto [waiting, asked] = sb.inFlight.try_emplace(a_view, 0u);
 		if (asked) {
 			GpuTextures::Get().Request(a_view, a_sourceTag, sb.replies, sb.cookie);
@@ -297,14 +281,13 @@ namespace DCLF::Scene
 		for (std::uint32_t i = 0; i < lookups.projectedTextures.size(); ++i) {
 			if (!((a_textures >> i) & 1))
 				continue;
-			// None captured yet: unresolvable, which defers the ProjectedUV pipelines' draws. A view asked for is kNone while it is.
+			// Unresolvable until captured, which defers the ProjectedUV pipelines' draws.
 			auto* view = sb.projectedSeen ? sb.projectedSeen->views[i].get() : nullptr;
 			auto binding = view ? SharedViewBinding(view, kProjectedSourceTag + i, SharedBindings::kProjected) : GpuTextures::Binding{ Lookups::kNone, {} };
 			if (binding.pending)
 				sb.projectedPending |= 1u << i;
 			else
 				sb.projectedPending &= ~(1u << i);
-			// Into the lookups where it differs: a new shared version, and a new generation for each of the owner and the index that moved.
 			const bool ownerChanged = lookups.projectedOwners[i].get() != binding.owner.get();
 			const bool indexChanged = lookups.projectedTextures[i] != binding.index;
 			if (!ownerChanged && !indexChanged)
@@ -330,31 +313,27 @@ namespace DCLF::Scene
 		const bool wanted = technique.shadowMask;
 		auto* view = wanted ? technique.shadowMaskTexture : nullptr;
 		const std::uint32_t textureGeneration = GpuTextures::Get().Generation();
-		// Unchanged and settled (resolved, rejected, or binding none): kept. One still asked for is looked up again until it is answered.
 		if (mask.wanted == wanted && entry.shadowMaskView == view && entry.shadowMaskTextureGeneration == textureGeneration && mask.settled)
 			return false;
 		GpuTextures::Binding binding{ Lookups::kNone, {} };
 		if (wanted && view) {
-			// The rows' views are the frame sample's (RefreshTechniqueRows), held by its capture; one that is not is counted (an observer).
 			if (view != a_frameMask)
 				++sb.stats.masksUnheld;
 			binding = SharedViewBinding(view, kMaskSourceTag, SharedBindings::kMask);
 		} else if (wanted) {
-			// A technique that binds the mask while the target has no view reads the null descriptor (waited for until it is published).
+			// A technique that binds the mask while the target has no view reads the null descriptor.
 			if (sb.fixed)
 				binding = sb.fixed->null;
 			else
 				binding.pending = true;
 		}
-		// Held while the new view is asked for, as a material's textures are (the set's members draw with it).
+		// Held while the new view is asked for, since the set's members draw with it.
 		if (binding.pending && entry.shadowMaskOwner && entry.shadowMaskIndex != Lookups::kNone && entry.shadowMaskTextureGeneration == textureGeneration) {
 			++sb.stats.masksHeld;
 			return true;
 		}
 		mask.settled = !binding.pending;
 		mask.wanted = wanted;
-		// Into the lookups' entry: what it was resolved for, and where the owner or the index moved, a new generation for
-		// each and a new version of the entry.
 		auto& written = lookups.pipelines.Mutable(a_slot);
 		written.shadowMaskView = view;
 		written.shadowMaskTextureGeneration = textureGeneration;
@@ -380,12 +359,11 @@ namespace DCLF::Scene
 		const auto it = sb.shadowTextures.find(a_view);
 		if (it == sb.shadowTextures.end() || !it->second.pending)
 			return;
-		// The view is a member's (its caster's record names it): alive, and the request takes its own reference at once.
+		// The view is alive because a member's record names it.
 		auto binding = SharedViewBinding(a_view, kShadowSourceTag, SharedBindings::kShadow);
 		if (binding.pending)
 			return;  // not in the lookups' table until answered, so its casters wait (deferredTextures)
-		// Imported or rejected (kNone, which its casters skip): a rejection is permanent, so neither is asked again. Into the lookups'
-		// table, a new shadow generation where it changed.
+		// A rejection is permanent, so neither outcome is asked again.
 		it->second.pending = false;
 		--sb.shadowPending;
 		auto [slot, inserted] = lookups.shadowTextures.try_emplace(a_view, binding.index);
@@ -404,8 +382,7 @@ namespace DCLF::Scene
 
 	void Coordinator::RetireMaskBinding(std::uint32_t a_slot)
 	{
-		// Its owner let go (the last release runs on the cleanup queue, whichever holder of a publication naming it lets go last); a
-		// successor in the slot resolves its own. The lookups' entry emptied, a new generation for each of the owner and the index that moved.
+		// The owner's last release runs on the cleanup queue.
 		if (a_slot < sharedBindings.masks.size())
 			sharedBindings.masks[a_slot] = {};
 		if (a_slot >= lookups.pipelines.size())
@@ -431,8 +408,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ResetSharedBindings()
 	{
-		// The lookups are made new with the tables (ResetSlotTables), and these entries with them. The posted projected capture is the
-		// render thread's and stays: the next pass takes it again.
+		// The posted projected capture is the render thread's and stays for the next pass.
 		auto& sb = sharedBindings;
 		sb.projectedSeen.reset();
 		sb.projectedPending = 0;

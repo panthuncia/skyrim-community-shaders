@@ -1,5 +1,4 @@
-// The coordinator's slot lifetimes (scene lane): geometry, object, pipeline and material slots allocated and freed, the tables
-// cleared, and a tracked geometry erased. Engine references freed here go through the retirement chain to the render thread.
+// The coordinator's slot lifetimes on the scene lane. Engine references freed here go through the retirement chain to the render thread.
 
 #include "Internal.h"
 
@@ -22,7 +21,6 @@ namespace DCLF::Scene
 			tables.PipelineColumns(kGrowColumn);
 			tables.NoteConstantsWrite();
 		}
-		// The caller writes the slot's pipeline family next (before the publication).
 		tables.NotePipelinesWrite();
 		return allocation.slot;
 	}
@@ -37,8 +35,7 @@ namespace DCLF::Scene
 
 	void Coordinator::InvalidateVerdicts()
 	{
-		// Every cached negative, candidate verdict and positive derivation: they witness the object, not
-		// the toggles, so a toggle that enters the classification leaves all of them stale at once.
+		// The caches witness the object, not the toggles, so a toggle the classification reads leaves all of them stale.
 		for (auto& [geometry, entry] : tracked) {
 			entry.verdict.cached = false;
 			entry.candidateFrame = 0;
@@ -53,17 +50,14 @@ namespace DCLF::Scene
 		residents.clear();
 		residentPatches.clear();
 		residentPos.clear();
+		stagedBindings.clear();
+		rebindingMembers.clear();
 		residentMaintenanceDirty = true;
-		// The listed nodes' references through the retirement chain with everything else the cleared tables named (the components',
-		// the fade roots' last, and what they keep beside the tables: Features/Faces' regions).
 		ComponentsReset();
 		tables.Clear();
-		// The scene work's material and shared bindings with the tables they were made for, and the lookups they are written into.
 		ResetMaterialBindings();
 		ResetSharedBindings();
-		// Drop material binding owners on world/device reset without permitting an old worker snapshot to match a newly empty lookup
-		// generation. The lookups are the scene lane's: made new here, whichever thread runs the coordinator's work; the
-		// frame keeps the installed publication's until a newer one is installed.
+		// Must not let an old worker snapshot match a newly empty lookup generation.
 		ResetLookups();
 		for (auto& [geometry, entry] : tracked) {
 			entry.slot = kNoObjectSlot;
@@ -73,18 +67,18 @@ namespace DCLF::Scene
 		pipelineIndex.clear();
 		materialIndex.clear();
 		materialDependents.clear();
-		// The scene work's record upkeep named the cleared slots.
 		ResetMaterialRecords();
-		// Released at Present through the retirement chain, as ClearMaterialSlot's (the last reference deletes the engine's material: never
-		// on the pump, which runs this on a loading pass).
+		// Released at Present, since the last reference deletes the engine's material and the pump runs this on a loading pass.
 		for (auto& owner : materialOwners)
 			ReleaseMaterial(std::move(owner));
 		materialOwners.clear();
+		for (std::uint32_t slot = 0; slot < materialViewPins.size(); ++slot)
+			ReleaseMaterialViews(slot);
+		materialViewPins.clear();
 		bindQueue.clear();
 		membershipWitness = ~0u;
 		materialMember.clear();
-		// The lookup import owners were reset above. The next shadow-index
-		// reconstruction must publish additions even if an SRV address recurs.
+		// The next shadow index rebuild must publish additions even if an SRV address recurs.
 		shadowTextureMembers.clear();
 		shadowKeyMembers.clear();
 		for (auto& members : occlusionKeyMembers)
@@ -123,8 +117,7 @@ namespace DCLF::Scene
 					object.pipelineIndex, tables.PipelineUsed(object.pipelineIndex), object.materialIndex, tables.MaterialUsed(object.materialIndex),
 					IsResidentSlot(static_cast<std::uint32_t>(o)), sceneFrame);
 			}
-			// Neutralised: nothing downstream may draw from slots no member holds. Its record is no
-			// longer the scene phase's, so the next delta walk writes it again.
+			// Nothing downstream may draw from slots no member holds. The next delta walk writes it again.
 			pendingEvaluation.push_back(tables.objectGeometry[o]);
 			DropResidentSlot(static_cast<std::uint32_t>(o), false);
 			object.flags = (object.flags & ~(kObjectMember | kObjectSunTest)) | kObjectNoBindings;
@@ -144,17 +137,15 @@ namespace DCLF::Scene
 		tables.geometrySlotKey[a_slot] = nullptr;
 		if (!denseWalk)
 			relocatedGeometrySlots.erase(a_slot);
-		// The leases outlive the frames in flight (TakeRetiredImports).
+		// The leases outlive the frames in flight.
 		auto& import = tables.geometryImports[a_slot];
 		for (auto* owner : { &import.vertexOwner, &import.indexOwner })
 			if (*owner)
 				retirement.Open().imports.push_back(std::move(*owner));
 		import = {};
-		// The record named the buffers the leases held: nothing may read through it once they are released (the index pool copies a
-		// logged slot's indices from its index address, its geometry row is the slot's draws' vertex buffer).
+		// Nothing may read through the record once the leases are released.
 		tables.geometries[a_slot] = {};
 		tables.geometryLastUsed[a_slot] = Tables::kSlotFree;
-		// The log names every write of the geometry columns (the published tables replay them by it).
 		tables.NoteGeometry(a_slot);
 	}
 
@@ -169,13 +160,60 @@ namespace DCLF::Scene
 		const auto key = tables.materialSlotKey[a_slot];
 		materialIndex.erase(key);
 		UnlistMaterialDependent(key.first, a_slot);
-		// Released at Present (the last reference deletes the engine's material), once no publication names the slot.
+		// Released at Present, since the last reference deletes the engine's material.
 		ReleaseMaterial(std::move(materialOwners[a_slot]));
+		ReleaseMaterialViews(a_slot);
 		tables.materialSlotKey[a_slot] = { nullptr, 0u };
-		// Logged: what follows the material log (the texture-transform list) drops the slot's entries.
 		tables.NoteMaterial(a_slot);
 		tables.UnmarkMaterial(a_slot);
 		tables.Retire(Tables::kRetiredMaterialLookup, a_slot);
+	}
+
+	void Coordinator::PinMaterialViews(std::uint32_t a_slot, const MaterialPort::HeldSnapshot& a_held, const MaterialPort::MaterialFrame& a_frame)
+	{
+		if (a_slot >= tables.materials.size())
+			return;
+		const auto& record = tables.materials[a_slot];
+		std::vector<ID3D11ShaderResourceView*> named;
+		named.reserve(record.textures.size() + record.featureTextures.size());
+		for (auto* view : record.textures)
+			if (view)
+				named.push_back(view);
+		for (auto* view : record.featureTextures)
+			if (view)
+				named.push_back(view);
+		if (materialViewPins.size() <= a_slot)
+			materialViewPins.resize(std::size_t(a_slot) + 1);
+		auto& pins = materialViewPins[a_slot];
+		// The pins hold the views, so equal pointers are the same objects.
+		if (pins ? pins->named == named : named.empty())
+			return;
+		std::shared_ptr<MaterialViewPins> next;
+		if (!named.empty()) {
+			next = std::make_shared<MaterialViewPins>();
+			next->named = named;
+			const auto count = std::min<std::size_t>(a_held.snapshot.textureCount, a_held.views.size());
+			for (auto* view : named) {
+				// Never take a reference on the pointer itself.
+				const auto captured = std::find_if(a_held.views.begin(), a_held.views.begin() + static_cast<std::ptrdiff_t>(count),
+					[&](const winrt::com_ptr<ID3D11ShaderResourceView>& a_ref) { return a_ref.get() == view; });
+				if (captured != a_held.views.begin() + static_cast<std::ptrdiff_t>(count))
+					next->views.push_back(*captured);
+				else
+					next->frame = a_frame.held;
+			}
+		}
+		// Take the new references before the old go, so a view in both is never released in between.
+		ReleaseMaterialViews(a_slot);
+		pins = std::move(next);
+	}
+
+	void Coordinator::ReleaseMaterialViews(std::uint32_t a_slot)
+	{
+		if (a_slot >= materialViewPins.size() || !materialViewPins[a_slot])
+			return;
+		retirement.Open().owners.push_back(std::move(materialViewPins[a_slot]));
+		materialViewPins[a_slot] = nullptr;
 	}
 
 	void Coordinator::UpdateSlotReferences()
@@ -194,7 +232,6 @@ namespace DCLF::Scene
 				a_table.AddRef(a_now.slot, a_now.generation);
 			a_counted = a_now;
 		};
-		// An object references its geometry while it has a record, and its pipeline and material while it is bound.
 		auto countObject = [&](std::uint32_t o) {
 			if (r.object.size() <= o)
 				r.object.resize(std::size_t(o) + 1);
@@ -206,7 +243,6 @@ namespace DCLF::Scene
 			move(tables.pipelineSlots, counted.pipeline, bound ? referenceTo(tables.pipelineSlots, object.pipelineIndex) : Reference{});
 			move(tables.materialSlots, counted.material, bound ? referenceTo(tables.materialSlots, object.materialIndex) : Reference{});
 		};
-		// A geometry slot references the next partition of its skin.
 		auto countLink = [&](std::uint32_t g) {
 			if (r.link.size() <= g)
 				r.link.resize(std::size_t(g) + 1);
@@ -214,7 +250,6 @@ namespace DCLF::Scene
 			move(tables.geometrySlots, r.link[g], linked ? referenceTo(tables.geometrySlots, tables.geometries[g].nextPartition) : Reference{});
 		};
 		if (!r.objects.Continues(tables.changeLog, tablesGeneration) || !r.links.Continues(tables.geometryLog, tablesGeneration)) {
-			// Every reference counted again: the first frame, new tables, or a log this reader fell behind.
 			tables.geometrySlots.ResetReferences();
 			tables.pipelineSlots.ResetReferences();
 			tables.materialSlots.ResetReferences();
@@ -224,6 +259,8 @@ namespace DCLF::Scene
 				countObject(o);
 			for (std::uint32_t g = 0; g < tables.geometries.size(); ++g)
 				countLink(g);
+			for (const auto& [slot, staged] : stagedBindings)
+				AddStagedReferences(staged);
 			r.objects.Restart(tablesGeneration);
 			r.links.Restart(tablesGeneration);
 		} else {
@@ -239,8 +276,7 @@ namespace DCLF::Scene
 	void Coordinator::SweepSlots()
 	{
 		UpdateSlotReferences();
-		// Every slot has explicit users (the object records, a skin's chain): its last reference going frees it, after the
-		// whole journal batch, with no grace period.
+		// A slot's last reference going frees it after the whole batch, with no grace period.
 		std::uint32_t freed = tables.geometrySlots.DrainUnreferenced([&](std::uint32_t a_slot) { ClearGeometrySlot(a_slot); });
 		freed += tables.pipelineSlots.DrainUnreferenced([&](std::uint32_t a_slot) {
 			pipelineIndex.erase(tables.pipelines[a_slot]);
@@ -323,7 +359,6 @@ namespace DCLF::Scene
 		auto* geometry = a_slot < tables.objectGeometry.size() ? tables.objectGeometry[a_slot] : nullptr;
 		if (!geometry)
 			return nullptr;
-		// Its entry's held property (the mirror's), not the live geometry's.
 		const auto it = tracked.find(geometry);
 		return it != tracked.end() ? it->second.HeldProperty(tables.IsLayer(a_slot)) : nullptr;
 	}
@@ -376,8 +411,6 @@ namespace DCLF::Scene
 			UnlistDependents(it->first, it->second, true);
 			UnlistCategoryMember(it->first, it->second);
 			ComponentsForgot(it->first);
-			// Off its veto (an outgoing LOD block's geometries leave their hold-out here, by their detach after the flip; their tags went
-			// with the components' forgot).
 			if (const std::uint8_t veto = it->second.veto)
 				--(veto == Api::kVetoHold ? vetoHeld : vetoObserved);
 			sceneIdentity.Detach(a_geometry);
@@ -395,16 +428,14 @@ namespace DCLF::Scene
 
 	void Coordinator::SweepObjectSlots()
 	{
-		// Consumers look objects up in the per-frame index lists by binary search (the capture check's actor check).
+		// Consumers binary-search these lists.
 		for (auto& members : tables.classMembers)
 			std::sort(members.objects.begin(), members.objects.end());
 		if (denseWalk) {
 			tables.liveObjects = static_cast<std::uint32_t>(tables.objects.size());
 			return;
 		}
-		// A slot this walk did not write belongs to an object that has no record this frame (ineligible now, or
-		// no longer tracked): it is freed, and its Tracked entry, if it still exists, forgets it. The pointer is
-		// only a key here; the geometry may already be gone.
+		// A slot this walk did not write has no record this frame, so it is freed. The pointer is only a key and may already be gone.
 		for (std::uint32_t slot = 0; slot < tables.objects.size(); ++slot) {
 			auto* geometry = tables.objectGeometry[slot];
 			if (!geometry || tables.objectSeen[slot] == walkSerial)

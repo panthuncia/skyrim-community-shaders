@@ -1,4 +1,3 @@
-// The scene's content owners (see the header).
 #include "Features/DrawcallLimitFix/Core/Render/Payload/ContentOwners.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -12,11 +11,11 @@ namespace DCLF::Draws
 		if (!a_bytes || (ranges.empty() && a_owners.empty()))
 			return;
 		const std::uint64_t end = a_offset + a_bytes;
-		// The same range naming the same owners: unchanged (a row written every frame with the same bindings).
+		// Same range and same owners, as for a row rewritten every frame with the same bindings.
 		if (const auto same = ranges.find({ a_target, a_offset });
 			same != ranges.end() && same->second.bytes == a_bytes && std::ranges::equal(same->second.owners, a_owners))
 			return;
-		// Every range a_target holds that overlaps: the one starting before a_offset, then those starting inside.
+		// Visit every overlapping range, starting with the one that begins before a_offset.
 		auto it = ranges.lower_bound({ a_target, a_offset });
 		if (it != ranges.begin()) {
 			const auto before = std::prev(it);

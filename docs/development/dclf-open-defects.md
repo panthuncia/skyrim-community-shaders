@@ -45,19 +45,14 @@ The fixes below are in the code. No recorded run has yet shown the check that co
     remaining frames needs the room resolved on the GPU in the frame: each object's record holds a stable room slot, and a table
     from slot to Light Limit Fix's number is written after its Prepass.
 
-## AMD: the HZB reads back empty, so occlusion is off there by default
+## AMD: the HZB reads back empty (fixed 2026-11-17)
 
--   **Symptom.** On an RX 6600 (AMD driver 2.0.353, GPU-driven), occlusion culled nearly everything in view: `HZB: N footprints
-    sampled, N came back all-near (~0)`, tree LOD 100% occluded, phase 2 bringing back nothing; trees, plants and actors missing.
-    Frustum-only culling draws the same view as CPU-driven. So `CS_DCLF_CULL` defaults to `frustum` on AMD (`DefaultCullMode`,
-    `Core/Settings/Toggles.cpp`); `dclf:cull=occlusion` or `CS_DCLF_CULL=occlusion` still turns it on.
--   **What was ruled out (2026-11-08, temporary shader probes).** The HZB dispatch is one SPD dispatch of the expected shape
-    (1024x1024 HZB, 32x32 groups, 11 mips). Its last group runs (its counter reset executes), and mips 0-6 hold 1.0 at the texels
-    probed when the source is forced to the far plane; the HZB view is valid (1024x1024, 11 levels). Neither SPD's LDS path
-    (`SPD_NO_WAVE_OPERATIONS`) nor zeroing the group counter with every depth commit changed the result. `HzbTest` clamps every tap
-    into the level, so the zeros are in the image at the tapped texels, while texels probed directly elsewhere were right.
--   **Next.** Read whole mips back (a probe that copies a level into a buffer the CPU reads) to see which texels are zero, and
-    compare the HZB's barriers between its per-mip UAV writes and the SRV read on AMD (GENERAL against SHADER_READ_ONLY per mip).
+-   **Cause.** `HzbTest` (`HzbTest.hlsli`) returned early on `a_view.Index == 0 || a_view.Mips == 0`. AMD's RDNA2 compiler folds a
+    value to the constant past such a guard (AGENTS.md, "Known Driver Bug"), so the four taps read heap slot 0 and every footprint came
+    back all-near: occlusion culled nearly everything in view on the RX 6600.
+-   **Fix.** The guard is one unsigned relational compare (`min(Index, Mips) < 1u`). With occlusion on, perf-taa reads 0 of 2,693
+    footprints all-near, about 460 draws a window are occluded, and the view is whole. `CS_DCLF_CULL` defaults to occlusion on every
+    GPU again (`DefaultCullMode`). Details: `org-native-frame-graph.md`, "RX 6600, third pass".
 
 ## Open crashes
 
@@ -203,6 +198,81 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     before `Setup` (`indirect state invalid`) while the claims stand and the snapshots look current, so DCLF's objects can be
     missing for those frames. Waiting on the catalog at the frame's start could exceed the 5 s bound while the pipelines compile.
     This needs its own design: for example, the old catalog keeps drawing into compatible formats until the new one is installed.
+
+-   **Objects changing cells flickered or vanished (fixed 2026-11-18).** A reference crossing into another cell is moved by one
+    `NiNode::AttachChild` on the new cell's node, which first detaches the child from the old one. The detach and the attach were
+    pushed as separate events, and the detach woke the scene pass, which often drained it alone: every part of the actor was
+    erased and tracked again as new one pass later. The new entries had no slot or binding, so they were withheld while they
+    waited for pipelines and materials, for 10 to 70 frames at Riverwood (`CS_DCLF_CELL_TRACE`, runs x2g and x3n: 8 of 9
+    crossings split). SceneWriterFramework now flags that detach `SWF_CHILD_REPARENT` (ABI minor 4), and `SceneTracker` holds the
+    move's events on the moving thread until its attach pushes them together. The move then applies in one batch, the entries keep
+    their slots and are re-filed under the new category node.
+-   **A drawn object rebound to a binding not built yet was hidden (fixed 2026-11-18).** Any change that picked a pipeline or
+    material not ready yet took the member out of the set while it was still withheld from the engine, so nobody drew it until the
+    pipeline compiled. At an actor's first cell change 3 to 8 parts vanished for 4 to 10 frames: its fade sat at 0.983 (one
+    fade step, "Actors resting at a fractional fade" below) on the blended fading pipeline, and the crossing reset it to 1 and picked the opaque one. A drawn member
+    now keeps its record, claim and current binding while the next one is staged (`Coordinator::StageBinding`, which references its
+    pipeline and material so they get built), and the joins switch in the publication that can draw the new one. The rebind of
+    every resident after a membership witness change goes the same way instead of ending all residency. In the fading case the
+    old binding draws a few frames of the blended pass at alpha 1: no G-buffer write, so no SSAO, screen-space shadows or GI and
+    no decals on it, and no shadow-casting lights, as in the engine's fading pass. A fading join also asks the pipeline lane for
+    its settled key (`RequestSettledPipeline`), so the switch usually finds it built. Runs fxg and fxn: 19 crossings, none losing a
+    part (Alvor's in fxn came while his parts still waited after the load, below).
+-   **A newly attached object shows 3 to 7 frames late (open).** In guest and native mode the engine's draw of a lit object draws
+    nothing (the flush latch skips it, native's D3D11 calls do nothing), so whether DCLF withholds it changes no pixel. An attached
+    object (a tankard, Alvor's hammer) joins the set in the scene pass that tracks it, but a publication is installed about every 2
+    to 3 frames and is 2 to 5 frames old by then (`[publication of frame N]` in the cell trace). The one frame of run x5g with no
+    engine pass for the hammer was its attach frame, before the stand-in walked the admitted entry again. **Fix direction:** a
+    shorter path from the scene pass to the installed snapshot.
+-   **Actors after a load are drawn by nobody for 1.5 to 4 seconds (open).** The load hold settles before the actors' 3D is
+    tracked (records 0 on its last frames), and their first bindings (the fade-in's blended keys) then wait for pipelines compiled
+    on demand, about 100 frames in guest and up to 260 in native (runs fxg, fxn, fig). The `drawn by nobody` count's first window
+    after a coc reads about 30,000 passes in guest. **Fix direction:** the hold also waits for the nearby actors' parts, and their
+    keys are asked for from the attach records during the load (Phase 5.5.1's sixth step).
+-   **A re-equip split across scene passes erased and re-added the item (fixed 2026-11-18).** NPCs re-equip by a `DetachChild`
+    and an `AttachChild` of the same node on the engine's actor threads (scabbard and dagger, bow, arrow and quiver after a load and
+    when an NPC's 3D finishes loading). The detach woke the scene pass, which erased the geometry before the attach tracked it
+    again: 5 to 10 in every Riverwood run (`[DCLF] split move`). `SceneTracker` now holds a plain detach outside loads, pinned, until
+    an attach of the same child pushes both (applied as a move) or the next frame's start pushes it as a removal. Runs fxg and fig
+    had none. Run fxn had two static ones at startup and fqn two 'Land' blocks detached at frame 59 and attached at frame 61, which
+    stay a removal and an add.
+-   **"Sometimes parts do not come back" (not reproduced).** No part stayed drawn by nobody and every actor's tracked count matched
+    its held geometry at the end, over runs l1g, fxg, fxn and fig: 31 crossings and about 36,000 actor-frames at Riverwood and in the
+    Bannered Mare, plus 47 crossings before.
+-   **Actors resting at a fractional fade (fixed 2026-11-18).** After a load, some actors' fade nodes hold 0.983 (guest, 60 fps),
+    0.964 (native, about 28 fps) or 0.950 (20 fps) for good, one frame's fade step below 1. The mirror reads that value, so their
+    parts bind the blended fading pipelines (hint 9) while DCLF's own fade state is 1 and draws them at alpha 1. A placement snap
+    or reseed (a cell change) clears it. Runs b5r1 to b5diag7g and the tour config in the bug5 scratch folder.
+    -   **Vanilla rests at exactly 1.** `FUN_14147a160` (AE 1.6.1170) steps `+0x130`/`+0x140` toward `fadeAmount` by
+        `min(dt / time, 0.1)` and stops at it. The snap applies only above 1.5 (`0x141ad2874`) and gives `fadeAmount - 2.0`
+        (`0x141ad288c`), so 0.983 is no snap offset. Ghosts use the snap. Their `fadeAmount` ramps to 2.25 and they rest at 0.25
+        (actor probe: node 2.250, mirror 2.250, root row 2.250).
+    -   **The handover.** The seed copies the node at the start of the frame that first draws the root's generation. The engine's
+        own `OnVisible` for that frame's cull still runs on the node, because the writer tables that stop it are published at the
+        next `Main::Update` entry. Run b5diag3 caught it for Hod. The seed read `cur 1.0`, `+0x140 1.0` and `fadeAmount 0` (alpha 0
+        for one frame at the load), then the engine stepped the node to 0.9639. DCLF's state runs on from the seed, and only a reported
+        milestone brings the node in line. `ReportMilestone` took the seed's milestone as already on the node, so a state that
+        stays at 1 is never written. **Fixed:** a new generation's
+        first update always reports (`FadeStateCS.hlsl` and the CPU stage's `Report`).
+    -   **The fade write-back delivered nothing (fixed).** Runs b5diag4 to b5diag7g (guest and native) counted about 1,400
+        harvests with 0 events and 0 stores, so every DCLF-owned fade node kept what the engine left at the handover. The graph's
+        order was right: a probe word FadeStateCS wrote reached the copied list in the same frame, after the header upload and before
+        the copy (run b6d1g). No event was ever appended. `ReportMilestone` guarded the append with two early returns on an `||` of
+        equalities (`EventsIndex == 0 || ReportedIndex == 0`, then the written bit or an unchanged milestone), the pattern the
+        RX 6600 compiler miscompiles (TextureTransformsCS, the portal programs). Adding counters ahead of the guards, with the logic
+        unchanged, made the events flow (run b6d2g: 13,435 events). The guards are now one relational compare and a plain `if` around
+        the append. Guest run b6fixg: 10,288 events and 10,280 stores in the first window after the load (the first-update rule makes
+        every root report once, 3.3 ms of stores in all), then 2 to 32 a window. Native run b6fixn: 10,531 events, 10,278 stores.
+    -   **Result.** The actor probe at rest finds 0 fading actors in guest (b6fixg, b6fin, b6fin2) and native (b6fixn). Before, native
+        held up to 9 actors at 0.964 and the actor walking in (1A010003) stayed at 0.90 to 0.93 in both modes. An NPC placed in front
+        (`player.placeatme 000A2C8E 1 150 0`, run b6fin2) still fades in on the fading pipelines (lowest fade 0.915, 0.829, 0.764 at
+        5 to 40 frames) and rests opaque. The ghost (`000725F6`) rests with its node's fade at 0.250 in both modes, DCLF's state and
+        the engine's own snap value, and draws translucent (run b6fin, shot ghost240). Its `+0x140` keeps the engine's last step (0.07
+        to 0.13): the store writes only `+0x130`. Console `enable` has no fade, so the bug5 config's disable and enable cycles never
+        tested a fade-in.
+    -   Also changed: the fade amount and fade snap writers push the mirror update before the key, and the scene pass drains those
+        keys before the tracker. A key could be applied against a mirror without its value, leaving the root row at an older alpha.
+        Not seen in a run.
 
 ## Memory retention
 

@@ -1,45 +1,28 @@
 #pragma once
 
-// Forward (CS_DCLF_FORWARD, CS_DCLF_REFRACTION; dclf-architecture.md, "The forward epoch"): DCLF's blended objects, drawn by the forward
-// epoch (sorted back to front, on the CPU across pipelines or on the GPU within each, before the engine's blended draws), and refraction (kRefraction, kTempRefraction), drawn into
-// the refraction normals by the forward epoch's refraction range. The feature registers its switches and live toggles, the forward and
-// refraction object classes' contributions (Api::ObjectClass: the forward epoch's coverage, recording and execution and the Lighting
-// port's derivation read the toggles through them, as data), and the engine's two forward points (ForwardHooks.cpp): the main pass's
-// blended draw, where the epoch runs (ForwardEpoch.cpp: SubmitForwardEpoch, through Core's IndirectDraws::SubmitSharedEpoch) and the
-// refraction normals it drew are marked for the engine, and Main::Draw's refraction point. It owns the epoch's passes (ForwardPasses.cpp:
-// forward.draw, forward.refraction; on the CPU they are Core's forward site), refraction's preparation and counters, and the epoch's report lines.
-//
-// Core keeps what blended Lighting, Features/Effects (Features/Particles and Features/Billboards through it) and Features/FirstPerson's
-// forward part share: the forward and refraction ranges, the kRasterForward and refraction record bits and keys, ForwardSortCS and the
-// forward sort (core.forward-sort), the shared epoch's submission, recording, coverage and counters, refraction's pipeline (DrawPipelines:
-// dclf-layout.md, "Remaining architectural flaws") and normals import, DeriveForward. Included by the feature's sources only.
+// Forward (CS_DCLF_FORWARD, CS_DCLF_REFRACTION): DCLF's blended objects, sorted back to front and drawn just before the
+// engine's own blended draws, plus refraction geometry drawn into the refraction normals. Both run in the forward epoch.
+// Core owns the parts other features share: the forward ranges, the sort, and the shared epoch's submission.
+// See dclf-architecture.md, "The forward epoch".
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 namespace DCLF::Features::Forward
 {
-	// ForwardFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 
-	// ForwardHooks.cpp: the main pass's blended draw (both its call sites; the forward epoch's trigger, blended.draw) and Main::Draw's
-	// refraction point, from the feature's install.
 	void InstallHooks(Api::InstallContext& a_context);
-	// Its three calls, before any hook is written (HookSites): CALLs, as the thunks chain. All or none: the refraction point clears what
-	// the blended draw's marks.
+	// Must run before any hook is written. Install all three hooks or none, because the refraction point undoes what the blended draw marks.
 	void PreflightHooks();
 
-	// ForwardPasses.cpp: the forward epoch's passes (forward.draw, forward.refraction), from the feature's install.
 	void RegisterPasses(Api::InstallContext& a_context);
 
 	/**
-	 * @brief ForwardEpoch.cpp: the forward epoch (CS_DCLF_FORWARD), at the engine's blended draw (FUN_1414b39d0, after the deferred composite and
-	 * the water): the visible forward objects, sorted back to front by the colour epoch, drawn before the engine's own blended draws.
-	 * Render thread; only after this frame's colour epoch, whose commit wrote everything these draws read. Returns whether this execution
-	 * drew the refraction normals (the caller marks them for the engine).
+	 * @brief Runs the forward epoch. Render thread, only after this frame's colour epoch has committed.
+	 * Returns whether it drew the refraction normals, which the caller must then mark for the engine.
 	 */
 	bool SubmitForwardEpoch();
-	/** @brief Whether this frame's forward epoch drew the refraction normals (render thread, at Main::Draw's refraction point). */
+	/** @brief Whether this frame's forward epoch drew the refraction normals. Render thread. */
 	bool RefractionDrawnThisFrame();
-	// The forward epoch's report lines (ReportPoint::AsyncWorkForward), from the feature's install.
 	void RegisterReport(Api::InstallContext& a_context);
 }

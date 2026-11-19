@@ -1,4 +1,4 @@
-// The root states' entry, list view and calls (see the header).
+// The root states' entry, list view and calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
@@ -11,26 +11,26 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveRootStates (InstallFeatures, before DCLF's threads exist), read-only after.
-		struct Resolved
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
+		struct ResolvedRootStates
 		{
 			RootStatesEntry entry;
 			bool registered = false;
 		};
 
-		Resolved& State()
+		ResolvedRootStates& RootStatesState()
 		{
-			static Resolved resolved;
+			static ResolvedRootStates resolved;
 			return resolved;
 		}
 
-		// Written only by NoteRootStatesInstalled (the early hooks, before DCLF's threads exist), read-only after.
+		// Written only by the early hooks, before DCLF's threads exist. Read-only after.
 		bool rootStatesInstalled = false;
 	}
 
 	void ResolveRootStates(const Api::RootStatesContribution& a_registered)
 	{
-		auto& resolved = State();
+		auto& resolved = RootStatesState();
 		resolved.registered = !a_registered.name.empty();
 		if (!resolved.registered)
 			return;
@@ -42,7 +42,7 @@ namespace DCLF::Extensions
 
 	const RootStatesEntry* RootStates()
 	{
-		const auto& resolved = State();
+		const auto& resolved = RootStatesState();
 		return resolved.registered ? &resolved.entry : nullptr;
 	}
 

@@ -31,7 +31,7 @@
 #		include "RenderGraph/RenderGraphRuntime.h"
 #		include "RenderGraph/ScheduleWindow.h"
 #		include <ORGModuleServices/PipelineRegistry.h>
-#		include "Features/DrawcallLimitFix/Diagnostics/TestHarness.h"
+#		include "Testing/Testing.h"
 #	endif
 
 #	include <DevBenchAPI.h>
@@ -896,19 +896,19 @@ namespace
 		RunHandler("communityshaders.schedule", &BuildScheduleResult, a_argsJson, a_sink, a_write);
 	}
 
-	/** @brief Drawcall Limit Fix's test harness commands (TestHarness.h), queued for the next Present. */
+	/** @brief Test commands (src/Testing/Testing.h, old "dclf:" lines included), queued for the next Present. */
 	json BuildDclfResult(const json& a_args)
 	{
 #	if defined(CS_HAS_RENDER_GRAPH)
 		// Every reply carries the command list's progress, so a client drives a run by it (a waited-for signal, the list's frame) rather
 		// than by the log. No command: the progress alone.
-		const auto progress = DCLF::TestHarnessStatus();
+		const auto progress = Testing::GetLegacyProgress();
 		json harness{ { "frame", progress.frame }, { "shift", progress.shift }, { "next", progress.next }, { "commands", progress.commands },
 			{ "nextFrame", progress.nextFrame }, { "nextCommand", progress.nextCommand }, { "waiting", progress.waiting } };
 		const std::string command = a_args.value("command", std::string{});
 		if (command.empty())
 			return json{ { "harness", std::move(harness) } };
-		DCLF::QueueTestCommand(command);
+		Testing::QueueCommandLine(command);
 		return json{ { "queued", command }, { "enqueued_at_frame", EnqueuedFrame() }, { "harness", std::move(harness) } };
 #	else
 		(void)a_args;

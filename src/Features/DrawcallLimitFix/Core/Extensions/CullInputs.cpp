@@ -1,17 +1,23 @@
-// The main cull input's entry, the main walk's install note and the cull bindings' entries (see the header).
+// The main cull input's entry, the main walk's install note and the cull bindings' entries.
+
+// Helpers.h first in its own block, because volk must precede every Vulkan header in the translation unit.
+#include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
+
+#include <Render/PassBuilders.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/Buffers/VersionedBuffer.h>
 
 namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveMainCullInput (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		struct Resolved
 		{
 			MainCullInputEntry entry;
 			bool registered = false;
-			// By slot (Written only by ResolveCullBindings, as the entry).
 			std::array<CullBindingEntry, kCullBindingSlots> bindings;
 			std::array<bool, kCullBindingSlots> bound{};
 		};
@@ -22,11 +28,11 @@ namespace DCLF::Extensions
 			return resolved;
 		}
 
-		// Written once on the main thread at PostPostLoad (a feature's early hooks, before PrimaryCull::Install reads it).
+		// Written once on the main thread by a feature's early hooks, before PrimaryCull::Install reads it.
 		bool mainWalkInstalled = false;
 
-		// CullBindingBuffer's answer without a versioned one.
 		const std::shared_ptr<org::VersionedBuffer> kNoCullBuffer;
+		const std::shared_ptr<org::VersionedBuffer> kNoCullPublished;
 	}
 
 	void ResolveMainCullInput(const Api::MainCullInputContribution& a_registered)
@@ -84,5 +90,18 @@ namespace DCLF::Extensions
 	{
 		const auto select = SelectCullBinding(a_slot, a_scene, a_frame);
 		return select.versioned ? *select.versioned : kNoCullBuffer;
+	}
+
+	const std::shared_ptr<org::VersionedBuffer>& CullBindingPublished(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene)
+	{
+		const auto select = SelectCullBinding(a_slot, a_scene);
+		return select.published ? *select.published : kNoCullPublished;
+	}
+
+	void DeclareCullBindingPublications(org::RenderPassBuilder& a_builder, const Draws::SceneBuffers& a_scene, std::initializer_list<Api::CullBindingSlot> a_slots)
+	{
+		for (const auto slot : a_slots)
+			if (const auto& published = CullBindingPublished(slot, a_scene))
+				a_builder.ShaderResource(*published);
 	}
 }

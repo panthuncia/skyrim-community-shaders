@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 
 #include <array>
 #include <cstddef>
@@ -15,30 +16,27 @@ namespace DCLF::Draws
 	struct BuildDrawsBindings
 	{
 		org::DeclaredViewToken sequences, count, hzb, visibility, frustum;
-		org::DeclaredViewToken writers;  // TEMP (CS_DCLF_SET_PARITY): Resources::writers
+		org::DeclaredViewToken writers;  // TEMP (CS_DCLF_SET_PARITY)
 		org::DeclaredViewToken memberQueries, memberResults, memberClaims;
 		org::DeclaredViewToken sortCounts, sortStaging, sortRanks;
 		org::DeclaredViewToken fadeRoots;
-		org::DeclaredViewToken bucketCounts, poolFirsts;    // the depth segment's buckets (Resources::zBucketCounts) and the pool's firsts
-		org::DeclaredViewToken rootPrograms;  // the main member queries: each root's program (the programs are the latch's)
-		org::DeclaredViewToken classCounts;                 // the colour segment's state class sub-ranges' counts (Resources::classCounts)
-		org::DeclaredViewToken objectGates;                 // the colour segment: the objects' strict-light gates (the cull binding ObjectGates)
-		org::DeclaredViewToken retests, retestDispatch;     // the depth phases: the retest list (phase 1 appends, phase 2 reads), phase 2's dispatch
-		org::ResourceBindingToken retestArguments;          // phase 2: that dispatch, as its ExecuteIndirect's arguments
+		org::DeclaredViewToken bucketCounts, poolFirsts;  // the depth segment's buckets and the pool's firsts
+		org::DeclaredViewToken rootPrograms;  // each root's portal program, for the main member queries
+		org::DeclaredViewToken classCounts;  // colour segment
+		org::DeclaredViewToken objectGates;  // colour segment, the objects' strict-light gates
+		org::DeclaredViewToken retests, retestDispatch;  // phase 1 appends to the list, phase 2 reads it
+		org::ResourceBindingToken retestArguments;  // phase 2's dispatch as ExecuteIndirect arguments
 	};
 
 	namespace
 	{
 		static_assert(std::is_trivially_copyable_v<BuildDrawsConstants> && sizeof(BuildDrawsConstants) == kBuildDrawsConstantWords * sizeof(std::uint32_t));
 
-		/**
-		 * @brief The words of a BuildDrawsConstants its recording fills with declared views' bindless indices (PassRecordContext::Index):
-		 * Prepare chooses the view each names, the recording resolves them against the frame it records.
-		 */
+		/** @brief The constants' words that the recording fills with declared views' bindless indices for the frame it records. */
 		class ViewIndexWords
 		{
 		public:
-			/** @brief Has the recording fill a_field (a word of a_constants) with a_view's index; a later Set of the same word replaces it. */
+			/** @brief Has the recording fill a_field with a_view's index. A later Set of the same word replaces it. */
 			void Set(const BuildDrawsConstants& a_constants, const std::uint32_t& a_field, const org::DeclaredViewToken& a_view)
 			{
 				const auto word = static_cast<std::uint32_t>(
@@ -51,7 +49,7 @@ namespace DCLF::Draws
 				entries.push_back({ word, a_view });
 			}
 
-			/** @brief a_constants with every word Set filled from a_recording's views. */
+			/** @brief a_constants with every Set word filled from a_recording's views. */
 			BuildDrawsConstants Apply(BuildDrawsConstants a_constants, const org::PassRecordContext& a_recording) const
 			{
 				std::array<std::uint32_t, kBuildDrawsConstantWords> words{};
@@ -77,10 +75,10 @@ namespace DCLF::Draws
 		std::shared_ptr<const ComputeProgram> program, clearQueries;
 		std::uint32_t queryGroups = 0;
 		BuildDrawsConstants constants{};
-		ViewIndexWords views;  // the constants' view index words
+		ViewIndexWords views;
 		std::shared_ptr<const org::LatchBlock> latch;
 		rhi::CommandSignatureHandle signature{};
-		// Phase 2 over the retest list: dispatched from the bindings' retestArguments (phase 1's groups), not the latch's.
+		// Phase 2 over the retest list is dispatched from phase 1's groups, not the latch's.
 		bool retestIndirect = false;
 	};
 
@@ -88,13 +86,15 @@ namespace DCLF::Draws
 		rhi::CommandSignatureHandle a_signature, std::uint32_t a_latchOffset, org::PassRecordContext& a_recording)
 	{
 		auto& commands = a_recording.Commands();
-		const std::uint64_t offset = a_latch.Offset(a_recording.FrameSlot()) + a_latchOffset;
+		const auto region = a_latch.At(a_recording.Run());
+		const std::uint64_t offset = region.offset + a_latchOffset;
+		a_constants.latchIndex = region.srvIndex;
 		a_constants.latchOffset = static_cast<std::uint32_t>(offset);
 		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&a_constants));
-		commands.ExecuteIndirect(a_signature, a_latch.Resource()->GetAPIResource().GetHandle(), offset, {}, 0, 1);
+		commands.ExecuteIndirect(a_signature, region.buffer->GetAPIResource().GetHandle(), offset, {}, 0, 1);
 	}
 
-	// Writes this frame's draw sequences and their count from the draw inputs (BuildDrawsCS.hlsl).
+	// Writes this frame's draw sequences and their count from the draw inputs.
 	class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildDrawsFrame, BuildDrawsBindings>
 	{
 	public:
@@ -113,12 +113,21 @@ namespace DCLF::Draws
 				bindings.memberQueries = bind(Api::CullBindingSlot::MemberQueries, true);
 				bindings.memberClaims = bind(Api::CullBindingSlot::MemberClaims, true);
 				bindings.rootPrograms = bind(Api::CullBindingSlot::RootPrograms, false);
+				// Declared through their late-bound buffers so the copies that fill them come first, whatever queue this pass runs on.
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene,
+					{ Api::CullBindingSlot::Programs, Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+				FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements);
+				DeclarePayloadReads(a_builder);
 				return bindings;
 			}
+			// Declared through late-bound buffers, as above.
+			Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 			if (const auto& results = Extensions::CullBindingBuffer(Api::CullBindingSlot::MemberResults, *resources->scene); results && segment == RenderGraphRuntime::Segment::ZPrepass && fixedPhase != 2)
 				bindings.memberResults = a_builder.ShaderResource(*results).View();
 
-			// The scene list, the geometry table and the rows are the installed payload's (the latch names them): no recording binds them.
+			// No recording binds the installed payload's parts, so they are declared through their late-bound buffers.
+			DeclarePayloadReads(a_builder);
 			bindings.sequences = a_builder.UnorderedAccess(*resources->sequences).View();
 			bindings.count = a_builder.UnorderedAccess(resources->count).View();
 			bindings.visibility = a_builder.UnorderedAccess(*resources->visibility).View();
@@ -126,20 +135,16 @@ namespace DCLF::Draws
 				bindings.writers = a_builder.UnorderedAccess(*resources->writers).View();
 			if (resources->frustum)
 				bindings.frustum = a_builder.UnorderedAccess(*resources->frustum).View();
-			// Every phase reads the fade roots' static rows (the cull binding RootRows: phase 1's fade verdicts, LOD skin partitions). The
-			// states FadeStateCS published last frame (RootStates, the latch's) are undeclared: nothing this frame writes them.
+			// Every phase reads the fade roots' static rows. Last frame's FadeStateCS states are undeclared since nothing this frame writes them.
 			if (const auto& roots = Extensions::CullBindingBuffer(Api::CullBindingSlot::RootRows, *resources->scene))
 				bindings.fadeRoots = a_builder.ShaderResource(*roots).View();
-			// Phase 1 sees last frame's HZB, phase 2 the one rebuilt this frame: same resource, ordered by their place around the build.
+			// Phase 1 sees last frame's HZB and phase 2 this frame's. Same resource, ordered by their place around the rebuild.
 			if (resources->hzb)
 				bindings.hzb = a_builder.ShaderResource(resources->hzb).View();
-			// The depth phases write into the pipeline slots' buckets, indexed from the pool, for the Z-prepass's plain draws.
 			if (segment == RenderGraphRuntime::Segment::ZPrepass && resources->pool) {
 				bindings.bucketCounts = a_builder.UnorderedAccess(*resources->zBucketCounts[fixedPhase == 2 ? 1 : 0]).View();
 				bindings.poolFirsts = a_builder.ShaderResource(*resources->pool->firsts).View();
 			}
-			// Phase 1 appends its OccludedRetest inputs to the retest list and grows phase 2's dispatch; phase 2 runs over the list, dispatched
-			// from it.
 			if (segment == RenderGraphRuntime::Segment::ZPrepass && resources->retests && resources->retestDispatch) {
 				if (fixedPhase == 2) {
 					bindings.retests = a_builder.ShaderResource(*resources->retests).View();
@@ -149,12 +154,11 @@ namespace DCLF::Draws
 					bindings.retestDispatch = a_builder.UnorderedAccess(resources->retestDispatch).View();
 				}
 			}
-			// The colour segment's refraction draws are pooled too; its other draws append through their state class sub-ranges' counts.
+			// Colour refraction draws are pooled too. Other colour draws append through their class counts.
 			if (segment == RenderGraphRuntime::Segment::MainOpaque && resources->pool)
 				bindings.poolFirsts = a_builder.ShaderResource(*resources->pool->firsts).View();
 			if (segment == RenderGraphRuntime::Segment::MainOpaque && resources->classCounts)
 				bindings.classCounts = a_builder.UnorderedAccess(*resources->classCounts).View();
-			// The colour segment's receivers of portal-strict lights pass their gates (LocalShadowMask).
 			if (segment == RenderGraphRuntime::Segment::MainOpaque)
 				if (const auto& gates = Extensions::CullBindingBuffer(Api::CullBindingSlot::ObjectGates, *resources->scene))
 					bindings.objectGates = a_builder.ShaderResource(*gates).View();
@@ -166,7 +170,7 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The shape and the buffer versions the recording binds are the revision's (the ticket's host data).
+		// The shape and buffer versions come from the revision.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(static_cast<std::uint64_t>(segment));
@@ -182,7 +186,7 @@ namespace DCLF::Draws
 			if (!frame || !resources->buildDraws || !frame->latch || !resources->dispatchSignature)
 				return prepared;
 			const std::uint32_t phase = Phase(now);
-			// Phase 2 (retesting phase 1's rejects against the rebuilt HZB) belongs to the depth segment only.
+			// Phase 2 belongs to the depth segment only.
 			if (fixedPhase == 2 && now != RenderGraphRuntime::Segment::ZPrepass)
 				return prepared;
 			prepared.program = resources->buildDraws;
@@ -190,7 +194,6 @@ namespace DCLF::Draws
 			prepared.signature = resources->dispatchSignature->GetHandle();
 			auto& constants = prepared.constants;
 			auto& views = prepared.views;
-			constants.latchIndex = frame->latch->SrvIndex();
 			if (queries) {
 				if (!a_bindings.memberQueries.layout || !a_bindings.memberClaims.layout)
 					return {};
@@ -202,7 +205,6 @@ namespace DCLF::Draws
 				views.Set(constants, constants.memberClaimsIndex, a_bindings.memberClaims);
 				const auto capacity = NamedUnitsOf(a_preparation, Extensions::CullBindingBuffer(Api::CullBindingSlot::MemberQueries, *resources->scene));
 				prepared.queryGroups = static_cast<std::uint32_t>((capacity + 63) / 64);
-				// The programs are the depth latch's portalProgramsIndex (the frame's publication).
 				if (RootRowsCurrent(*resources->scene) && a_bindings.rootPrograms.layout)
 					views.Set(constants, constants.rootProgramsIndex, a_bindings.rootPrograms);
 				return prepared;
@@ -215,10 +217,10 @@ namespace DCLF::Draws
 			SetRowStrides(constants);
 			constants.phaseBits = (phase & 0xFu) << 4;
 			views.Set(constants, constants.visibilityIndex, a_bindings.visibility);
-			// TEMP (CS_DCLF_SET_PARITY): the writer records, through the claims word only the query preparation uses.
+			// TEMP (CS_DCLF_SET_PARITY): the writer records.
 			if (a_bindings.writers.layout)
 				views.Set(constants, constants.memberClaimsIndex, a_bindings.writers);
-			// Frustum stamps: only depth phase 1 tests every candidate's frustum.
+			// Only depth phase 1 tests every candidate's frustum, so only it stamps.
 			if (resources->frustum && phase == 1)
 				views.Set(constants, constants.frustumIndex, a_bindings.frustum);
 			const bool rootRows = RootRowsCurrent(*resources->scene);
@@ -231,9 +233,8 @@ namespace DCLF::Draws
 				constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
 				constants.hzbMips = resources->hzbMips;
 			}
-			// The retest list, with the HZB test (only it leaves an input OccludedRetest): phase 1 appends, phase 2 runs over the list,
-			// dispatched indirect from phase 1's groups. Both phases decide this from the same shape, so phase 2 never waits on a list
-			// phase 1 did not fill; without it phase 2 runs over every input from the latch's dispatch.
+			// Both phases decide this from the same shape, so phase 2 never reads a list phase 1 did not fill.
+			// Without it, phase 2 runs over every input from the latch's dispatch.
 			if (occlusion && now == RenderGraphRuntime::Segment::ZPrepass && a_bindings.retests.layout) {
 				if (phase == 2) {
 					views.Set(constants, constants.retestsIndex, a_bindings.retests);
@@ -255,23 +256,19 @@ namespace DCLF::Draws
 			constants.phaseTwoBase = frame->sequenceDraws;
 			constants.decalBase = 2 * frame->sequenceDraws;
 			constants.decalStride = frame->sequenceDecals;
-			// The state class sub-ranges' counts: colour segment only (the latch's class table and map say where each class draws).
 			if (now == RenderGraphRuntime::Segment::MainOpaque && resources->classCounts)
 				views.Set(constants, constants.classCountsIndex, a_bindings.classCounts);
 			if (now == RenderGraphRuntime::Segment::MainOpaque && a_bindings.objectGates.layout)
 				views.Set(constants, constants.objectGatesIndex, a_bindings.objectGates);
-			// The forward range (its classes' halves: the class table's): colour segment only.
-			// With the forward family on the CPU (GraphConditions::forwardDirect) nothing reads either range: no capacity, so the build stages none.
+			// With the forward family on the CPU nothing reads these ranges, so they get no capacity and nothing is staged.
 			const bool forwardOnCpu = CurrentGraphConditions().forwardDirect;
 			if (now == RenderGraphRuntime::Segment::MainOpaque && frame->forwardCapacity && !forwardOnCpu) {
 				constants.forwardBase = static_cast<std::uint32_t>(ForwardStagingSlot(*frame));
 				constants.forwardCapacity = frame->forwardCapacity;
 			}
-			// The forward buckets' draws are pooled (CS_DCLF_FORWARD_PLAIN), as are refraction's.
 			if (now == RenderGraphRuntime::Segment::MainOpaque && resources->pool)
 				views.Set(constants, constants.poolFirstsIndex, a_bindings.poolFirsts);
-			// The refraction range follows the forward halves (forwardBase + 2 * forwardCapacity), so forwardBase is set even
-			// without forward capacity.
+			// The refraction range follows the forward halves, so forwardBase is set even without forward capacity.
 			if (now == RenderGraphRuntime::Segment::MainOpaque && frame->refractionCapacity && resources->pool && !forwardOnCpu) {
 				constants.forwardBase = static_cast<std::uint32_t>(ForwardStagingSlot(*frame));
 				constants.refractionCapacity = frame->refractionCapacity;
@@ -288,7 +285,7 @@ namespace DCLF::Draws
 			const auto viewed = a_frame.views.Apply(a_frame.constants, a_recording);
 			if (a_frame.clearQueries) {
 				auto constants = viewed;
-				constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 				commands.BindLayout(a_frame.clearQueries->layout->GetHandle());
 				commands.BindPipeline(a_frame.clearQueries->Pipeline());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
@@ -300,9 +297,8 @@ namespace DCLF::Draws
 			commands.BindLayout(a_frame.program->layout->GetHandle());
 			commands.BindPipeline(a_frame.program->Pipeline());
 			if (a_frame.retestIndirect) {
-				// Phase 2: the latch's values, the retest list's groups.
 				auto constants = viewed;
-				constants.latchOffset = static_cast<std::uint32_t>(a_frame.latch->Offset(a_recording.FrameSlot()));
+				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.ExecuteIndirect(a_frame.signature, a_recording.Resolve(a_bindings.retestArguments).GetHandle(), 0, {}, 0, 1);
 				return;
@@ -318,7 +314,7 @@ namespace DCLF::Draws
 		}
 
 	private:
-		// Only the colour segment sorts (by pipeline, for its device-generated draw); depth draws are bucketed.
+		// Only the colour segment sorts. Depth draws are bucketed.
 		bool Sorts() const { return resources->sort && segment != RenderGraphRuntime::Segment::ZPrepass; }
 
 		std::shared_ptr<Resources> resources;
@@ -344,7 +340,7 @@ namespace DCLF::Draws
 		std::uint32_t groups = 0;
 	};
 
-	/** @brief The sort's scatter, after BuildDraws and the scan, over the draws' full range (threads past the count return). */
+	/** @brief The sort's scatter over the draws' full range. Threads past the count return. */
 	class SortSequencesPass final : public org::TypedRenderGraphPass<SortSequencesPass, SortSequencesFrame, SortSequencesBindings>
 	{
 	public:
@@ -363,7 +359,6 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The shape is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(static_cast<std::uint64_t>(segment)); }
 
 		SortSequencesFrame Prepare(const SortSequencesBindings&, const org::PassPrepareContext& a_preparation) const
@@ -371,8 +366,7 @@ namespace DCLF::Draws
 			SortSequencesFrame prepared{};
 			if (!BuildsDraws(a_preparation, *resources, segment))
 				return prepared;
-			// The main buckets' plain draws (CS_DCLF_MAIN_PLAIN) stage nothing: BuildDraws writes them in place, and its draw count is no
-			// staged count, so a scatter would copy stale staging over the buckets.
+			// Main plain buckets are written in place by BuildDraws, so a scatter would copy stale staging over them.
 			if (const auto shape = CurrentFrame(a_preparation, segment); shape && shape->classPlan && !shape->classPlan->main.empty())
 				return prepared;
 			prepared.program = resources->sort->scatter;

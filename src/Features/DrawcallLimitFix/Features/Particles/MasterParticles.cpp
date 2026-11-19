@@ -1,0 +1,298 @@
+// Master particle systems: the unheld-roots contribution over the particle manager's children, the removal hook, child-edit
+// counters and the observers' report lines.
+
+#include "Features/DrawcallLimitFix/Features/Particles/MasterParticles.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
+#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "Utils/SwitchFile.h"
+
+#include <atomic>
+#include <mutex>
+#include <shared_mutex>
+#include <vector>
+
+namespace DCLF::Features::Particles::MasterParticles
+{
+	namespace
+	{
+		// The particle manager's global and its lock (BSReadWriteLock at the global + 8). FUN_140e2a520 clears an idle master's slot with
+		// SetAt when it has fewer than 3 references and no live particles. AE 1.6.1170 and SE 1.5.97 match; AE 1.7.104 is checked by CallsTo.
+		constexpr Engine::Offset kManager{ { 411270 }, { 524630 } };                     // 0x143284b88 / 0x143024208
+		constexpr Engine::Offset kRemovalCall{ { 76601, 0x69 }, { 74853, 0x69 } };       // 0x140e2a589 / 0x140d53029
+		constexpr Engine::Offset kArraySetAt{ { 70322 }, { 68970 } };                    // 0x140d1ee40 / 0x140c59560
+		constexpr Engine::Offset kResetRemoveAll{ { 36601, 0x584 }, { 35593, 0x475 } };  // 0x140649254 / 0x1405b5905
+		constexpr Engine::Offset kRemoveAll{ { 70295 }, { 68944 } };                     // FUN_140d1d630 / FUN_140c58020 (SWF's removeAllChildren)
+
+		constexpr std::size_t kChildrenArray = 0x110;    // NiNode::children (the NiTObjectArray SetAt is called on)
+		constexpr std::size_t kMasterRemovable = 0x166;  // byte: the master may be removed once idle
+		// The master's emitter count. With none, its particles die out. Read as a plain count, because the live count walks arrays that
+		// its update rebuilds on a job thread.
+		constexpr std::size_t kMasterEmitters = 0x138;
+		constexpr std::uint32_t kHeldFrames = 600;  // an idle master kept only by DCLF's pins this long is flagged (<- MASTER REFS)
+
+		RE::NiNode* Manager()
+		{
+			return Engine::Global<RE::NiNode*>(kManager);
+		}
+
+		RE::BSReadWriteLock& ManagerLock()
+		{
+			return *reinterpret_cast<RE::BSReadWriteLock*>(REL::Module::get().base() + kManager.Get() + sizeof(void*));
+		}
+
+		std::uint32_t FrameCounter()
+		{
+			return Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
+		}
+
+		// Shared by the render thread's category capture, exclusive for the removal hook, so no removal lands between a master's listing
+		// and its capture's pushes. Lock order is gate, then the manager's lock. The removal hook runs on a job thread holding no lock
+		// (UpdateParticleSystemManagerJob 0x1402c7470), so nothing holds the manager's lock while waiting for the gate.
+		std::shared_mutex gate;
+		bool installed = false;
+		Api::SwitchId masterSwitch;  // install
+		bool observing = false;      // install: CS_DCLF_STATS, the observers' report (Lines) is read
+
+		struct Counts
+		{
+			std::atomic<std::uint64_t> attaches{ 0 }, detaches{ 0 }, removals{ 0 }, gathers{ 0 };
+		} counts;
+		EventQueue<const void*> exits;
+
+		// A master read at a gather, and how many of its references are DCLF's capture pins.
+		struct MasterRead
+		{
+			RE::NiNode* master = nullptr;
+			bool idleHeld = false;
+			std::uint32_t references = 0, pins = 0;
+		};
+
+		struct Observed
+		{
+			std::vector<const void*> listed, gathered;
+			std::vector<std::pair<const void*, std::uint32_t>> held;
+			std::uint64_t unseenLeft = 0, flaggedHeld = 0;
+			std::uint32_t lastListed = 0, maxListed = 0, idleEngine = 0, idleDclf = 0;
+			std::string firstUnseen, firstHeld, firstEngine;
+		} observed;
+		std::mutex observedLock;  // the render thread's gathers write, the report reads
+
+		/** @brief Flags masters that left with no event, and idle ones held only by DCLF's pins. CS_DCLF_STATS only. */
+		void Observe(const std::vector<MasterRead>& a_masters)
+		{
+			const std::scoped_lock lock(observedLock);
+			auto& o = observed;
+			std::vector<const void*> exited;
+			exits.Drain([&](const void* a_key) { exited.push_back(a_key); });
+			std::ranges::sort(exited);
+			o.gathered.clear();
+			for (const auto& read : a_masters)
+				o.gathered.push_back(read.master);
+			std::ranges::sort(o.gathered);
+			for (const auto* key : o.listed)
+				if (!std::ranges::binary_search(o.gathered, key) && !std::ranges::binary_search(exited, key))
+					if (o.unseenLeft++ == 0)
+						o.firstUnseen = fmt::format("{}", key);
+			std::swap(o.listed, o.gathered);
+			o.lastListed = static_cast<std::uint32_t>(o.listed.size());
+			o.maxListed = std::max(o.maxListed, o.lastListed);
+			// An idle master with a third reference is normal while an emitter's BSValueNode names it (+0x130), as with TES's pooled impact
+			// clones. Only DCLF's pins count against it: one held only by them for kHeldFrames is flagged as a leaked pin.
+			const std::uint32_t frame = FrameCounter();
+			std::vector<std::pair<const void*, std::uint32_t>> held;
+			o.idleEngine = o.idleDclf = 0;
+			for (const auto& read : a_masters) {
+				if (!read.idleHeld)
+					continue;
+				if (read.references - std::min(read.pins, read.references) > 2) {
+					if (o.idleEngine++ == 0 && o.firstEngine.empty())
+						o.firstEngine = fmt::format("'{}' ({} references)", read.master->name.c_str() ? read.master->name.c_str() : "", read.references);
+					continue;
+				}
+				++o.idleDclf;
+				std::uint32_t since = frame;
+				for (const auto& [key, first] : o.held)
+					if (key == read.master)
+						since = first;
+				if (since != ~0u && frame - since >= kHeldFrames) {
+					if (o.flaggedHeld++ == 0)
+						o.firstHeld = fmt::format("'{}' {} ({} references, {} of them DCLF's capture pins)", read.master->name.c_str() ? read.master->name.c_str() : "",
+							static_cast<const void*>(read.master), read.references, read.pins);
+					since = ~0u;  // flagged once
+				}
+				held.emplace_back(read.master, since);
+			}
+			o.held = std::move(held);
+		}
+
+		void Enter()
+		{
+			gate.lock_shared();
+		}
+
+		void Leave()
+		{
+			gate.unlock_shared();
+		}
+
+		void Gather(Api::UnheldRootSink& a_sink)
+		{
+			auto* manager = Manager();
+			if (!manager)
+				return;
+			counts.gathers.fetch_add(1, std::memory_order_relaxed);
+			static std::vector<MasterRead> masters;
+			masters.clear();
+			// The manager's AttachChild grows the array under this lock. The removal hook waits for Leave, so no slot read here is cleared
+			// before the sink pins its master.
+			auto& lock = ManagerLock();
+			lock.LockForRead();
+			for (const auto& child : Engine::Children(*manager)) {
+				auto* master = child ? child->AsNode() : nullptr;
+				if (!master || master->parent)
+					continue;
+				MasterRead read{ .master = master };
+				if (observing) {
+					// Read before the sink pins it.
+					read.references = master->GetRefCount();
+					read.idleHeld = Engine::At<std::uint8_t>(master, kMasterRemovable) && read.references > 2 &&
+					                std::atomic_ref<std::uint32_t>(Engine::At<std::uint32_t>(master, kMasterEmitters)).load(std::memory_order_relaxed) == 0;
+				}
+				masters.push_back(read);
+			}
+			lock.UnlockForRead();
+			for (const auto& read : masters)
+				a_sink.Add(read.master);
+			if (!observing)
+				return;
+			std::vector<const void*> keys;
+			for (const auto& read : masters)
+				if (read.idleHeld)
+					keys.push_back(read.master);
+			std::vector<std::uint32_t> pins(keys.size());
+			Scene::FrameView::Get().CapturePinsOf(keys, pins);
+			for (std::size_t k = 0, m = 0; m < masters.size(); ++m)
+				if (masters[m].idleHeld)
+					masters[m].pins = pins[k++];
+			Observe(masters);
+		}
+
+		/** @brief The manager's update clearing an idle master's slot. Its detach is pushed first, as a child edit's would be. */
+		struct RemovalHook
+		{
+			static void thunk(void* a_array, std::uint32_t a_index, void* a_value)
+			{
+				auto* manager = reinterpret_cast<RE::NiNode*>(static_cast<std::byte*>(a_array) - kChildrenArray);
+				std::unique_lock lock(gate);
+				const auto& children = manager->GetChildren();
+				if (RE::NiAVObject* master = a_index < children.free_idx() ? children[static_cast<std::remove_cvref_t<decltype(children)>::size_type>(a_index)].get() : nullptr) {
+					counts.removals.fetch_add(1, std::memory_order_relaxed);
+					PrimaryCull::Get().NoteListStructure(manager, master, false);
+					SceneTracker::Get().PushDetached(master, manager);
+					if (observing)
+						exits.Push(master);
+				}
+				func(a_array, a_index, a_value);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		void OnAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
+		{
+			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
+			if (event.parent && event.parent == Manager())
+				counts.attaches.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		void OnDetaching(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
+		{
+			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
+			if (event.parent && event.parent == Manager() && event.child) {
+				counts.detaches.fetch_add(1, std::memory_order_relaxed);
+				if (observing)
+					exits.Push(event.child);
+			}
+		}
+
+		bool SitesKnown()
+		{
+			return kManager.Known() && kRemovalCall.Known() && kArraySetAt.Known();
+		}
+	}
+
+	void Preflight()
+	{
+		// Runs before the switch is registered, so read it from the same source the registry uses.
+		if (Util::SwitchFile::Value("CS_DCLF_MASTER_PARTICLES") == "0")
+			return;
+		HookSites::RequireKnown("the particle manager's master removal", SitesKnown());
+		if (SitesKnown())
+			HookSites::RequireCall("the particle manager's master removal (FUN_140e2a520's SetAt of an idle master's slot)", REL::Offset(kRemovalCall).address());
+	}
+
+	void Install(Api::InstallContext& a_context)
+	{
+		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 they stay the engine's", .after = "CS_DCLF_PARTICLES" });
+		if (SwitchValue(masterSwitch) == "0" || installed)
+			return;
+		observing = Diagnostics::Observe().stats;
+		if (!SitesKnown()) {
+			logger::warn("[DCLF] master particles: this runtime has no address for the particle manager's master removal; they stay the engine's");
+			return;
+		}
+		// Chained, so another plugin's hook there is called through. A call to any other game function means the code moved, and the
+		// masters stay the engine's.
+		const auto removal = REL::Offset(kRemovalCall).address();
+		const auto setAt = REL::Offset(kArraySetAt).address();
+		if (!Engine::CallsTo(removal, setAt)) {
+			const auto module = HookSites::BranchTargetModule(removal);
+			if (module == HookSites::ModuleOf(setAt)) {
+				logger::warn("[DCLF] master particles: the call at {:#x} is not the master removal's SetAt; they stay the engine's", removal);
+				return;
+			}
+			logger::info("[DCLF] master particles: the master removal at {:#x} is hooked by {}; DCLF's thunk chains onto it", removal, module);
+		}
+		if (!SceneWriter::Subscribe(SWF_EVENT_CHILD_ATTACHED, &OnAttached) || !SceneWriter::Subscribe(SWF_EVENT_CHILD_DETACHING, &OnDetaching)) {
+			logger::warn("[DCLF] master particles: the scene writer framework refused the child-edit subscriptions; they stay the engine's");
+			return;
+		}
+		stl::write_thunk_call<RemovalHook>(removal);
+		a_context.RegisterUnheldRoots({ .owner = &Manager, .enter = &Enter, .leave = &Leave, .gather = &Gather });
+		installed = true;
+		const auto reset = REL::Offset(kResetRemoveAll).address();
+		logger::info(
+			"[DCLF] master particles: on (CS_DCLF_MASTER_PARTICLES, default on): the particle manager's masters are unheld category roots; removal hooked at {:#x}; "
+			"the world reset's remove-all at {:#x} {}",
+			removal, reset, Engine::CallsTo(reset, REL::Offset(kRemoveAll).address()) ? "is the engine's (SceneWriterFramework's detour fires its detaches)" : "is not a call to the remove-all <- FLAG");
+	}
+
+	void Lines(std::string& a_text)
+	{
+		if (!installed)
+			return;
+		const auto attaches = counts.attaches.exchange(0, std::memory_order_relaxed);
+		const auto detaches = counts.detaches.exchange(0, std::memory_order_relaxed);
+		const auto removals = counts.removals.exchange(0, std::memory_order_relaxed);
+		const auto gathers = counts.gathers.exchange(0, std::memory_order_relaxed);
+		const std::scoped_lock lock(observedLock);
+		const auto& o = observed;
+		a_text += fmt::format(
+			"[DCLF] master particles (CS_DCLF_MASTER_PARTICLES): {} listed at the last gather ({} at most); {} attaches, {} detaches (the manager's child "
+			"edits), {} idle removals hooked, {} gathers; {} left with no event{}{}\n",
+			o.lastListed, o.maxListed, attaches, detaches, removals, gathers, o.unseenLeft, o.unseenLeft ? " <- MASTER SET" : " <- OK",
+			o.firstUnseen.empty() ? std::string() : fmt::format(" (first {})", o.firstUnseen));
+		a_text += fmt::format(
+			"[DCLF] master particles' references at the last gather: {} idle masters kept by the engine's own references (an emitter's value "
+			"node){}; {} kept only by DCLF's capture pins, {} of them {} frames or more{}{}\n",
+			o.idleEngine, o.firstEngine.empty() ? std::string() : fmt::format(" (first {})", o.firstEngine), o.idleDclf, o.flaggedHeld, kHeldFrames,
+			o.flaggedHeld ? " <- MASTER REFS" : " <- OK", o.firstHeld.empty() ? std::string() : fmt::format(" (first {})", o.firstHeld));
+	}
+}

@@ -1,11 +1,57 @@
-SamplerState LinearSampler : register(s0);
-SamplerComparisonState ShadowSampler : register(s1);
-Texture3D<float4> VBufferA : register(t0);
-Texture2DArray<float4> DirectionalShadowMap : register(t1);
-Texture3D<float4> LightScatteringHistory : register(t2);
-Texture2D<float> ConservativeDepthTexture : register(t3);
-Texture2D<float> PrevConservativeDepthTexture : register(t4);
-RWTexture3D<float4> LightScattering : register(u0);
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and the included headers'
+// resources (SharedData's depth, IBL, Skylighting, Terrain and Cloud Shadows, Light Limit Fix) are heap reads
+// through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below. Light Limit
+// Fix's strict lights are never read here: an UNREAD_LATCH entry.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+#include "ExponentialHeightFog/VolumetricFogConstants.hlsli"
+
+struct DirectionalShadowLightData
+{
+	column_major float4x4 ShadowProj[2];
+	column_major float4x4 InvShadowProj[2];
+	float2 EndSplitDistances;
+	float2 StartSplitDistances;
+};
+
+#define LIGHT_SCATTERING_RESOURCES(X)                                                 \
+	X(SHARED, ConstantBuffer, Shared, 0)                                              \
+	X(LATCH, VolumetricFogConstants, VolumetricFog, 0)                                \
+	X(SAMPLER, SamplerState, LinearSampler, 0)                                        \
+	X(SAMPLER, SamplerComparisonState, ShadowSampler, 1)                              \
+	X(SRV, Texture3D<float4>, VBufferA, 0)                                            \
+	X(SRV, Texture2DArray<float4>, DirectionalShadowMap, 1)                           \
+	X(SRV, Texture3D<float4>, LightScatteringHistory, 2)                              \
+	X(SRV, Texture2D<float>, ConservativeDepthTexture, 3)                             \
+	X(SRV, Texture2D<float>, PrevConservativeDepthTexture, 4)                         \
+	X(UAV, RWTexture3D<float4>, LightScattering, 0)                                   \
+	X(SRV, StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98) \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)                                    \
+	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                      \
+	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                      \
+	X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 50)                              \
+	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)                             \
+	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                            \
+	X(EXTERN, StructuredBuffer<Light>, lights, 35)                                    \
+	X(EXTERN, StructuredBuffer<uint>, lightList, 36)                                  \
+	X(EXTERN, StructuredBuffer<LightGrid>, lightGrid, 37)                             \
+	X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                   \
+	X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)                            \
+	X(UNREAD_LATCH, StrictLightDataValues, StrictLightData, 3)
+
+// The engine's local shadow maps, with Light Limit Fix only. Last in the push block, so the block's start is the
+// same in every permutation.
+#if defined(LIGHT_LIMIT_FIX)
+#	define ENGINE_LOCAL_SHADOW_RESOURCES(X)                        \
+		X(SRV, Texture2DArray<float>, EngineLocalShadowMaps, 5)    \
+		X(LATCH, EngineLocalShadowConstants, EngineLocalShadow, 1)
+#else
+#	define ENGINE_LOCAL_SHADOW_RESOURCES(X)
+#endif
+
+ORG_PUSH_BLOCK(LIGHT_SCATTERING_RESOURCES(ORG_HANDLE) ENGINE_LOCAL_SHADOW_RESOURCES(ORG_HANDLE))
+LIGHT_SCATTERING_RESOURCES(ORG_RESOURCE)
 
 #include "Common/Random.hlsli"
 #include "ExponentialHeightFog/VolumetricFogCSCommon.hlsli"
@@ -19,24 +65,25 @@ RWTexture3D<float4> LightScattering : register(u0);
 #if defined(LIGHT_LIMIT_FIX)
 #	include "LightLimitFix/LightLimitFix.hlsli"
 
-Texture2DArray<float> EngineLocalShadowMaps : register(t5);
-cbuffer EngineLocalShadowCB : register(b1)
+struct EngineLocalShadowConstants
 {
-	LightLimitFix::LocalShadowData EngineLocalShadows[4];
+	LightLimitFix::LocalShadowData Shadows[4];
 };
+ENGINE_LOCAL_SHADOW_RESOURCES(ORG_RESOURCE)
+// One engine local shadow by index. Under ORG it is read from the latch buffer by offset: indexing the latched
+// array per thread made it a private array, which AMD's compiler keeps in scratch memory.
+LightLimitFix::LocalShadowData EngineLocalShadowAt(uint a_index)
+{
+#	if defined(CS_ORG_BINDLESS)
+	// LocalShadowData is 112 bytes: a float4x4 and three float4.
+	return OrgLatch_EngineLocalShadow.Load<LightLimitFix::LocalShadowData>(OrgOffset_EngineLocalShadow + 112 * a_index);
+#	else
+	return EngineLocalShadow.Shadows[a_index];
+#	endif
+}
 #endif
 #define SKYLIGHTING_PROBE_REGISTER t50
 #include "Skylighting/Skylighting.hlsli"
-
-struct DirectionalShadowLightData
-{
-	column_major float4x4 ShadowProj[2];
-	column_major float4x4 InvShadowProj[2];
-	float2 EndSplitDistances;
-	float2 StartSplitDistances;
-};
-
-StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t98);
 
 // 4D PCG hash matching UE's Rand4DPCG32 (jcgt.org/published/0009/03/02/)
 uint4 Rand4DPCG32(int4 p)
@@ -168,17 +215,20 @@ float SampleDirectionalShadow(float3 positionWS)
 	if (!VolumetricFogHasDirectionalShadowMap)
 		return 1.0f;
 
-	DirectionalShadowLightData directionalShadowLightData = DirectionalShadowLights[0];
+	// The cascade's matrix is read from the buffer by index. A local copy of the whole entry indexed per thread became a
+	// private array, which AMD's compiler keeps in scratch memory.
+	const float2 endSplitDistances = DirectionalShadowLights[0].EndSplitDistances;
+	const float2 startSplitDistances = DirectionalShadowLights[0].StartSplitDistances;
 	float shadowMapDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(positionWS));
-	if (shadowMapDepth >= directionalShadowLightData.EndSplitDistances.y)
+	if (shadowMapDepth >= endSplitDistances.y)
 		return 1.0f;
 
-	float splitDenom = max(directionalShadowLightData.EndSplitDistances.x - directionalShadowLightData.StartSplitDistances.y, 1e-4f);
-	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - directionalShadowLightData.StartSplitDistances.y) / splitDenom));
+	float splitDenom = max(endSplitDistances.x - startSplitDistances.y, 1e-4f);
+	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - startSplitDistances.y) / splitDenom));
 	uint primaryCascade = (uint)cascadeSelect;
 
 	float3 absolutePositionWS = positionWS + FrameBuffer::CameraPosAdjust.xyz;
-	float3 positionLS = mul(directionalShadowLightData.ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+	float3 positionLS = mul(DirectionalShadowLights[0].ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 	if (any(positionLS.xy < 0.0f) || any(positionLS.xy > 1.0f))
 		return 1.0f;
 
@@ -187,14 +237,14 @@ float SampleDirectionalShadow(float3 positionWS)
 	[branch] if (cascadeSelect > 0.0f && cascadeSelect < 1.0f)
 	{
 		uint secondaryCascade = 1u - primaryCascade;
-		float3 secondaryLS = mul(directionalShadowLightData.ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+		float3 secondaryLS = mul(DirectionalShadowLights[0].ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 		if (!any(secondaryLS.xy < 0.0f) && !any(secondaryLS.xy > 1.0f)) {
 			float secondaryShadow = SampleDirectionalShadowPCF(secondaryLS, secondaryCascade);
 			shadow = lerp(shadow, secondaryShadow, cascadeSelect);
 		}
 	}
 
-	float fade = saturate(shadowMapDepth / max(directionalShadowLightData.EndSplitDistances.y, 1.0f));
+	float fade = saturate(shadowMapDepth / max(endSplitDistances.y, 1.0f));
 	float fadeFactor = 1.0f - pow(fade * fade, 8.0f);
 	return lerp(1.0f, shadow, fadeFactor);
 }
@@ -248,7 +298,7 @@ float SampleLocalLightShadow(LightLimitFix::Light light, float3 positionWS, floa
 	if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
 		if (!VolumetricFogHasEngineLocalShadows || light.shadowLightIndex >= 4u)
 			return 0.0f;
-		LightLimitFix::LocalShadowData data = EngineLocalShadows[light.shadowLightIndex];
+		LightLimitFix::LocalShadowData data = EngineLocalShadowAt(light.shadowLightIndex);
 		if (data.Params.y <= 0.0f)
 			return 0.0f;
 		return LightLimitFix::GetLocalShadow(EngineLocalShadowMaps, LinearSampler, data, (uint)data.Params2.z, positionWS, FrameBuffer::CameraPosAdjust.xyz, towardLight, false, noise, data.Params2.w, 1u, 0.0f);

@@ -1,9 +1,7 @@
 #pragma once
 
-// What an epoch's execution holds until the GPU retires it (RenderGraphRuntime::ExecuteEpoch's resource owner), made the one way every
-// submission makes it (dclf-architecture.md, "Descriptor ownership"): what the execution reads (its payloads' bindings, the adopted
-// snapshot, its frame textures, its commit's own leases), then, sealed at the end of its record step, the scene's content owners - the
-// descriptors every row it can read names, whichever commit wrote them.
+// What an epoch's execution holds until the GPU retires it, made the same way for every submission. It holds what the
+// execution reads, then the scene's content owners sealed at the end of its record step, which own the descriptors its rows name.
 
 #include <memory>
 #include <vector>
@@ -16,7 +14,7 @@ namespace DCLF::Draws
 	class ExecutionOwners
 	{
 	public:
-		/** @brief Render thread: an empty list on the graph's cleanup queue; false without one (nothing can be submitted). */
+		/** @brief Render thread: an empty list on the graph's cleanup queue. False without one, and then nothing can be submitted. */
 		static ExecutionOwners Make();
 
 		explicit operator bool() const { return list != nullptr; }
@@ -25,14 +23,11 @@ namespace DCLF::Draws
 			if (a_owner)
 				list->push_back(std::move(a_owner));
 		}
-		/** @brief a_payload's bindings (the rows it built name). */
+		/** @brief Adds a_payload's bindings. */
 		void AddPayload(const MainPayload& a_payload);
-		/** @brief The list itself, for a commit that adds what only this execution reads (CommitContext::executionOwners). */
+		/** @brief The list itself, for a commit that adds what only this execution reads. */
 		std::vector<std::shared_ptr<const void>>& List() { return *list; }
-		/**
-		 * @brief At the end of the record step, after the execution's commit wrote its content: the content owners of a_scene (null: none)
-		 * as they now stand.
-		 */
+		/** @brief At the end of the record step: the content owners of a_scene as they now stand. */
 		void Seal(SceneBuffers* a_scene);
 		/** @brief The resource owner the execution is submitted with. */
 		std::shared_ptr<const void> Handle() const { return list; }

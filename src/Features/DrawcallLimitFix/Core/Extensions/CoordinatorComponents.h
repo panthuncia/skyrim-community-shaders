@@ -1,9 +1,7 @@
 #pragma once
 
-// The coordinator component contract's Core side (Api/CoordinatorComponents.h): what a component's hooks are handed - the live tables,
-// its state, and the few coordinator services a residency change or a walk's phase needs, never the coordinator itself; the walk's
-// scheduling and entry writes; whether an entry class is taken. Implemented by the coordinator (Core/Scene/Coordinator/Components.cpp), which
-// calls the hooks, and the registry (EntryClassTaken).
+// Core's side of Api/CoordinatorComponents.h: what a component's hooks receive.
+// Hooks get the live tables, their own state and a few coordinator services, never the coordinator itself.
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Api/EntryRanges.h"
@@ -29,14 +27,14 @@ namespace DCLF
 
 namespace DCLF::Api
 {
-	/** @brief What a component's hook is handed (scene lane, inside a pass): the live tables, its state, and the coordinator's services. */
+	/** @brief What a component's hook gets on the scene lane: the live tables, its state and the coordinator's services. */
 	class CoordinatorComponentContext
 	{
 	public:
 		CoordinatorComponentContext(SceneTables& a_tables, const std::shared_ptr<void>& a_state, Scene::Coordinator& a_coordinator, std::uint32_t a_component) :
 			tables(a_tables), state(a_state), coordinator(a_coordinator), component(a_component) {}
 
-		SceneTables& tables;  // the coordinator's live tables (its table families: Extensions::TableFamilies::Mutable)
+		SceneTables& tables;
 		const std::shared_ptr<void>& state;
 
 		template <class T>
@@ -45,139 +43,112 @@ namespace DCLF::Api
 			return *static_cast<T*>(state.get());
 		}
 
-		/** @brief Whether the walk parity's dense walk runs: it restores the tables, not what the components keep beside them. */
+		/** @brief Whether the parity dense walk is running. It restores the tables but not what components keep beside them. */
 		bool DenseWalk() const;
-		/**
-		 * @brief The fade node of a_slot's property as the mirror holds it (null: no geometry, no property record or none), and the node's
-		 * capture kind (Api::kMirroredKind*; 0 when the mirror holds no record of it). Reads no engine memory.
-		 */
+		/** @brief The fade node of a_slot's property as the mirror holds it, and its capture kind. Reads no engine memory. */
 		const void* MirroredFadeNode(std::uint32_t a_slot, std::uint32_t& a_kind) const;
 		/**
-		 * @brief A reference to a_node from a_slot's entry (its fade node, held from the naming event's pins), for a newly listed owner;
-		 * null when the entry holds another (asked of the render thread: the component is called again with the answer, resident).
+		 * @brief A reference to a_node held by a_slot's entry, for a newly listed owner.
+		 * Returns null when the entry holds a different node. The render thread is then asked, and the component is called again as resident.
 		 */
 		RE::NiPointer<RE::NiAVObject> HoldFadeNode(std::uint32_t a_slot, const void* a_node) const;
-		/** @brief a_slot is recounted at the next KeepResidentsAlive (its keys may have changed). */
+		/** @brief Recounts a_slot at the next KeepResidentsAlive, because its keys may have changed. */
 		void NoteTouched(std::uint32_t a_slot) const;
-		/** @brief An engine reference let go of: released at Present through the retirement chain. */
+		/** @brief Releases an engine reference at Present through the retirement chain. */
 		void HandBack(RE::NiPointer<RE::NiAVObject>&& a_reference) const;
 		void HandBack(std::vector<RE::NiPointer<RE::NiAVObject>>& a_references) const;
 		void HandBack(RE::NiPointer<RE::NiRefObject>&& a_reference) const;
-		/** @brief A tracked entry's write state (none: a_geometry is not tracked). */
+		/** @brief A tracked entry's write state. */
 		struct TrackedWrite
 		{
 			bool tracked = false;
-			std::uint32_t slot = ~0u;  // its object slot (kNoObjectSlot: none)
-			bool streamWaiting = false;  // its last record write waited for its second vertex stream (EntryWrite)
+			std::uint32_t slot = ~0u;
+			bool streamWaiting = false;  // its last record write waited for its second vertex stream
 		};
 		TrackedWrite TrackedWriteOf(const RE::BSGeometry* a_geometry) const;
-		/** @brief a_geometry's tracked entry written in full this walk (Coordinator::Schedule); false when it is not tracked. */
+		/** @brief Writes a_geometry's tracked entry in full this walk. Returns false if it is not tracked. */
 		bool ScheduleWrite(RE::BSGeometry* a_geometry) const;
-		/** @brief The tracked entry's own reference of the geometry keyed a_key (held from its attach's pins), or null when not tracked. */
+		/** @brief The tracked entry's own reference to the geometry keyed a_key, or null when not tracked. */
 		RE::BSGeometry* TrackedGeometry(const void* a_key) const;
-		/**
-		 * @brief A range of the component's (a_count units from a_first) freed: retiring until no publication names it, then handed back
-		 * (CoordinatorComponent::Retirement::recycled).
-		 */
+		/** @brief Frees a range of the component's. It retires until no publication names it, then comes back through Retirement::recycled. */
 		void RetireRange(std::uint32_t a_first, std::uint32_t a_count) const;
-		/** @brief A seed the next frame's start takes (PublicationDeltas, then FrameView::TakeComponentSeeds with the component's id). */
+		/** @brief Adds a seed for the next frame's start to hand to this component. */
 		void RequestSeed(FadeSeedItem&& a_seed) const;
-		/** @brief Whether KeepResidentsAlive counted a_slot (a resident with a pipeline: what the residents keep alive). */
+		/** @brief Whether KeepResidentsAlive counted a_slot, meaning a resident with a pipeline. */
 		bool Counted(std::uint32_t a_slot) const;
-		/** @brief The coordinator's scene mirror, as the pass's events left it (the parent chains, the nodes' kinds; no engine memory). */
+		/** @brief The scene mirror as this pass's events left it. No engine memory. */
 		const SceneMirror& Mirror() const;
-		/** @brief a_key's node as the mirror holds it (Api::MirroredNode: a parent chain's walk, the node's kind, RTTI and lists). */
 		MirroredNode MirroredNodeOf(const void* a_key) const;
 
-		// The object slots' columns a component reads, and the fixed main ranges' it writes (Api/MainRanges.h; the slots' ordinals in
-		// their range: Features/Decals' order), the live tables'. Read per event, never per object per frame.
-		/** @brief How many object slots the tables hold. */
+		// Object slot columns a component reads, and the fixed main range ordinals it writes. Read per event, never per object per frame.
 		std::uint32_t ObjectSlots() const;
-		/** @brief a_slot's geometry (null past the slots, or none). */
+		/** @brief a_slot's geometry, or null. */
 		const RE::BSGeometry* ObjectGeometry(std::uint32_t a_slot) const;
-		/** @brief The slots a_slot takes in its fixed range, by its skin partitions (RangeSpanOf; one past the slots). */
+		/** @brief The slots a_slot takes in its fixed range, one per skin partition. */
 		std::uint32_t RangeSpan(std::uint32_t a_slot) const;
-		/** @brief The slots a range member of a_partitions (a skin partitions value: Api::SlotRewrite's) takes: one per partition up to the last. */
+		/** @brief The slots a range member with a_partitions skin partitions takes. */
 		static std::uint32_t RangeSpanOf(std::uint32_t a_partitions);
-		/** @brief Each object slot's ordinal in its fixed range (~0u: none), sized to the object slots first (a new slot's none). */
+		/** @brief Each object slot's ordinal in its fixed range, or ~0u. Resized to the object slots first. */
 		std::span<std::uint32_t> SizedRangeOrdinals() const;
-		/** @brief Each fixed range's slots. */
 		std::span<std::uint32_t, kFixedMainRanges> RangeCounts() const;
-		/** @brief a_slot's ordinal moved, or it left its range: its draw's inputs changed (noted with the bindings' cause). */
+		/** @brief Reports that a_slot's ordinal moved or it left its range, so its draw's inputs changed. */
 		void NoteRangeOrdinalChanged(std::uint32_t a_slot) const;
-		/** @brief The coordinator's pass serial (the observers' ParityDue). */
 		std::uint64_t PassSerial() const;
-		/** @brief The pass's stamp (Coordinator::PassStamp: never 0), for a check run once a pass. */
+		/** @brief The pass's stamp, never 0, for a check run once per pass. */
 		std::uint32_t PassStamp() const;
 
-		// The drawn index ranges the coordinator keeps by tracked entry (a ranged geometry type's, Api::GeometryTypeContribution::ranges:
-		// object LOD's sub-index shapes: the attach's capture, then their events), which the walk reads as data (each range a geometry slot
-		// of the entry's chain); erased with the entry.
+		// Drawn index ranges kept per tracked entry, such as object LOD's sub-index shapes. Erased with the entry.
 		using EntryRangesMap = ankerl::unordered_dense::map<const RE::BSGeometry*, std::vector<EntryRange>>;
-		/** @brief Every entry's kept ranges. */
 		const EntryRangesMap& EntryRanges() const;
-		/** @brief a_entry's kept ranges; null when it keeps none (not a tracked entry with ranges: only such a key is known alive). */
+		/** @brief a_entry's kept ranges, or null. Only a tracked entry with ranges is known alive. */
 		const std::vector<EntryRange>* EntryRangesOf(const void* a_entry) const;
-		/** @brief The ranges the mirror's record of a_entry holds (SceneCapture::GeometryRecord::ranges; null: no record). */
+		/** @brief The ranges in the mirror's record of a_entry, or null. */
 		const std::vector<EntryRange>* MirroredRanges(const void* a_entry) const;
-		/** @brief a_entry's kept ranges replaced; a_rewrite: its record (its range slot chain) is written again this walk. */
+		/** @brief Replaces a_entry's kept ranges. a_rewrite rewrites its range slot chain this walk. */
 		void SetEntryRanges(const void* a_entry, std::vector<EntryRange>&& a_ranges, bool a_rewrite) const;
 
-		// The marks on scene roots (Api::Mark), the coordinator's map read as data by the prepares (written only while the mirror's events
-		// are applied, before the adds).
+		// Marks on scene roots. Written only while the mirror's events are applied, before the adds.
 		/**
-		 * @brief a_key marked the component's (a_token, a_side); a_ownHide: the mirror counts the subtree's hide as the component's (its
-		 * entries' verdicts do not take it). Returns the mark it displaced (none: no other).
+		 * @brief Marks a_key for this component. a_ownHide makes the mirror count the subtree's hide as the component's.
+		 * Returns the mark it displaced.
 		 */
 		Mark MarkRoot(const void* a_key, std::uint64_t a_token, std::uint8_t a_side, bool a_ownHide) const;
-		/** @brief a_key's mark erased when it is the component's with a_token; whether it was. */
+		/** @brief Erases a_key's mark if it is this component's with a_token. Returns whether it did. */
 		bool UnmarkRoot(const void* a_key, std::uint64_t a_token) const;
-		/** @brief a_key's mark (none: unmarked). */
 		Mark MarkOf(const void* a_key) const;
 
-		// The commit's vetoes (Api::kVetoHold, kVetoObserve): one byte per entry, read by the commit as data.
-		/** @brief a_entry's veto set (0: none); Observe resets its observed slots. Set during settle, it applies in the same commit. */
+		// The commit's vetoes, one byte per entry.
+		/** @brief Sets a_entry's veto. Observe resets its observed slots. Set during settle, it applies in the same commit. */
 		void SetEntryVeto(const void* a_entry, std::uint8_t a_veto) const;
-		/** @brief What the commit recorded of a_slot while Observe withheld it (none past the slots). */
+		/** @brief What the commit recorded of a_slot while Observe withheld it. */
 		ObservedState ObservedSlot(std::uint32_t a_slot) const;
-		/** @brief Whether a_slot is a layer's (the tables' IsLayer): a publication claims it with its base geometry. */
+		/** @brief Whether a_slot is a layer's. A publication claims a layer with its base geometry. */
 		bool LayerSlot(std::uint32_t a_slot) const;
-		/** @brief How many entries hold a_veto (Api::kVetoHold or kVetoObserve; every component's), as the coordinator counts them. */
+		/** @brief How many entries hold a_veto, across every component. */
 		std::uint32_t VetoCount(std::uint8_t a_veto) const;
-		/** @brief Whether the component needs the commit live (settle called with a_live) whatever the vetoes. */
+		/** @brief Asks for the commit to run live, so settle is called, whatever the vetoes. */
 		void SetCommitLive(bool a_live) const;
-		/** @brief a_entry requeued (Api::kRequeueSlots, kRequeueReevaluate, kRequeueReevaluateAlways); nothing when it is not tracked. */
+		/** @brief Requeues a_entry. Does nothing when it is not tracked. */
 		void Requeue(const void* a_entry, std::uint8_t a_flags) const;
-		/** @brief a_entry's tracked state (Api::TrackedState; tracked false: not tracked). */
 		TrackedState TrackedStateOf(const void* a_entry) const;
-		/** @brief A delta the next publication carries for the component (forces one), handed to its adoption (AdoptionContext::deltas). */
+		/** @brief Adds a delta for the next publication, which this forces. The delta reaches the component's adoption. */
 		void PublishDelta(std::shared_ptr<const void> a_delta) const;
-		/**
-		 * @brief The tracked entries under a_root as the mirror holds the subtree (the tracking walk's), into a_out (appended); a_lacking set
-		 * when the mirror lacks a record of the root or a node under it.
-		 */
+		/** @brief Appends the tracked entries under a_root as the mirror holds the subtree. a_lacking is set if the mirror lacks any record. */
 		void SubtreeEntries(const void* a_root, std::vector<const void*>& a_out, bool& a_lacking) const;
 
 	private:
-		Scene::Coordinator& coordinator;  // the services above, not the component's
-		std::uint32_t component;          // its registration
+		Scene::Coordinator& coordinator;
+		std::uint32_t component;
 	};
 
-	/**
-	 * @brief An accumulated patch's values a component lists by (ApplyAccumulatePatch; CoordinatorComponent::Accumulate::patched): the
-	 * draw chain the Lighting port derived for an object drawn in a kept order (a decal's group, pass and sub-pass:
-	 * AccumulatePatch::decalKey; 0 for none).
-	 */
+	/** @brief The accumulated patch values a component lists by: the decal draw chain key for an object drawn in a kept order. */
 	class AccumulatedPatch
 	{
 	public:
 		std::uint64_t chain;
 	};
 
-	/**
-	 * @brief A walk's rewrite of a slot (Coordinator::WriteObject, WriteLayer, or a skin's refresh in place): whether its scene half was
-	 * rewritten (it may have moved in the scene graph), and its skin partitions before and now (equal when they did not change).
-	 */
+	/** @brief A walk's rewrite of a slot: whether its scene half was rewritten, and its skin partitions before and after. */
 	class SlotRewrite
 	{
 	public:
@@ -186,62 +157,50 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A recount (KeepResidentsAlive): rebuilt, every resident is counted again from nothing; otherwise the slots touched since the
-	 * last recount (sorted, each once) are uncounted, all of them first, then counted as they are now.
+	 * @brief A recount. With rebuild, every resident is counted from nothing.
+	 * Otherwise the touched slots, sorted and unique, are all uncounted first and then counted as they are now.
 	 */
 	class ResidentRecount
 	{
 	public:
 		bool rebuild;
 		std::span<const std::uint32_t> touched;    // without rebuild
-		std::span<const std::uint32_t> residents;  // with rebuild, in the residents' order
+		std::span<const std::uint32_t> residents;  // with rebuild, in residents' order
 	};
 
-	/**
-	 * @brief The delta walk's scheduling (DeltaWalk): whether it is a full evaluation, and what the component's events did, the component's
-	 * own counts (for its report lines).
-	 */
+	/** @brief The delta walk's scheduling, and the component's own counts for its report lines. */
 	class WalkScheduling
 	{
 	public:
 		bool full;
-		std::uint64_t events = 0;   // the component's events this walk
-		std::uint64_t updated = 0;  // the slots it updated in place
-		std::uint64_t written = 0;  // the writes it scheduled (ScheduleWrite)
+		std::uint64_t events = 0;
+		std::uint64_t updated = 0;  // slots updated in place
+		std::uint64_t written = 0;  // writes scheduled through ScheduleWrite
 	};
 
-	/**
-	 * @brief A walk's write of an entry of the class a component follows (Coordinator::MergeWrite): the entry, and the second vertex stream
-	 * resolve gives its record (held on the merge's stack: what it leases lives as long as the write).
-	 */
+	/** @brief A walk's write of an entry of the followed class, and the second vertex stream resolve gives it. Lives on the merge's stack. */
 	class EntryWrite
 	{
 	public:
 		RE::BSGeometry& geometry;
-		// The entry's held source node (its entry class rule's parent, EntryRule::holdsParent: a face shape's BSFaceGenNiNode, from its
-		// attach's pins), or null.
+		// The entry's held source node, such as a face shape's BSFaceGenNiNode, or null.
 		RE::NiNode* source = nullptr;
-		// The stream: float4 positions, published by generation, leased by owner, and its region of the scene's positions buffer.
+		// The stream's float4 positions, leased by owner, and their region of the scene's positions buffer.
 		const float* positions = nullptr;
 		std::uint32_t vertexCount = 0;
 		std::uint64_t generation = 0;
 		std::shared_ptr<const std::vector<float>> owner;
-		std::uint32_t region = ~0u;  // Api::VertexStreamRow::kNoFirst: none
+		std::uint32_t region = ~0u;  // kNoFirst means none
 	};
 }
 
 namespace DCLF::Extensions
 {
-	/**
-	 * @brief Any thread, after InstallFeatures (false before): whether a_class's objects are DCLF's (the component that follows it takes
-	 * it: Api::CoordinatorComponent::EntryClassHooks::takes). Read as data by the eligibility, the walk and the frame's addresses.
-	 */
+	/** @brief Any thread, after InstallFeatures. Whether the component that follows a_class takes its objects. */
 	bool EntryClassTaken(Api::EntryClass a_class);
 	/**
-	 * @brief Render thread, the frame's start (after its coverage decision: claims installed, or none yet): every component's
-	 * adoption hook (Api::CoordinatorComponent::Adoption), in registration order, handed a_frame, a_claims (null: none installed yet)
-	 * and its deltas (a_deltas by component: the publications installed since the last call; none past it).
-	 * Core/Scene/Coordinator/Components.cpp.
+	 * @brief Render thread, at the frame's start after coverage is decided. Calls every component's adoption hook in registration order.
+	 * a_claims is null until claims are installed.
 	 */
 	void ComponentsAdopt(std::uint32_t a_frame, const void* a_claims, std::span<const std::vector<std::shared_ptr<const void>>> a_deltas);
 }

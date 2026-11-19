@@ -1,14 +1,9 @@
 #pragma once
 
-// The main cull input contract (Api::InstallContext::RegisterMainCullInput): what the main camera's cull reads besides the frustum, from
-// the walk a feature makes after Main::Update's own (Features/Portals' port of the portal/occluder walk). Core needs a walk: the primary
-// cull's scene lists keep the object root only while the walk reached unbound space, and the depth commits send each fade root's program
-// (an index into the feature's programs: an encoding Core does not read, which FadeStateCS and BuildDraws' phase 1 test each root's by).
-// One input: a second fails the install. Without one the primary cull stays off (its install finds no walk: Extensions::MainWalkInstalled).
-// The programs themselves are the feature's scene resources and commit hook, which Core's cull reads at a cull binding (below).
-//
-// And the cull binding contract (RegisterCullBinding): the buffers Core's cull (BuildDraws, VisibilityEvents) and the root states' stage
-// read at Core's fixed descriptor words, each slot's buffer a feature's (its scene resources or pool), selected per pass or commit.
+// The main cull input: what the main camera's cull reads besides the frustum, from a walk a feature makes after Main::Update's own.
+// Features/Portals provides it. Without it the primary cull stays off, because the scene lists depend on whether the walk reached unbound space.
+// Each fade root gets a program index into the feature's programs. Core never decodes it; the GPU cull shaders do.
+// Cull bindings: the buffers Core's cull reads at fixed descriptor words, each one supplied by a feature.
 
 #include <cstdint>
 #include <span>
@@ -17,25 +12,19 @@
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/CullInputs.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/CullInputs.h.
 	class RootProgramsJudge;
 	class CullBindingSelect;
 
 	/**
-	 * @brief The main camera's cull input. Read where Core decides; every callback is per frame, per commit, per event or once, never per
-	 * object (the per-root programs are asked in one batch).
+	 * @brief The main camera's cull input. One registration only. No callback runs per object.
 	 *
-	 * - name: the input's (the install's refusals name it).
-	 * - noProgram: the program of a root culled by the frustum alone, which a root without a node takes.
-	 * - unboundVisible: render thread, once a frame (the scene lists' keep check): whether this frame's walk reached unbound space.
-	 * - structure: any thread, per attach/detach the primary cull's structure events follow (PrimaryCull::NoteListStructure).
-	 * - programsVersion: render thread, per depth commit: changes when judge's answers may have.
-	 * - judge: render thread, per depth commit when the roots or programsVersion moved: each root's program, the roots asked in one batch.
-	 * - test: parity only (the fade log's CPU re-check), any thread a parity observer runs on: the GPU's test on the CPU, of program
-	 *   a_program in the programs a_programs (the words a readback saved), for the sphere (a_centre, a_radius) of a node with a_nodeFlags:
-	 *   1 in view, 0 culled, -1 no program; a_why names the deciding test.
-	 * - programWords: parity only (the fade log, with test), render thread: the programs test reads, as the walk encoded them now (the
-	 *   words a log window saves for its re-check).
+	 * - noProgram: the program for a root culled by the frustum alone, and for a root without a node.
+	 * - structure: any thread, per attach or detach.
+	 * - programsVersion: render thread, per depth commit. Changes whenever judge's answers may have.
+	 * - judge: render thread. Assigns every root's program in one batch.
+	 * - test: parity only. The GPU's test run on the CPU. Returns 1 in view, 0 culled, -1 no program.
+	 * - programWords: parity only. The program words as the walk encoded them now.
 	 */
 	struct MainCullInputContribution
 	{
@@ -51,25 +40,14 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief The cull bindings' slots: the buffers Core's cull reads at its fixed descriptor words (the shaders' constants), by what they are.
+	 * @brief The buffers Core's cull reads at fixed descriptor words.
 	 *
-	 * - Programs: the main cull input's programs as the frame's depth commit published them (a pooled backing's SRV index, the depth
-	 *   latch's portalProgramsIndex: the member and fade query stages and their batches; Features/Portals' "cs.dclf.portal-programs").
-	 * - RootPrograms: each listed root's program (by root slot).
-	 * - RootRows: the listed roots' static rows (by root slot).
-	 * - RootStates: the roots' published states a frame's cull reads (by root slot; may alternate by frame).
-	 * - RootStepStates: the root states' step's own state rows (by root slot): this frame's once the step ran (the visibility events read
-	 *   them; RootStates is the published copy a frame's cull reads).
-	 * - RootSeeds: the roots' seeds (a frame value pool's: by SRV index).
-	 * - RootFrame: the root states' frame inputs.
-	 * - MemberQueries/MemberResults: main-camera bound queries and tagged verdicts, indexed by stable object slot.
-	 * - MemberClaims: per-object atomic claims during query generation; reused as query ranks after that pass.
-	 * - LightContexts: the frame's portal context atlas (the camera's and the selected portal-strict lights' walks: a pooled backing's SRV
-	 *   index; Features/LocalLights' "cs.dclf.light-contexts"), which a strict light's views and the colour pass's volumes name an entry of.
-	 * - StrictGates: each strict-light gate's verdict per atlas context, this frame's (a pooled backing's SRV index; Portals/StrictGates.h's
-	 *   words).
-	 * - ObjectGates: each object's strict-light gate (by object slot: a versioned buffer of the feature's scene resources), which the
-	 *   StrictGates verdicts are of.
+	 * - RootStates: the published states a frame's cull reads. May alternate by frame.
+	 * - RootStepStates: the root state step's own rows for this frame, read by the visibility events.
+	 * - MemberClaims: per-object atomic claims during query generation, reused as query ranks after that pass.
+	 * - LightContexts: the frame's portal context atlas for the camera and the strict lights.
+	 * - StrictGates: each strict-light gate's verdict per atlas context.
+	 * - ObjectGates: each object's strict-light gate.
 	 */
 	enum class CullBindingSlot : std::uint8_t
 	{
@@ -90,14 +68,9 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A cull binding: slot's buffer, one registration a slot.
-	 *
-	 * - name: the binding's (the install's refusals name it).
-	 * - select: render thread (a pass's declaration, revision and preparation; a commit), per pass or commit, never per object: the buffer
-	 *   the slot reads, answered on a_select (Core's: the scene's tables, the frame, the adopted set where there is one): Versioned for a
-	 *   versioned buffer of the feature's scene resources, Buffer for a plain one, Index for a pooled buffer's SRV index; with Versioned or
-	 *   Buffer, Rows for how many of its units its readers may read now. No answer: the slot is unbound (its readers take what they do
-	 *   without it). It reads only handles made at the scene's setup, its pool, and the frame.
+	 * @brief Supplies one cull binding slot's buffer.
+	 * select runs on the render thread per pass or commit. With no answer the slot is unbound.
+	 * It must read only handles made at scene setup, its pool and the frame.
 	 */
 	struct CullBinding
 	{

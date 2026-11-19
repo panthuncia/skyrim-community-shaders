@@ -30,7 +30,7 @@ namespace DCLF::SceneWriter
 		std::vector<IntegrityChange> integrityChanges;
 		bool integrityChecked = false;
 
-		// The families in a_caps, by SWF's names, joined.
+		// The families in a_caps by SWF's names.
 		std::string CapNames(SWF_Caps a_caps)
 		{
 			static constexpr std::pair<SWF_Caps, const char*> kNames[] = { { SWF_CAP_HIDDEN, "hidden" }, { SWF_CAP_SWITCH_INDEX, "switch-index" },
@@ -55,7 +55,7 @@ namespace DCLF::SceneWriter
 
 	const SWF_Api* Api()
 	{
-		// Another host's election may have run without CS's (CS's ran only if DCLF will install).
+		// Another host's election may have run without CS's.
 		if (!api)
 			api = SWF_Connect(SWF_ABI_MINOR);
 		return api;

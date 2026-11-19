@@ -125,6 +125,7 @@
                 "COMMONLIB_PREBUILT_MULTICONFIG": "ON",
                 "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF",
                 "SC_DEVFAST_OPTS": "ON",
+                "SC_UNITY_BUILD": "ON",
                 "CMAKE_CXX_FLAGS_RELEASE": "/Od /Ob1 /DNDEBUG",
                 "CMAKE_SHARED_LINKER_FLAGS_RELEASE": ""
             },

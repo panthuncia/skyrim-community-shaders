@@ -1,0 +1,2 @@
+# Native D3D12, the shadow flicker burst (flicker.toml).
+extends = ["native-d3d12", "flicker"]

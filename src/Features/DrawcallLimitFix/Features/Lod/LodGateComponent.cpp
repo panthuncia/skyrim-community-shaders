@@ -1,6 +1,5 @@
-// The LOD gates' scene side (LodGates.h has the engine side; dclf-architecture.md, "LOD gates: the scene side"): the
-// component's gates, opened by their events, the commit's withholding and flips, and the outcomes that retire them (drained from the
-// engine side: LodGates::DrainOutcomes). Scene lane; the coordinator only through the hooks' context.
+// The LOD gates' scene side: opening gates, holding back their incoming geometries, flipping, and retiring on outcomes.
+// Runs on the scene lane.
 
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 
@@ -16,7 +15,7 @@ namespace DCLF::Features::Lod::Gates
 	{
 		using Context = Api::CoordinatorComponentContext;
 
-		/** @brief Off its gate's tag (the component's forgot, a retag, a kept notice); its veto is the caller's. */
+		// Leaves the entry's veto to the caller.
 		void UntagGate(GateState& a_state, const RE::BSGeometry* a_geometry)
 		{
 			auto& gateTags = a_state.gateTags;
@@ -28,7 +27,6 @@ namespace DCLF::Features::Lod::Gates
 			gateTags.erase(tag);
 		}
 
-		/** @brief Tags a tracked a_geometry on a_token's a_side (its veto: Observe while an open gate's incoming, else none). */
 		void TagGate(const Context& a_context, GateState& a_state, const RE::BSGeometry* a_geometry, std::uint64_t a_token, std::uint8_t a_side)
 		{
 			auto& gateTags = a_state.gateTags;
@@ -46,23 +44,21 @@ namespace DCLF::Features::Lod::Gates
 			if (a_side == kGateIncoming) {
 				gate->second.incomingGeometries.insert(geometry);
 				++gateStats.taggedIncoming;
-				// Withheld while its gate is open, its slots' readiness recorded (Observe: ready only by an evaluation under this gate, an earlier
-				// gate's record of the slot is not this one's); a hold-out it had goes. Classified again with its root gated (a verdict taken while
-				// the gate's hide counted stands no more; AddGeometry's own is pending already), and its slots committed again by the next commit.
+				// Withheld while the gate is open. Readiness must come from an evaluation under this gate, and a verdict
+				// taken while the gate's hide counted no longer stands, so classify it again.
 				a_context.SetEntryVeto(a_geometry, gate->second.state == LodGate::State::Open ? Api::kVetoObserve : std::uint8_t{ 0 });
 				a_context.Requeue(a_geometry, std::uint8_t(Api::kRequeueReevaluate | Api::kRequeueSlots));
 			} else {
 				gate->second.outgoingGeometries.insert(geometry);
 				++gateStats.taggedOutgoing;
-				// A hold-out it had goes (its gate's flip holds it out again).
+				// The flip will hold it out again.
 				a_context.SetEntryVeto(a_geometry, 0);
 			}
 		}
 
-		/** @brief Tags the tracked geometries under a_root on a_token's a_side; true when the mirror lacked a record there. */
+		// Returns true when the mirror lacked a record under a_root.
 		bool TagGateRoot(const Context& a_context, GateState& a_state, std::uint64_t a_token, const void* a_root, std::uint8_t a_side)
 		{
-			// One walk of the mirror per root (not per pass): the subtree as the tracking walks it (SubtreeEntries), each tracked geometry tagged.
 			auto& entries = a_state.gateEntries;
 			entries.clear();
 			bool lacking = false;
@@ -72,13 +68,11 @@ namespace DCLF::Features::Lod::Gates
 			return lacking;
 		}
 
-		/** @brief Whether a gated incoming geometry is ready (GeometryReady, by the coordinator's records). */
 		bool GateGeometryReady(const Context& a_context, const RE::BSGeometry* a_geometry)
 		{
 			return GeometryReady(a_geometry, a_context.TrackedStateOf(a_geometry), [&](std::uint32_t a_slot) { return a_context.ObservedSlot(a_slot); });
 		}
 
-		/** @brief A gate event opens its gate: token, roots (keys), push stamp. */
 		void OpenGate(const Context& a_context, GateState& a_state, std::uint64_t a_token, std::span<const void* const> a_incoming, std::span<const void* const> a_outgoing,
 			std::uint64_t a_stampNs, std::uint32_t a_stampFrame)
 		{
@@ -88,7 +82,7 @@ namespace DCLF::Features::Lod::Gates
 				return;
 			const auto [it, inserted] = lodGates.try_emplace(a_token);
 			if (!inserted) {
-				// One event a token (LodGates' are unique): a second is a defect, and the first stands.
+				// Tokens are unique, so a second event is a defect. The first one stands.
 				static std::uint32_t logged = 0;
 				if (logged++ < 4)
 					logger::warn("[DCLF] LOD gate {}: a second gate event for the same token, ignored <- GATE TOKEN", a_token);
@@ -100,10 +94,8 @@ namespace DCLF::Features::Lod::Gates
 				gate.stampNs = a_stampNs ? a_stampNs : GateNowNs();
 				gate.stampFrame = a_stampFrame;
 			}
-			// A root another gate still names (its block swapped again before that gate's outcome): this gate's from here (the coordinator's
-			// mark, MarkRoot). A root that changes side is gated only while incoming (an outgoing block's hide is the engine's own): the
-			// incoming own their hide.
-			// The commit runs live (the gates settle) while any gate stands.
+			// A root another gate still names moves to this gate. Only incoming roots own their hide.
+			// The commit runs live while any gate stands.
 			a_context.SetCommitLive(true);
 			auto take = [&](const void* a_root, std::uint8_t a_side) {
 				if (const auto displaced = a_context.MarkRoot(a_root, a_token, a_side, a_side == kGateIncoming)) {
@@ -118,11 +110,10 @@ namespace DCLF::Features::Lod::Gates
 			for (const void* root : a_incoming) {
 				if (!root)
 					continue;
-				// Its own hide the gate's from here (HiddenForWalk): classified, written, bound and committed while the engine keeps it hidden.
+				// The gate owns this hide, so the geometry is still classified and committed while the engine keeps it hidden.
 				take(root, kGateIncoming);
 				lodGates.find(a_token)->second.incoming.push_back(root);
-				// The tracked geometries under it (its attach applied before this event: tracked by an earlier pass, or by this batch's adds
-				// after the mirror's events, which AddGeometry tags); a root or node the mirror lacks a record of holds the gate until it has one.
+				// A root the mirror has no record of yet holds the gate until it does.
 				if (TagGateRoot(a_context, a_state, a_token, root, kGateIncoming))
 					++lodGates.find(a_token)->second.unmirrored;
 			}
@@ -137,7 +128,7 @@ namespace DCLF::Features::Lod::Gates
 				++gateStats.emptyIncoming;
 		}
 
-		/** @brief Retires a_token's gate at its outcome (a_forced: released without a flip). */
+		// a_forced means the gate was released without a flip.
 		void RetireGate(const Context& a_context, GateState& a_state, std::uint64_t a_token, bool a_forced)
 		{
 			auto& lodGates = a_state.lodGates;
@@ -147,8 +138,7 @@ namespace DCLF::Features::Lod::Gates
 				return;
 			auto& gate = it->second;
 			const bool open = gate.state == LodGate::State::Open;
-			// Its roots unmarked, the incoming ungated (flipped: the engine's show came as the root's hidden event, applied before this outcome).
-			// A root listed is marked this gate's (a later gate's mark, or a detach, took it off the list).
+			// Every root still listed is marked as this gate's. Later gates and detaches remove theirs from the list.
 			for (const void* root : gate.incoming)
 				a_context.UnmarkRoot(root, a_token);
 			for (const void* root : gate.outgoing)
@@ -158,13 +148,12 @@ namespace DCLF::Features::Lod::Gates
 					continue;
 				a_state.gateTags.erase(geometry);
 				if (open) {
-					// Forced before its flip: the block is the engine's as it shows it (or detaches it), so it is withheld no more, its verdict is
-					// taken again without the gate and its slots committed with their own phases.
+					// Forced before its flip, so the block goes back to the engine. Classify it again without the gate.
 					a_context.SetEntryVeto(geometry, 0);
 					a_context.Requeue(geometry, std::uint8_t(Api::kRequeueReevaluateAlways | Api::kRequeueSlots));
 				}
 			}
-			// The outgoing: untagged; held out still when the gate flipped (their detach erases them).
+			// Flipped outgoing geometries stay held out until their detach erases them.
 			for (auto* geometry : gate.outgoingGeometries)
 				if (a_context.TrackedStateOf(geometry).tracked)
 					a_state.gateTags.erase(geometry);
@@ -178,15 +167,10 @@ namespace DCLF::Features::Lod::Gates
 			a_context.SetCommitLive(!lodGates.empty());
 		}
 
-		/**
-		 * @brief The engine reused a_token's held block under a_roots: those roots and their geometries leave the gate's outgoing side and
-		 * hold-out (requeued).
-		 */
+		// The engine reattached a held outgoing block. No detach will ever erase its entries, so we must release the hold-out here.
+		// Its gate may be open, flipped, or already retired.
 		void ApplyGateKept(const Context& a_context, GateState& a_state, std::uint64_t a_token, const std::array<const void*, 2>& a_roots)
 		{
-			// The engine reused a held outgoing block: it stays attached as its node's current block, drawn by the engine while DCLF holds it
-			// out, and no detach will ever erase its entries. Its gate may still be open (reattached before the flip: the flip must not hold it
-			// out), flipped, or retired already (the flip's outcome came first: the hold-out stays on entries with no gate).
 			auto& gateTags = a_state.gateTags;
 			auto& gateStats = a_state.gateStats;
 			++gateStats.keptNotices;
@@ -199,7 +183,6 @@ namespace DCLF::Features::Lod::Gates
 					if (gate != a_state.lodGates.end())
 						std::erase(gate->second.outgoing, root);
 				}
-				// One walk of the mirror per notice (the gate's own tag walk, TagGateRoot): a root the mirror lost was detached, its entries erased.
 				auto& entries = a_state.gateEntries;
 				entries.clear();
 				bool lacking = false;
@@ -207,7 +190,7 @@ namespace DCLF::Features::Lod::Gates
 				for (const void* key : entries) {
 					const auto* geometry = static_cast<const RE::BSGeometry*>(key);
 					const auto tag = gateTags.find(geometry);
-					// This gate's outgoing tag, or a hold-out its retirement left (no gate tags it); a later gate's tag is that gate's.
+					// Ours, or an untagged hold-out this gate's retirement left behind.
 					const bool ours = tag != gateTags.end() && tag->second.token == a_token && tag->second.side == kGateOutgoing;
 					const bool heldOut = a_context.TrackedStateOf(geometry).veto == Api::kVetoHold;
 					if (!ours && !(tag == gateTags.end() && heldOut))
@@ -217,7 +200,6 @@ namespace DCLF::Features::Lod::Gates
 						++gateStats.keptUntagged;
 						continue;
 					}
-					// Held out by the flip (0 applied to its slots): no more, committed again with its own phases.
 					a_context.SetEntryVeto(geometry, 0);
 					++gateStats.keptCleared;
 					a_context.Requeue(geometry, Api::kRequeueSlots);
@@ -230,16 +212,13 @@ namespace DCLF::Features::Lod::Gates
 
 	void ApplyGateEvent(const Api::CoordinatorComponentContext& a_context, Api::EngineChannelId a_channel, const Api::Stacked& a_event)
 	{
-		// Its incoming roots pinned, its outgoing named.
 		if (a_channel == channel)
 			OpenGate(a_context, a_context.State<GateState>(), a_event.token, a_event.pinned, a_event.named, a_event.stampNs, a_event.stampFrame);
 	}
 
 	void RootDetached(const Api::CoordinatorComponentContext& a_context, const void* a_key, const Api::Mark& a_mark)
 	{
-		// A root detached leaves its gate (its mark erased, its hide ungated: UnmarkDetached; its geometries leave with their own erasure:
-		// the forgot hook untags them). An open gate left without an incoming root never flips (its outgoing would be hidden over nothing):
-		// the engine side's forced release retires it.
+		// An open gate left with no incoming root never flips. The engine side's forced release retires it.
 		auto& state = a_context.State<GateState>();
 		if (const auto gate = state.lodGates.find(a_mark.token); gate != state.lodGates.end()) {
 			std::erase(gate->second.incoming, a_key);
@@ -261,7 +240,6 @@ namespace DCLF::Features::Lod::Gates
 		for (auto& [token, gate] : state.lodGates) {
 			if (gate.state != LodGate::State::Open)
 				continue;
-			// Roots the mirror lacked a record of: walked again (a capture since; a subtree tracked since is tagged on the way).
 			if (gate.unmirrored) {
 				std::uint32_t unmirrored = 0;
 				for (const void* root : gate.incoming)
@@ -274,8 +252,6 @@ namespace DCLF::Features::Lod::Gates
 					++gate.pending;
 			if (!a_live || gate.pending || gate.unmirrored || gate.incoming.empty())
 				continue;
-			// The flip: the incoming slots' observed phases and the outgoing slots' none, in this commit (the vetoes the settle drops or sets
-			// apply in it); the publication carries it.
 			GateFlip flip;
 			flip.token = token;
 			flip.requestNs = gate.stampNs;
@@ -288,9 +264,9 @@ namespace DCLF::Features::Lod::Gates
 				const auto entry = a_context.TrackedStateOf(geometry);
 				if (!entry.tracked)
 					continue;
-				// Its Observe dropped: each slot the commit last evaluated for it takes the phases recorded then.
+				// Each slot takes the phases recorded at its last evaluation.
 				a_context.SetEntryVeto(geometry, 0);
-				// The claims are by base geometry (a layer is claimed with its base).
+				// Claims are by base geometry. A layer is claimed with its base.
 				if (entry.slot != kNoSlot)
 					if (const auto observed = a_context.ObservedSlot(entry.slot); observed.geometry == geometry && observed.phases && !a_context.LayerSlot(entry.slot))
 						flip.incoming.emplace_back(geometry, observed.phases);
@@ -299,7 +275,7 @@ namespace DCLF::Features::Lod::Gates
 				const auto entry = a_context.TrackedStateOf(geometry);
 				if (!entry.tracked)
 					continue;
-				// Held out of the set until its detach (the engine side detaches it at a LOD drain after the flip's release): its slots none.
+				// Held out until a LOD drain after the flip's release detaches it.
 				if (entry.veto != Api::kVetoHold)
 					++gateStats.heldOut;
 				a_context.SetEntryVeto(geometry, Api::kVetoHold);
@@ -309,14 +285,13 @@ namespace DCLF::Features::Lod::Gates
 			++gateStats.flipped;
 			gateStats.requestToFlipMs.push_back(GateMs(gate.stampNs, gate.flipNs));
 			gateStats.requestToFlipFrames.push_back(gate.flipFrame >= gate.stampFrame ? gate.flipFrame - gate.stampFrame : 0u);
-			// Published by this commit's publication, as the gates' component's delta (released by the frame installing it: Adopt).
 			a_context.PublishDelta(std::make_shared<const GateFlip>(std::move(flip)));
 		}
 	}
 
 	void Take(const Api::CoordinatorComponentContext& a_context)
 	{
-		// Before the tracker's stack is drained (CollectEvents): every outcome taken here was posted after its gate's events were pushed.
+		// Runs before the event stack is drained, so every outcome taken here was posted after its gate's events.
 		auto& state = a_context.State<GateState>();
 		if (!LodGates::Enabled() && state.lodGates.empty())
 			return;
@@ -328,12 +303,12 @@ namespace DCLF::Features::Lod::Gates
 	{
 		if (a_channel != channel)
 			return;
-		// After the pass's batch (the channel's AfterBatch keys): its gate events are applied before their outcomes.
+		// Runs after the pass's batch, so gate events are applied before their outcomes.
 		auto& state = a_context.State<GateState>();
 		if (state.gateOutcomesHeld.empty())
 			return;
 		for (const auto& outcome : state.gateOutcomesHeld) {
-			// A kept notice (in order with the retirements: its gate's flip outcome may come before it or after it).
+			// A kept notice can arrive before or after its gate's flip outcome.
 			if (outcome.kept[0]) {
 				ApplyGateKept(a_context, state, outcome.token, outcome.kept);
 				continue;

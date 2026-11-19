@@ -1,18 +1,9 @@
 #pragma once
 
-// Hidden nodes (dclf-architecture.md, "Hidden bits by event"): the source of the hidden events - every engine store that can change
-// NiAVObject::flags' kHidden bit, patched by SceneWriterFramework, pushing the node's mirror update with its site (HiddenStores.cpp, at
-// the feature's early hooks: in right after Core's scene events, before Core's engine side reads HiddenStoresLive) - and
-// CS_DCLF_HIDDEN_WATCH, the hardware watch that names a store the source misses (Diagnostics/HiddenWatch.cpp: its switch, its observer
-// and its report lines).
-//
-// Core keeps the hidden-bit vocabulary every object is judged by: the channel (Core/Engine/Capture/SceneEvents.h: Scene::PushHiddenUpdate,
-// hiddenEventsInstalled, the reserved sites' Extensions::PushReservedHidden; the mirror update's hiddenSite), the coordinator's chains and
-// their drain (hiddenDependents, DrainHiddenEvents: the walk's dependency tracking for the Hidden verdict, as propertyDependents is for the
-// property events), the frame's capture of the culls' bits (FrameGlobals::cullHidden), the Hidden verdict itself (Coordinator::ClassifyFrame,
-// HiddenForWalk), and the show veto SWF's show stores ask through the source's filter (SWF_FILTER_SHOW; Api::ShowVeto,
-// Extensions::RegisteredShowVeto: the LOD gates'). Without the source the walk retakes every frame verdict, and neither the LOD gates nor the kept scene lists engage. Included
-// by the feature's sources only.
+// Hidden nodes: turns every engine store to NiAVObject's kHidden bit into an event, via SceneWriterFramework patches.
+// CS_DCLF_HIDDEN_WATCH is a hardware watch that finds stores the patches miss.
+// Without these events the walk retakes every verdict each frame, and the LOD gates and kept scene lists stay off.
+// Core owns the channel, the dependency tracking and the Hidden verdict. See dclf-architecture.md, "Hidden bits by event".
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
@@ -27,31 +18,20 @@ namespace RE
 
 namespace DCLF::Features::HiddenNodes
 {
-	// HiddenNodesFeature.cpp: the feature's entry (Features/FeatureList.cpp).
 	Api::Feature Feature();
 
-	// HiddenStores.cpp: the source.
-	/**
-	 * @brief Subscribes to SceneWriterFramework's hidden stores and registers the show filter and, subscribed, marks Core's channel
-	 * installed (Scene::hiddenEventsInstalled), with SWF's sites noted (Extensions::NoteHiddenSourceSites: the reserved sites follow
-	 * them). The render (main) thread at PostPostLoad, the feature's early hooks.
-	 */
+	/** @brief Subscribes to SWF's hidden stores and registers the show filter. Main thread, at PostPostLoad. */
 	void InstallStores();
-	/** @brief The patched store (its address in the image) whose SWF stub holds a_address, or 0 (the watch's report). */
+	/** @brief The patched store whose SWF stub contains a_address, or 0. */
 	std::uintptr_t StoreSiteOf(std::uintptr_t a_address);
 
-	// Diagnostics/HiddenWatch.cpp: CS_DCLF_HIDDEN_WATCH.
 	/**
-	 * @brief CS_DCLF_HIDDEN_WATCH=1: hardware write watchpoints (the debug registers, every thread of the process) on up to
-	 * four NiAVObject::flags fields, armed when an actor's frame verdict changed with no hidden event
-	 * (Coordinator::FrameVerdictKept). A write that flips kHidden (bit 0) records the instruction after it, so the store the
-	 * hidden events miss (HiddenStores.cpp) can be named. At most one arming at a time; disarmed after 600 reports' worth
-	 * of frames or 16 flips. Diagnostic only.
+	 * @brief CS_DCLF_HIDDEN_WATCH=1: hardware write watchpoints on up to four flags fields, on every thread.
+	 * Armed when an actor's verdict changes with no hidden event, to name the store the events miss. Diagnostic only.
 	 */
 	void Arm(const std::array<const RE::NiAVObject*, 4>& a_nodes);
-	/** @brief The report, once per interval: what the watch recorded (empty when nothing), and the disarm when it is due. */
+	/** @brief Returns what the watch recorded, or empty. Also disarms it when due. */
 	std::string TakeReport(std::uint32_t a_frame);
 	bool Enabled();
-	/** @brief The watch's switch, and with it on its observer (Diagnostics::ActorVerdictUnannounced) and report lines (Statistics). */
 	void RegisterWatch(Api::InstallContext& a_context);
 }

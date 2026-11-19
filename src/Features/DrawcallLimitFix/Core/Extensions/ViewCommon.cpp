@@ -1,7 +1,6 @@
-// Both view families' phases and view bits (see the header): checked against Core's and each other's, and the table the per-object
-// paths read.
+// Both view families' phases and view bits: checked against Core's and each other's, and the table the per-object paths read.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ViewCommon.h"
@@ -13,7 +12,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		/** @brief One feature view's bits: one bit each, neither Core's nor an earlier view's; then taken. */
+		/** @brief Takes one view's bits. Each must be a single bit, and neither Core's nor an earlier view's. */
 		void TakeViewBits(const char* a_family, std::size_t a_index, std::uint8_t a_phase, std::uint32_t a_viewBit, std::uint32_t& a_phases, std::uint32_t& a_viewBits)
 		{
 			if (!std::has_single_bit(static_cast<std::uint32_t>(a_phase)) || (a_phase & a_phases) || !std::has_single_bit(a_viewBit) || (a_viewBit & a_viewBits))
@@ -23,10 +22,7 @@ namespace DCLF::Extensions
 			a_viewBits |= a_viewBit;
 		}
 
-		/**
-		 * @brief Each registered view's and occlusion map's phase and view bit: one bit, none Core's (its phases and view bits) nor another
-		 * view's, of either family.
-		 */
+		/** @brief Checks every view's and occlusion map's phase and view bit across both families. */
 		void CheckViewBits(const ViewSet& a_views, const ShadowViewSet& a_shadow)
 		{
 			std::uint32_t phases = kCoreSetPhases;
@@ -46,10 +42,7 @@ namespace DCLF::Extensions
 					a_table.viewBitsOfPhaseBit[b] |= a_viewBits;
 		}
 
-		/**
-		 * @brief The view bits by phase (Core's main and caster phases', then the maps', then the views'), both families' phases and bits,
-		 * and the lacking counts' phases.
-		 */
+		/** @brief Builds the view bits by phase, both families' phases and bits, and the lacking counts' phases. */
 		void DeriveViewBits(const ViewSet& a_views, const ShadowViewSet& a_shadow, ViewBitTable& a_table)
 		{
 			AddPhaseBits(a_table, kSetMain, Draws::kViewMain);

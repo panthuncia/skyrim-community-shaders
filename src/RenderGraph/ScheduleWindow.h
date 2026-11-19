@@ -8,11 +8,8 @@
 #	include <memory>
 
 /**
- * @brief The render graph's persistent schedule, explained (docs/development/render-graph-schedule.md): the menu's "Render graph
- * schedule" window (ORG's DebugUI/ScheduleInspector.h) and the DevBench tool communityshaders.schedule.
- *
- * The graph traces its schedule (RenderGraph::SetScheduleTraceEnabled) while either wants it: the window while open, the tool from
- * its enable until its disable.
+ * @brief The menu's "Render graph schedule" window and the DevBench tool communityshaders.schedule.
+ * The graph traces its schedule while either wants it. See docs/development/render-graph-schedule.md.
  */
 namespace RenderGraphSchedule
 {
@@ -22,17 +19,17 @@ namespace RenderGraphSchedule
 		DevBench,
 	};
 
-	/** @brief Whether a_requester wants the schedule traced; the graph traces while any does. Any thread. */
+	/** @brief The graph traces while any requester wants it. Any thread. */
 	void SetTracing(Requester a_requester, bool a_enabled);
-	/** @brief Whether the graph traces its schedule now (false without a graph). Any thread. */
+	/** @brief False without a graph. Any thread. */
 	bool TracingEnabled();
 
-	/** @brief The schedules the graph executes now; null without a graph, while tracing is off, or before a traced frame. Any thread. */
+	/** @brief Null without a graph, while tracing is off, or before a traced frame. Any thread. */
 	std::shared_ptr<const org::PersistentScheduleSnapshot> Snapshot();
 
-	/** @brief Opens the window (it starts tracing). UI thread. */
+	/** @brief Opens the window, which starts tracing. UI thread. */
 	void OpenWindow();
-	/** @brief Draws the window while it is open (Menu::DrawSettings). UI thread, inside an ImGui frame. */
+	/** @brief Draws the window while it is open. UI thread, inside an ImGui frame. */
 	void DrawWindow();
 }
 

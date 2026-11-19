@@ -1,37 +1,46 @@
-// FrameSlots.h's functions: the main pass's bindings captured (render thread), the frame textures it binds at t16+, and FrameData's
-// names of the frame-constants buffer's parts.
+// The main pass's captured bindings, the frame textures at t16 and up, and the names of the frame constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+
+#include "RenderGraph/Engine/Flush/Flush.h"
 
 namespace DCLF::Draws
 {
 	std::shared_ptr<const FrameBlockViews> FrameBlockViews::Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants)
 	{
+		std::array<Block, kFrameBlocks> blocks{};
+		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
+			// The shared light block is half a slot.
+			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
+			blocks[a_block] = { FrameBlockOffset(a_pixel, a_register), static_cast<std::uint32_t>(bytes) };
+		});
+		return CreateFor(a_device, a_frameConstants, blocks, "frame block");
+	}
+
+	std::shared_ptr<const FrameBlockViews> FrameBlockViews::CreateFor(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_buffer, std::span<const Block> a_blocks,
+		const char* a_what)
+	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto service = host && host->Graph() ? host->Graph()->RetainDescriptorService() : nullptr;
-		if (!service || !a_frameConstants) {
-			logger::error("[DCLF] frame block views: no descriptor service");
+		if (!service || !a_buffer || a_blocks.size() > kFrameBlocks) {
+			logger::error("[DCLF] {} views: no descriptor service", a_what);
 			return nullptr;
 		}
 		auto views = std::make_shared<FrameBlockViews>();
 		views->service = std::move(service);
-		views->buffer = a_frameConstants;
-		const auto resource = a_frameConstants->GetAPIResource().GetHandle();
-		bool ok = true;
-		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
-			if (!ok)
-				return;
+		views->buffer = a_buffer;
+		const auto resource = a_buffer->GetAPIResource().GetHandle();
+		for (std::uint32_t b = 0; b < a_blocks.size(); ++b) {
 			const rhi::DescriptorSlot slot = views->service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);
-			views->slots[a_block] = slot;
-			views->made = a_block + 1;
-			const rhi::CbvDesc desc{ .byteOffset = FrameBlockOffset(a_pixel, a_register), .byteSize = static_cast<std::uint32_t>(kFrameSlotBytes) };
+			views->slots[b] = slot;
+			views->made = b + 1;
+			const rhi::CbvDesc desc{ .byteOffset = a_blocks[b].offset, .byteSize = a_blocks[b].bytes };
 			if (!slot.heap.valid() || a_device.CreateConstantBufferView(slot, resource, desc) != rhi::Result::Ok) {
-				logger::error("[DCLF] frame block views: the view of {} b{} could not be made", a_pixel ? "PS" : "VS", a_register);
-				ok = false;
-				return;
+				logger::error("[DCLF] {} views: the view of block {} ({} bytes at {}) could not be made", a_what, b, a_blocks[b].bytes, a_blocks[b].offset);
+				return nullptr;
 			}
-			views->indices[a_block] = slot.index;
-		});
-		return ok ? std::shared_ptr<const FrameBlockViews>(std::move(views)) : nullptr;
+			views->indices[b] = slot.index;
+		}
+		return views;
 	}
 
 	FrameBlockViews::~FrameBlockViews()
@@ -52,7 +61,7 @@ namespace DCLF::Draws
 		if (slot < 2 * kConstantBufferRegisters)
 			return fmt::format("frame constants PS b{}", slot - kConstantBufferRegisters);
 		if (slot == kFrameSlotSharedLight)
-			return "frame constants: zeroed light block";
+			return within < kSharedLightBlockBytes ? "frame constants: zero block" : "frame constants: shared light block (PS b3)";
 		if (slot == kFrameSlotLighting)
 			return within < sizeof(FrameLighting)                                   ? "frame constants: frame lighting" :
 			       within < sizeof(FrameLighting) + sizeof(LodFadeFrame)           ? "frame constants: LOD fade frame" :
@@ -71,6 +80,9 @@ namespace DCLF::Draws
 		context->VSGetConstantBuffers(0, kConstantBufferRegisters, capture.vsBuffers.data());
 		context->PSGetConstantBuffers(0, kConstantBufferRegisters, capture.psBuffers.data());
 		context->PSGetShaderResources(0, kTextureRegisters, capture.psViews.data());
+		// A null where CS bound a view DXVK dropped is logged by the state readers' trace.
+		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
+			RenderGraph::Engine::Flush::NoteRead("DCLF CaptureBindings", t, capture.psViews[t]);
 		ID3D11RenderTargetView* views[kColorTargets] = {};
 		ID3D11DepthStencilView* depth = nullptr;
 		context->OMGetRenderTargets(kColorTargets, views, &depth);
@@ -89,9 +101,8 @@ namespace DCLF::Draws
 			capture.depth = resource.try_as<ID3D11Texture2D>();
 			depth->Release();
 		}
-		// Community Shaders binds its own per-frame pixel buffers - b5 SharedData and b6 FeatureData - from Renderer_ResetState, so
-		// whether they are bound when this capture is taken depends on where the engine last reset its state (which the withheld
-		// native draws change). They are CS's own buffers with known identities: taken from CS when the capture lacks them.
+		// CS binds b5 SharedData and b6 FeatureData from Renderer_ResetState, so whether they are bound here depends on the last reset.
+		// They are CS's own buffers, so take them from CS when the capture lacks them.
 		if (auto* state = globals::state) {
 			auto adopt = [&](std::uint32_t a_slot, ConstantBuffer* a_buffer) {
 				if (capture.psBuffers[a_slot] || !a_buffer || !a_buffer->CB())
@@ -117,7 +128,7 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		/** @brief Whether a_register is one of the frame graph buffers' in a_graphBuffers (a bit per registration). */
+		/** @brief Whether a_register belongs to one of the frame graph buffers in a_graphBuffers. */
 		bool GraphBufferHeld(std::uint32_t a_graphBuffers, std::uint32_t a_register)
 		{
 			const auto registered = Extensions::RegisteredFrameGraphBuffers();

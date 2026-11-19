@@ -1,5 +1,5 @@
-// CS_DCLF_CHANGE_LOG_PARITY: every 60 passes each slot's columns are kept, and a pass later every slot whose columns changed in between
-// must be in the log for that pass with the causes that changed. At the scene phase's start, before anything of the pass writes.
+// Change log parity. Every 60 passes each slot's columns are saved, and a pass later every changed slot must be in the log with
+// the causes that changed. Runs at the scene phase's start, before anything of the pass writes.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -23,7 +23,7 @@ namespace DCLF::Diagnostics
 				const bool continues = c.cursor.Continues(tables.changeLog, tablesGeneration);
 				c.cursor.active = false;
 				if (!continues) {
-					++c.skipped;  // the log started again (a load, a reset): every reader resyncs anyway
+					++c.skipped;  // the log restarted after a load or reset, and every reader resyncs anyway
 				} else {
 					++c.checks;
 					// What the log says changed since the snapshot, per slot.
@@ -34,7 +34,7 @@ namespace DCLF::Diagnostics
 						++c.slots;
 						const auto now = tables.ColumnsOf(slot);
 						const bool grown = slot >= c.snapshot.size();
-						// A slot grown since is new: a live one must be in the log at all.
+						// A slot grown since is new, so a live one must be in the log at all.
 						const std::uint32_t causes = grown ? ((tables.objects[slot].flags & kObjectFree) ? 0u : kChangeAll) : SceneTables::CausesBetween(c.snapshot[slot], now);
 						if (!causes)
 							continue;

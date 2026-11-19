@@ -1,6 +1,7 @@
 // CS_DCLF_TARGET_DUMP: staging copies at the frame's target points, written as PNGs and statistics once readable. Render thread.
 #include "TargetDump.h"
 #include "Features/Upscaling.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <DirectXPackedVector.h>
 #include <DirectXTex.h>
@@ -17,7 +18,6 @@ namespace DCLF::TargetDump
 {
 	namespace
 	{
-		// One copied target: its staging texture, what it was, where it was copied.
 		struct Copy
 		{
 			winrt::com_ptr<ID3D11Texture2D> staging;
@@ -26,7 +26,7 @@ namespace DCLF::TargetDump
 			std::string name;  // "<order>-<point>-<slot>"
 		};
 
-		// A dumping frame's copies, written once all are readable.
+		// Written once all copies are readable.
 		struct Frame
 		{
 			std::uint32_t count = 0;
@@ -62,6 +62,8 @@ namespace DCLF::TargetDump
 
 		void Stage(ID3D11Texture2D* a_texture, const std::string& a_name, Frame& a_frame)
 		{
+			// Engine target fields can be tripwire handles. DXVK's context copies the texture they wrap.
+			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			if (!a_texture)
 				return;
 			D3D11_TEXTURE2D_DESC desc{};
@@ -76,7 +78,7 @@ namespace DCLF::TargetDump
 			Copy copy;
 			if (FAILED(globals::d3d::device->CreateTexture2D(&staging, nullptr, copy.staging.put())))
 				return;
-			// Subresource 0 (mip 0, slice 0); a depth buffer copies whole, as D3D11 requires.
+			// Subresource 0. A depth buffer copies whole, as D3D11 requires.
 			globals::d3d::context->CopySubresourceRegion(copy.staging.get(), 0, 0, 0, 0, a_texture, 0, nullptr);
 			copy.format = desc.Format;
 			copy.width = desc.Width;
@@ -85,9 +87,11 @@ namespace DCLF::TargetDump
 			a_frame.copies.push_back(std::move(copy));
 		}
 
-		/** @brief Each slice of a texture array (at most 16), as Stage copies slice 0: a whole subresource, as a depth array requires. */
+		/** @brief Copies each slice of a texture array, at most 16, as whole subresources as a depth array requires. */
 		void StageSlices(ID3D11Texture2D* a_texture, const std::string& a_name, Frame& a_frame)
 		{
+			// Engine target fields can be tripwire handles. DXVK's context copies the texture they wrap.
+			a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			if (!a_texture)
 				return;
 			D3D11_TEXTURE2D_DESC desc{};
@@ -118,10 +122,10 @@ namespace DCLF::TargetDump
 				return nullptr;
 			winrt::com_ptr<ID3D11Resource> resource;
 			a_view->GetResource(resource.put());
-			return resource.try_as<ID3D11Texture2D>().get();  // the view keeps the texture alive while it is bound
+			return resource.try_as<ID3D11Texture2D>().get();  // the view keeps the texture alive while bound
 		}
 
-		// A texel as up to four floats (NaN/Inf kept), or false for a format this does not decode.
+		// A texel as up to four floats with NaN and Inf kept, or false for a format this does not decode.
 		bool Decode(DXGI_FORMAT a_format, const std::uint8_t* a_row, std::uint32_t a_x, float (&a_out)[4], std::uint32_t& a_channels)
 		{
 			using namespace DirectX::PackedVector;
@@ -234,11 +238,8 @@ namespace DCLF::TargetDump
 		}
 
 		/**
-		 * @brief The local shadow mask's agreement on a DCLF frame: the engine draws each light's channel whole before the colour segment
-		 * (opaque-end: Main::RenderShadowmasks, a full-screen pass per shadow light), and DCLF's colour segment reads it and leaves it as it
-		 * is, so the copy after it (after-DCLF-colour) should agree. Where the engine lit a receiver
-		 * (> 0.5), the later copy should not be dark (< 0.5): those texels per channel, and how many are dark. Empty without both copies; a
-		 * DCLF-off frame compares the engine's with itself.
+		 * @brief The engine draws each local shadow mask channel before the colour segment and DCLF leaves it alone, so the copy after it
+		 * should agree. Counts texels the engine lit above 0.5 that are dark later. Empty without both copies.
 		 */
 		std::string MaskAgreement(const Frame& a_frame, const std::vector<D3D11_MAPPED_SUBRESOURCE>& a_mapped, std::size_t a_done)
 		{
@@ -283,7 +284,7 @@ namespace DCLF::TargetDump
 			return static_cast<std::uint8_t>(std::lround(std::min(v, 1.0f) * 255.0f));
 		}
 
-		// Writes one mapped copy: a half-size PNG and its statistics line.
+		// One mapped copy as a half-size PNG and a statistics line.
 		std::string Write(const Copy& a_copy, const D3D11_MAPPED_SUBRESOURCE& a_mapped, const std::filesystem::path& a_dir, bool a_image)
 		{
 			const std::uint32_t w = std::max(1u, a_copy.width / 2), h = std::max(1u, a_copy.height / 2);
@@ -371,8 +372,7 @@ namespace DCLF::TargetDump
 		ID3D11RenderTargetView* views[8] = {};
 		ID3D11DepthStencilView* depthView = nullptr;
 		context->OMGetRenderTargets(8, views, &depthView);
-		// The frame's G-buffer: the targets of the last point that had several bound (the deferred pass's), staged again at a point with
-		// none bound (an epoch unbinds them), so DCLF's colour epoch's writes are seen.
+		// The G-buffer is staged again at a point with no targets bound, since an epoch unbinds them, so the colour epoch's writes are seen.
 		static std::array<winrt::com_ptr<ID3D11Texture2D>, 8> gbuffer;
 		std::uint32_t bound = 0;
 		for (std::uint32_t t = 0; t < 8; ++t)
@@ -391,20 +391,20 @@ namespace DCLF::TargetDump
 		Stage(TextureOf(depthView), order + "-depth", frame);
 		if (depthView)
 			depthView->Release();
-		// Without an extra: the upscaler's output (what the previous frame's evaluate wrote), at every point.
+		// Without an extra, the upscaler's output from the previous frame's evaluate, at every point.
 		if (!a_extra)
 			if (auto* upscaled = globals::features::upscaling.upscaledTexture; upscaled && upscaled->resource)
 				a_extra = upscaled->resource.get();
 		Stage(a_extra, order + "-extra", frame);
-		// The renderer's main colour, motion vectors and depth, bound or not (an epoch runs with the context's targets unbound).
+		// Main colour, motion vectors and depth, bound or not, since an epoch runs with the context's targets unbound.
 		if (auto* renderer = RE::BSGraphics::Renderer::GetSingleton()) {
 			Stage(reinterpret_cast<ID3D11Texture2D*>(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].texture), order + "-kMOTION", frame);
 			Stage(reinterpret_cast<ID3D11Texture2D*>(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture), order + "-kMAIN", frame);
 			Stage(reinterpret_cast<ID3D11Texture2D*>(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture), order + "-kMAINdepth",
 				frame);
-			// The local shadow lights' screen-space masks (the engine's per-receiver passes, DCLF's resolve at the colour epoch's start).
+			// The local shadow lights' screen-space masks.
 			Stage(reinterpret_cast<ID3D11Texture2D*>(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].texture), order + "-kSHADOWMASK", frame);
-			// The shadow maps, every slice, once a frame (at its Present: the frame's views are drawn, by the engine or DCLF).
+			// Every shadow map slice, once a frame at Present.
 			if (label == "present") {
 				const auto& depths = renderer->GetDepthStencilData().depthStencils;
 				StageSlices(reinterpret_cast<ID3D11Texture2D*>(depths[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM].texture), order + "-kSHADOWMAPS_ESRAM", frame);
@@ -418,18 +418,16 @@ namespace DCLF::TargetDump
 		Parse();
 		if (wanted.empty())
 			return;
-		// The frame that just ended waits for its copies.
 		if (current) {
 			written.push_back(std::move(*current));
 			current.reset();
 		}
-		// Counted as the test harness counts its frames (loading screens do not count), so a dump lands where CS_DCLF_TEST_COMMANDS put the
-		// camera, with DCLF on or off.
+		// Count frames as the test harness does, skipping loading screens, so a dump lands where the test commands put the camera.
 		if (!Scene::FrameView::IsLoadingScreenUp() && std::ranges::find(wanted, ++presents) != wanted.end()) {
 			current.emplace();
 			current->count = presents;
 		}
-		// The oldest waiting frame, once every copy maps without waiting (or 60 Presents later, waiting then).
+		// The oldest waiting frame, once every copy maps without waiting, or 60 Presents later with a wait.
 		if (written.empty())
 			return;
 		auto& frame = written.front();
@@ -463,13 +461,11 @@ namespace DCLF::TargetDump
 			logger::info("[DCLF] target dump: Present {}: {}", frame.count, agreement);
 		}
 		for (std::size_t i = 0; i < done; ++i) {
-			// Every point's images on the first frame listed; on the others the presented image alone (the statistics of all), so a run of
-			// consecutive frames stays small.
+			// Every point's images on the first frame listed, only the presented image on the others, so consecutive frames stay small.
 			const bool mask = frame.copies[i].name.ends_with("-kSHADOWMASK") || frame.copies[i].name.find("-kSHADOWMAPS") != std::string::npos;
 			const bool image = frame.count == wanted.front() || mask || frame.copies[i].name.find("-present-rt0") != std::string::npos;
 			stats << Write(frame.copies[i], mapped[i], dir, image) << "\n";
-			// The extra target's raw texels (the upscaler's output), row by row, for a byte-level look at what overwrote it.
-			// The shadow mask's too, every channel at full size (the PNG drops the fourth and halves it).
+			// Raw texels of the upscaler's output, for a byte-level look at what overwrote it, and of the shadow mask at full size.
 			if (mask || (frame.copies[i].name.ends_with("-extra") && (frame.copies[i].name.find("before-upscale") != std::string::npos || frame.copies[i].name.find("after-evaluate") != std::string::npos))) {
 				std::ofstream raw(dir / (frame.copies[i].name + ".raw"), std::ios::binary);
 				const auto& c = frame.copies[i];

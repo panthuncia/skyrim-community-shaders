@@ -1,41 +1,24 @@
-// Drawcall Limit Fix: builds the hierarchical depth buffer the occlusion culling tests against. Compiled
-// to SPIR-V for the render graph (BasicRHI's descriptor-heap ABI); textures come from the descriptor heap.
+// Drawcall Limit Fix. Builds the hierarchical depth buffer that occlusion culling tests against.
 //
-// The HZB holds raw NDC depth, not linear view depth. Skyrim's projection is z_ndc = A - B/w, which is
-// monotonic in distance, and the test only ever compares two depths for order, so linearising would add a
-// step that can be got wrong without making any comparison more correct. Every level is the MAXIMUM of the
-// level below, so a texel holds the FARTHEST surface anywhere under it. That is the direction that keeps
-// the test conservative: a footprint that is partly empty sky keeps a large value and nothing under it is
-// ever culled.
-//
-// The chain is built by AMD's single-pass downsampler (FidelityFX/ffx_spd.h): one dispatch writes every
-// mip, each group reducing a 64x64 tile of the source through mip 5 and the last group to finish carrying
-// on from mip 5 to the end. That needs a source whose every level halves evenly, which the depth is not.
-// The HZB is defined over a power-of-two domain instead (Features/GpuOcclusion/HzbPass.cpp: mip 0 is half the next power of two
-// of the depth), and the loads answer for the texels the depth does not have:
-//
-//   - inside the domain but past the rendered area (the padding): the far plane, 1.0, which suppresses
-//     culling rather than causing it;
-//   - outside the domain, or outside a level that is not square once its short side has reached one
-//     texel: 0.0, the reduction's identity. Such a texel covers no area at all, so it must not count.
-//
-// Stores outside a level are dropped (a non-square chain's levels are narrower than SPD's square tiles).
-//
-// A domain of more than 4096 texels a side (a render target wider than 4096) is more than one dispatch can
-// take: its mip 5 is wider than the last group's 64x64. HzbPass then splits the chain, each dispatch reading
-// the previous one's last level (FromDepth 0).
+// The HZB holds raw NDC depth. Skyrim's z_ndc = A - B/w is monotonic in distance and the test only compares order, so linearising
+// would add a step that can go wrong for no gain. Each level is the MAXIMUM of the one below, so a texel holds the farthest surface
+// under it. That keeps the test conservative, since a footprint with some sky never culls.
+// AMD's single-pass downsampler writes every mip in one dispatch, which needs a power-of-two domain. Mip 0 is half the next power
+// of two of the depth. Padding inside the domain loads as 1.0, the far plane, which suppresses culling. Texels outside the domain
+// or a non-square level load as 0.0, the reduction's identity. Stores outside a level are dropped.
+// A domain wider than 4096 overflows the last group's 64x64 at mip 5, so HzbPass splits the chain into several dispatches.
 
-// Must match HzbConstants (Features/GpuOcclusion/HzbLayout.h).
+// Must match HzbConstants in HzbLayout.h.
 cbuffer HzbConstants : register(b0)
 {
-	uint SourceIndex;   // FromDepth: Texture2D<float> of the scene depth. Otherwise RWTexture2D<float> of an HZB level.
+	uint SourceIndex;   // FromDepth reads the scene depth Texture2D, otherwise an HZB level RWTexture2D
 	uint FromDepth;
-	uint2 ValidSize;    // the source texels holding depth (the rendered area, or the whole level)
+	uint2 ValidSize;    // the source texels holding depth
 	uint2 DomainSize;   // the source's extent, of which [ValidSize, DomainSize) is padding
-	uint2 TargetSize;   // the first written level's size; level i is max(1, TargetSize >> i)
+	uint2 TargetSize;   // the first written level's size, level i is max(1, TargetSize >> i)
 	uint Mips;          // the levels this dispatch writes
 	uint WorkGroups;    // the dispatch's group count, for the last-group test
-	uint CounterIndex;  // RWStructuredBuffer<uint>: the groups that have finished; the last one zeroes it again
+	uint CounterIndex;  // RWStructuredBuffer<uint>, finished groups, zeroed again by the last
 	uint Padding;
 	uint4 TargetIndices[3];  // RWTexture2D<float> per written level, 12 at most
 }
@@ -105,8 +88,7 @@ AF4 SpdReduce4(AF4 v0, AF4 v1, AF4 v2, AF4 v3)
 void SpdIncreaseAtomicCounter(AU1 slice)
 {
 	globallycoherent RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[CounterIndex];
-	// This group's level 5 texel (stored by this same thread) before its arrival; the arrival before the
-	// last group's reads of everyone's.
+	// This thread's level 5 store must be visible before the group arrives, and every arrival before the last group reads.
 	DeviceMemoryBarrier();
 	InterlockedAdd(counter[0], 1, spdCounter);
 	DeviceMemoryBarrier();

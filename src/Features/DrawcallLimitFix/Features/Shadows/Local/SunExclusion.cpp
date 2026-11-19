@@ -1,4 +1,4 @@
-// The entry exclusions (see the header): their translations to later candidates, and their slots.
+// The entry exclusions' translations and slots.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/SunExclusion.h"
 
@@ -20,9 +20,7 @@ namespace DCLF::Features::Shadows::Local
 
 	void SunExclusionSlot::BeginFrame(const std::shared_ptr<const EntrySpace>& a_candidates)
 	{
-		// The builder translated each verdict it built to the candidates of every later build (ForwardExclusion): the frame takes the
-		// one for its candidates, a swap. None (a snapshot the builder made no exclusion for): the pending one stays, a verdict on other
-		// candidates, which the full-frustum cull does not apply (exclusionStale).
+		// Take the builder's translation for the frame's candidates. With none, the pending one stays and the full-frustum cull treats it as stale.
 		if (!pending || !a_candidates || pending->candidates == a_candidates)
 			return;
 		if (auto forwarded = ForwardExclusion(pending, a_candidates)) {
@@ -49,7 +47,7 @@ namespace DCLF::Features::Shadows::Local
 		out->excluded.assign(capacity, 0);
 		const std::size_t kept = std::min<std::size_t>(capacity, a_exclusion->excluded.size());
 		std::copy_n(a_exclusion->excluded.begin(), kept, out->excluded.begin());
-		// Indices past the original's are new entries (changed), not excluded; ones the original had past a_to's capacity are gone.
+		// Indices past the original's are new entries, not excluded. Ones past a_to's capacity are gone.
 		std::uint32_t count = a_exclusion->excludedCount;
 		if (kept < a_exclusion->excluded.size())
 			count -= static_cast<std::uint32_t>(std::count(a_exclusion->excluded.begin() + kept, a_exclusion->excluded.end(), std::uint8_t(1)));
@@ -66,7 +64,7 @@ namespace DCLF::Features::Shadows::Local
 		out->version = a_newVersion && flipped ? (1ull << 63) | (translatedVersions.fetch_add(1, std::memory_order_relaxed) + 1) : a_exclusion->version;
 		out->builtFrame = a_exclusion->builtFrame;
 		out->reused = a_exclusion->reused;
-		// The stamped words, shared where long enough (SunExclusion: no version but the frame's is stamped).
+		// Shared when long enough, since only the frame's version is stamped.
 		const auto fits = [&](const SunExclusion* a_from) {
 			return a_from && a_from->removed && a_from->cleared && (!a_lightReach || a_from->lightReach) && a_from->removedCount >= capacity &&
 			       a_from->clearedCount >= geometries;
@@ -93,7 +91,7 @@ namespace DCLF::Features::Shadows::Local
 	{
 		if (!a_exclusion || !a_to)
 			return nullptr;
-		// Each link is held by the one before it (forwardOwned, written before forward is released and never again).
+		// Each link is held by the one before it. forwardOwned is written before forward is released, and never again.
 		const SunExclusion* node = a_exclusion.get();
 		if (node->candidates == a_to)
 			return a_exclusion;

@@ -1,4 +1,4 @@
-// EntrySpaceTable's reset and snapshot publication (coordinator thread). The readers of its published log are Core/Scene/EntrySpace's.
+// EntrySpaceTable's reset and snapshot publication. Coordinator thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/EntrySpaceTable.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -15,12 +15,11 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		// The log and the published runs keep at most this many indices (a reader behind them is brought up index by index, the
-		// journals' contract); the runs at most this many generations.
+		// A reader behind these bounds is brought up index by index.
 		constexpr std::size_t kMaxLogEntries = 1u << 16;
 		constexpr std::size_t kMaxRuns = 64;
 
-		/** @brief What a snapshot is brought up to: the table's arrays, or a published snapshot's (the same layout). */
+		/** @brief The table's arrays, or a published snapshot's with the same layout. */
 		struct CandidateRows
 		{
 			const std::vector<const RE::NiAVObject*>& nodes;
@@ -33,10 +32,8 @@ namespace DCLF::Scene
 		};
 
 		/**
-		 * @brief a_s brought up to a_rows at the indices a_moved names (each once; every index whose version differs among them). Each
-		 * index lets go first (a geometry index can pass from one entry to another among them), then is written as a_rows has it. An
-		 * index still under the same root keeps its map entry (counted in a_kept), and a geometry still the same entry's at the same index
-		 * keeps its map entry: a rewrite writes rows, not maps.
+		 * @brief Each index lets go first, since a geometry index can pass from one entry to another among them. A rewrite under the
+		 * same root writes rows, not maps.
 		 */
 		void BringUp(EntrySpace& a_s, const CandidateRows& a_rows, const std::vector<std::uint32_t>& a_moved, std::uint64_t& a_kept)
 		{
@@ -105,9 +102,8 @@ namespace DCLF::Scene
 		}
 
 		/**
-		 * @brief A spare (preparation pool; nothing else writes a_spare meanwhile) brought up to a_source, a published snapshot: by the
-		 * source's runs after the spare's own generation of the same log (a_state.log, generation), else by comparing every index. Free
-		 * indices included: a version moves when its index is freed, and the next catch-up compares versions.
+		 * @brief Runs on the preparation pool, and nothing else writes a_spare meanwhile. Free indices are included, since a version
+		 * moves when its index is freed.
 		 */
 		void CatchUpSpare(EntrySpace& a_spare, const EntrySpace& a_source, Scene::EntrySpaceTable::Pooled::State& a_state)
 		{
@@ -163,7 +159,7 @@ namespace DCLF::Scene
 		std::fill(geometryEntry.begin(), geometryEntry.end(), EntrySpace::kNone);
 		geometryFree.resize(geometryNodes.size());
 		std::iota(geometryFree.rbegin(), geometryFree.rend(), 0u);
-		// Every index moved: the pooled snapshots are brought up whole, and the published log starts again (no reader chains across).
+		// No reader chains across a reset.
 		log.Invalidate();
 		logId = NextLogId();
 		changed = true;
@@ -173,8 +169,7 @@ namespace DCLF::Scene
 		const std::function<RE::NiPointer<RE::NiAVObject>(const RE::NiAVObject*)>& a_ownedRoot)
 	{
 		DCLF_ZONE("CS.DCLF.Scene.SunCandidates.Snapshot");
-		// A pooled snapshot no reader holds (the pool's own reference only), the one with the least of the log to read: the spare,
-		// brought up to the last publication (finished here if the pool has not yet), else a new one.
+		// The free pooled snapshot with the least of the log to read, else a new one.
 		std::size_t at = pool.size();
 		for (std::size_t i = 0; i < pool.size(); ++i) {
 			const auto& p = pool[i];
@@ -201,8 +196,7 @@ namespace DCLF::Scene
 		auto& s = *snapshot;
 		const std::uint32_t capacity = static_cast<std::uint32_t>(nodes.size());
 		const std::uint32_t span = std::max(capacity, s.Capacity());
-		// The indices whose versions moved since this snapshot was brought up last: those the log names since its cursor, or every
-		// index when the cursor is not readable.
+		// Every index when the cursor is not readable.
 		std::vector<std::uint32_t> moved;
 		auto differs = [&](std::uint32_t e) { return (e < s.Capacity() ? s.entryVersion[e] : 0u) != (e < capacity ? version[e] : 0u); };
 		if (cursor.Continues(log, 0)) {
@@ -222,8 +216,6 @@ namespace DCLF::Scene
 		}
 		entriesCaughtUp += moved.size();
 		BringUp(s, CandidateRows{ nodes, version, geometries, geometryNodes, geometryEntry, geometrySlot, primaryGeometry }, moved, entriesKept);
-		// The roots this publication names, owned by the table: an index under another root lets the old one go (moved holds every
-		// index written since the last publication, which this snapshot was at or behind).
 		if (owned.size() < capacity)
 			owned.resize(capacity);
 		for (const std::uint32_t e : moved) {
@@ -245,8 +237,7 @@ namespace DCLF::Scene
 		cursor.Restart(0);
 		cursor.Advance(log);
 
-		// The run of indices written since the last publication, published with the earlier runs; with none to chain to (the first
-		// publication, or after a Reset) the log starts at this generation.
+		// The first publication, or one after a Reset, starts the log at this generation.
 		auto next = std::make_shared<EntrySpaceChanges>();
 		next->log = logId;
 		next->generation = s.generation;
@@ -260,7 +251,6 @@ namespace DCLF::Scene
 			for (const std::uint32_t e : run->entries)
 				marks[e] = 0;
 			std::sort(run->entries.begin(), run->entries.end());
-			// The earlier runs, newest back, while within the bounds; the floor moves to the newest left out.
 			next->floor = changes->floor;
 			std::size_t total = run->entries.size(), from = 0;
 			for (std::size_t k = changes->runs.size(); k-- > 0;) {
@@ -282,7 +272,7 @@ namespace DCLF::Scene
 		s.changes = std::move(next);
 		pooled.state->log = logId;
 		pooled.state->generation = s.generation;
-		// The log keeps what a pooled snapshot has not read (one behind the bound is brought up whole).
+		// One behind the bound is brought up whole.
 		std::uint64_t oldest = log.End();
 		for (const auto& p : pool)
 			if (p.cursor.Continues(log, 0))
@@ -308,7 +298,6 @@ namespace DCLF::Scene
 				idle.push_back(i);
 		if (idle.size() <= kFreeSpares)
 			return;
-		// The nearest the log first (the least to read when brought up), as Publish and DispatchSpare choose.
 		std::sort(idle.begin(), idle.end(), [&](std::size_t a_left, std::size_t a_right) {
 			const auto& l = pool[a_left].cursor;
 			const auto& r = pool[a_right].cursor;
@@ -344,22 +333,19 @@ namespace DCLF::Scene
 		if (!state.busy.load(std::memory_order_acquire))
 			return;
 		if (!state.claimed.exchange(true, std::memory_order_acq_rel)) {
-			// Not started (the pool is busy): the lane runs it, the job finding it claimed.
+			// Not started yet, so the lane runs it and the job finds it claimed.
 			CatchUpSpare(*a_pooled.snapshot, *a_pooled.source, state);
 			state.busy.store(false, std::memory_order_relaxed);
 			++sparesRunByLane;
 			return;
 		}
-		// Running on a worker: waited for, as ParallelFor waits for a claimed chunk.
 		state.busy.wait(true, std::memory_order_acquire);
 		++sparesWaited;
 	}
 
 	void EntrySpaceTable::DispatchSpare(std::size_t a_published)
 	{
-		// The free pooled snapshot nearest the log (else a new one), brought up to this publication on the pool while the lane goes on:
-		// the next publication then reads one run on the lane, not every run since the spare's own publication (snapshots held in
-		// turn) nor the whole table (a snapshot the pool grew by).
+		// Caught up on the pool while the lane goes on, so the next publication reads one run on the lane.
 		std::size_t spare = pool.size();
 		for (std::size_t i = 0; i < pool.size(); ++i) {
 			const auto& p = pool[i];
@@ -378,8 +364,7 @@ namespace DCLF::Scene
 			++poolGrowths;
 		}
 		auto& p = pool[spare];
-		// No reader's earlier generation names it while the pool writes it (parity keeps weak references by generation); the lane
-		// writes its generation again as it publishes it. Its cursor is where this publication left the log, the state it will hold.
+		// Parity keeps weak references by generation, so no reader's earlier generation may name it while the pool writes it.
 		p.snapshot->generation = 0;
 		p.cursor.Restart(0);
 		p.cursor.Advance(log);
@@ -390,7 +375,7 @@ namespace DCLF::Scene
 		next->busy.store(true, std::memory_order_relaxed);
 		p.state = next;
 		++spareCatchUps;
-		// The job reads the snapshots by address: the pool holds the spare, and p.source the source, until the lane finishes it.
+		// The job reads the snapshots by address. The pool and p.source hold them until the lane finishes it.
 		auto job = [spareSnapshot = p.snapshot.get(), source = p.source.get(), state = std::move(next)]() {
 			if (state->claimed.exchange(true, std::memory_order_acq_rel))
 				return;
@@ -398,7 +383,6 @@ namespace DCLF::Scene
 			state->busy.store(false, std::memory_order_release);
 			state->busy.notify_all();
 		};
-		// Parity runs keep it on the pass's thread (Policy::SerialFanout, as the fan-outs do); a refused job runs here too.
 		if (Policy::SerialFanout() || !SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu,
 										  "DCLF candidate spare", [job](const auto&) { job(); }))
 			job();

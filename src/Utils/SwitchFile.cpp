@@ -1,5 +1,7 @@
 #include "SwitchFile.h"
 
+#include "Testing/SwitchRegistry.h"
+
 #include <ShlObj.h>
 #include <Windows.h>
 
@@ -44,6 +46,13 @@ namespace Util::SwitchFile
 			return file;
 		}
 
+		// SetFileValue's values. Written at load only, before any switch is read, so reads take no lock.
+		ankerl::unordered_dense::map<std::string, std::string>& Overrides()
+		{
+			static ankerl::unordered_dense::map<std::string, std::string> overrides;
+			return overrides;
+		}
+
 		std::string Environment(std::string_view a_name)
 		{
 			// Whatever its length (a test command list can run to kilobytes): the size first, then the value.
@@ -72,11 +81,20 @@ namespace Util::SwitchFile
 
 	std::string Value(std::string_view a_name, bool a_environmentOnly)
 	{
+		Testing::SwitchRegistry::NoteRead(a_name);
 		auto value = Environment(a_name);
-		if (value.empty() && !a_environmentOnly)
-			if (const auto it = File().find(std::string(a_name)); it != File().end())
+		if (value.empty() && !a_environmentOnly) {
+			if (const auto it = Overrides().find(std::string(a_name)); it != Overrides().end())
 				value = it->second;
+			else if (const auto found = File().find(std::string(a_name)); found != File().end())
+				value = found->second;
+		}
 		return value;
+	}
+
+	void SetFileValue(std::string_view a_name, std::string_view a_value)
+	{
+		Overrides()[std::string(a_name)] = std::string(a_value);
 	}
 
 	std::vector<std::string> FileNames()
@@ -85,6 +103,9 @@ namespace Util::SwitchFile
 		names.reserve(File().size());
 		for (const auto& [name, value] : File())
 			names.push_back(name);
+		for (const auto& [name, value] : Overrides())
+			if (!File().contains(name))
+				names.push_back(name);
 		return names;
 	}
 }

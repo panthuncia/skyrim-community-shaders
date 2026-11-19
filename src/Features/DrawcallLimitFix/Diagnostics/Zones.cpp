@@ -14,8 +14,8 @@ namespace DCLF::Zones
 			std::uint64_t count = 0, totalNs = 0, maxNs = 0, topLevelNs = 0;
 		};
 
-		// One thread's tallies. Created at the thread's first recorded zone and kept for the process (the pools' threads live as
-		// long), so a phase's end can read them after the thread is gone. The lock is the thread's own but at a phase's ends.
+		// One thread's tallies, kept for the process so a phase's end can read them after the thread is gone.
+		// The lock is taken only by the thread itself, except at a phase's ends.
 		struct ThreadTable
 		{
 			std::mutex mutex;

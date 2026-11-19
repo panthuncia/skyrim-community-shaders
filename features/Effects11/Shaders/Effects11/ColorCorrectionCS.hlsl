@@ -1,11 +1,19 @@
-cbuffer ColorCorrectionParams : register(b0)
+#include "Common/OrgResources.hlsli"
+
+struct ColorCorrectionConstants
 {
 	float Brightness;
 	float GammaCurve;
 	uint FrameCount;
+	uint Pad;
 };
 
-RWTexture2D<float4> OutputTexture : register(u0);
+// D3D11: u0 and b0. ORG: handles in the push block (Common/OrgResources.hlsli), the values a latch region.
+#define COLOR_CORRECTION_RESOURCES(X)             \
+	X(UAV, RWTexture2D<float4>, OutputTexture, 0) \
+	X(LATCH, ColorCorrectionConstants, ColorCorrection, 0)
+ORG_PUSH_BLOCK(COLOR_CORRECTION_RESOURCES(ORG_HANDLE))
+COLOR_CORRECTION_RESOURCES(ORG_RESOURCE)
 
 uint3 pcg3d(uint3 v)
 {
@@ -35,8 +43,8 @@ float3 TriDither(float2 screenPos, uint frameCount)
 	}
 
 	float4 color = OutputTexture[id.xy];
-	color.rgb = pow(abs(color.rgb), GammaCurve);
-	color.rgb *= Brightness;
-	color.rgb += TriDither(float2(id.xy), FrameCount) / 1023.0;
+	color.rgb = pow(abs(color.rgb), ColorCorrection.GammaCurve);
+	color.rgb *= ColorCorrection.Brightness;
+	color.rgb += TriDither(float2(id.xy), ColorCorrection.FrameCount) / 1023.0;
 	OutputTexture[id.xy] = color;
 }

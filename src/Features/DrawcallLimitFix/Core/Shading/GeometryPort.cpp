@@ -24,7 +24,7 @@ namespace DCLF::GeometryPort
 
 		static_assert(std::is_same_v<FrameLighting, std::array<float, 24>>);
 
-		// Engine::Offsets (Address Library ids) (SetupGeometry, AE 0x1414dd040, reads each).
+		// Address Library ids SetupGeometry (AE 0x1414dd040) reads.
 		constexpr Engine::Offset kVec3NormalizeImport{ { 417053 }, { 228300 } };  // D3DXVec3Normalize's IAT slot (the thunk at 0x14153d3da)
 		constexpr std::size_t kImageSpaceHdr = 0xe0;
 		constexpr std::size_t kBSLightNiLight = 0x48;     // BSLight -> NiLight*
@@ -43,18 +43,16 @@ namespace DCLF::GeometryPort
 		constexpr Engine::Offset kAmbientSpecularGlobal{ { 390997 }, { 513256 } };  // BSShaderManager::State+0xfc: tint xyz, Fresnel power w
 
 		/**
-		 * @brief Whether SSE Engine Fixes' BSLightingAmbientSpecular fix is in SetupGeometry (EngineFixesSkyrim64,
-		 * src/fixes/bslightingambientspecular.h): a jmp5 over SetupGeometry's Specular test (`test dword [r13+0x94], 0x200`, 41 F7 85
-		 * 94 00 00 00 00 02 00 00; in AE 1.6.1170 at 0x1414de2b1, SetupGeometry +0x1271: the offset a fix build uses varies) into code
-		 * that, for an AmbientSpecular pass, copies the 16 bytes at BSShaderManager::State's ambient specular (0x14203315c) into
-		 * PerGeometry PS 6. Found by the instruction itself: the test whole, the fix absent; the jmp5 and the test's last six bytes,
-		 * present. Fixed after load (SKSE plugins patch at load).
+		 * @brief Whether SSE Engine Fixes' BSLightingAmbientSpecular fix is in SetupGeometry. The fix jmp5s over the Specular test
+		 * `test dword [r13+0x94], 0x200` (41 F7 85 94 00 00 00 00 02 00 00), at a build-dependent offset, AE 1.6.1170 0x1414de2b1.
+		 * It then copies the ambient specular at 0x14203315c into PerGeometry PS 6. Found by the instruction: the whole test means absent,
+		 * the jmp5 plus the test's last six bytes means present. Checked after load, since SKSE plugins patch at load.
 		 */
 		bool AmbientSpecularFixInstalled()
 		{
 			static const bool installed = [] {
 				constexpr std::uint8_t kTest[] = { 0x41, 0xf7, 0x85, 0x94, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00 };
-				const std::size_t kScan = REL::Module::IsSE() ? 0xc66 : 0x1600;  // SetupGeometry's length (SE's outlines much of it)
+				const std::size_t kScan = REL::Module::IsSE() ? 0xc66 : 0x1600;  // SetupGeometry's length. SE outlines much of it.
 				const auto* code = reinterpret_cast<const std::uint8_t*>(REL::RelocationID(100565, 107300).address());
 				int vanilla = 0, patched = 0;
 				for (std::size_t i = 0; i + sizeof(kTest) <= kScan; ++i) {
@@ -87,10 +85,8 @@ namespace DCLF::GeometryPort
 		constexpr int kTemplateLights = 1;
 
 		/**
-		 * @brief The descriptor SetupGeometry reads at BSLightingShader+0x94 for a pass descriptor: SetupTechnique's
-		 * (SetupTechniqueDescriptor), then the pass rules' SetupGeometry hook (Api::LightingPassRules' raw rule, resolved data;
-		 * Integrations/TruePBR's: a TruePbr pass gains AmbientSpecular and flips AnisoLighting), and bits 3-5 become
-		 * min(numLights - 1, 7), the template pass's 0.
+		 * @brief The descriptor SetupGeometry reads at BSLightingShader+0x94: SetupTechnique's, then the pass rules' raw rule,
+		 * with bits 3-5 set to min(numLights - 1, 7), which is 0 for the template pass.
 		 */
 		std::uint32_t RawTechniqueOf(std::uint32_t a_passDescriptor)
 		{
@@ -112,25 +108,19 @@ namespace DCLF::GeometryPort
 			return &a_block.floats[a_layout.offset[a_variable]];
 		}
 
-		/**
-		 * @brief The frame's lighting and eye into a block for a raw technique: PS DirLightDirection, DirLightColor, DirectionalAmbient
-		 * (every pass), PS AmbientSpecularTintAndFresnelPower (AmbientSpecular passes, with Engine Fixes' patch), VS EyePosition (the
-		 * passes that write it, with an accumulator). What moves every frame; the rest of the block moves with SamePipelineInputs.
-		 */
+		/** @brief Writes the frame's lighting and eye into a block for a raw technique. These are the parts that move every frame. */
 		void WriteFrameValues(std::uint32_t a_raw, const PipelineFrame& a_frame, GeometryConstants& a_out)
 		{
 			const auto& vsLayout = LightingVSLayout();
 			const auto& psLayout = LightingPSLayout();
-			// The sun and the ambient, every pass (xyz of the two float3s; the w the engine leaves).
+			// The sun and the ambient for every pass, xyz only. The engine leaves w.
 			std::memcpy(VariableAt(a_out.ps, psLayout, kPSDirLightColor), a_frame.dirLightColor, sizeof(a_frame.dirLightColor));
 			std::memcpy(VariableAt(a_out.ps, psLayout, kPSDirLightDirection), a_frame.dirLightDirection, sizeof(a_frame.dirLightDirection));
 			std::memcpy(VariableAt(a_out.ps, psLayout, kPSDirectionalAmbient), a_frame.directionalAmbient, sizeof(a_frame.directionalAmbient));
-			// EyePosition, xyz, for the passes that write it (with True PBR's AmbientSpecular: LightingConstants.h's WritesEyePosition
-			// does not see that).
+			// EyePosition xyz, for the passes that write it, including True PBR's AmbientSpecular, which WritesEyePosition misses.
 			if (WritesEye(a_raw) && a_frame.eye)
 				std::memcpy(VariableAt(a_out.vs, vsLayout, kVSEyePosition), a_frame.eyePosition, sizeof(a_frame.eyePosition));
-			// AmbientSpecularTintAndFresnelPower, all four, for AmbientSpecular passes (the raw technique's: True PBR's hook adds it),
-			// where Engine Fixes' patch writes it.
+			// AmbientSpecularTintAndFresnelPower, all four, for AmbientSpecular passes where Engine Fixes' patch writes it.
 			if ((a_raw & kAmbientSpecular) && a_frame.ambientSpecularFix)
 				std::memcpy(VariableAt(a_out.ps, psLayout, kPSAmbientSpecular), a_frame.ambientSpecular, sizeof(a_frame.ambientSpecular));
 		}
@@ -147,7 +137,7 @@ namespace DCLF::GeometryPort
 		EngineReadWindow::Touch("SamplePipelineFrame");
 		PipelineFrame frame;
 
-		// The sun: ShadowSceneNode[0]->sunLight, the template pass's sceneLights[0]; SetupGeometry reads it through BSLight+0x48.
+		// The sun: ShadowSceneNode[0]->sunLight. SetupGeometry reads it through BSLight+0x48.
 		auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
 		const RE::BSLight* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
 		const auto* light = sun ? At<const std::byte* const>(sun, kBSLightNiLight) : nullptr;
@@ -158,8 +148,8 @@ namespace DCLF::GeometryPort
 			const float scale = At<const float>(light, kNiLightFade) * At<const float>(imageSpace, kImageSpaceHdr);
 			for (std::uint32_t c = 0; c < 3; ++c)
 				frame.dirLightColor[c] = scale * At<const float>(light, kNiLightDiffuse + c * sizeof(float));
-			// DirLightDirection (0x1414dd622): the direction negated (a sign flip, xorps 0x141ad3130; SE multiplies by -1.0, the same bits), through the engine's own
-			// D3DXVec3Normalize import, so the result is the same bits on this machine.
+			// DirLightDirection (0x1414dd622): the direction negated with a sign flip (xorps 0x141ad3130; SE's multiply by -1.0 gives the same bits),
+			// then normalized through the engine's own D3DXVec3Normalize import, so the bits match on this machine.
 			const float negated[3] = { -At<const float>(light, kNiLightDirection), -At<const float>(light, kNiLightDirection + 4),
 				-At<const float>(light, kNiLightDirection + 8) };
 			using Vec3Normalize = float* (*)(float*, const float*);
@@ -184,7 +174,7 @@ namespace DCLF::GeometryPort
 				frame.eyePosition[c] = At<const float>(accumulator, kAccumulatorEye + c * sizeof(float)) - posAdjust[c];
 		}
 
-		// SSRParams.xyz (0x1414de283): x, then y + x (addss: the same bits either way round), then the auxiliary-target switch.
+		// SSRParams.xyz (0x1414de283): x, then y + x, then the auxiliary-target switch. addss gives the same bits either way round.
 		frame.ssrParams[0] = Global<const float>(kSsrX);
 		frame.ssrParams[1] = Global<const float>(kSsrY) + Global<const float>(kSsrX);
 		frame.ssrParams[2] = Global<const float>(kSsrAuxiliary);
@@ -209,13 +199,10 @@ namespace DCLF::GeometryPort
 		const auto& psLayout = LightingPSLayout();
 		const std::uint32_t raw = RawTechniqueOf(a_passDescriptor);
 
-		// The sun, the ambient, the eye and the ambient specular (RefreshFrameValues' part).
 		WriteFrameValues(raw, a_frame, a_out);
 
-		// NumLightNumShadowLight.xy (0x1414dda7c): the raw technique's light counts, bits 3-5 (0: True PBR's hook) and 6-8 (the
-		// descriptor's shadow lights). Then both point light arrays zeroed (0x70 bytes each: the layout's shared scratch). The point
-		// light routine (FUN_1414df650, Light Limit Fix's replacement) runs only for a light count above 0, so ShadowLightMaskSelect
-		// stays unwritten.
+		// NumLightNumShadowLight.xy (0x1414dda7c): the raw technique's light counts in bits 3-5 and 6-8. Both point light arrays are then zeroed.
+		// The point light routine (FUN_1414df650) only runs for a light count above 0, so ShadowLightMaskSelect stays unwritten.
 		float* counts = VariableAt(a_out.ps, psLayout, kPSNumLights);
 		counts[0] = static_cast<float>(static_cast<std::int32_t>((raw >> 3) & 7));
 		counts[1] = static_cast<float>(static_cast<std::int32_t>((raw >> 6) & 7));
@@ -228,7 +215,7 @@ namespace DCLF::GeometryPort
 			std::memcpy(VariableAt(a_out.ps, psLayout, kPSWorldMapOverlay), a_frame.worldMapPS, sizeof(a_frame.worldMapPS));
 		}
 
-		// SSRParams.xyz, every pass; w (the specular LOD fade) is the object's.
+		// SSRParams.xyz for every pass. w is the object's specular LOD fade.
 		std::memcpy(VariableAt(a_out.ps, psLayout, kPSSSRParams), a_frame.ssrParams, sizeof(a_frame.ssrParams));
 		return true;
 	}

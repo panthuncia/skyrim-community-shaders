@@ -94,9 +94,21 @@ public:
 	void RedirectFramebuffer();
 	/** @brief Restores the original kFRAMEBUFFER texture, SRV, and RTV after HDR rendering. */
 	void RestoreFramebuffer();
+	/**
+	 * @brief The texture RedirectFramebuffer puts in kFRAMEBUFFER's place this frame (the float16 HDR texture), or null when it would not
+	 * redirect. The render graph's post chain ends in it instead of the back buffer.
+	 */
+	ID3D11Texture2D* PostChainTarget() const;
 
 	/** @brief Redirects kFRAMEBUFFER.RTV to the UI texture for vanilla UI capture. */
 	void SetUIBuffer();
+
+	/**
+	 * @brief Before a Bink movie's tiles draw (BSMovie::DrawTiles) with HDR output on: clears the scene and points kFRAMEBUFFER at the
+	 * UI texture, so the movie goes through the composite. Nothing with HDR output off. The tile draw's detour calls it, and so does
+	 * Bink's render-graph path for the ticks whose draw it withholds.
+	 */
+	void PrepareMovieDraw();
 	/** @brief Clears the UI texture and restores the original kFRAMEBUFFER.RTV. */
 	void ClearUIBuffer();
 	/** @brief Returns true when HDR deferred compositing is active (composite after Present-hook mods). */
@@ -188,6 +200,8 @@ public:
 	Texture2D* cleanSceneCapture = nullptr;    // Pre-blur copy of hdrTexture for clean captures
 	uint cleanSceneCaptureFrame = UINT32_MAX;  // frameCount when cleanSceneCapture was last refreshed
 	uint movieDrawnFrame = UINT32_MAX;         // frameCount when a Bink movie was last drawn into the UI buffer
+	uint sceneClearFrame = UINT32_MAX;         // frameCount whose movie draw asked ApplyHDR to clear hdrTexture (the graph's clear)
+	bool uiTextureClean = false;               // uiTexture holds transparent black: cleared, and no redirect drew into it since
 
 	ID3D11ComputeShader* hdrOutputCS = nullptr;
 	/** @brief Returns the HDR output compute shader, compiling it on first use. */

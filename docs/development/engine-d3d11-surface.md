@@ -361,7 +361,7 @@ All are USAGE_DYNAMIC, BIND_CONSTANT_BUFFER, CPU_ACCESS_WRITE, and are written w
 
 | SE global                    | AE global        | Size                 | Use                                                                                                            |
 | ---------------------------- | ---------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 0x143027a08[4]               | (in 0x14328xxxx) | 0xf00 each           | 4 rotating "custom" CBs handed out by GetID3D11Resource 75561 (Ghidra name is wrong: it is a custom-CB mapper) |
+| 0x143027a08[4]               | 0x143288308[4]   | 0xf00 each           | 4 rotating "custom" CBs handed out by `MapCustomConstantBuffer` 75561 / 77362 (Ghidra called it GetID3D11Resource) |
 | 0x143027a30 + i*8, i = 1..19 |                  | 0x10*i (up to 0x130) | **VS PerTechnique (b0) size-class pool**                                                                       |
 | 0x143027ad0 + i*8, i = 1..9  |                  | up to 0x90           | **VS PerMaterial (b1) pool**                                                                                   |
 | 0x143027b20 + i*8, i = 1..27 |                  | up to 0x1b0          | **VS PerGeometry (b2) pool**                                                                                   |
@@ -499,7 +499,8 @@ BSGraphics and SetDirtyStates.
 4. Format 0x20 for 75490's TEXCOORD1 (R8G8B8A8_SINT) is unusual. Check the shader's input signature.
 5. The PS size-class pools (0x143027c00, 0x143027ca0, 0x143027d40) are mapped to tech, material and
    geometry by symmetry only. 75582 `0x140d70e60` reads 0x143027c08 and is presumably the PS serializer.
-   Confirm.
+   Confirm. **Answered (P5.7):** 75582 is `SavePixelShader` and maps levels 0, 1, 2 to those three pools. The AE
+   addresses of every constant-buffer global are in [p5/constants.md](./p5/constants.md).
 6. AE twins not matched by hash: InitD3D 77649 (by xref), raster 77652, samplers 77653 (by xref), Init
    ~77635, device creation ~77396, 75546 ~77346. Also the AE addresses of the size-class pools and the
    custom-CB ring (only the AE alpha, compute, per-frame and type-7 CBs were confirmed).
@@ -591,7 +592,7 @@ Slots 57, 61 and 63 are created but not used by this Render _(inferred)_.
 | +0x180 | 0x1412e82f0 | 105, 119-122, 124                | 100481 / 0x1412e8470, from 99024; kIBLENSFLARES_* RTs                                              |
 | +0x188 | 0x1412ea1a0 | 106-113 (CS blurs)               | 100486 / 0x1412ea290 (VL), 100488 / 0x1412ea340 (DOF)                                              |
 | +0x190 | 0x1412ea8e0 | 114-116                          | 100493 / 0x1412ea900, from 99024                                                                   |
-| +0x198 | 0x1412eabc0 | 117                              | RenderWorld 100424 (snow: kMAIN to kSNOW_SWAP) and RenderWaterEffects                              |
+| +0x198 | 0x1412eabc0 | 117                              | RenderWorld 100424 (snow: kMAIN to kSNOW_SWAP) and RenderWaterEffects (below)                      |
 | +0x1a0 | 0x1412eade0 | 118                              | debug only                                                                                         |
 | +0x1a8 | 0x1412eaf20 | 123                              | -                                                                                                  |
 | +0x1b0 | 0x1412eb050 | 125-127                          | unused in vanilla                                                                                  |
@@ -606,6 +607,21 @@ Slots 57, 61 and 63 are created but not used by this Render _(inferred)_.
 | +0x1f8 | 0x1412f0360 | 154                              | 100548                                                                                             |
 | +0x200 | 0x1412f0590 | 155 WaterBlend                   | not traced                                                                                         |
 | +0x208 | 0x1412f0b90 | 156 UnderwaterMask               | not traced                                                                                         |
+
+**The viewport of a raster effect (checked 2026-11-11, SE).** `BSImagespaceShader::Render` (100950) calls
+`Renderer::UpdateViewPort(0, 0, true)` (SE 0x140d69d00: the whole current target, the dynamic-resolution scale ignored) only
+when the effect's `unk88` (+0x88) is clear. With it set, the draw keeps the viewport the state already holds. `UpdateViewPort`
+with `false` scales by the dynamic-resolution ratios (SE `DAT_14302c98c` / `DAT_14302c990`, unless the lock `DAT_14302c9a0` is
+set) and marks the shadow state's viewport dirty (0x2). 99023 keeps `unk88` set on its ISCopy (+0x110) except around the
+screenshot copy, then calls `UpdateViewPort(0, 0, false)`; the depth-of-field effect's Render (SE 0x1412f90d0) sets `unk88` on
+its first child for that child's draw. `SetDirtyStates` applies the shadow viewport (adjusting its depth range only with a
+depth-bias raster mode).
+
+**ISCopySubRegionCS's two callers (+0x198).** `DispatchCopySubRegion` (SE 0x1412eabf0, AE 0x1414d48c0) binds t0 and u0 in one of
+three modes (+0x60). RenderWorld uses mode 2, engine target indices: `kMAIN` (1) to `kSNOW_SWAP` (0x71), the SRV and UAV from
+`renderTargets`. `Main::RenderWaterEffects` (SE 0x1405b2300) uses mode 0, raw views: for each texture in BGSAutoWater's queue,
+that texture's SRV is copied into a sub-rectangle of the UAV of the texture at `DAT_1431d0f80 + 0x48`, which
+`BSWaterShader::SetupGeometry` reads. Neither view is an engine render target's.
 
 **Other 99025 call sites:**
 
@@ -800,9 +816,9 @@ the raw device and context, and every UI draw is its own D3D11 call.
 | factory                          | 82831 | 0x140f5d450 | 84952 | 0x141047dc0 | Allocates from the GFx heap.                                                                                                |
 | SetDependentVideoMode            | 82918 | 0x140f633d0 | 85033 | 0x14104dfe0 | Slot 53.                                                                                                                    |
 | CreateShaders and states         | 82863 | 0x140f5fae0 | 84984 | 0x14104a670 | Releases everything via 82894 on failure.                                                                                   |
-| BSScaleformManager renderer init | 80603 | 0x140edb730 | ?     | -           | Factory, `GetScaleformRendererParameters`, `SetDependentVideoMode(dev, ctx, 0)`, GFxRenderConfig (0x140f63d20, flags 0x11). |
+| BSScaleformManager renderer init | 80603 | 0x140edb730 | 82730 | 0x140fc31e0 | Factory, `GetScaleformRendererParameters`, `SetDependentVideoMode(dev, ctx, 0)`, GFxRenderConfig (0x140f63d20, flags 0x11). |
 
-**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xE0 the renderer's own DSV (mask stencil), +0x150..
+**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xD8/+0xE0 the RTV and DSV bound at BeginDisplay (the mask stencil is kMAIN's, see p5/scaleform.md), +0x150..
 VS, +0x248.. and +0x2D8.. PS, +0x110 input layout, +0x1B8 and +0x3B0 constant buffers (0x80 each), +0x3E0..+0x458 blend
 states (2x7), +0x410 color-write-off, +0x3B8..+0x3D0 samplers (4), +0x458/+0x460 rasterizer states, +0x468..+0x488
 depth-stencil states (5), +0x4A0 in-mask flag, +0x4A4 stencil ref, +0x620 texture list, +0x640 CRITICAL_SECTION, +0x720
@@ -942,7 +958,7 @@ ORG present stage must accept presents from the blocking loop and the sequence t
 1. AE render-target indices (116 vs 114): confirm the two extra are appended.
 2. Bink colour order: BINKSURFACE32's byte order may not match R8G8B8A8_UNORM; dump the PS at 0x141e0bf10 for a swizzle.
 3. Scaleform enable tables: what fills the `.bss` enable bytes, so which blobs are created at runtime.
-4. Pair the 53 embedded HLSL sources with the 55 blobs before porting.
+4. Pair the 53 embedded HLSL sources with the 55 blobs before porting. **Done** (P5.10, `tools/check-scaleform-shaders.py`): 46 identical, 5 differ in register allocation only, 2 sources have no blob; table in p5/scaleform.md.
 5. No callers found for slots 8 (Map), 33 (Noise), 49-51 (DistantBlur) and 57/61/63.
 6. Which console command or INI sets the HDR flag (SE `DAT_141e0eb24`), and what mgr+0x118 means.
 7. Missing AE IDs: 100430, 51855, 80603, 87887, 87889 and the helper render functions.
@@ -1104,6 +1120,15 @@ SE +0x50 / AE Init +0x2BC), then 0x140d88c90, 0x140d891f0, 0x140d89230, 0x140d89
 0x140e65d50, 0x140e65fa0), then 75592 and 75593, then `IDXGIDevice1::SetMaximumFrameLatency(2)`.
 `Renderer::Init` (75445/77226) then creates 64 OCCLUSION queries (0x143025f60) and 6 TIMESTAMP_DISJOINT queries
 (0x14302ac78, stride 0x50) and creates `Data/ShaderCache`.
+
+The occlusion ring's functions, confirmed in Ghidra (2026-11-11, Phase 5.5.5; details in `p5/occlusion-queries.md`): ring SE
+524740 / 0x143025f60, AE 411344 / 0x143286800 (64 `ID3D11Query*`, next index at ring + 0x200). `AcquireOcclusionQuery` SE 75565 /
+0x140d70150, AE 77366 / 0x140e4ae40; `ReleaseOcclusionQuery` (a user count only) SE 75566 / 0x140d70180, AE 77367 / 0x140e4ae70;
+`BeginQuery` SE 75567 / 0x140d70190, AE 77368 / 0x140e4ae80; `EndQuery` SE 75568 / 0x140d701b0, AE 77369 / 0x140e4aea0;
+`GetQueryData(renderer, entry, wait, flush)` SE 75569 / 0x140d701d0, AE 77370 / 0x140e4aec0 (8 bytes read, low 32 bits returned,
+0xFFFFFFFF when not ready, `wait` spins with `Sleep(0)`). Users: the sun's draw SE 99958 / AE 106604 (from `Sun::SubmitOcclusionQuery`
+SE 25799 / AE 26353), read by SE 99967 / AE 106605 and AE 106614; the decal occlusion test SE 35563 / AE 36562, read by SE 29262 /
+AE 30117. `Sun::SubmitOcclusionQuery` is called by `Main::RenderWorld` (index 1) and AE 107129 (index 2).
 
 #### R6.5 BSGraphics::TriShape ownership
 

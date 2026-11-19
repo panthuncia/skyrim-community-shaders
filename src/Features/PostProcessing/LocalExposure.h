@@ -65,6 +65,13 @@ struct LocalExposure : public PostProcessFeature
 		float Padding1[2];
 	};
 
+	/**
+	 * @brief The constants Draw uploads, also latched by the ORG path (ORG/ORGLocalExposure.cpp).
+	 * @param a_inputWidth, a_inputHeight The scene image's size.
+	 * @param a_blurWidth, a_blurHeight The blurred luminance's size.
+	 */
+	LocalExposureCB Constants(uint a_inputWidth, uint a_inputHeight, uint a_blurWidth, uint a_blurHeight) const;
+
 	std::unique_ptr<ConstantBuffer> localExposureCB = nullptr;
 
 	// Textures
@@ -73,6 +80,12 @@ struct LocalExposure : public PostProcessFeature
 	static constexpr uint s_MaxBlurRadius = 64;
 	static constexpr uint s_GridDepth = 32;
 	static constexpr uint s_GridTileSize = 64;
+
+	/** @brief The log-luminance pyramid's mip count for a scene a_width by a_height. */
+	static uint MipCount(uint a_width, uint a_height);
+
+	/** @brief The pyramid level the broad blur reads, for a pyramid of a_mips levels. */
+	static uint BlurMip(uint a_mips) { return std::min(s_BlurMip, a_mips - 1); }
 
 	eastl::unique_ptr<Texture2D> texLogLuminance = nullptr;
 	eastl::unique_ptr<Texture3D> texLuminanceGrid = nullptr;

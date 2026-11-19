@@ -316,13 +316,14 @@ Leaving the interior after this behaves as after `pcb`: the exterior grid is loa
 ## Recommended sequence
 
 ```
-// main thread only (e.g. an SKSE task), not during a load/save or a cell transition
+// main thread only, not during a load/save or a cell transition. Not an SKSE task: SKSE runs
+// those on a BSJobs thread inside the AI job (Main::PostAIJobUpdate, 36592). VRAM Budget runs
+// after Main::Update's frame-job wait (JobListManager wait, 35409 / 34554).
+if tes->interiorCell && no buffered exterior is unloadable && the grid holds cells:   // §6
+    tes->PurgeBufferedCells()                               // 13299 / 13159: the whole pcb, then stop
 mlm = AE 400323 (0x1420f69e0) / SE 13110();                char st[2];
 BeginMemoryFree(mlm, st, false, true);                      // 36815 / 35844 — pauses IO, may stall
 tes = *TES (403450 / 516923); g = tes->gridCells->length;
-if tes->interiorCell && no buffered exterior is unloadable && the grid holds cells:   // §6
-    if tes->worldSpace: TESWorldSpace 3D unload(ws)         // 20515 / 20072
-    tes->gridCells->DetachAll()                             // vfunc 1; the grid's cells become unloadable
 for k in 0..N-1:
     cell = oldest candidate  (interiors first when outside, exteriors first when inside;
                               exterior slots n-1..0, state 4, not in the grid, !kStillLoading, lock==0;
@@ -337,6 +338,11 @@ EndMemoryFree(mlm, st);                                     // 36816 / 35845
 ```
 
 ## Open risks
+
+- Never detach the grid without unloading every detached exterior in the same call. 20515 clears the worldspace's
+  portal graph (`ws+0x130`). An actor left in a detached exterior cell crashes at `0x1402c4bd6` (19165) the next time
+  the engine attaches its 3D there: 19165 reads the null graph's `+0x28`. `pcb` (13604) unloads them all at once and
+  releases the worldspace (20463) once the exterior buffer is empty, so call `PurgeBufferedCells` whole.
 
 - The IO-thread writers of the buffers are inferred from `CellLoaderTask`'s state machine, not from a captured thread
   ID. If the work function in fact runs on the main thread, the IO pause is only a precaution. It still matches `pcb`.

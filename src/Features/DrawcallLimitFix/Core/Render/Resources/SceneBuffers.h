@@ -1,10 +1,9 @@
 #pragma once
 
-// The scene's GPU tables shared by every epoch (SceneBuffers: the vertex stream, the features' scene resources, readback lists, the draw
-// families' published pipelines), the root states' and cull bindings' readers (render thread). Self-contained (features include it);
-// Internal.h includes it in its order.
+// The scene's GPU tables shared by every epoch, and readers for the root states and cull bindings. Render thread.
+// Features include this header directly, so it must stay self-contained.
 
-// volk must precede every Vulkan header in this translation unit (Helpers.h: DrawPipelinesRhi.h's FamilyPipelines).
+// volk must come before every Vulkan header in this translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
@@ -29,52 +28,35 @@ namespace DCLF::Draws
 {
 	struct IndexPool;
 
-	/**
-	 * @brief The scene's tables, each a buffer of the scene's set (SceneBufferSet): every capacity a commit, build or pass reads is
-	 * its named version's units, which the revision producer requires to hold the tables (RequireSceneTables).
-	 */
+	/** @brief The scene's tables. Each is a buffer of the scene's set, and the revision producer grows it to hold the tables. */
 	struct SceneBuffers
 	{
-		// The object records, extras and geometry table are the installed payload's (PayloadVersions).
-		// The vertex stream's buffer (Api::VertexStreamContribution::select: Features/Faces' face positions), of its scene resources'
-		// state, resolved once at setup: the second vertex stream the passes bind. Null without a stream.
+		// The second vertex stream the passes bind, resolved once at setup. Null without a stream.
 		Versioned vertexStream;
-		// The index pool every plain indexed draw binds; kept current by every commit that draws from it (UpdateIndexPool).
+		// Kept current by every commit that draws from it.
 		std::shared_ptr<IndexPool> pool;
-		// The features' scene resources' states (Api::SceneResources::setup, by registration: Extensions::RegisteredSceneResources;
-		// Extensions::SceneResourcesOf), made with these tables, the vertex stream's first, and held until they go.
+		// The features' scene resource states, in registration order, held as long as these tables.
 		std::vector<std::shared_ptr<void>> sceneResources;
-		// The passes' states (Api::PassDef::setup, by pass: the executor's registration order, SetUpPassStates); null: no setup, or the
-		// pass is not added.
+		// The passes' setup states, in registration order. Null when a pass has no setup or is not added.
 		std::vector<std::shared_ptr<const void>> passStates;
-		// Visibility readback (null without its program, or without the root states' rows: Api::CullBindingSlot::RootRows): events
-		// (count zeroed by every depth commit), and each root's and object's last reported verdict. Every version is zero-filled; the
-		// decoder restarts with the first batch of a version it has not followed (visibilityReportedFollowed: root, object).
+		// Visibility readback buffers. Every version is zero-filled, so the decoder restarts with the first batch of a version it has not followed.
 		Versioned visibilityEvents, visibilityRootReported, visibilityObjectReported;
 		std::array<org::services::FilledVersion, 2> visibilityReportedFollowed;
 		std::shared_ptr<const ComputeProgram> visibilityEventsProgram;
 		std::shared_ptr<VisibilityReadback> visibilityReadback;
-		// The draw families' pipelines on their lane (Api::DrawFamily, by family), published by the frame's decision once built
-		// (DrawFamilyFrame::Pipelines); read on the graph host's thread (FamilyPipelinesOf).
+		// Each draw family's pipelines, published once built. Read on the graph host's thread.
 		std::array<std::atomic<std::shared_ptr<const FamilyPipelines>>, Extensions::kDrawFamilies> familyPipelines;
-		// The owners of the descriptors the commits' rows in these tables name, by range (render thread): every execution holds them while
-		// the bytes are current (dclf-architecture.md, "Descriptor ownership").
+		// Owners of the descriptors these tables' rows name. Executions hold them while the bytes are current.
 		ContentOwners content;
 	};
 
-	/**
-	 * @brief The root states' family in a_tables (Api::RootStatesContribution::family; null without a producer, or before its first
-	 * write): its objectRow is every object's root slot, read as data.
-	 */
+	/** @brief The root states' family in a_tables, or null. Its objectRow gives each object's root slot. */
 	inline const Extensions::TableFamilyColumns* RootFamilyOf(const SceneTables& a_tables)
 	{
 		return a_tables.families.Find(Extensions::RootStatesFamily());
 	}
 
-	/**
-	 * @brief Cull binding a_slot's descriptor for frame a_frame as a_adopted names it (render thread, a commit's latch): a versioned
-	 * buffer's SRV, a plain buffer's, a pooled buffer's index; 0 unbound.
-	 */
+	/** @brief Cull binding a_slot's descriptor for a_frame, or 0 when unbound. Render thread. */
 	inline std::uint32_t CullBindingIndex(Api::CullBindingSlot a_slot, const SceneBuffers& a_scene, std::uint32_t a_frame, const NamedVersions& a_adopted)
 	{
 		const auto select = Extensions::SelectCullBinding(a_slot, a_scene, a_frame, &a_adopted);
@@ -85,10 +67,7 @@ namespace DCLF::Draws
 		return select.srv;
 	}
 
-	/**
-	 * @brief Whether the root states' rows are bound and hold the tables' roots for the commit (Api::CullBindingSlot::RootRows, its rows
-	 * answer): Core's cull binds them only then.
-	 */
+	/** @brief Whether the root states' rows are bound and hold the tables' roots. Core's cull binds them only then. */
 	inline bool RootRowsCurrent(const SceneBuffers& a_scene)
 	{
 		const auto select = Extensions::SelectCullBinding(Api::CullBindingSlot::RootRows, a_scene);

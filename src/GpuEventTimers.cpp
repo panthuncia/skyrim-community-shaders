@@ -1,6 +1,8 @@
 #include "GpuEventTimers.h"
 
 #include "Globals.h"
+#include "RenderGraph/GpuLoadPass.h"
+#include "RenderGraph/GpuTimingSource.h"
 #include "State.h"
 
 #include <algorithm>
@@ -109,6 +111,12 @@ namespace GpuEventTimers
 		{
 			static State state;
 			return state;
+		}
+
+		// CS_GPU_TIMERS=graph: the render graph's ranges are the timers (GpuTimingSource logs them), and no D3D11 query is made.
+		bool OnGraph()
+		{
+			return GpuTimingSource::SelectedTimers() == GpuTimingSource::Timers::Graph;
 		}
 
 		bool Initialize(State& a_state)
@@ -412,6 +420,7 @@ namespace GpuEventTimers
 		// The phase "~load" turns it off, which measures it on this path.
 		std::uint32_t loadGroups = 0;
 		bool loadReady = false;
+		bool loadOnGraph = false;  // CS_GPU_TIMERS=graph: a render-graph pass at the Present anchor (GpuLoadPass)
 		winrt::com_ptr<ID3D11ComputeShader> loadShader;
 		winrt::com_ptr<ID3D11UnorderedAccessView> loadUav;
 
@@ -423,6 +432,10 @@ namespace GpuEventTimers
 				loadGroups = static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10));
 			if (!loadGroups)
 				return;
+			if (OnGraph() && GpuLoadPass::Register(loadGroups)) {
+				loadOnGraph = true;
+				return;
+			}
 			using Compile = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
 			const auto compile = reinterpret_cast<Compile>(GetProcAddress(LoadLibraryA("d3dcompiler_47.dll"), "D3DCompile"));
 			static const char source[] = R"(
@@ -460,7 +473,13 @@ RWTexture2D<float> Out : register(u0);
 		{
 			if (!loadReady)
 				SetupLoad();
-			if (!loadGroups || !loadShader || !loadUav || std::ranges::find(active, std::string_view("~load")) != active.end())
+			if (!loadGroups || std::ranges::find(active, std::string_view("~load")) != active.end())
+				return;
+			if (loadOnGraph) {
+				GpuLoadPass::Arm();
+				return;
+			}
+			if (!loadShader || !loadUav)
 				return;
 			auto* context = globals::d3d::context;
 			winrt::com_ptr<ID3D11ComputeShader> shader;
@@ -931,7 +950,7 @@ RWTexture2D<float> Out : register(u0);
 	{
 		EventStats::Begin(a_name);
 		PassSkip::Begin(a_name);
-		if (!Requested())
+		if (!Requested() || OnGraph())
 			return;
 		auto& state = Get();
 		auto& frame = state.frames[state.write];
@@ -957,7 +976,7 @@ RWTexture2D<float> Out : register(u0);
 	{
 		EventStats::End();
 		PassSkip::End();
-		if (!Requested())
+		if (!Requested() || OnGraph())
 			return;
 		auto& state = Get();
 		if (state.initialized && GetCurrentThreadId() != state.thread)
@@ -1103,7 +1122,7 @@ RWTexture2D<float> Out : register(u0);
 	{
 		EventStats::Present();
 		PassSkip::Present();
-		if (!Requested())
+		if (!Requested() || OnGraph())
 			return;
 		auto& state = Get();
 		if (state.failed)
@@ -1165,6 +1184,10 @@ RWTexture2D<float> Out : register(u0);
 	{
 		if (!Requested())
 			return;
+		if (OnGraph()) {
+			GpuTimingSource::StartWindow(a_label);
+			return;
+		}
 		auto& state = Get();
 		state.labels.emplace_back(a_label);
 		probeFlushes = a_label.starts_with("f") ? static_cast<std::uint32_t>(std::strtoul(std::string(a_label.substr(1)).c_str(), nullptr, 10)) : 0u;

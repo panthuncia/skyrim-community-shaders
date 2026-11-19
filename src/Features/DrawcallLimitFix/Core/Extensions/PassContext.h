@@ -1,17 +1,17 @@
 #pragma once
 
-// The pass contract's Core side (Api/Passes.h): what a pass's setup is handed, what a scheduled pass is made from, and where an anchor
-// adds its passes. The schedule's executor (Core/Render/Epochs/ScheduleExecutor) runs the setups and fills the others at the graph's build.
-// And the authoring helpers a pass or a scene resource uses (Draws::Register, Draws::RecordDispatch). A pass reads its epoch from the
-// context it was made with (segment), never a literal one: the schedule decides where it runs.
+// Core's side of Api/Passes.h: what a pass's setup gets, what a scheduled pass is made from, and where an anchor adds passes.
+// Also authoring helpers for passes and scene resources. A pass takes its epoch from its context, never a literal, because the schedule decides.
 
 #include "Features/DrawcallLimitFix/Api/Passes.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Epochs.h"
 
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <Render/RenderGraph/RenderGraph.h>
 #include <Resources/Buffers/VersionedBuffer.h>
+#include <Resources/VersionedTexture.h>
 #include <rhi.h>
 
 #include <cassert>
@@ -32,6 +32,7 @@ namespace org::services
 
 namespace DCLF::Draws
 {
+	struct BuildState;
 	struct Resources;
 	struct RevisionShapes;
 	struct SceneBuffers;
@@ -41,10 +42,7 @@ namespace DCLF::Draws
 
 namespace DCLF::Api
 {
-	/**
-	 * @brief A pass's setup (render thread, EnsureSceneBuffers): the device its programs are made on, and the scene's tables as far as
-	 * they are made (the features' scene resources included: Extensions::SceneResourcesOf).
-	 */
+	/** @brief What a pass's setup gets on the render thread: the device and the scene's tables as far as they are made. */
 	class PassSetup
 	{
 	public:
@@ -52,21 +50,21 @@ namespace DCLF::Api
 		const Draws::SceneBuffers& scene;
 	};
 
-	/** @brief What a pass is made from (render thread, the graph's build): its epoch, and its extension's resources (Api::EpochShape). */
+	/** @brief What a pass is made from at graph build: its epoch and its extension's resources. */
 	class PassContext
 	{
 	public:
 		std::string_view epochId;
 		RenderGraphRuntime::Segment segment{};
 		std::uint32_t epoch = 0;                                          // RenderGraphRuntime::EpochOf(segment)
-		const std::shared_ptr<Draws::Resources>* main = nullptr;          // Main shape; View shape: the view's main resources
+		const std::shared_ptr<Draws::Resources>* main = nullptr;          // Main shape, or a View shape's main resources
 		const std::shared_ptr<Draws::ShadowResources>* shadow = nullptr;  // Shadow shape
-		const std::shared_ptr<Draws::ViewResources>* view = nullptr;      // View shape; a hosted epoch's pass in its Main host: its view's
-		// A Main epoch hosting views' epochs (Api::EpochDef::hostedBy: the depth epoch, the reflection's and first person's depth): the
-		// resources of each view whose passes are added (ScheduleExecutor's GatherScheduled), in the epochs' row order, for the epoch's own
-		// passes (its latched copies take the views' lists too); empty otherwise.
+		const std::shared_ptr<Draws::ViewResources>* view = nullptr;      // View shape, or a hosted epoch's view
+		// For a Main epoch that hosts view epochs, the resources of each hosted view, in epoch row order. Empty otherwise.
 		std::span<const std::shared_ptr<Draws::ViewResources>> hosted;
-		std::shared_ptr<const void> state;                                // the state its setup made (PassDef::setup); null: none
+		std::shared_ptr<const void> state;                                // null when setup made none
+		// The build state. A make reads views and shadow slots from here, never from live fields the render thread changes.
+		const Draws::BuildState* build = nullptr;
 
 		const std::shared_ptr<Draws::Resources>& Main() const
 		{
@@ -83,31 +81,28 @@ namespace DCLF::Api
 			assert(view);
 			return *view;
 		}
+		const Draws::BuildState& Build() const
+		{
+			assert(build);
+			return *build;
+		}
 
-		/** @brief The setup's state as the pass's type. */
 		template <class T>
 		std::shared_ptr<const T> State() const
 		{
 			return std::static_pointer_cast<const T>(state);
 		}
 
-		/**
-		 * @brief Whether the main resources have the depth pyramid (Resources::hzb; ScheduleExecutor.cpp) and the cull mode tests occlusion
-		 * (Draws::GraphConditions::twoPassOcclusion): the depth epoch's phase 2 block (the pyramid, its retest build, the features' phase 2
-		 * passes, its depth draw) is added only then.
-		 */
+		/** @brief Whether the depth pyramid exists and the cull mode tests occlusion. The phase 2 block is added only then. */
 		bool PhaseTwo() const;
 
 		/**
-		 * @brief Whether the graph is built for an interior cell (Draws::GraphConditions::interior): exterior-only content's passes (grass,
-		 * tree LOD) are left out. Their draws stand down on their own there: their families decide nothing to draw without content.
+		 * @brief Whether the graph is built for an interior cell, where exterior-only passes like grass and tree LOD are left out.
+		 * Their families decide nothing to draw there anyway.
 		 */
 		bool Interior() const;
 
-		/**
-		 * @brief The segment of the epoch whose shape the pass records against: its epoch's own, or the epoch it shares the shape of
-		 * (Api::EpochDef::sharesWith: the forward epoch's passes read the colour epoch's shape). A search: call it from a make, not per frame.
-		 */
+		/** @brief The segment whose shape the pass records against, following sharesWith. It searches, so call it from a make, not per frame. */
 		RenderGraphRuntime::Segment ShapeSegment() const
 		{
 			const std::uint32_t row = Draws::EpochById(epochId);
@@ -116,16 +111,16 @@ namespace DCLF::Api
 		}
 	};
 
-	/** @brief What an anchor adds to its epoch: in order, each with its name, kind and queue. */
+	/** @brief What an anchor adds to its epoch, in order. */
 	class PassOut
 	{
 	public:
 		PassOut(std::vector<org::RenderGraph::ExternalPassDesc>& a_out, std::uint32_t a_epoch) :
 			out(a_out), epoch(a_epoch) {}
 
-		/** @brief a_pass in the anchor's epoch (ScheduleExecutor.cpp), as Draws::AddPass adds it: a null pass is added as given. */
+		/** @brief Adds a_pass to the anchor's epoch. A null pass is added as given. */
 		void Add(std::string a_name, PassKind a_kind, std::shared_ptr<org::RenderPass> a_pass, PassQueue a_queue = PassQueue::Default);
-		// Diagnostics' MainGraphPasses observers append finished descs; the executor keeps their order.
+		// Diagnostics observers append finished descs here, and the executor keeps their order.
 		std::vector<org::RenderGraph::ExternalPassDesc>& Descs() { return out; }
 
 	private:
@@ -137,10 +132,8 @@ namespace DCLF::Api
 namespace DCLF::Draws
 {
 	/**
-	 * @brief Registers a graph resource under a_id. A versioned buffer is not registered: its passes declare it (its resolver), and a
-	 * registration would hold the version registered for as long as the graph, where a version should go when nothing uses it. Nothing
-	 * looks these identifiers up, but the registration is not only a name: the graph holds the resource strongly and tracks it (an
-	 * unregistered one gets a weak anonymous handle, pinned a frame at a time) and tags its memory with the identifier.
+	 * @brief Registers a graph resource under a_id. The graph then holds it strongly, tracks it and tags its memory with the id.
+	 * Versioned buffers are not registered, because that would pin the registered version for the graph's life. Their passes declare them.
 	 */
 	template <class T>
 	void Register(org::RenderGraph& a_graph, org::ResourceIdentifier a_id, const std::shared_ptr<T>& a_resource)
@@ -148,6 +141,17 @@ namespace DCLF::Draws
 		if constexpr (!std::is_same_v<T, org::VersionedBuffer>)
 			if (a_resource)
 				a_graph.RegisterResource(std::move(a_id), a_resource);
+	}
+
+	/** @brief Register for an import handle. An engine target's slot resolves the id, so the id follows the slot's versions. */
+	inline void Register(org::RenderGraph& a_graph, org::ResourceIdentifier a_id, const FrameAnchors::Texture& a_texture)
+	{
+		if (const auto& slot = a_texture.Slot()) {
+			if (!a_graph._resolverMap.contains(a_id))
+				a_graph.RegisterResolver(std::move(a_id), slot);
+		} else if (a_texture.Plain()) {
+			a_graph.RegisterResource(std::move(a_id), a_texture.Plain());
+		}
 	}
 
 	/** @brief One compute dispatch of a_program with its push constants. */

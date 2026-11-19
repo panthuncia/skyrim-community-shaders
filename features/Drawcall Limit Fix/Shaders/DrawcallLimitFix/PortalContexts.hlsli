@@ -8,8 +8,8 @@
 bool PortalContextProgram(ByteAddressBuffer atlas, uint bucket, out uint base, out uint program, out uint frame)
 {
 	base = program = frame = 0;
-	const uint contexts = atlas.Load(0);
-	if (bucket >= atlas.Load(4) || contexts == 0)
+	const uint contexts = bucket < atlas.Load(4) ? atlas.Load(0) : 0u;
+	if (contexts == 0)
 		return false;
 	// Upper bound handles contexts with no programs (and therefore repeated firstBucket values).
 	uint first = 0, last = contexts;

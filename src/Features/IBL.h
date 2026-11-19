@@ -42,6 +42,8 @@ public:
 	virtual void Prepass() override;
 	/** @brief Creates IBL textures, compiles the diffuse IBL compute shader, and loads static fallback cubemaps. */
 	virtual void SetupResources() override;
+	/** @brief Reserves the render graph's Prepass anchor when CS_ORG_IBL=1 (ORGIBL). */
+	virtual void PostPostLoad() override;
 	/** @brief Releases the cached diffuse IBL compute shader so it can be recompiled. */
 	virtual void ClearShaderCache() override;
 
@@ -89,4 +91,15 @@ public:
 	bool IsManagedByENB() const;
 	/** @brief Returns the diffuse IBL spherical harmonics compute shader, compiling it on first use. */
 	ID3D11ComputeShader* GetDiffuseIBLCS();
+
+	/**
+	 * @brief The environment and sky SH (3x1 RGBA16F) as D3D11 views: the render graph's exports while it projects the SH (CS_ORG_IBL=1),
+	 * else the D3D11 textures. Null before SetupResources.
+	 */
+	ID3D11ShaderResourceView* EnvIBLSRV() const;
+	ID3D11ShaderResourceView* SkyIBLSRV() const;
+
+private:
+	/** @brief The D3D11 path's SH textures (envIBLTexture, skyIBLTexture): at setup, or when the render graph's path fails. */
+	void CreateSHTextures();
 };

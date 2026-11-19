@@ -1,6 +1,5 @@
-// The CPU pipeline's incremental scene lists (ViewBatchesInternal.h, SceneLists): successive snapshots' view batch sets from one base
-// (a compaction's sorted batches, shared) less its lanes gone since (each set's tombstones), plus the delta (the inputs added or changed
-// since) and the volatile lanes (rebuilt every set), their persistent sequences in an append-only store.
+// The CPU pipeline's incremental scene lists. Each set is a shared sorted base minus tombstoned lanes, plus a delta of added or
+// changed inputs and volatile lanes rebuilt every set. Persistent sequences live in an append-only store.
 
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatchesInternal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -23,7 +22,7 @@ namespace DCLF::Draws::detail
 	{
 		using Clock = std::chrono::steady_clock;
 
-		/** @brief The persistent sequences' bytes (the uploads' source and the equivalence check), in fixed chunks as ArgsChunks. */
+		/** @brief The persistent sequences' bytes, in fixed chunks like ArgsChunks. */
 		struct SequenceChunks
 		{
 			static constexpr std::uint32_t kShift = Direct::ArgsChunks::kShift, kChunk = Direct::ArgsChunks::kChunk, kChunks = Direct::ArgsChunks::kChunks;
@@ -31,24 +30,24 @@ namespace DCLF::Draws::detail
 			const DrawSequence& At(std::uint32_t a_sequence) const { return chunks[a_sequence >> kShift][a_sequence & (kChunk - 1)]; }
 		};
 
-		/** @brief A compaction's batches, shared by every set made on it. Immutable but for the live columns (FrameValues' movers). */
+		/** @brief A compaction's batches, shared by every set made on it. Immutable except for the movers' live columns. */
 		struct BaseLists
 		{
 			std::shared_ptr<std::byte[]> storage;
-			std::uint32_t lanes = 0;  // a batch's
+			std::uint32_t lanes = 0;  // per batch
 			std::array<std::vector<Direct::ViewBatch>, Direct::kViewTypes> lists;
 			std::array<Direct::ViewBuckets, Direct::kViewTypes> buckets;
 			std::array<ankerl::unordered_dense::map<std::uint32_t, std::uint32_t>, Direct::kViewTypes> bucketOf;
 			std::array<std::size_t, Direct::kViewTypes> deadFirst{};  // a view's first batch's word in a set's dead bits
 			std::size_t deadWords = 0, laneCount = 0;
 			std::vector<Direct::LaneRef> movers;
-			// By view, by lane (batch * lanes + lane): its pipeline slot (ViewBuckets::pipelineSlot is a live lane's: SlotsOf).
+			// Pipeline slot per view and lane, indexed by batch * lanes + lane.
 			std::array<std::vector<std::uint32_t>, Direct::kViewTypes> laneSlot;
-			std::array<bool, Direct::kViewTypes> slotted{};  // the view's buckets have slots (the main family's)
+			std::array<bool, Direct::kViewTypes> slotted{};  // true for the main family's views
 			std::uint32_t WordsPerBatch() const { return (lanes + 63) / 64; }
 		};
 
-		/** @brief What a set holds of the lists (ViewBatchSet::lists): its base, the persistent arguments and sequences. */
+		/** @brief What a set keeps alive of the lists. */
 		struct SharedParts
 		{
 			std::shared_ptr<const BaseLists> base;
@@ -56,7 +55,7 @@ namespace DCLF::Draws::detail
 			std::shared_ptr<const SequenceChunks> sequences;
 		};
 
-		/** @brief Where one of an object's lanes is: a base batch's lane, or a delta lane (its index in the view's delta). */
+		/** @brief Where one of an object's lanes is, in a base batch or in the view's delta. */
 		struct LaneAt
 		{
 			std::uint8_t view = 0;
@@ -65,11 +64,11 @@ namespace DCLF::Draws::detail
 			std::uint32_t at = 0;  // base: the batch; delta: the index
 		};
 
-		/** @brief A persistent object's (a region entry not volatile) lanes and what they were made from. */
+		/** @brief A persistent object's lanes and what they were made from. */
 		struct Owned
 		{
 			bool present = false, inBase = false;
-			bool mover = false;  // inBase: as its base lanes were laid out
+			bool mover = false;  // as laid out in the base
 			std::array<float, 4> sphere{};
 			DrawInput input{};
 			InputRuns runs;
@@ -77,7 +76,7 @@ namespace DCLF::Draws::detail
 			std::vector<std::uint32_t> slots;  // the geometry slots its sequences read
 		};
 
-		/** @brief An input whose lanes are made again every set: a stream row's (its index moves with the slots), a decal's (the decal list's order). */
+		/** @brief An input rebuilt every set. Stream rows move with the slots, and decals depend on list order. */
 		bool Volatile(const DrawInput& a_input)
 		{
 			return a_input.streamIndex != ~0u || ObjectDecalGroup(a_input.flags) != 0;
@@ -107,7 +106,7 @@ namespace DCLF::Draws::detail
 			}
 		}
 
-		/** @brief a_lanes laid out into a_list's batches from a_storage (a_first: the first batch's index), the movers' refs into a_movers. */
+		/** @brief Lay out a_lanes into a_list's batches, and record the movers. */
 		void LayOutLanes(const std::vector<Lane>& a_lanes, std::uint32_t a_view, std::uint32_t a_laneCount, std::byte* a_storage, std::uint32_t a_first,
 			std::vector<Direct::ViewBatch>& a_list, const SceneTables& a_tables, const Direct::SnapshotSpheres* a_spheres, std::vector<Direct::LaneRef>& a_movers)
 		{
@@ -152,7 +151,7 @@ namespace DCLF::Draws::detail
 		const KeptView<DrawInput>& RegionOf(const ViewBatchInputs& a_in) { return a_in.main ? a_in.main->resident : a_in.shadow->regionInputs; }
 		const GeometryDrawsOut& GeometriesOf(const ViewBatchInputs& a_in) { return a_in.main ? a_in.main->body->geometryDraws : a_in.shadow->geometries; }
 
-		/** @brief Every volatile input of the scene list in ForEachInput's order: the region's, then the tails. */
+		/** @brief Visit every volatile input in ForEachInput's order. */
 		template <class F>
 		void ForEachVolatile(const ViewBatchInputs& a_in, F&& a_visit)
 		{
@@ -174,6 +173,9 @@ namespace DCLF::Draws::detail
 			rows.pipelineRows = RowBases::AddressOf(*a_in.payload, PayloadPart::PipelineRows);
 			rows.materialRows = RowBases::AddressOf(*a_in.payload, PayloadPart::MaterialRows);
 			rows.shadowRows = RowBases::AddressOf(*a_in.payload, PayloadPart::ShadowRows);
+			rows.pipelineRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::PipelineRows);
+			rows.materialRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::MaterialRows);
+			rows.shadowRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::ShadowRows);
 			rows.slotKeys = a_in.lookups ? &a_in.lookups->shadowSlotKeys : nullptr;
 			return rows;
 		}
@@ -181,7 +183,6 @@ namespace DCLF::Draws::detail
 
 	struct SceneLists::State
 	{
-		// The base and the store.
 		std::shared_ptr<BaseLists> base;
 		std::shared_ptr<Direct::ArgsChunks> args;
 		std::shared_ptr<SequenceChunks> sequences;
@@ -189,7 +190,7 @@ namespace DCLF::Draws::detail
 		std::uint32_t deadSequences = 0;   // ... no live lane draws
 		std::vector<std::uint64_t> deadBits;
 		std::size_t deadLanes = 0;
-		// The delta: by view, the lanes added since the base (live or gone).
+		// Lanes added since the base, per view, live or gone.
 		std::array<std::vector<Lane>, Direct::kViewTypes> delta;
 		std::array<std::vector<std::uint8_t>, Direct::kViewTypes> deltaLive;
 		std::size_t deltaLanes = 0;  // live
@@ -203,7 +204,7 @@ namespace DCLF::Draws::detail
 		std::vector<std::uint32_t> zGroups;
 		std::vector<ShadowPipelineKey> slotKeys;
 		std::uint32_t lanes = 0;
-		// The sequences' versions: the last GPU ready (its persistent count), and what each version since wrote.
+		// The last GPU-ready version, and what each version since wrote.
 		std::shared_ptr<const org::services::PublishedBufferVersion> posted;
 		std::uint32_t postedPersistent = 0;
 		struct Written
@@ -254,7 +255,7 @@ namespace DCLF::Draws::detail
 
 	struct SceneLists::Compaction
 	{
-		ViewBatchInputs in;  // its snapshot's (held by in.keep)
+		ViewBatchInputs in;  // kept alive by in.keep
 		std::shared_ptr<const Direct::SnapshotSpheres> spheres;
 		std::unique_ptr<State> state;  // set before done
 		std::atomic<bool> done{ false };
@@ -268,14 +269,14 @@ namespace DCLF::Draws::detail
 		auto window = state->window;
 		state = std::make_unique<State>();
 		state->window = window;
-		compaction.reset();  // one in flight finishes into its own
+		compaction.reset();  // one in flight still finishes into its own object
 	}
 
 	bool SceneLists::State::Stale(const ViewBatchInputs& a_in, const ListBuilder& a_builder) const
 	{
 		if (!base || lanes != BatchLanes() || regionMain != (a_in.main != nullptr) || zGroups != a_builder.ZGroups())
 			return true;
-		// A key slot's entry the base's shadow sequences embed changed (appended ones are new keys: no lane has them yet).
+		// A changed key slot entry invalidates the base's shadow sequences. Appended slots are new keys that no lane uses yet.
 		const auto* keys = a_in.lookups ? &a_in.lookups->shadowSlotKeys : nullptr;
 		const std::size_t now = keys ? keys->size() : 0;
 		if (now < slotKeys.size())
@@ -283,7 +284,6 @@ namespace DCLF::Draws::detail
 		for (std::size_t k = 0; k < slotKeys.size(); ++k)
 			if (!((*keys)[k] == slotKeys[k]))
 				return true;
-		// The store's room (a compaction starts it again).
 		return std::size_t(persistent) + RegionOf(a_in).Count() * 8 > std::size_t(Direct::ArgsChunks::kChunk) * Direct::ArgsChunks::kChunks;
 	}
 
@@ -323,7 +323,7 @@ namespace DCLF::Draws::detail
 			const std::uint32_t object = input.objectIndex & kObjectIndexMask;
 			auto& own = OwnedOf(object);
 			if (own.present)
-				continue;  // a second entry of one object (the region holds one): not this one
+				continue;  // the region holds one entry per object, so skip a second
 			walked.clear();
 			own.runs = a_builder.Add(input);
 			own.present = own.inBase = true;
@@ -334,7 +334,7 @@ namespace DCLF::Draws::detail
 		}
 		Append(*sequences, *args, 0, newSequences, newArgs);
 		persistent = static_cast<std::uint32_t>(newSequences.size());
-		// Sorted, bucketed, laid out: each object's lanes noted where they landed.
+		// Note where each object's lanes landed.
 		auto& b = *base;
 		b.lanes = BatchLanes();
 		std::size_t batches = 0;
@@ -434,8 +434,7 @@ namespace DCLF::Draws::detail
 		DCLF_ZONE("CS.DCLF.SceneLists.Update");
 		const auto& view = RegionOf(a_in);
 		const std::size_t oldCount = region.Count(), newCount = view.Count();
-		// The region's changed entries: an index whose bytes changed (an entry written, or one moved into a removal's hole) had the old
-		// entry and has the new; past the new count, the old entries are gone.
+		// A changed index had the old entry and now has the new one. Entries past the new count are gone.
 		entryOf.clear();
 		touched.clear();
 		std::vector<std::uint32_t> candidates;
@@ -450,10 +449,10 @@ namespace DCLF::Draws::detail
 			}
 		});
 		if (newCount && changed * 2 > newCount)
-			return false;  // most of it (or the journal's floor passed): a compaction
+			return false;  // most of it changed, so compact
 		for (std::size_t i = newCount; i < oldCount; ++i)
 			candidates.push_back(region.At(i)->objectIndex & kObjectIndexMask);
-		// Geometry slots rewritten: their objects' sequences again.
+		// Objects reading a rewritten geometry slot need their sequences again.
 		const auto& geometries = GeometriesOf(a_in);
 		std::vector<std::uint32_t> slots;
 		const std::uint64_t slotsChanged = geometries.slots.changes.ForEachRun(geometryEpoch, geometries.SlotCount(), [&](std::uint64_t a_first, std::uint64_t a_count) {
@@ -468,7 +467,7 @@ namespace DCLF::Draws::detail
 		a_sink.base = persistent;
 		a_sink.walked = &walked;
 		a_builder.Target(delta, a_sink);
-		// The objects whose sequences read a rewritten slot: never left as they are, whatever the region did with their entry.
+		// Objects that read a rewritten slot are always redone, whatever happened to their region entry.
 		dirty.clear();
 		for (const std::uint32_t slot : slots)
 			if (const auto it = slotObjects.find(slot); it != slotObjects.end())
@@ -494,7 +493,7 @@ namespace DCLF::Draws::detail
 				++window.reemitted;
 			}
 		}
-		// The rewritten slots' objects the region left alone: again from their own input.
+		// Redo the rewritten slots' objects that the region left alone.
 		for (const std::uint32_t object : dirty) {
 			dirtyMark[object] = 0;
 			if (!Touch(object) || !owned[object].present)
@@ -504,8 +503,8 @@ namespace DCLF::Draws::detail
 			Emit(object, input, nullptr, a_builder);
 			++window.reemitted;
 		}
-		// A base lane's sphere is the base's: an object whose snapshot sphere or mover state changed has its lanes laid out again (its
-		// sequences kept). The delta's are laid out every set.
+		// A base lane's sphere is frozen in the base. An object whose sphere or mover state changed is laid out again with its
+		// sequences kept.
 		for (std::uint32_t o = 0; o < owned.size(); ++o) {
 			auto& own = owned[o];
 			if (!own.present || !own.inBase)
@@ -548,8 +547,11 @@ namespace DCLF::Draws::detail
 		set->pipelineRowsBase = rows.pipelineRows;
 		set->materialRowsBase = rows.materialRows;
 		set->shadowRowsBase = rows.shadowRows;
+		set->pipelineRowsRef = rows.pipelineRowsRef;
+		set->materialRowsRef = rows.materialRowsRef;
+		set->shadowRowsRef = rows.shadowRowsRef;
 		FillAnimatedRows(*set, a_in);
-		// The volatile lanes (their sequences after the store's), then each view's fresh lanes: the delta's live and the volatile.
+		// Volatile sequences go after the store's.
 		for (auto& list : volatileScratch)
 			list.clear();
 		volatileSequences.clear();
@@ -588,10 +590,8 @@ namespace DCLF::Draws::detail
 			LayOutLanes(lanesScratch[v], static_cast<std::uint32_t>(v), b.lanes, set->storage.get() + next * batchBytes, static_cast<std::uint32_t>(before), list,
 				*a_in.tables, a_spheres, set->moverLanes);
 			next += list.size() - before;
-			// A bucket's pipeline slot: its live lanes' first in the full build's order (the lowest object: one key, one k0 and k1), as
-			// MakeViewBatches takes it; the base's own may be gone, and its slot another pipeline's since.
+			// Take each bucket's pipeline slot from its lowest live object, as a full build would. The base's own may be gone.
 			auto& buckets = set->buckets[v];
-			// Without base lanes (the decals': all volatile) the fresh lanes' sort took it as the full build's sort does.
 			if (before && b.slotted[v]) {
 				std::vector<std::uint32_t> best(buckets.pipeline.size(), ~0u);
 				const auto take = [&](std::uint32_t a_bucket, std::uint32_t a_object, std::uint32_t a_flags, std::uint32_t a_slot) {
@@ -610,13 +610,12 @@ namespace DCLF::Draws::detail
 					take(lane.bucketKey, lane.object, lane.flags, lane.pipelineSlot);
 			}
 		}
-		// The base's movers still live in this set.
 		for (const auto& ref : b.movers) {
 			const std::size_t bit = (b.deadFirst[ref.view] + std::size_t(ref.batch) * b.WordsPerBatch()) * 64 + ref.lane;
 			if (!((deadBits[bit >> 6] >> (bit & 63)) & 1u))
 				set->moverLanes.push_back(ref);
 		}
-		// The decal list's groups by main range slot (its lanes are all fresh: decals are volatile).
+		// Decal group g uses main range slot g - 1.
 		const auto& decals = lanesScratch[View(ViewType::Decal)];
 		if (!decals.empty()) {
 			auto& groupFirst = set->decalGroupFirst;
@@ -644,8 +643,7 @@ namespace DCLF::Draws::detail
 		if (!a_in.tables || !a_in.payload || (!a_in.main && !a_in.shadow))
 			return nullptr;
 		const auto start = Clock::now();
-		// A compaction done on the pool: its lists replace these (the window's counters kept), and this set's Update catches them up from
-		// its snapshot (the journals' positions it was made at) to this one.
+		// Swap in a finished pool compaction. Update then catches it up from its snapshot to this one.
 		if (compaction && compaction->done.load(std::memory_order_acquire)) {
 			auto window = state->window;
 			window.asyncCompactions += compaction->state->window.compactions;
@@ -659,13 +657,13 @@ namespace DCLF::Draws::detail
 		const auto& geometries = GeometriesOf(a_in);
 		SequenceSink sink{ s.newSequences, s.newArgs, geometries };
 		ListBuilder builder(a_in, rows, sink, BuilderScratch());
-		// What every lane depends on changed, or the journals no longer reach the last set: compacted here, before this set.
+		// Compact now when something every lane depends on changed, or the journals no longer reach the last set.
 		if (s.Stale(a_in, builder) || !s.Update(a_in, a_spheres.get(), builder, sink)) {
 			compaction.reset();
 			s.Compact(a_in, a_spheres.get(), builder, sink);
 		} else if (!compaction &&
 				   (s.deltaLanes > std::max<std::size_t>(4096, s.base->laneCount / 4) || s.deadLanes > s.base->laneCount / 4 || s.deadSequences > s.persistent / 2)) {
-			// Too much of the base gone, or too much added: compacted from this snapshot on the pool, while the sets go on from these lists.
+			// The base has drifted too far. Compact on the pool while sets keep coming from these lists.
 			auto job = std::make_shared<Compaction>();
 			job->in = a_in;
 			job->spheres = a_spheres;
@@ -687,7 +685,7 @@ namespace DCLF::Draws::detail
 		SequenceSink volatileSink{ s.volatileSequences, volatileArgs, geometries };
 		auto set = s.Assemble(a_in, a_spheres.get(), builder, volatileSink);
 		set->sequenceArgs = std::move(volatileArgs);
-		// The version: this set's writes are the store's appends since the last ready version and its volatile sequences.
+		// This set writes the store's appends since the last ready version, plus its volatile sequences.
 		const std::uint32_t total = set->sequenceCount;
 		const std::uint32_t first = s.posted ? std::min(s.postedPersistent, s.persistent) : 0u;
 		auto volatileCopy = std::make_shared<const std::vector<DrawSequence>>(s.volatileSequences);
@@ -706,8 +704,7 @@ namespace DCLF::Draws::detail
 			if (!volatileCopy->empty())
 				a_write(volatileCopy->data(), volatileCopy->size() * sizeof(DrawSequence), std::uint64_t(persistent) * sizeof(DrawSequence));
 		};
-		// A backing at a version's content epoch agrees with the last ready one below both's persistent counts (the store is
-		// append-only); past them, both versions' bytes may differ, as far as either's end.
+		// The store is append-only, so two versions agree below the smaller persistent count. Past it, bytes may differ.
 		std::optional<State::Written> previous;
 		for (const auto& w : s.written)
 			if (s.posted && w.write == s.posted->writeSequence)
@@ -806,13 +803,13 @@ namespace DCLF::Draws::detail
 
 	namespace
 	{
-		/** @brief One lane as the equivalence check compares it (sorted, then compared in order). */
+		/** @brief One lane as the equivalence check compares it. */
 		struct LaneKey
 		{
 			std::uint32_t object, flags, fadeRoot, fadeDistance, partitions, lodPartitions, pipeline, slot, count;
 			std::array<std::uint32_t, 4> sphere;
-			std::uint64_t sequences;  // a hash of its sequences' bytes
-			std::uint32_t firstSequence;  // not compared: for the log
+			std::uint64_t sequences;  // hash of its sequences' bytes
+			std::uint32_t firstSequence;  // for the log only
 			auto Tied() const { return std::tie(object, flags, fadeRoot, fadeDistance, partitions, lodPartitions, pipeline, slot, count, sphere, sequences); }
 			bool operator<(const LaneKey& a_other) const { return Tied() < a_other.Tied(); }
 		};
@@ -878,9 +875,9 @@ namespace DCLF::Draws::detail
 						text += fmt::format("{}{{object {} flags {:x} pipeline {} slot {} sequences {} ({:x}) sphere r {}", text.empty() ? "" : ", ", k.object, k.flags,
 							k.pipeline, k.slot, k.count, k.sequences, std::bit_cast<float>(k.sphere[3]));
 						if (const DrawSequence* q = k.count ? a_sequence(k.firstSequence) : nullptr)
-							text += fmt::format(" [{}: pipeline {:x} rows {:x} {:x} object {:x} vb {:x}/{}/{} stream {:x}/{}/{} ib {:x}/{} count {} first {}]", k.firstSequence,
-								q->pipelineIndex, q->pipelineRowAddress, q->materialRowAddress, q->objectIndex, q->vertexBufferAddress, q->vertexBufferSize, q->vertexStride,
-								q->streamBufferAddress, q->streamBufferSize, q->streamStride, q->indexBufferAddress, q->indexBufferSize, q->indexCount, q->firstIndex);
+							text += fmt::format(" [{}: pipeline {:x} rows {:x} {:x} object {:x} vb {}+{:x}/{}/{} stream {}+{:x}/{}/{} ib {:x}/{} count {} first {}]", k.firstSequence,
+								q->pipelineIndex, q->pipelineRowAddress, q->materialRowAddress, q->objectIndex, q->vertexBufferRef.viewSlot, q->vertexBufferRef.byteOffset,
+								q->vertexBufferSize, q->vertexStride, q->streamBufferRef.viewSlot, q->streamBufferRef.byteOffset, q->streamBufferSize, q->streamStride, q->indexBufferAddress, q->indexBufferSize, q->indexCount, q->firstIndex);
 						text += "}";
 					}
 					return text;
@@ -896,7 +893,7 @@ namespace DCLF::Draws::detail
 	}
 }
 
-// The set's CPU copies of its sequences: the incremental lists' store (its shared parts), then its own.
+// The set's CPU copies of its sequences, the shared store first and then its own.
 const DCLF::DrawSequence* DCLF::Direct::ViewBatchSet::Sequence(std::uint32_t a_sequence) const
 {
 	if (a_sequence < persistentSequences) {

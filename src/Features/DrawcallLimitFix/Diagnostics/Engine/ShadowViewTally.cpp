@@ -1,4 +1,4 @@
-// The shadow views' tallies (ShadowViewTally.h): render thread.
+// Shadow view tallies, render thread.
 
 #include "ShadowViewTally.h"
 

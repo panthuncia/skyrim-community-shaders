@@ -1,9 +1,7 @@
 #pragma once
 
-// The frame binding contract's Core side (Api/FrameBindings.h): what a registered binding's select is handed, the values the frame
-// records take from the bindings, and the texture registers Core keeps for itself (which no binding or frame texture may take). And the
-// frame textures' (Api::FrameTexture): their registers' indices. And the frame graph buffers' (Api::FrameGraphBuffers): their entries.
-// And the per-draw buffers' (Api::PerDrawBuffer): the per-draw registers by stage, Core's and the declared ones (PerDrawMask).
+// Core's side of Api/FrameBindings.h: frame bindings, frame textures, frame graph buffers and per-draw buffers.
+// Also the texture registers Core keeps for itself, and the one rule that picks a published graph texture over an imported view.
 
 #include "Features/DrawcallLimitFix/Api/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -14,10 +12,16 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <tuple>
+#include <vector>
+
+struct ID3D11ShaderResourceView;
 
 namespace org
 {
+	struct FramePreparationContext;
+	class RenderPassBuilder;
 	class VersionedBuffer;
 	namespace services
 	{
@@ -32,39 +36,30 @@ namespace DCLF::Draws
 
 namespace DCLF::Api
 {
-	/**
-	 * @brief A binding's select (render thread or snapshot builder): the scene's tables and the frame; select answers with buffer, or on the
-	 * render thread (a frame record's commit) with index instead.
-	 */
+	/** @brief What a binding's select gets. It answers with buffer, or with index when called on the render thread. */
 	class FrameBindingSelect
 	{
 	public:
 		const Draws::SceneBuffers& scene;
-		std::uint32_t frame;                                            // the frame whose draws read it
-		bool renderThread = false;                                      // a frame record's commit: index may answer
-		const std::shared_ptr<org::VersionedBuffer>* buffer = nullptr;  // the answer: a buffer of the scene's set (null: none)
-		std::uint32_t index = ~0u;  // or the descriptor the frame's draws read (a frame value pool's backing), render thread only
+		std::uint32_t frame;
+		bool renderThread = false;                                      // only then may index answer
+		const std::shared_ptr<org::VersionedBuffer>* buffer = nullptr;  // null means no answer
+		std::uint32_t index = ~0u;  // a descriptor index instead, render thread only
 	};
 }
 
 namespace DCLF::Extensions
 {
-	/**
-	 * @brief The most frame bindings there may be: a build embeds their values (Draws::ResourceAddresses::frameBindings). A binding past
-	 * them fails the install: grow this first.
-	 */
+	/** @brief Most frame bindings, because a build embeds their values. Grow this before registering more. */
 	inline constexpr std::size_t kFrameBindingSlots = 5;
-	/** @brief A binding's value when its select gave no buffer: the register keeps what the record gave it. */
+	/** @brief A binding value meaning select gave nothing, so the register keeps what the record set. */
 	inline constexpr std::uint32_t kNoFrameBinding = ~0u;
-	/** @brief The bindings' values for one frame, by registration (Extensions::RegisteredFrameBindings). */
+	/** @brief The bindings' values for one frame, in registration order. */
 	using FrameBindingValues = std::array<std::uint32_t, kFrameBindingSlots>;
 
 	/**
-	 * @brief Whether Core keeps a_register: the material rows' pixel textures and the frame record's own buffers and textures
-	 * (DrawPipelines.h). A binding, a frame texture or a material contributor's register may take none of them (Features/Manifest.cpp checks
-	 * the features' registers against it at compile time, the install at registration). The material contributors' registers
-	 * (Api::MaterialContributor::textureRegisters) are theirs, not Core's: the install refuses a binding, a frame texture or graph buffers on
-	 * one, and one on theirs (Extensions::FeatureTextureSlotOf once resolved).
+	 * @brief Whether Core keeps a_register for the material rows' pixel textures or the frame record's own resources.
+	 * No binding, frame texture or material contributor may take one. Features/Manifest.cpp checks this at compile time too.
 	 */
 	inline constexpr bool CoreFrameRegister(std::uint32_t a_register)
 	{
@@ -73,69 +68,132 @@ namespace DCLF::Extensions
 		       a_register == kShadingBufferRegister;
 	}
 
-	/**
-	 * @brief The descriptor of every binding's buffer for a_frame, as a_sealed names it, into a_out (render thread or snapshot builder); on
-	 * the render thread (a_renderThread: a frame record's commit) a binding's index answer too, which the builder leaves to the commit.
-	 */
+	/** @brief Fills a_out with every binding's descriptor for a_frame. Index answers are only taken on the render thread. */
 	void FrameBindingValuesOf(const org::services::NamedVersions& a_sealed, const Draws::SceneBuffers& a_scene, std::uint32_t a_frame, FrameBindingValues& a_out,
 		bool a_renderThread);
-	/** @brief a_values (FrameBindingValuesOf) into a frame record's texture registers (DrawBindings::textures). */
+	/** @brief Writes a_values into a frame record's texture registers. */
 	void WriteFrameBindings(const FrameBindingValues& a_values, std::span<std::uint32_t> a_textures);
-	/** @brief Whether a_register is a binding's (a build counts it among the buffers, not the captured frame textures). */
+	/** @brief Whether a_register belongs to a binding. A build counts those as buffers, not captured frame textures. */
 	bool FrameBindingRegister(std::uint32_t a_register);
-	/** @brief Binding a_binding's buffer for a_frame (its select's answer; null: none), for the named-address parity. */
+	/** @brief Binding a_binding's buffer for a_frame, or null. Used by the named-address parity. */
 	const std::shared_ptr<org::VersionedBuffer>* FrameBindingBuffer(std::size_t a_binding, const Draws::SceneBuffers& a_scene, std::uint32_t a_frame);
 
-	/**
-	 * @brief The most frame textures there may be: one a frame register (t16-t127), as no two share one, so a colour commit's fixed array
-	 * of their views (ResolveFrameTextures) holds every registration there can be. The install still fails one past it.
-	 */
+	/** @brief Most frame textures: one per frame register from t16 to t127, since no two share a register. */
 	inline constexpr std::size_t kFrameTextureSlots = kTextureRegisters - kPixelTextureSlots;
-	/** @brief A register no frame texture has (FrameTextureIndices). */
+	/** @brief A register with no frame texture. */
 	inline constexpr std::uint8_t kNoFrameTexture = 0xFF;
 	static_assert(kFrameTextureSlots < kNoFrameTexture, "a frame texture's index (FrameTextureIndices) would reach kNoFrameTexture");
-	/** @brief Any thread, after InstallFeatures: by texture register, its frame texture's index (RegisteredFrameTextures), or kNoFrameTexture. */
+	/** @brief Any thread, after InstallFeatures. Each texture register's frame texture index, or kNoFrameTexture. */
 	std::span<const std::uint8_t> FrameTextureIndices();
 
+	/** @brief Who reads a graph texture. Each reader logs its own path changes. */
+	enum class GraphTextureReader : std::uint8_t
+	{
+		Colour,  // a colour commit's frame textures
+		Faces,   // the reflection faces' frame textures
+		Grass,   // grass's collision texture
+		Count,
+	};
+
+	/** @brief Any thread, after InstallFeatures. Every frame texture's graph ids, once each, for the colour passes to declare. */
+	std::span<const std::string_view> ColourGraphTextureIds();
+	/** @brief Any thread, after InstallFeatures. Graph ids of frame textures that have a view. The faces read no others. */
+	std::span<const std::string_view> FacesGraphTextureIds();
+
 	/**
-	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's
-	 * registers (Api::FrameGraphBuffers::resources). One past them fails the install: grow this first.
+	 * @brief Published-id reads a pass declared, with the bindless index each had at graph build. The commit latches that index.
+	 * CheckDeclaredReads verifies it still matches the declared view's index in Prepare. Cheap to copy.
 	 */
+	struct DeclaredReads
+	{
+		struct Entry;
+		std::shared_ptr<std::vector<Entry>> entries;
+	};
+
+	/**
+	 * @brief Graph build. Declares a read of a_id with the same view whose index the commit latches, and adds it to a_out.
+	 * Check PublishedResources::IsDeclarable first.
+	 */
+	void DeclarePublishedRead(org::RenderPassBuilder& a_builder, std::string_view a_id, DeclaredReads& a_out);
+
+	/** @brief Logs "[ORG] declared view mismatch" once per declared read whose build-time index no longer matches its view. */
+	void CheckDeclaredReads(const DeclaredReads& a_reads, const org::FramePreparationContext& a_preparation, std::string_view a_site);
+
+	/**
+	 * @brief Graph build. Declares a read of every declarable id in a_ids.
+	 * Ids stay registered once published, and the set only grows on a first Publish, which rebuilds every graph anyway.
+	 */
+	DeclaredReads DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids);
+
+	/** @brief Same as above, adding to a_out. */
+	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids, DeclaredReads& a_out);
+
+	/**
+	 * @brief Render thread. The one rule for reading a published texture.
+	 * If a_view is the export of a declared id, writes its bindless index and returns true. Otherwise the caller imports a_view.
+	 */
+	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,
+		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
+
+	/** @brief Published ids the character light's noise can read: the HDR downsample chain, whose last level the luminance chain alternates. */
+	std::span<const std::string_view> CharacterLightGraphTextureIds();
+
+	/**
+	 * @brief The character light's read of the adapted luminance. CS's post chain draws that level into its own pair of targets.
+	 * Returns the index of CS's target with the same parity if declared. On false, try EngineTargetTextureIndex.
+	 */
+	bool AdaptedLuminanceTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index);
+
+	/** @brief The published id of the engine's shadow mask, which grass reads from its draw row. */
+	std::span<const std::string_view> ShadowMaskGraphTextureIds();
+
+	/**
+	 * @brief GraphTextureIndex for a view of an engine render target. The view may be a tripwire handle, so it is matched as the wrapped D3D11 view.
+	 * On a miss with a new view, publishes the target if ORG owns it, so the next build declares it.
+	 */
+	bool EngineTargetTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, ID3D11ShaderResourceView* a_view,
+		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
+
+	/** @brief The register where Wetness Effects binds the engine's precipitation occlusion map for every colour draw. */
+	inline constexpr std::uint32_t kPrecipitationOcclusionRegister = 70;
+
+	/** @brief The published id of the engine's precipitation occlusion map, a depth target. */
+	std::span<const std::string_view> PrecipitationOcclusionGraphTextureIds();
+
+	/**
+	 * @brief GraphTextureIndex for the precipitation occlusion map. On a miss with a new view, imports the depth target and publishes it under
+	 * the same id so the next colour build declares it. Any other view there is left to the caller's import.
+	 */
+	bool PrecipitationOcclusionTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index);
+
+	/** @brief Most frame graph buffers registrations, because a commit keeps their indices in a fixed array. Grow this first. */
 	inline constexpr std::size_t kFrameGraphBufferSlots = 2;
 	inline constexpr std::size_t kFrameGraphBufferRegisters = std::tuple_size_v<decltype(Api::FrameGraphBuffers::resources)>;
-	/** @brief Each registration's indices for one commit (FrameGraphBufferIndices), by registration then register. */
+	/** @brief Each registration's indices for one commit, by registration then register. */
 	using FrameGraphBufferValues = std::array<std::array<std::uint32_t, kFrameGraphBufferRegisters>, kFrameGraphBufferSlots>;
-	/** @brief A registered frame graph buffers (its names owned): registers [firstRegister, firstRegister + count). */
+	/** @brief A registered frame graph buffers entry covering registers [firstRegister, firstRegister + count). */
 	struct FrameGraphBuffersEntry
 	{
 		std::string name;
 		std::uint32_t firstRegister = ~0u;
-		std::uint32_t count = 0;                                            // the leading non-empty resources
-		std::array<std::string, kFrameGraphBufferRegisters> resources;      // the graph ids, owned (c_str for ORG's ResourceIdentifier)
+		std::uint32_t count = 0;                                            // leading non-empty resources
+		std::array<std::string, kFrameGraphBufferRegisters> resources;      // owned so c_str can feed ORG's ResourceIdentifier
 		decltype(Api::FrameGraphBuffers::indices) indices = nullptr;
 	};
-	/** @brief Any thread, after InstallFeatures (empty before): the registrations, in order. */
+	/** @brief Any thread, after InstallFeatures. */
 	std::span<const FrameGraphBuffersEntry> RegisteredFrameGraphBuffers();
-	/** @brief Whether a_register is a registered frame graph buffer's (the captured frame buffers skip it while it is registered). */
+	/** @brief Whether a_register belongs to a registered frame graph buffer. */
 	bool FrameGraphBufferRegister(std::uint32_t a_register);
-	/**
-	 * @brief Render thread (the main resources' check, each colour commit): registration a_buffers's indices into a_out (its indices),
-	 * whether they are registered; false past the registrations.
-	 */
+	/** @brief Render thread. Writes registration a_buffers's indices and returns whether they are on the graph. */
 	bool FrameGraphBufferIndices(std::size_t a_buffers, std::span<std::uint32_t, kFrameGraphBufferRegisters> a_out);
 
-	/**
-	 * @brief The constant buffers Core treats as bound per draw, by stage: the Lighting groups (b0-b2), the permutation (b4), VS b9 and b10,
-	 * PS b11. The features' per-draw buffers (Api::PerDrawBuffer, below kConstantBufferRegisters) are added to them (PerDrawMask).
-	 */
+	/** @brief Constant buffers Core treats as bound per draw: b0-b2, b4, VS b9 and b10, and PS b11. */
 	inline constexpr std::uint32_t kCorePerDrawVS = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 4) | (1u << 9) | (1u << 10);
 	inline constexpr std::uint32_t kCorePerDrawPS = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 4) | (1u << 11);
-	/** @brief Core's per-draw registers of a_stage. */
 	inline constexpr std::uint32_t CorePerDrawMask(Api::ShaderStage a_stage) { return a_stage == Api::ShaderStage::Vertex ? kCorePerDrawVS : kCorePerDrawPS; }
 	/**
-	 * @brief Any thread, after InstallFeatures (Core's alone before): a_stage's per-draw constant buffer registers, Core's and the declared
-	 * per-draw buffers' (a bit by register): the main pass's frame blocks skip them (MainEpochs' MirrorFrameBlocks), and so do the capture
-	 * checks (CapturePoint, CaptureParity).
+	 * @brief Any thread, after InstallFeatures. a_stage's per-draw constant buffer registers, Core's and declared ones.
+	 * Frame block mirroring and capture checks skip these.
 	 */
 	std::uint32_t PerDrawMask(Api::ShaderStage a_stage);
 }

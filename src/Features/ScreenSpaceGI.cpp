@@ -5,6 +5,8 @@
 #include "../I18n/I18n.h"
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Deferred.h"
+#include "ScreenSpaceGI/ORGScreenSpaceGI.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Util.h"
 
@@ -397,6 +399,7 @@ bool ScreenSpaceGI::MenuOpenCloseEventHandler::Register()
 void ScreenSpaceGI::PostPostLoad()
 {
 	MenuOpenCloseEventHandler::Register();
+	ORGScreenSpaceGI::Reserve();
 }
 
 void ScreenSpaceGI::SetupResources()
@@ -408,6 +411,78 @@ void ScreenSpaceGI::SetupResources()
 	{
 		ssgiCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<SSGICB>(), "SSGI::CB");
 	}
+
+	logger::debug("Loading noise texture...");
+	{
+		DirectX::ScratchImage image;
+		try {
+			std::filesystem::path path{ "Data\\Shaders\\ScreenSpaceGI\\fast_2uges.dds" };
+
+			DX::ThrowIfFailed(LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image));
+		} catch (const DX::com_exception& e) {
+			logger::error("{}", e.what());
+			return;
+		}
+
+		ID3D11Resource* pResource = nullptr;
+		try {
+			DX::ThrowIfFailed(CreateTexture(device,
+				image.GetImages(), image.GetImageCount(),
+				image.GetMetadata(), &pResource));
+		} catch (const DX::com_exception& e) {
+			logger::error("{}", e.what());
+			return;
+		}
+
+		texNoise = eastl::make_unique<Texture2D>(reinterpret_cast<ID3D11Texture2D*>(pResource), "SSGI::Noise");
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
+			.Format = texNoise->desc.Format,
+			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
+			.Texture2D = {
+				.MostDetailedMip = 0,
+				.MipLevels = 1 }
+		};
+		texNoise->CreateSRV(srvDesc);
+	}
+
+	logger::debug("Creating samplers...");
+	{
+		D3D11_SAMPLER_DESC samplerDesc = {
+			.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+			.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+			.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+			.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+			.MaxAnisotropy = 1,
+			.MinLOD = 0,
+			.MaxLOD = D3D11_FLOAT32_MAX
+		};
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, linearClampSampler.put()));
+		Util::SetResourceName(linearClampSampler.get(), "SSGI::LinearClampSampler");
+
+		samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, pointClampSampler.put()));
+		Util::SetResourceName(pointClampSampler.get(), "SSGI::PointClampSampler");
+	}
+
+	// The graph path makes its own textures; the D3D11 ones only when it does not run.
+	// When the graph path stops later, DrawSSGI makes them before its first D3D11 frame.
+	bool onGraph = false;
+	if (ORGScreenSpaceGI::Requested()) {
+		D3D11_TEXTURE2D_DESC mainDesc;
+		renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
+		onGraph = ORGScreenSpaceGI::Get().Setup(mainDesc, [] { logger::warn("[ORG] Screen Space GI: drawing with D3D11 from now on"); });
+	}
+	if (!onGraph)
+		CreateTextures();
+
+	CompileComputeShaders();
+}
+
+void ScreenSpaceGI::CreateTextures()
+{
+	auto renderer = globals::game::renderer;
+	auto device = globals::d3d::device;
 
 	logger::debug("Creating textures...");
 	{
@@ -570,61 +645,11 @@ void ScreenSpaceGI::SetupResources()
 			texPrevGeo->CreateUAV(uavDesc);
 		}
 	}
+}
 
-	logger::debug("Loading noise texture...");
-	{
-		DirectX::ScratchImage image;
-		try {
-			std::filesystem::path path{ "Data\\Shaders\\ScreenSpaceGI\\fast_2uges.dds" };
-
-			DX::ThrowIfFailed(LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image));
-		} catch (const DX::com_exception& e) {
-			logger::error("{}", e.what());
-			return;
-		}
-
-		ID3D11Resource* pResource = nullptr;
-		try {
-			DX::ThrowIfFailed(CreateTexture(device,
-				image.GetImages(), image.GetImageCount(),
-				image.GetMetadata(), &pResource));
-		} catch (const DX::com_exception& e) {
-			logger::error("{}", e.what());
-			return;
-		}
-
-		texNoise = eastl::make_unique<Texture2D>(reinterpret_cast<ID3D11Texture2D*>(pResource), "SSGI::Noise");
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = texNoise->desc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = {
-				.MostDetailedMip = 0,
-				.MipLevels = 1 }
-		};
-		texNoise->CreateSRV(srvDesc);
-	}
-
-	logger::debug("Creating samplers...");
-	{
-		D3D11_SAMPLER_DESC samplerDesc = {
-			.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-			.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
-			.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
-			.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
-			.MaxAnisotropy = 1,
-			.MinLOD = 0,
-			.MaxLOD = D3D11_FLOAT32_MAX
-		};
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, linearClampSampler.put()));
-		Util::SetResourceName(linearClampSampler.get(), "SSGI::LinearClampSampler");
-
-		samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-		DX::ThrowIfFailed(device->CreateSamplerState(&samplerDesc, pointClampSampler.put()));
-		Util::SetResourceName(pointClampSampler.get(), "SSGI::PointClampSampler");
-	}
-
-	CompileComputeShaders();
+void ScreenSpaceGI::Prepass()
+{
+	ORGScreenSpaceGI::Get().Prepass();
 }
 
 void ScreenSpaceGI::ClearShaderCache()
@@ -689,11 +714,24 @@ bool ScreenSpaceGI::ShadersOK()
 
 void ScreenSpaceGI::UpdateSB()
 {
-	float2 res = { (float)texRadiance->desc.Width, (float)texRadiance->desc.Height };
+	ssgiCB->Update(BuildConstants({ (float)texRadiance->desc.Width, (float)texRadiance->desc.Height }));
+}
+
+ScreenSpaceGI::DispatchSizes ScreenSpaceGI::GetDispatchSizes() const
+{
+	float2 size = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	auto resolution = std::array{ (uint)size.x, (uint)size.y };
+	auto resChoices = std::array{
+		resolution, std::array{ resolution[0] >> 1, resolution[1] >> 1 }, std::array{ resolution[0] >> 2, resolution[1] >> 2 }
+	};
+	return { resolution, resChoices[settings.ResolutionMode] };
+}
+
+ScreenSpaceGI::SSGICB ScreenSpaceGI::BuildConstants(float2 a_texDim)
+{
+	float2 res = a_texDim;
 	float2 dynres = Util::ConvertToDynamic(res);
 	dynres = { floor(dynres.x), floor(dynres.y) };
-
-	static float4x4 prevInvView = {};
 
 	SSGICB data;
 	{
@@ -737,7 +775,7 @@ void ScreenSpaceGI::UpdateSB()
 		data.DistanceNormalisation = settings.DistanceNormalisation;
 	}
 
-	ssgiCB->Update(data);
+	return data;
 }
 
 void ScreenSpaceGI::DrawSSGI()
@@ -750,6 +788,12 @@ void ScreenSpaceGI::DrawSSGI()
 	// Toggle vanilla SSAO
 	if (BSImagespaceShaderISSAOBlurH)
 		BSImagespaceShaderISSAOBlurH->enableSAO = settings.EnableVanillaSSAO;
+
+	// The graph path ran in the DeferredPasses anchor, just before this.
+	if (ORGScreenSpaceGI::Get().IsActive())
+		return;
+	if (!texRadiance)
+		CreateTextures();
 
 	if (!(settings.Enabled && ShadersOK())) {
 		FLOAT clr[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -787,14 +831,11 @@ void ScreenSpaceGI::DrawSSGI()
 
 	auto renderer = globals::game::renderer;
 	auto rts = renderer->GetRuntimeData().renderTargets;
+	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
+	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto deferred = globals::deferred;
 
-	float2 size = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
-	auto resolution = std::array{ (uint)size.x, (uint)size.y };
-	auto resChoices = std::array{
-		resolution, std::array{ resolution[0] >> 1, resolution[1] >> 1 }, std::array{ resolution[0] >> 2, resolution[1] >> 2 }
-	};
-	auto internalRes = resChoices[settings.ResolutionMode];
+	const auto [resolution, internalRes] = GetDispatchSizes();
 
 	std::array<ID3D11ShaderResourceView*, 11> srvs = { nullptr };
 	std::array<ID3D11UnorderedAccessView*, 6> uavs = { nullptr };
@@ -837,11 +878,11 @@ void ScreenSpaceGI::DrawSSGI()
 		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Radiance Disocc");
 
 		resetViews();
-		srvs.at(0) = rts[deferred->forwardRenderTargets[0]].SRV;
+		srvs.at(0) = Unwrap(rts[deferred->forwardRenderTargets[0]].SRV);
 		srvs.at(1) = texWorkingDepth->srv.get();
-		srvs.at(2) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(2) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(3) = texPrevGeo->srv.get();
-		srvs.at(4) = rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV;
+		srvs.at(4) = Unwrap(rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV);
 		srvs.at(5) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(6) = texAo[inputAoTexIdx]->srv.get();
 		srvs.at(7) = texIlY[inputGITexIdx]->srv.get();
@@ -895,7 +936,7 @@ void ScreenSpaceGI::DrawSSGI()
 		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Prefilter Normals");
 
 		resetViews();
-		srvs.at(0) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(0) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		uavs.at(0) = uavNormal[0].get();
 		uavs.at(1) = uavNormal[1].get();
 		uavs.at(2) = uavNormal[2].get();
@@ -916,7 +957,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = texRadiance->srv.get();
 		srvs.at(3) = texNoise->srv.get();
 		srvs.at(4) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
@@ -951,7 +992,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Unwrap(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(3) = texIlY[inputGITexIdx]->srv.get();
 		srvs.at(4) = texIlCoCg[inputGITexIdx]->srv.get();
@@ -1009,6 +1050,19 @@ void ScreenSpaceGI::DrawSSGI()
 	context->CSSetConstantBuffers(1, 1, &cb);
 	context->CSSetSamplers(0, (uint)samplers.size(), samplers.data());
 	context->CSSetShader(nullptr, nullptr, 0);
+}
+
+std::tuple<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> ScreenSpaceGI::GetOutputTextures()
+{
+	if (!loaded || !settings.Enabled)
+		return { nullptr, nullptr, nullptr, nullptr };
+	if (ORGScreenSpaceGI::Get().IsActive()) {
+		const auto outputs = ORGScreenSpaceGI::Get().GetOutputs();
+		return { outputs.ao, outputs.y, outputs.coCg, outputs.specular };
+	}
+	if (!texAo[outputAoIdx])
+		return { nullptr, nullptr, nullptr, nullptr };
+	return { texAo[outputAoIdx]->srv.get(), texIlY[outputIlIdx]->srv.get(), texIlCoCg[outputIlIdx]->srv.get(), texGiSpecular[outputAoIdx]->srv.get() };
 }
 
 #undef I18N_KEY_PREFIX

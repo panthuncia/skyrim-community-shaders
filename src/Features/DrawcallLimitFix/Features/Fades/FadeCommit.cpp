@@ -1,6 +1,5 @@
-// Fades' depth commit hook (Api::CommitHook "fade roots"): the root rows and, once a frame, FadeStateCS's inputs (the list jobs' camera,
-// the engine's fade globals, the animation job's batch, the log window); the write-back's readback harvested and armed; each root's
-// program from the main cull input. Core's visibility readback is armed after the hooks (CommitMainPayload).
+// The depth commit hook for fades. It uploads root rows and FadeStateCS's per-frame inputs,
+// harvests and re-arms the write-back readback, and uploads each root's portal program.
 
 #include <Tracy/Tracy.hpp>
 
@@ -27,8 +26,7 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		// Once a frame, FadeStateCS's inputs: the list jobs' camera (FadeState::FadeEye), the engine's fade globals and the
-		// animation job's batch (its roots' words sent), and the log window.
+		// Once a frame.
 		void SampleFadeInputs(const Draws::NamedVersions& a_adopted, Draws::CommitUploads& a_uploads, FadeScene& a_buffers, std::uint32_t a_rootSlots,
 			FadeFrame& a_inputs, std::uint32_t& a_logBase)
 		{
@@ -36,7 +34,6 @@ namespace DCLF::Features::Fades
 			const auto eye = FadeState::FadeEye();
 			std::copy_n(eye.data(), 3, a_inputs.eye);
 			a_inputs.lodAdjust = eye[3];
-			// The animation job's updates since the last cull: roots stamped with this frame, inputs in the frame row.
 			std::vector<AnimatedFadeRoot> roots;
 			AnimatedFadeInputs anim{};
 			TakeAnimatedBatch(roots, anim);
@@ -45,9 +42,8 @@ namespace DCLF::Features::Fades
 			a_inputs.animLodAdjust = anim.lodAdjust;
 			a_inputs.animCounter = anim.counter;
 			a_inputs.animDeltaTime = anim.deltaTime;
-			// Each root's updates counted in a dense array kept across frames (only the roots this batch names are touched, and
-			// cleared again). The batch names root slots resolved by the animation job against the writer tables; the frame's tables
-			// may be newer, so a slot counts only where they still list that node at that generation (no lookup, no hashing).
+			// Slots were resolved against the writer tables, and the frame's tables may be newer.
+			// A slot counts only if these tables still list the same node at the same generation.
 			const auto batchRoots = Extensions::RootListOf(Scene::FrameView::Get().GetTables());
 			auto& counts = a_buffers.fadeAnimatedCounts;
 			if (counts.size() < a_rootSlots)
@@ -70,7 +66,7 @@ namespace DCLF::Features::Fades
 				counts[root] = 0;
 			}
 			std::sort(stamped.begin(), stamped.end());
-			// A version not filled is sent the whole mirror.
+			// A version not filled yet gets the whole mirror.
 			if (const auto& animated = a_adopted.Of(a_buffers.fadeAnimated); !a_buffers.fadeAnimatedFilled.Holds(animated)) {
 				stamped.resize(std::min<std::size_t>(animatedWords.size(), animated.units));
 				std::iota(stamped.begin(), stamped.end(), 0u);
@@ -81,21 +77,17 @@ namespace DCLF::Features::Fades
 			});
 			if (anim.varied)
 				Diagnostics::Notify(Diagnostics::FadeInputsVaried{ Scene::FrameView::Get().GetFrame() });
-			// FadeStateCS's log window, when an observer asks.
+			// A diagnostics observer may set a log window.
 			a_logBase = ~0u;
 			Diagnostics::Notify(Diagnostics::FadeLogWindow{ Scene::FrameView::Get().GetFrame(), Scene::FrameView::Get().GetTables(), a_inputs, a_logBase });
 		}
 
-		/**
-		 * @brief The depth commit's fade uploads into the versions a_sealed (the adopted set) names: missing static rows, and once a frame
-		 * the inputs (the main cull input's programs are its scene resources', sent by its commit hook).
-		 */
+		/** @brief Uploads the static rows the sealed version is missing, and the frame row. */
 		void UploadFadeRoots(const Draws::NamedVersions& a_sealed, const SceneTables& a_tables, std::uint32_t a_frame, const FadeFrame& a_inputs,
 			std::uint32_t a_logBase, FadeScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
 			if (!a_scene.fadeState || !a_scene.fadeRoots)
 				return;
-			// The roots as the root states' family lists them (its view), and its journal's runs.
 			const auto list = Extensions::RootListOf(a_tables);
 			const auto* family = Draws::RootFamilyOf(a_tables);
 			const std::uint64_t current = list.contentEpoch;
@@ -119,11 +111,9 @@ namespace DCLF::Features::Fades
 			a_scene.fadeFrame.sceneFrame = a_scene.fadeFrameNumber;
 			a_scene.fadeFrame.logBase = a_scene.fadeLogBase;
 			a_uploads(a_scene.fadeFrameBuffer, &a_scene.fadeFrame, sizeof(FadeFrame), 0);
-			// The write-back's header is ArmFadeReadback's.
 		}
 
-		// The roots UploadFadeRootPrograms judges again, in its order: incrementally, those written since the mirror's content epoch
-		// (the root states' family's journal, below the mirror's size) and the new ones; else every root.
+		// Incrementally, roots written since the last judging plus new ones. Otherwise every root.
 		void CollectRootsToJudge(const Extensions::TableFamilyColumns* a_family, bool a_incremental, std::uint64_t a_judgedEpoch, std::size_t a_before,
 			std::size_t a_rootCount, std::vector<std::uint32_t>& a_roots)
 		{
@@ -142,7 +132,7 @@ namespace DCLF::Features::Fades
 			}
 		}
 
-		// The batch's programs from the main cull input's judge, called once: a root without a node takes noProgram unasked.
+		// A root without a node gets noProgram without asking.
 		void JudgeRootPrograms(const Extensions::MainCullInputEntry& a_input, std::span<const void* const> a_nodes, FadeScene::RootProgramsBatch& a_batch)
 		{
 			a_batch.asked.clear();
@@ -156,10 +146,8 @@ namespace DCLF::Features::Fades
 			a_input.contribution.judge(judge);
 		}
 
-		// Each root's program (the main cull input's: Features/Portals' room programs), when the roots or the input's answers
-		// (programsVersion) changed. With the input unchanged and the version holding the mirror, only the roots written since the
-		// mirror's content epoch (the roots' journal) and the new ones are judged again; an input change, or a version the mirror is not
-		// of, judges every root. Without an input FadeStateCS and the builds bind no programs, so the roots' are not read.
+		// Each root's portal program. Rejudges only changed roots unless the input changed or the version does not hold the mirror.
+		// Without a main cull input nothing reads the programs.
 		void UploadFadeRootPrograms(const Draws::NamedVersions& a_adopted, Draws::CommitUploads& a_uploads, FadeScene& a_buffers)
 		{
 			const auto* input = Extensions::MainCullInput();
@@ -183,7 +171,7 @@ namespace DCLF::Features::Fades
 				auto& batch = a_buffers.fadeRootProgramsBatch;
 				CollectRootsToJudge(Draws::RootFamilyOf(rootTables), incremental, judged.rootsEpoch, sent.size(), rootCount, batch.roots);
 				JudgeRootPrograms(*input, rootList.nodes, batch);
-				// Only words that differ (all of them for a version not filled); the mirror takes the new words.
+				// Upload only words that differ from the mirror.
 				std::vector<std::uint32_t> differing;
 				for (std::size_t k = 0; k < batch.roots.size(); ++k) {
 					const std::size_t root = batch.roots[k];
@@ -207,7 +195,7 @@ namespace DCLF::Features::Fades
 			}
 		}
 
-		/** @brief The depth commit: harvests the frame slot's last fade events for the write-back task, resets the list, arms the slot. */
+		/** @brief Harvests the range's last fade events for the write-back task, then resets the list and re-arms the range. */
 		void ArmFadeReadback(FadeScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
 			if (!a_scene.fadeWriteBack || !a_scene.fadeEvents)
@@ -216,12 +204,10 @@ namespace DCLF::Features::Fades
 			auto* host = RenderGraphRuntime::Get().Host();
 			if (!host)
 				return;
-			const std::uint32_t frameSlot = host->CurrentFrameSlot();
+			const std::uint32_t frameSlot = writeBack.ranges.Of(host->CurrentRun());
 			if (frameSlot >= writeBack.armed.size())
 				return;
-			// Harvests the slot's last execution (the host waited for it) if its buffer holds the frame that armed it. If the epoch did
-			// not run for that frame, FadeStateCS did not report either: the next execution reports those changes. Roots past the
-			// list's end report again next frame while the list grows (RequireSceneTables).
+			// If the epoch did not run for the armed frame, FadeStateCS did not report either, so the next run reports those changes.
 			if (auto& armed = writeBack.armed[frameSlot]; armed.armed) {
 				armed.armed = false;
 				writeBack.Harvest(frameSlot, armed.frame, [&](const std::uint32_t* a_words, std::uint32_t a_count, std::uint32_t a_capacity) {
@@ -237,7 +223,7 @@ namespace DCLF::Features::Fades
 					writeBack.harvested.fetch_add(1, std::memory_order_relaxed);
 				});
 			}
-			// The header FadeStateCS appends after: the count and the frame the harvest matches.
+			// Header with a zero count and the frame the harvest will match.
 			const std::uint32_t header[kFadeEventHeaderWords]{ 0u, Scene::FrameView::Get().GetFrame(), 0u, 0u };
 			a_uploads(a_scene.fadeEvents, header, sizeof(header), 0);
 			auto& armed = writeBack.armed[frameSlot];
@@ -245,8 +231,6 @@ namespace DCLF::Features::Fades
 			armed.frame = Scene::FrameView::Get().GetFrame();
 		}
 
-		// The depth commit only: fade roots and, once a frame, their inputs for FadeStateCS; the write-back armed; the roots' cull
-		// programs. Core's visibility readback is armed after the hooks (CommitMainPayload).
 		void CommitFadeRoots(const Api::CommitContext& a_commit)
 		{
 			if (a_commit.kind != Api::CommitKind::Depth)
@@ -263,13 +247,12 @@ namespace DCLF::Features::Fades
 			if (buffers.fadeFrameNumber != a_commit.frame)
 				SampleFadeInputs(adopted, uploads, buffers, rootSlots, inputs, logBase);
 			UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, logBase, buffers, uploads);
-			// Programs past the adopted bucket scratch are evaluated unbatched by the count stage (same verdict); report the lag.
+			// Programs past the bucket scratch still get the same verdict, unbatched. This only reports the shortfall.
 			if (buffers.portalBatch)
 				Portals::CheckMainBatchCapacity(*buffers.portalBatch, a_commit.frame,
 					std::min(Draws::NamedUnits(adopted, buffers.portalBatch->counts), Draws::NamedUnits(adopted, buffers.portalBatch->offsets)) / 2);
 
 			Extensions::TableFamilySent(Extensions::RootStatesFamily(), buffers.FadeRootsContentEpoch(adopted));
-			// The fade events' header and readback slot (its last execution harvested first).
 			ArmFadeReadback(buffers, uploads);
 			UploadFadeRootPrograms(adopted, uploads, buffers);
 		}
@@ -277,7 +260,7 @@ namespace DCLF::Features::Fades
 
 	void RegisterCommit(Api::InstallContext& a_context)
 	{
-		// The depth commit's rows, inputs, write-back and root programs, after every feature's hook (Portals' programs among them).
+		// Must run after every other feature's hook, including Portals', which sends the programs.
 		a_context.RegisterCommitHook({ .name = "fade roots", .commit = &CommitFadeRoots });
 	}
 }

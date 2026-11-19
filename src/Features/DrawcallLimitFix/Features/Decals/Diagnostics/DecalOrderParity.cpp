@@ -1,6 +1,4 @@
-// CS_DCLF_PERSISTENT_PARITY: every 60 passes the kept decal order against one made whole (every key taken again: CompareDecalOrder),
-// after the order's upkeep, summed in the component's state. Reported with the coordinator's scene lines (OrderParityLines, at
-// Api::ReportPoint::SceneCoordinatorMaterials).
+// CS_DCLF_PERSISTENT_PARITY: periodically compares the kept decal order with one rebuilt from scratch.
 
 #include "Features/DrawcallLimitFix/Features/Decals/DecalOrder.h"
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"

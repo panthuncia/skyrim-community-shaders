@@ -9,10 +9,12 @@
 
 #include "Features/HDRDisplay.h"
 #include "Features/Screenshot/Avif.h"
+#include "Features/Screenshot/ORGScreenshot.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "RenderGraph/Switches.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
@@ -43,6 +45,9 @@ namespace
 		// the SRV-readable cache instead.
 		bool needsPreviewCache = false;
 		const char* description = "(none)";
+		// The render graph's copy (ORGScreenshot): the engine target it is (-1: none), else its import name.
+		std::int32_t engineTarget = -1;
+		const char* importName = nullptr;
 	};
 
 	struct CaptureStateGuard
@@ -306,6 +311,7 @@ namespace
 						src.srv = hdr.outputTexture->srv.get();
 						src.needsPreviewCache = false;
 						src.description = "HDR clean composite (no UI, no menu blur)";
+						src.importName = "screenshot.hdr-clean";
 						return src;
 					}
 				}
@@ -317,14 +323,32 @@ namespace
 			src.texture = ResolveDisplayedBackBuffer(holder);
 			src.needsPreviewCache = true;
 			src.description = "Swap chain back buffer (display composite)";
+			src.importName = "screenshot.back-buffer";
 			return src;
 		}
 
+		// CS_ORG_SHOT_TARGET=<n> (a diagnostic): the shot copies engine render target n instead of the framebuffer, as it is at the
+		// capture point.
+		static const auto shotTarget = static_cast<std::int32_t>(Switches::Number("CS_ORG_SHOT_TARGET", RE::RENDER_TARGETS::kFRAMEBUFFER));
+		if (shotTarget != RE::RENDER_TARGETS::kFRAMEBUFFER && shotTarget >= 0 && shotTarget < RE::RENDER_TARGETS::kTOTAL) {
+			auto& target = renderer->GetRuntimeData().renderTargets[shotTarget];
+			if (auto* texture = ResolveSlotTexture(target, holder)) {
+				src.texture = texture;
+				src.srv = target.SRV;
+				src.needsPreviewCache = true;
+				src.description = "an engine target (CS_ORG_SHOT_TARGET)";
+				src.engineTarget = shotTarget;
+				src.importName = "screenshot.target";
+				return src;
+			}
+		}
 		auto& slot = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		src.texture = ResolveSlotTexture(slot, holder);
 		src.srv = slot.SRV;
 		src.needsPreviewCache = true;
 		src.description = "kFRAMEBUFFER";
+		src.engineTarget = static_cast<std::int32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER);
+		src.importName = "screenshot.framebuffer";
 		return src;
 	}
 
@@ -516,6 +540,13 @@ bool ScreenshotFeature::IsInMenu() const
 void ScreenshotFeature::PostPostLoad()
 {
 	ApplyVanillaScreenshotSetting();
+	ORGScreenshot::Reserve();
+}
+
+void ScreenshotFeature::SetupResources()
+{
+	if (ORGScreenshot::Requested())
+		(void)ORGScreenshot::Get().Setup();
 }
 
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
@@ -833,6 +864,8 @@ void ScreenshotFeature::ProcessCaptureRequest()
 			logger::error("Screenshot capture failed with an unknown exception.");
 		}
 	}
+	// The render graph's readbacks: finished ones go to the worker.
+	ORGScreenshot::Get().Poll();
 }
 
 void ScreenshotFeature::ProcessPendingReadbacks()
@@ -915,6 +948,21 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 			screenshotQueue.pop();
 		}
 
+		// A render-graph readback (ORGScreenshot): its crop into the image here, off the render thread.
+		if (!screenshot.readback.data.empty()) {
+			const bool copied = ORGScreenshot::Crop(screenshot.readback, screenshot.cropX, screenshot.cropY, screenshot.width, screenshot.height,
+				screenshot.format, screenshot.image);
+			const auto readbackWidth = screenshot.readback.width;
+			const auto readbackHeight = screenshot.readback.height;
+			screenshot.readback = {};
+			if (!copied) {
+				logger::error("Screenshot failed: the render graph's readback ({}x{}) does not hold the {}x{} capture at {},{}.",
+					readbackWidth, readbackHeight, screenshot.width, screenshot.height, screenshot.cropX, screenshot.cropY);
+				ShowInGameNotification("Screenshot failed - see CommunityShaders.log");
+				continue;
+			}
+		}
+
 		Util::FileHelpers::EnsureDirectoryExists(screenshot.outputPath.parent_path());
 
 		const bool saveOk = SaveScreenshotToDisk(
@@ -944,6 +992,9 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 				ShowInGameNotification(std::format("Screenshot saved: {}",
 					screenshot.outputPath.filename().string()));
 		}
+		// A scripted capture is done (saved or failed): the file is whole or absent.
+		if (!screenshot.notify && scriptedInFlight.load(std::memory_order_acquire) != 0)
+			scriptedInFlight.fetch_sub(1, std::memory_order_acq_rel);
 	}
 	CoUninitialize();
 }
@@ -995,6 +1046,54 @@ void ScreenshotFeature::Capture()
 		copyH = region.h;
 	}
 
+	// Match SelectCaptureSource: only the flat HDR back-buffer path uses HDR encoding.
+	// Do not key off DXGI format alone — kFRAMEBUFFER can be float/HDR-sized in SDR mode.
+	const bool flatHdrCapture = IsFlatHdrScreenshotCapture();
+	if (flatHdrCapture && !IsHdrCaptureFormat(srcDesc.Format)) {
+		logger::error("Unsupported HDR screenshot format: {}", static_cast<uint32_t>(srcDesc.Format));
+		return;
+	}
+	const bool saveAsHdrPng = flatHdrCapture && !hdrUseAvif;
+	const bool saveAsHdrAvif = flatHdrCapture && hdrUseAvif;
+	const bool saveAsSdrPng = !flatHdrCapture && sdrUsePng;
+
+	const char* extension = saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp");
+	const auto outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
+	PendingScreenshot screenshot;
+	screenshot.format = srcDesc.Format;
+	screenshot.width = copyW;
+	screenshot.height = copyH;
+	screenshot.saveAsHdrPng = saveAsHdrPng;
+	screenshot.saveAsHdrAvif = saveAsHdrAvif;
+	screenshot.saveAsSdrPng = saveAsSdrPng;
+	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
+	screenshot.outputPath = outputPath;
+	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
+	screenshot.notify = captureOutputPath.empty();
+
+	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it. Not for the UI
+	// composite, which is D3D11's.
+	if (ORGScreenshot::Get().IsActive() && !src.uiSRV) {
+		screenshot.cropX = copyX;
+		screenshot.cropY = copyY;
+		auto shared = std::make_shared<PendingScreenshot>(std::move(screenshot));
+		const ORGScreenshot::Source source{ .texture = sourceTexture, .srv = src.srv, .engineTarget = src.engineTarget, .importName = src.importName };
+		const bool onGraph = ORGScreenshot::Get().Capture(source, [this, shared](ORGScreenshot::Pixels&& a_pixels) {
+			shared->readback = std::move(a_pixels);
+			try {
+				EnsureWorkerThread();
+				EnqueueScreenshot(std::move(*shared));
+			} catch (const std::exception& e) {
+				logger::error("Screenshot failed: could not hand off to worker thread: {}", e.what());
+			}
+		});
+		if (onGraph) {
+			logger::debug("Screenshot copied on the render graph from {}", src.description);
+			return;
+		}
+		screenshot = std::move(*shared);
+	}
+
 	D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;
 	stagingDesc.Width = copyW;
 	stagingDesc.Height = copyH;
@@ -1024,30 +1123,7 @@ void ScreenshotFeature::Capture()
 
 	context->CopySubresourceRegion(stagingTexture.get(), 0, 0, 0, 0, sourceTexture, 0, &sourceRegion);
 
-	// Match SelectCaptureSource: only the flat HDR back-buffer path uses HDR encoding.
-	// Do not key off DXGI format alone — kFRAMEBUFFER can be float/HDR-sized in SDR mode.
-	const bool flatHdrCapture = IsFlatHdrScreenshotCapture();
-	if (flatHdrCapture && !IsHdrCaptureFormat(srcDesc.Format)) {
-		logger::error("Unsupported HDR screenshot format: {}", static_cast<uint32_t>(srcDesc.Format));
-		return;
-	}
-	const bool saveAsHdrPng = flatHdrCapture && !hdrUseAvif;
-	const bool saveAsHdrAvif = flatHdrCapture && hdrUseAvif;
-	const bool saveAsSdrPng = !flatHdrCapture && sdrUsePng;
-
-	PendingScreenshot screenshot;
 	screenshot.stagingTexture = std::move(stagingTexture);
-	screenshot.format = srcDesc.Format;
-	screenshot.width = copyW;
-	screenshot.height = copyH;
-	screenshot.saveAsHdrPng = saveAsHdrPng;
-	screenshot.saveAsHdrAvif = saveAsHdrAvif;
-	screenshot.saveAsSdrPng = saveAsSdrPng;
-	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
-	const char* extension = saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp");
-	screenshot.outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
-	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
-	screenshot.notify = captureOutputPath.empty();
 	pendingReadbacks.push_back(std::move(screenshot));
 }
 
@@ -1055,5 +1131,6 @@ void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath)
 {
 	std::lock_guard lock(requestedPathsMutex);
 	requestedPaths.push(std::move(a_outputPath));
+	scriptedInFlight.fetch_add(1, std::memory_order_acq_rel);
 }
 #undef I18N_KEY_PREFIX

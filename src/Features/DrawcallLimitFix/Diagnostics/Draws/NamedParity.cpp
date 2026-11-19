@@ -1,9 +1,9 @@
-// CS_DCLF_PERSISTENT_PARITY: the sealed set, the only source of a versioned buffer's address, SRV index and capacity. Every address and SRV
-// index a snapshot's draws embed against the set its revision was sealed with, and every shape's ranges and counts against the named
-// versions of the buffers it indexes (the snapshot builder); every commit target named and current in the adopted set, and the
-// recordings' resolves of buffers their set does not name (render thread).
+// Sealed set parity. The sealed set is the only source of a versioned buffer's address, SRV index and capacity.
+// The snapshot builder checks every embedded address and index and every shape's ranges against it. The render thread checks
+// commit targets and recordings that resolve buffers their set does not name.
 
 #include "DrawsState.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
 #include "Events.h"
@@ -13,21 +13,21 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		// The snapshot builder's (one pass at a time); the counts read by the render thread's report line.
+		// Snapshot builder, one pass at a time. The render thread's report reads the counts.
 		struct SealedChecks
 		{
 			std::atomic<std::uint64_t> snapshots{ 0 }, payloads{ 0 }, differ{ 0 }, unnamed{ 0 };
 			std::uint32_t logged = 0;
 		} sealedChecks;
 
-		// The snapshot builder's; the counts read by the render thread's report line.
+		// Snapshot builder. The render thread's report reads the counts.
 		struct ShapeChecks
 		{
 			std::atomic<std::uint64_t> revisions{ 0 }, shapes{ 0 }, findings{ 0 };
 			std::uint32_t logged = 0;
 		} shapeChecks;
 
-		// The render thread's.
+		// Render thread.
 		struct CommitChecks
 		{
 			std::uint64_t targets = 0, unnamed = 0, notCurrent = 0, resolves = 0;
@@ -39,13 +39,13 @@ namespace DCLF::Diagnostics
 
 		constexpr std::uint32_t kLogged = 16;
 
-		/** @brief The fields a build embeds of the versioned buffers both its kinds of resources hold (Impl::AddressesOf). */
+		/** @brief The versioned buffer fields a build embeds. */
 		template <class Resources>
 		void CheckAddresses(const char* a_payload, const Draws::NamedVersions& a_sealed, const Resources& a_resources, const Draws::ResourceAddresses& a_embedded)
 		{
 			auto& c = sealedChecks;
 			++c.payloads;
-			// An unnamed buffer's entry is empty (check reports it unnamed first).
+			// An unnamed buffer's entry is empty, and check reports it unnamed first.
 			const auto entry = [&](const Draws::Versioned& a_buffer) -> const org::services::NamedEntry& {
 				static const org::services::NamedEntry kUnnamed;
 				return a_buffer && a_sealed.Names(*a_buffer) ? a_sealed.Of(*a_buffer) : kUnnamed;
@@ -66,18 +66,16 @@ namespace DCLF::Diagnostics
 					logger::warn("[DCLF] snapshot draws (set {}): the {} payload's {} is {:#x}, the sealed set names {:#x} <- NAMED ADDRESS", a_sealed.Serial(), a_payload,
 						a_field, a_value, a_expected);
 			};
-			// The vertex stream's buffer (Features/Faces' "face positions").
 			if (a_embedded.streamBuffer || Extensions::VertexStreamTaken())
-				check(Extensions::VertexStream().name.c_str(), scene.vertexStream, a_embedded.streamBuffer, entry(scene.vertexStream).deviceAddress);
-			// The features' frame bindings (Api::FrameBinding), each read by the frame the context was posted at: the frame's buffer or the
-			// next one's (one alternating by frame: either parity's).
+				check(Extensions::VertexStream().name.c_str(), scene.vertexStream, a_embedded.streamBuffer.Bits(), RefOf(entry(scene.vertexStream)).Bits());
+			// Feature frame bindings alternate by frame, so a context may embed either the posted frame's buffer or the next one's.
 			const auto bindings = Extensions::RegisteredFrameBindings();
 			for (std::size_t i = 0; i < bindings.size(); ++i) {
 				static const Draws::Versioned kNone;
 				const auto* even = Extensions::FrameBindingBuffer(i, scene, 1);
 				const auto* odd = Extensions::FrameBindingBuffer(i, scene, 0);
 				const std::uint64_t value = a_embedded.frameBindings[i];
-				// A binding answered on the render thread alone (an index: Fades' seeds) is the frame record's commit's, embedded as none.
+				// A binding answered only on the render thread is the frame record's commit's, embedded as none.
 				if (!even && !odd && value == Extensions::kNoFrameBinding)
 					continue;
 				const std::uint64_t evenIndex = even ? entry(*even).srvIndex : 0, oddIndex = odd ? entry(*odd).srvIndex : 0;
@@ -86,9 +84,8 @@ namespace DCLF::Diagnostics
 		}
 
 		/**
-		 * @brief A main shape's state class sub-ranges (PassFrame::classes): the classes the set version has, each class's keys its
-		 * pipelines, each sub-range in its own region of the sequences (the main ones in the draw range, the terrain and forward ones in
-		 * phase 2's before refraction, the decal ones past both), a count word per (class, range), the latch's table and map room.
+		 * @brief Checks a main shape's state class sub-ranges. Each sub-range must lie in its own region of the sequences, with a count
+		 * word per class and range, and room for the latch's table and map.
 		 */
 		template <class Finding>
 		void CheckClassRanges(const PassFrame& a_frame, std::uint64_t a_sequences, std::uint64_t a_classWords, Finding&& a_finding)
@@ -128,7 +125,7 @@ namespace DCLF::Diagnostics
 		++c.snapshots;
 		const auto& context = a_sealed.context;
 		const auto& draws = a_sealed.draws;
-		// A payload built for other resources than the context's names theirs (the frame does not submit it: identity).
+		// A payload built for other resources is not submitted by the frame, so its names must match by identity.
 		for (const std::size_t j : { Draws::kAsyncZPrepass, Draws::kAsyncColour })
 			if (const auto& payload = draws.payloads[j]; payload && context.build[j] && context.target && context.target->scene &&
 														 payload->inputs.addresses.identity == context.target.get())
@@ -170,8 +167,7 @@ namespace DCLF::Diagnostics
 		const auto units = [&](const Draws::Versioned& a_buffer) { return Draws::NamedUnits(sealed, a_buffer); };
 		const auto bytes = [&](const Draws::Versioned& a_buffer) -> std::uint64_t { return a_buffer && sealed.Names(*a_buffer) ? sealed.Of(*a_buffer).bytes : 0; };
 		constexpr std::uint64_t kSequence = sizeof(DrawSequence);
-		// The views: every face's range within the sequences, the plan (its buckets and forward range) within a face's range, its buckets'
-		// count words within each face's bucket counts.
+		// Every face's range within the sequences, the plan within a face's range, and its bucket count words within the face's counts.
 		for (std::size_t v = 0; v < Draws::kViews; ++v) {
 			const auto& frame = a_made.made.views[v];
 			const auto& view = inputs.views[v].resources;
@@ -193,8 +189,7 @@ namespace DCLF::Diagnostics
 				if (words > units(view->bucketCounts[f]))
 					finding(fmt::format("the {} view's {} bucket words past face {}'s {}", traits.name, words, f, units(view->bucketCounts[f])));
 		}
-		// The main segments: their ranges within the sequences, the Z-prepass buckets' table within phase 1's range and their count
-		// words within the counts, the terrain, forward and refraction ranges within phase 2's.
+		// Main segment ranges within the sequences, Z-prepass buckets within phase 1, and terrain, forward and refraction ranges within phase 2.
 		if (const auto& main = inputs.main) {
 			for (const auto& frame : a_made.made.main) {
 				if (!frame)
@@ -218,8 +213,7 @@ namespace DCLF::Diagnostics
 					finding(fmt::format("the terrain, forward and refraction ranges reach {} past phase 2's end {}", phaseTwo, 2ull * frame->sequenceDraws));
 			}
 		}
-		// The shadow shapes (the occlusion maps' views among theirs): each view's slot within the slots made, its classes' ranges within
-		// the slot's sequences, its buckets within the ranges and the slot's count words, its slot within the view blocks.
+		// Each shadow view's slot, class ranges, buckets and count words within their containers.
 		if (const auto& shadow = inputs.shadow) {
 			const auto& slots = inputs.shadowSlots;
 			for (const auto& frame : a_made.made.shadow) {
@@ -231,7 +225,7 @@ namespace DCLF::Diagnostics
 						finding(fmt::format("a shadow view at slot {} past the slots made", view.slot));
 						continue;
 					}
-					// The slot's buckets lie back to back in its sequences, every class's (SizeShadowBuckets): half again its draws.
+					// The slot's buckets lie back to back in its sequences, half again its draws.
 					const std::uint64_t range = ShadowSlotSequences(view.sequenceDraws);
 					if (range * kShadowDrawBytes > bytes(slots->drawArgs[view.slot]))
 						finding(fmt::format("shadow slot {}'s {} sequences past its draw arguments' {} bytes", view.slot, range, bytes(slots->drawArgs[view.slot])));
@@ -249,7 +243,7 @@ namespace DCLF::Diagnostics
 				}
 			}
 		}
-		// The index pool: a first index and a copy for every geometry slot of the tables.
+		// The index pool holds a first index and a copy for every geometry slot.
 		if (const auto& scene = inputs.scene; scene && scene->pool) {
 			const auto& pool = *scene->pool;
 			if (units(pool.firsts) < a_made.geometries || units(pool.copies) < a_made.geometries)
@@ -263,7 +257,7 @@ namespace DCLF::Diagnostics
 		if (!draws)
 			return;
 		auto& c = commitChecks;
-		// The recordings of the adopted revision resolved every buffer they bind from its set: Find's misses, counted by the set.
+		// The adopted revision's recordings must resolve every buffer from its set. Find's misses are counted per set.
 		const auto& adopted = draws->Adopted();
 		if (&adopted != c.set || adopted.Serial() != c.setSerial) {
 			c.set = &adopted;

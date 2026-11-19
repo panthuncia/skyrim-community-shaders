@@ -1,4 +1,4 @@
-// GpuOcclusion: the depth pyramid's producer, the HZB the two-phase occlusion test reads.
+// GpuOcclusion feature registration.
 
 #include "Features/DrawcallLimitFix/Features/GpuOcclusion/GpuOcclusion.h"
 

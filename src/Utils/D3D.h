@@ -1,10 +1,16 @@
 #pragma once
 #include <array>
+#include <optional>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <filesystem>
 #include <fstream>
 #include <winrt/base.h>
+
+namespace DirectX
+{
+	class ScratchImage;
+}
 
 namespace Util
 {
@@ -76,6 +82,9 @@ namespace Util
 	 */
 	std::string GetNameFromRTV(ID3D11RenderTargetView* a_rtv);
 
+	/** @brief WKPDID_D3DDebugObjectName, the private-data GUID SetResourceName names objects with. */
+	extern GUID WKPDID_D3DDebugObjectNameT;
+
 	/**
 	 * @brief Set a debug name on a D3D11 resource for RenderDoc debuggability.
 	 * @param Resource The D3D11 device child to name.
@@ -101,6 +110,13 @@ namespace Util
 	private:
 		winrt::com_ptr<REX::W32::ID3D11Multithread> multithread;
 	};
+
+	/**
+	 * @brief The defines CompileShader adds to every build after the caller's: State's shader defines, then each loaded feature's
+	 * common defines that neither the caller (a_explicit) nor an earlier entry already names. An ORG build of a D3D11 shader adds the
+	 * same, so both see one permutation.
+	 */
+	std::vector<std::pair<std::string, std::string>> GetCommonShaderDefines(std::span<const std::string_view> a_explicit = {});
 
 	/**
 	 * @brief Compile an HLSL shader from file and create the appropriate D3D11 shader object.
@@ -145,6 +161,14 @@ namespace Util
 	 * @return S_OK on success, or an error HRESULT.
 	 */
 	HRESULT SaveTextureToFile(ID3D11Device* device, ID3D11DeviceContext* context, const std::filesystem::path& path, ID3D11Texture2D* tex);
+
+	/**
+	 * @brief Save a CPU image to a DDS file on disk, through a temporary file and a rename.
+	 * @param path Destination file path (parent directories are created if needed).
+	 * @param image The image to save, with all its mips and array slices.
+	 * @return S_OK on success, or an error HRESULT.
+	 */
+	HRESULT SaveImageToFile(const std::filesystem::path& path, const DirectX::ScratchImage& image);
 
 	/**
 	 * @brief Load a DDS texture from disk and create a texture with its SRV.

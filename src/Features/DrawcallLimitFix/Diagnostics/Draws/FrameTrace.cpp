@@ -1,9 +1,7 @@
-// The frame trace (CS_DCLF_FRAME_TRACE), the corrupt-frame tool: every frame, one line per point of what it drew with - the snapshot it
-// adopted (its set, its payload's parts), its epoch coverage, each main epoch's outcome, the colour epoch's culling counts and the
-// retirement point it bound against the clock - each "[DCLF] frame trace: frame N ...", with F10 logged as the user's marker. A line
-// that is not the steady state ("submitted", every epoch covered) carries its reason; a binding the clock had already passed, or a point
-// below the last, is flagged with `<-`. tools/dclf-corrupt-frames.py maps the corrupt captures of tools/dclf-capture-burst.ps1 to these
-// lines by their timestamps.
+// The frame trace, a tool for corrupt frames. Every frame logs one line per point of what it drew with: the adopted snapshot,
+// epoch coverage, each main epoch's outcome, colour culling counts and the bound retirement point. F10 logs the user's marker.
+// A line off the steady state carries its reason, and a binding the clock already passed is flagged with "<-".
+// tools/dclf-corrupt-frames.py maps captures from tools/dclf-capture-burst.ps1 to these lines by timestamp.
 
 #include "DrawsView.h"
 #include "Events.h"
@@ -15,13 +13,13 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		/** @brief Render thread: the last frame's bound point, and whether F10 was down at it. */
+		/** @brief The last frame's bound point, and whether F10 was down at it. Render thread. */
 		struct FrameTraceState
 		{
 			std::uint64_t lastPoint = 0;
 			bool markDown = false;
 		};
-		FrameTraceState& State()
+		FrameTraceState& TraceState()
 		{
 			static FrameTraceState state;
 			return state;
@@ -64,11 +62,11 @@ namespace DCLF::Diagnostics
 
 	void TraceAdoptedBound(const AdoptedBound& a_bound)
 	{
-		auto& state = State();
+		auto& state = TraceState();
 		logger::info("[DCLF] frame trace: frame {} binds point {} (clock {}){}{}", a_bound.frame, a_bound.point, a_bound.completed,
 			a_bound.point <= a_bound.completed ? " <- BOUND AT A RETIRED POINT" : "", a_bound.point < state.lastPoint ? " <- POINT WENT BACK" : "");
 		state.lastPoint = a_bound.point;
-		// F10: the user saw a corrupt frame (its edge, once per press).
+		// F10 marks a corrupt frame the user saw, once per press.
 		const bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
 		if (down && !state.markDown)
 			logger::info("[DCLF] frame trace: ===== USER MARK (F10) at frame {} =====", a_bound.frame);
@@ -77,8 +75,7 @@ namespace DCLF::Diagnostics
 
 	void TraceColourCounts(const Draws::CounterReadback& a_readback, std::uint32_t a_slot)
 	{
-		// The slot's last colour execution's words (the host has waited for it), its first source's: whatever execution they are of,
-		// named by the stamp they carry.
+		// The range's last colour execution has retired. Its words name their execution by the stamp they carry.
 		if (a_slot >= a_readback.buffers.size())
 			return;
 		auto resource = a_readback.buffers[a_slot]->GetAPIResource();
@@ -87,8 +84,9 @@ namespace DCLF::Diagnostics
 		if (!mapped)
 			return;
 		const auto* w = static_cast<const std::uint32_t*>(mapped);
-		logger::info("[DCLF] frame trace: colour exec stamp {} (slot {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}", w[Draws::kCountWords],
-			a_slot, w[0], w[1], w[2], w[6], w[17], w[18]);
+		logger::info("[DCLF] frame trace: colour exec stamp {} (range {}): drawn {} rejected {} tested {} occluded {} phase2 drawn {} rescued {}; terrain groups {} {}; fade tested {} hidden {}; class unplanned {}",
+			w[Draws::kCountWords], a_slot, w[0], w[1], w[2], w[6], w[17], w[18], w[Draws::kCountTerrainGroupWord], w[Draws::kCountTerrainGroupWord + 1],
+			w[Draws::kCountFadeTestedWord], w[Draws::kCountFadeHiddenWord], w[Draws::kCountClassUnplannedWord]);
 		resource.Unmap(0, 0);
 	}
 }

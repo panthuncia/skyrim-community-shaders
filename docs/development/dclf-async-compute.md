@@ -65,7 +65,7 @@ DCLF's compute queue (`AsyncComputeQueue()`, `Core/Render/Resources/Helpers.h`) 
 | LightLimitFix `CopyLocalShadowMaps` (`src/Features/LightLimitFix.cpp:1903-2086`) | — | local shadow maps | **yes** | no: must follow the light views |
 | SubsurfaceScattering (`src/Features/SubsurfaceScattering.cpp:220-363`) | — | main colour, G-buffer | no | no: post-opaque |
 
-The ScreenSpaceShadows "SSS::ShadowTexture" clear is a full-screen R8G8 UAV clear; if the ray march writes every pixel it
+The ScreenSpaceShadows "ScreenSpaceShadows::ShadowTexture" clear is a full-screen R8G8 UAV clear; if the ray march writes every pixel it
 could be dropped rather than moved.
 
 ## Estimate

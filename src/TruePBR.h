@@ -56,8 +56,13 @@ public:
 
 	/** @brief Draws the ImGui settings UI for PBR texture sets and material objects. */
 	virtual void DrawSettings() override;
+
+	/** @brief The render graph's glints noise is filled again (ORGGlintsNoise::ClearShaderCache). */
+	virtual void ClearShaderCache() override;
 	/** @brief Loads PBR texture set and material object configurations from disk. */
 	virtual void SetupResources() override;
+	/** @brief On the ORG path (CS_ORG_GLINTS=1), once the render graph is up: sets up the glint noise's one-shot fill at EarlyPrepass. */
+	virtual void PostSetupResources() override;
 	/** @brief Per-frame prepass that initializes the glint noise texture and binds it to the pipeline. */
 	virtual void Prepass() override;
 	/** @brief Installs all Detours hooks for PBR material, shader, and decal interception. */
@@ -177,6 +182,12 @@ public:
 	/** @brief Creates and populates the 128x128 glint noise texture via a compute shader dispatch. */
 	void SetupGlintsTexture();
 	eastl::unique_ptr<Texture2D> glintsNoiseTexture = nullptr;
+
+	/**
+	 * @brief The glint noise's view (t20): the render graph's export on the ORG path once it is filled, else the D3D11 texture's;
+	 * null before either is ready.
+	 */
+	ID3D11ShaderResourceView* GlintsNoiseSRV() const;
 
 	std::unordered_map<uint32_t, std::string> editorIDs;
 

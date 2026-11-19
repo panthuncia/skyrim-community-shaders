@@ -4,6 +4,7 @@
 #include "../SettingManager.h"
 #include "../TextureManager.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Utils/Game.h"
 
 void ENBEffect::Execute()
@@ -19,7 +20,9 @@ void ENBEffect::Execute()
 		return;
 	}
 
+	// Engine target fields can be tripwire handles: effects and DXVK take the wrapped objects.
 	auto textureOriginal = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	textureOriginal.SRV = RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.SRV);
 
 	if (!textureOriginal.SRV) {
 		return;
@@ -109,5 +112,5 @@ void ENBEffect::UpdateEffectVariables()
 	const char* adaptationTexName = (textureManager.GetTextureSwap() & 1) ? "TextureAdaptation" : "TextureAdaptationSwap";
 	bindTextureIfEnabled(effectManager.enbAdaptation.IsCompiled() ? idEnableAdaptation : 0xFFFFFFFF, "TextureAdaptation", adaptationTexName);
 
-	SetShaderResourceVariable("TextureOriginal", globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV);
+	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
 }

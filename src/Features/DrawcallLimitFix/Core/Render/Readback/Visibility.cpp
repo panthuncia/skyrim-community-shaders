@@ -1,7 +1,7 @@
-// The visibility readback (Readbacks.h, VisibilityReadback; dclf-architecture.md, "The visibility events"): the main camera's visibility as GPU change
-// events (VisibilityEventsCS), armed and harvested by the depth commit (render thread), decoded into verdicts by a task on DCLF's
-// executor, and written as kAccumulated by the main thread at Main::Update's entry on the roots DCLF lists and their geometry.
-// The <- ACCUMULATED observer against the engine's bit runs only under CS_DCLF_ACCUMULATED_PARITY.
+// The visibility readback. VisibilityEventsCS reports main-camera visibility changes as GPU events.
+// The depth commit arms and harvests them on the render thread, and a task on DCLF's executor decodes them into verdicts.
+// The main thread then writes them as kAccumulated at Main::Update's entry, on the roots DCLF lists and their geometry.
+// See dclf-architecture.md, "The visibility events".
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -18,54 +18,48 @@ namespace DCLF
 	{
 		using Readback = VisibilityReadback;
 
-		// The CPU's batches (PostCpuVisibility): a lock-free stack any thread pushes, the frame start's kick takes whole.
+		// Lock-free stack of CPU batches. Any thread pushes, and the frame start takes it whole.
 		std::atomic<Readback::Batch*> cpuVisibility{ nullptr };
 
 		inline constexpr std::uint32_t kUnlisted = ~0u;
-		// An object's share in its plain entry (VisibilityDecode::objectShare): counted (listed), in view, an engine residue.
+		// An object's share in its plain entry.
 		inline constexpr std::uint8_t kShareListed = 1, kShareVisible = 2, kShareResidue = 4;
 
-		/**
-		 * @brief PrepareWrites' own state (Readback::decodeState). A pass visits only what can have changed: the slots the batches'
-		 * events name, the verdicts whose out-of-view window has passed (expiries, by frame), the object slots the tables' change log
-		 * names, the root rows the fade-root journal marked since the rows the classes were judged from, and the plain entries the
-		 * candidates moved; plus the objects a root's or an entry's change reaches, through the indexes kept here. Only a reset, a
-		 * camera cut and a refresh (and a log or journal it cannot read on) visit everything.
-		 */
+		/** @brief The decode task's state. A pass visits only slots that can have changed, plus the objects those changes reach.
+		 * Only a reset, a camera cut or a refresh visits everything. */
 		struct VisibilityDecode
 		{
 			struct Expiry
 			{
-				std::uint32_t frame = 0;  // the frame the slot went out of view: judged again once the window reaches it
+				std::uint32_t frame = 0;  // the frame it went out of view
 				std::uint32_t slot = 0;
 				bool root = false;
 				bool operator>(const Expiry& a_other) const { return frame > a_other.frame; }
 			};
-			MarkedList roots, objects, entries;  // this pass's visits
+			MarkedList roots, objects, entries;
 			std::vector<Expiry> expiries;        // a min-heap by frame
 			LogCursor changes;                   // tables.changeLog
-			std::uint64_t rootEpoch = 0;         // the root states' family's journal content epoch the root classes were judged at
+			std::uint64_t rootEpoch = 0;         // root states' journal epoch the root classes were judged at
 			bool rootsHeld = false;
-			std::uint32_t cutVisited = 0;        // the cut whose pending pass visited everything
-			std::shared_ptr<const EntrySpace> candidates;  // the snapshot whose indices entryMembers are in
-			// Per root slot: its class as last judged (0 not written, 1 stood in, 2 wide), its node, the object slots under it.
+			std::uint32_t cutVisited = 0;        // the cut whose pass visited everything
+			std::shared_ptr<const EntrySpace> candidates;  // the snapshot entryMembers indexes into
+			// Per root slot: class as last judged (0 not written, 1 stood in, 2 wide), node, and the object slots under it.
 			std::vector<std::uint8_t> rootClass;
 			std::vector<const void*> rootNode;
 			std::vector<std::vector<std::uint32_t>> rootMembers;
-			// Per object slot: the root and the plain entry it is listed under (kUnlisted) with its place in their lists, its share
-			// in the entry, and its occupant as last judged (the occupants' slots find an entry's new geometries).
+			// Per object slot: its root and plain entry with its place in each list, its share in the entry, and its last judged occupant.
 			std::vector<std::uint32_t> objectRoot, objectRootAt, objectEntry, objectEntryAt;
 			std::vector<std::uint8_t> objectShare;
 			std::vector<const void*> objectGeometry;
 			ankerl::unordered_dense::map<const void*, std::uint32_t> geometrySlot;
-			// Per plain entry: its object slots, and how many of them count listed, in view, as an engine residue.
+			// Per plain entry: its object slots, and how many count as listed, in view, or engine residue.
 			std::vector<std::vector<std::uint32_t>> entryMembers;
 			std::vector<std::uint32_t> entryListed, entryVisible, entryResidue;
-			// Since the last line (CS_DCLF_STATS): passes, their time, slots visited and whole passes; the parity observer's.
+			// CS_DCLF_STATS counters since the last line.
 			std::uint64_t serial = 0, passes = 0, prepareNs = 0, visits = 0, wholePasses = 0, parityFrames = 0, parityDiffs = 0;
 		};
 
-		/** @brief The decode task's state (Readback::decodeState), made on its first use. Only the decode task touches it. */
+		/** @brief The decode task's state, made on first use. Only the decode task touches it. */
 		VisibilityDecode& DecodeOf(Readback& a_readback)
 		{
 			if (!a_readback.decodeState)
@@ -73,7 +67,7 @@ namespace DCLF
 			return *static_cast<VisibilityDecode*>(a_readback.decodeState.get());
 		}
 
-		/** @brief Clears the decoder's verdicts (a reset frame: the reported words have a new, empty backing). */
+		/** @brief Clears the verdicts on a reset frame, when the reported words get a new empty backing. */
 		void StartAgain(Readback& a_readback, VisibilityDecode& a_decode)
 		{
 			a_readback.roots.assign(a_readback.roots.size(), {});
@@ -81,18 +75,17 @@ namespace DCLF
 			a_readback.rootApplied.assign(a_readback.rootApplied.size(), 0u);
 			a_readback.objectApplied.assign(a_readback.objectApplied.size(), 0u);
 			a_readback.decodedFrame = a_readback.previousDecodedFrame = 0;
-			// The reset's pass visits everything.
 			a_decode.expiries.clear();
 		}
 
-		/** @brief A slot to judge again once the window reaches a_frame (it went out of view then). */
+		/** @brief Judge a_slot again once the window reaches a_frame, the frame it went out of view. */
 		void Expire(VisibilityDecode& a_decode, std::uint32_t a_frame, std::uint32_t a_slot, bool a_root)
 		{
 			a_decode.expiries.push_back({ a_frame, a_slot, a_root });
 			std::push_heap(a_decode.expiries.begin(), a_decode.expiries.end(), std::greater<>{});
 		}
 
-		/** @brief Decode task: applies one batch to the verdicts, against its frame's tables. Each slot it takes is visited. */
+		/** @brief Applies one batch to the verdicts, against its frame's tables. Each slot it touches is visited. */
 		void Apply(Readback& a_readback, VisibilityDecode& a_decode, const Readback::Batch& a_batch)
 		{
 			const auto& tables = *a_batch.tables;
@@ -112,7 +105,7 @@ namespace DCLF
 			for (const VisibilityEvent& event : a_batch.events) {
 				const bool visible = (event.bits & kVisibilityBitVisible) != 0;
 				if (event.kind == kVisibilityKindRoot) {
-					// Must match its listing in its frame's tables and be no older than the last applied.
+					// Must match its listing in its frame's tables and be no older than the last applied event.
 					if (event.slot >= rootList.rows.size() || rootList.rows[event.slot].generation != event.generation || !rootList.nodes[event.slot] ||
 						frame < a_readback.rootApplied[event.slot]) {
 						++stale;
@@ -176,20 +169,20 @@ namespace DCLF
 			{}
 		};
 
-		/** @brief ReferenceWrites' shared locals: the reference's inputs, its asks and its writes. */
+		/** @brief Shared inputs, asks and writes for the reference pass. */
 		struct ReferencePass
 		{
 			const Readback& readback;
 			Asked& asked;
 			const SceneTables& tables;
 			const Api::RootListView& rootList;
-			std::size_t roots, objects;  // the tables'
+			std::size_t roots, objects;
 			std::uint32_t window;
 			bool full, cutPending;
 			std::vector<Readback::Writes::Write>& writes;
 		};
 
-		/** @brief The reference's roots: every listed root's write, and per root slot its class (1 stood in, 2 wide) into a_rootClass. */
+		/** @brief The reference's roots. Fills each root slot's class (1 stood in, 2 wide). */
 		void ReferenceRoots(const ReferencePass& a_ref, std::vector<std::uint8_t>& a_rootClass)
 		{
 			const auto& rootList = a_ref.rootList;
@@ -218,10 +211,7 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief The reference's objects: every drawn geometry's write by its root's class or its plain entry's, and per entry its
-		 * state (1 listed, 2 visible) and engine residue into a_entryState and a_entryResidue.
-		 */
+		/** @brief The reference's objects. Each drawn geometry is written by its root's class or its plain entry's. */
 		void ReferenceObjects(const ReferencePass& a_ref, const EntrySpace* a_candidates, std::uint32_t a_entries, const std::vector<std::uint8_t>& a_rootClass,
 			std::vector<std::uint8_t>& a_entryState, std::vector<std::uint8_t>& a_entryResidue)
 		{
@@ -286,7 +276,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief The reference's plain entry roots: each counted entry's write, none while one of its geometries is an engine residue. */
+		/** @brief The reference's plain entry roots. An entry is not written while one of its geometries is engine residue. */
 		void ReferenceEntries(const ReferencePass& a_ref, const EntrySpace* a_candidates, std::uint32_t a_entries, const std::vector<std::uint8_t>& a_entryState,
 			const std::vector<std::uint8_t>& a_entryResidue)
 		{
@@ -316,10 +306,7 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief The parity observer's reference: every listed root, object and plain entry judged against a_asked (the asks before
-		 * the pass), as PrepareWrites did before it visited only changes. Reads no engine memory.
-		 */
+		/** @brief The parity observer's reference. Judges every listed slot from scratch, as PrepareWrites did before it visited only changes. */
 		std::vector<Readback::Writes::Write> ReferenceWrites(const Readback& a_readback, Asked& a_asked, const Readback::Batch& a_newest, bool a_full, bool a_cutPending)
 		{
 			const auto& tables = *a_newest.tables;
@@ -339,7 +326,6 @@ namespace DCLF
 			const std::uint32_t window = a_readback.previousDecodedFrame;
 			std::vector<Readback::Writes::Write> writes;
 			const ReferencePass ref{ a_readback, a_asked, tables, rootList, roots, objects, window, full, cutPending, writes };
-			// Per root slot: 1 stood in, 2 wide (its geometry takes the same class).
 			std::vector<std::uint8_t> rootClass(roots, 0u);
 			ReferenceRoots(ref, rootClass);
 			const EntrySpace* candidates = a_newest.candidates.get();
@@ -353,29 +339,28 @@ namespace DCLF
 				a_asked.objectEntryGeometry.resize(objects, nullptr);
 			}
 			const std::uint32_t entries = candidates ? candidates->Capacity() : 0u;
-			// Per entry: 1 listed, 2 visible; an entry with an engine-residue geometry keeps the engine's bit.
+			// An entry with an engine-residue geometry keeps the engine's bit.
 			std::vector<std::uint8_t> entryState(entries, 0u), entryResidue(entries, 0u);
 			ReferenceObjects(ref, candidates, entries, rootClass, entryState, entryResidue);
 			ReferenceEntries(ref, candidates, entries, entryState, entryResidue);
 			return writes;
 		}
 
-		/** @brief One PrepareWrites pass's inputs and output. */
 		struct Pass
 		{
 			Readback& readback;
 			VisibilityDecode& decode;
 			const SceneTables& tables;
-			const Api::RootListView& rootList;  // the tables' listed roots (the root states' view)
+			const Api::RootListView& rootList;
 			const EntrySpace* candidates;
 			std::uint32_t entries;      // the candidates' index space
-			std::size_t roots, objects;  // the tables'
-			std::uint32_t window;        // the conservative rule's: the older of the last two decoded frames
+			std::size_t roots, objects;
+			std::uint32_t window;        // the older of the last two decoded frames
 			bool cutPending, full;
 			Readback::Writes& list;
 		};
 
-		/** @brief Takes a_slot out of its owner's list (a_of: per slot its owner, a_at: its place there). */
+		/** @brief Takes a_slot out of its owner's list. a_of holds each slot's owner and a_at its place there. */
 		void Unlist(std::vector<std::vector<std::uint32_t>>& a_lists, std::vector<std::uint32_t>& a_of, std::vector<std::uint32_t>& a_at, std::uint32_t a_slot)
 		{
 			const std::uint32_t owner = a_of[a_slot];
@@ -432,7 +417,7 @@ namespace DCLF
 				a_decode.entryMembers.resize(a_count);
 		}
 
-		/** @brief An object's share in its plain entry; the entry is visited when its counts move. */
+		/** @brief Sets an object's share in its plain entry. The entry is visited when its counts move. */
 		void Share(VisibilityDecode& a_decode, std::uint32_t a_object, std::uint8_t a_share)
 		{
 			const std::uint8_t previous = a_decode.objectShare[a_object];
@@ -456,7 +441,7 @@ namespace DCLF
 			a_decode.entries.Add(entry);
 		}
 
-		/** @brief A root slot: its write when it differs from the last asked; a changed class or node visits the objects under it. */
+		/** @brief Writes a root slot when it differs from the last ask. A changed class or node visits the objects under it. */
 		void JudgeRoot(Pass& a_pass, std::uint32_t a_root)
 		{
 			auto& readback = a_pass.readback;
@@ -466,7 +451,7 @@ namespace DCLF
 			const void* node = a_root < a_pass.roots ? rootList.nodes[a_root] : nullptr;
 			std::uint8_t rootClass = 0;
 			if (!node || a_root >= rootList.rows.size()) {
-				// Not written: forget the last write so a return writes again.
+				// Forget the last write so the slot writes again if it returns.
 				node = nullptr;
 				if (a_root < readback.rootWritten.size())
 					readback.rootWritten[a_root] = Readback::kWrittenNone;
@@ -490,7 +475,7 @@ namespace DCLF
 			}
 			if (rootClass == decode.rootClass[a_root] && node == decode.rootNode[a_root])
 				return;
-			// Its geometry takes its class; a node listed or unlisted as a fade root also turns its plain entry's geometry off or on.
+			// Its geometry takes its class. Listing or unlisting a node as a fade root also flips its plain entry's geometry.
 			for (const std::uint32_t object : decode.rootMembers[a_root])
 				decode.objects.Add(object);
 			if (a_pass.candidates)
@@ -503,7 +488,7 @@ namespace DCLF
 			decode.rootNode[a_root] = node;
 		}
 
-		/** @brief An object slot's geometry indexed by its node (geometrySlot) and its place under its root (rootMembers). */
+		/** @brief Indexes an object slot's geometry by node and records its place under its root. */
 		inline void IndexObject(VisibilityDecode& a_decode, std::uint32_t a_object, RE::BSGeometry* a_geometry, bool a_drawn, std::uint32_t a_root)
 		{
 			auto& decode = a_decode;
@@ -525,7 +510,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief A drawn object's class (1 stood in, 2 wide) and write root, by its root's class or its plain entry's. */
+		/** @brief A drawn object's class (1 stood in, 2 wide) and the root it writes through. */
 		struct ObjectClass
 		{
 			std::uint8_t objectClass = 0;
@@ -574,13 +559,13 @@ namespace DCLF
 			return out;
 		}
 
-		/** @brief An object slot's place in its plain entry's list (a_entryOf: kUnlisted for none); a move takes its share out first. */
+		/** @brief Moves an object slot to its plain entry's list. A move takes its share out first. */
 		inline void ListUnderEntry(Pass& a_pass, std::uint32_t a_object, std::uint32_t a_entryOf)
 		{
 			auto& readback = a_pass.readback;
 			auto& decode = a_pass.decode;
 			const std::uint32_t entryOf = a_entryOf;
-			// The cached entry holds only while the object is listed under it (an entry's move visits its members alone).
+			// The cached entry holds only while the object is listed under it.
 			if (entryOf == kUnlisted && a_object < readback.objectEntryGeometry.size())
 				readback.objectEntryGeometry[a_object] = nullptr;
 			if (entryOf != decode.objectEntry[a_object]) {
@@ -593,7 +578,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief An object slot: its write when it differs from the last asked, its place under its root and its plain entry. */
+		/** @brief Writes an object slot when it differs from the last ask, and lists it under its root and plain entry. */
 		void JudgeObject(Pass& a_pass, std::uint32_t a_object)
 		{
 			auto& readback = a_pass.readback;
@@ -608,8 +593,8 @@ namespace DCLF
 			IndexObject(decode, a_object, geometry, drawn, root);
 			auto [objectClass, rootNode, entry, entryOf] = ClassifyObject(a_pass, a_object, geometry, drawn, root);
 			ListUnderEntry(a_pass, a_object, entryOf);
-			// A wide geometry DCLF does not draw in the main view (engine residue, shadow-only) has no verdict: its bit stays the
-			// engine cull's (and its plain entry's too).
+			// A wide geometry DCLF does not draw in the main view, such as engine residue or shadow-only, gets no verdict.
+			// Its bit stays the engine cull's.
 			std::uint8_t share = 0;
 			if (objectClass == 2 && a_object < tables.objects.size() &&
 				(!(tables.objects[a_object].flags & kObjectMember) || (tables.objects[a_object].flags & (kObjectNoBindings | kObjectShadowOnly | kObjectFree)))) {
@@ -640,7 +625,7 @@ namespace DCLF
 			a_pass.list.writes.push_back({ geometry, rootNode, visible, Readback::kWriteGeometry, wideBit != 0 });
 		}
 
-		/** @brief A plain entry root: visible when any of its counted geometries is, unwritten while one is an engine residue. */
+		/** @brief A plain entry root is visible when any counted geometry is, and unwritten while one is engine residue. */
 		void JudgeEntry(Pass& a_pass, std::uint32_t a_entry)
 		{
 			if (a_entry >= a_pass.entries)
@@ -665,10 +650,7 @@ namespace DCLF
 			a_pass.list.writes.push_back({ const_cast<void*>(node), node, visible, Readback::kWriteEntry, true });
 		}
 
-		/**
-		 * @brief The parity observer (CS_DCLF_PERSISTENT_PARITY): a pass's writes against the reference's from the same asks, as
-		 * sets. A write only one side makes is a difference (<- WRITES DIFFER, with the first ones by slot).
-		 */
+		/** @brief The parity observer (CS_DCLF_PERSISTENT_PARITY). A write only one side makes is logged as a difference. */
 		void CompareWrites(VisibilityDecode& a_decode, const Pass& a_pass, std::uint32_t a_frame, std::vector<Readback::Writes::Write> a_reference)
 		{
 			using Write = Readback::Writes::Write;
@@ -713,17 +695,13 @@ namespace DCLF
 					a_reference.size(), diffs, first);
 		}
 
-		/**
-		 * @brief The object slots the tables' change log names since the last pass; whether the pass visits everything: on a forced
-		 * write, on tables or a log the cursor cannot read on, and when a cut starts (every slot visible until it is answered).
-		 */
+		/** @brief Visits the object slots changed since the last pass. Returns whether the pass must visit everything. */
 		bool VisitChangedObjects(VisibilityDecode& a_decode, const SceneTables& a_tables, bool a_full, std::uint32_t a_cut, bool a_cutPending)
 		{
 			const auto& tables = a_tables;
 			const std::uint32_t cut = a_cut;
 			bool everything = a_full;
-			// The log is invalidated whenever the slots are cleared (SceneTables::Clear); a generation InvalidateVerdicts alone moves
-			// leaves the columns, whose rewrites the log carries: the cursor follows the log alone.
+			// The log is invalidated whenever the slots are cleared, so the cursor can follow the log alone.
 			if (!a_decode.changes.Continues(tables.changeLog, 0u)) {
 				everything = true;
 				a_decode.changes.Restart(0u);
@@ -739,7 +717,7 @@ namespace DCLF
 			return everything;
 		}
 
-		/** @brief The plain entries the candidates moved: their members before and after (the cached entry of each is looked up again). */
+		/** @brief Visits the plain entries the candidates moved, with their members before and after. */
 		void VisitMovedEntries(Readback& a_readback, VisibilityDecode& a_decode, const Readback::Batch& a_newest, std::uint32_t a_entries, bool& a_everything)
 		{
 			const EntrySpace* candidates = a_newest.candidates.get();
@@ -780,7 +758,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief The root rows the journal marked since the classes were judged (all of them for a holder behind its floor). */
+		/** @brief Visits the root rows the journal marked since the classes were judged. */
 		void VisitMarkedRoots(VisibilityDecode& a_decode, const SceneTables& a_tables, const Api::RootListView& a_rootList, std::size_t a_roots, bool& a_everything)
 		{
 			bool& everything = a_everything;
@@ -797,7 +775,6 @@ namespace DCLF
 			a_decode.rootsHeld = true;
 		}
 
-		/** @brief The verdicts whose out-of-view frame the window has reached. */
 		void VisitExpired(VisibilityDecode& a_decode, std::uint32_t a_window)
 		{
 			const std::uint32_t window = a_window;
@@ -809,7 +786,7 @@ namespace DCLF
 			}
 		}
 
-		/** @brief Every root, object and plain entry slot, those the tables hold and those the decoder still has state for. */
+		/** @brief Every root, object and plain entry slot, including those only the decoder still has state for. */
 		void VisitEverything(VisibilityDecode& a_decode, std::size_t a_roots, std::size_t a_objects, std::uint32_t a_entries)
 		{
 			for (std::size_t r = 0, end = std::max(a_roots, a_decode.rootClass.size()); r < end; ++r)
@@ -820,7 +797,7 @@ namespace DCLF
 				a_decode.entries.Add(static_cast<std::uint32_t>(e));
 		}
 
-		/** @brief The decode's line every 300 passes (CS_DCLF_STATS), and its counters reset. */
+		/** @brief Logs the decode line every 300 passes (CS_DCLF_STATS) and resets its counters. */
 		void ReportDecode(VisibilityDecode& a_decode)
 		{
 			if (++a_decode.passes >= 300) {
@@ -835,18 +812,8 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief Decode task: the kAccumulated writes that differ from the last asked (all on a full write). Reads no engine
-		 * memory. Null when there is nothing to write.
-		 *
-		 * The conservative rule (dclf-architecture.md, "kAccumulated written by DCLF"): visible when in view in either of the last two decoded frames, when the
-		 * listing has no verdict yet (visible until FadeStateCS's first), or while a camera cut has no decoded batch of its frame or
-		 * later.
-		 *
-		 * Stood-in roots and their geometry, plus wide writes: every other listed fade root and non-layer geometry under one, and
-		 * each plain entry root (visible when any of its geometries is). A slot changing class is rewritten. Only the slots that
-		 * can have changed are visited (VisibilityDecode).
-		 */
+		/** @brief The kAccumulated writes that differ from the last ask, or all of them on a full write. Null when there is nothing to write.
+		 * A slot is visible if in view in either of the last two decoded frames, if it has no verdict yet, or during an unanswered camera cut. */
 		Readback::Writes* PrepareWrites(Readback& a_readback, VisibilityDecode& a_decode, const Readback::Batch& a_newest, bool a_reset)
 		{
 			DCLF_ZONE("CS.DCLF.VisibilityPrepare");
@@ -854,8 +821,7 @@ namespace DCLF
 			const auto& tables = *a_newest.tables;
 			const std::uint32_t cut = a_readback.cutFrame.load(std::memory_order_acquire);
 			const bool cutPending = cut && a_readback.decodedFrame < cut;
-			// The first batch at or after a cut's frame rewrites everything (the main thread set every root at the cut and held back
-			// older batches' clears).
+			// The first batch at or after a cut rewrites everything. The main thread set every root at the cut and held back older clears.
 			const bool cutAnswered = cut && !cutPending && a_readback.cutAnswered != cut;
 			const bool full = a_reset || cutAnswered || a_readback.refreshWanted.exchange(false, std::memory_order_acq_rel);
 			if (cutAnswered)
@@ -874,7 +840,7 @@ namespace DCLF
 			}
 			const EntrySpace* candidates = a_newest.candidates.get();
 			const std::uint32_t entries = candidates ? candidates->Capacity() : 0u;
-			// The parity observer's reference starts from the asks before this pass.
+			// The parity reference starts from the asks before this pass.
 			std::optional<Asked> asked;
 			if (Diagnostics::Observe().scene && Diagnostics::ParityDue(a_decode.serial, 23))
 				asked.emplace(a_readback);
@@ -890,7 +856,6 @@ namespace DCLF
 				a_readback.entryWrittenVersion.resize(entries, 0u);
 			}
 			VisitMarkedRoots(a_decode, tables, rootList, roots, everything);
-			// The verdicts whose out-of-view frame the window has reached.
 			const std::uint32_t window = a_readback.previousDecodedFrame;
 			VisitExpired(a_decode, window);
 			if (everything)
@@ -899,7 +864,7 @@ namespace DCLF
 			list->frame = a_newest.frame;
 			list->full = full;
 			Pass pass{ a_readback, a_decode, tables, rootList, candidates, entries, roots, objects, window, cutPending, full, *list };
-			// Roots first (their classes are their objects'), objects next (their shares are their entries' counts).
+			// Roots first, since objects take their class. Objects next, since entries count their shares.
 			for (const std::uint32_t r : a_decode.roots.list)
 				JudgeRoot(pass, r);
 			for (std::size_t k = 0; k < a_decode.objects.list.size(); ++k)
@@ -933,7 +898,7 @@ namespace DCLF
 		using Engine::kObjectFlags;
 		using Engine::FlagsOf;
 
-		/** @brief Main thread: sets or clears one node's kAccumulated atomically, skipping the RMW when already as wanted. */
+		/** @brief Main thread. Sets or clears one node's kAccumulated atomically, skipping the write when it is already right. */
 		void Store(Readback& a_readback, void* a_node, bool a_set, bool a_wide = false)
 		{
 			std::atomic_ref<std::uint32_t> flags(*reinterpret_cast<std::uint32_t*>(static_cast<std::byte*>(a_node) + kObjectFlags));
@@ -950,13 +915,8 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief Main thread: sets kAccumulated on the nodes between a geometry written visible and its root (receivers test every
-		 * level; skyrim-engine-notes.md). Set only: a stale bit above an out-of-view geometry is harmless (receivers stop at the
-		 * geometry's clear bit; the animation gate and tree clock read the root alone). The chain is written only if it reaches the
-		 * root: the write's tables hold the geometry, a live node's parent is live (NiNode's destructor clears its children's parent
-		 * pointers), and nothing attaches or detaches at Main::Update's entry.
-		 */
+		/** @brief Main thread. Sets kAccumulated on the nodes between a visible geometry and its root, since receivers test every level.
+		 * Set only, as a stale bit above an out-of-view geometry is harmless. Written only if the chain reaches the root. */
 		void SetChain(Readback& a_readback, RE::NiAVObject* a_geometry, const void* a_root)
 		{
 			auto& chain = a_readback.chain;
@@ -991,10 +951,7 @@ namespace DCLF
 		}
 
 
-		/**
-		 * @brief Main thread at Main::Update's entry: sets kAccumulated (set only) on the object root's non-hidden children, as
-		 * DrawWorld_BuildSceneLists does every frame, for frames where DCLF builds the lists instead.
-		 */
+		/** @brief Main thread. Sets kAccumulated on the object root's non-hidden children, as DrawWorld_BuildSceneLists does each frame. */
 		void CellRoots(Readback& a_readback)
 		{
 			const auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
@@ -1004,10 +961,8 @@ namespace DCLF
 			auto* objectRoot = root ? root->AsNode() : nullptr;
 			if (!objectRoot || Engine::IsHidden(objectRoot))
 				return;
-			// The engine's build (DrawWorld_BuildSceneLists, AE 0x14064bc20; dclf-architecture.md, "kAccumulated written by DCLF"): in an exterior it sets every
-			// non-hidden child from the third on; children 0 and 1 are list entries (appended to list 0) whose bit the main camera's
-			// list cull sets or clears. In an interior only the cell's 3D is a cell root. Containers are set too (receivers then test
-			// the levels below; nothing else reads them).
+			// Matches DrawWorld_BuildSceneLists (AE 0x14064bc20). In an exterior it sets every non-hidden child from the third on.
+			// Children 0 and 1 are list entries whose bit the list cull owns. In an interior only the cell's 3D is a cell root.
 			const auto* tes = RE::TES::GetSingleton();
 			auto* interior = tes ? tes->interiorCell : nullptr;
 			const auto* loaded = interior ? interior->GetRuntimeData().loadedData : nullptr;
@@ -1029,10 +984,7 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief The <- ACCUMULATED observer: verdicts against the engine's bit as a_sample's frame left it. Moved slots, roots
-		 * without a verdict and DCLF-only on app-culled roots are counted aside.
-		 */
+		/** @brief The <- ACCUMULATED observer. Compares verdicts with the engine's bit as the sample's frame left it. */
 		void Compare(Readback& a_readback, Readback::Batch& a_batch, const Diagnostics::Accumulated::Sample& a_sample)
 		{
 			const auto& tables = *a_batch.tables;
@@ -1087,7 +1039,7 @@ namespace DCLF
 				Count(stoodIn ? a_readback.stoodInGeometryCounts : a_readback.geometryCounts, dclf, engine);
 				if (stoodIn || dclf == engine)
 					continue;
-				// Engine-only under a root its cull failed: a stale bit from an earlier cull.
+				// Engine-only under a root its cull failed is a stale bit from an earlier cull.
 				if (engine && !(bits & Diagnostics::Accumulated::kSampleRootAccumulated))
 					++staleGeometry;
 				keep(dclf ? Readback::kGeometryDclfOnly : Readback::kGeometryEngineOnly, geometry);
@@ -1100,7 +1052,7 @@ namespace DCLF
 			a_readback.framesCompared.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		/** @brief Render thread: names a decoded batch's finds (its tables hold the nodes), then frees the batch and its tables. */
+		/** @brief Render thread. Resolves a decoded batch's finds, then frees the batch and its tables. */
 		void Release(Readback& a_readback, Readback::Batch* a_batch)
 		{
 			for (const auto& [category, node] : a_batch->firsts) {
@@ -1113,17 +1065,15 @@ namespace DCLF
 			delete a_batch;
 		}
 
-		/**
-		 * @brief Render thread, at a frame slot's depth commit: copies the slot's last execution's events into a batch if the buffer
-		 * holds the arming frame. The host has waited for that execution; the next is not submitted yet.
-		 */
+		/** @brief Render thread, at a frame slot's depth commit. Copies the slot's last events into a batch if they belong to the armed frame.
+		 * The host has waited for that execution, and the next one is not submitted yet. */
 		void Harvest(Readback& a_readback, std::uint32_t a_frameSlot)
 		{
 			auto& armed = a_readback.armed[a_frameSlot];
 			if (!armed.armed)
 				return;
 			armed.armed = false;
-			// Events past the list's end are appended again next frame; the list grows (RequireSceneTables).
+			// Events past the list's end are appended again next frame, and the list grows.
 			const bool found = a_readback.Harvest(a_frameSlot, armed.frame, [&](const std::uint32_t* a_words, std::uint32_t a_count, std::uint32_t a_capacity) {
 				auto* batch = new Readback::Batch();
 				batch->frame = armed.frame;
@@ -1139,7 +1089,7 @@ namespace DCLF
 			});
 			if (found)
 				return;
-			// No readback ran for that frame: the GPU reports its changes next frame; a carried reset goes with the next batch.
+			// No readback ran for that frame, so the GPU reports its changes next frame. A carried reset goes with the next batch.
 			a_readback.carryReset = a_readback.carryReset || armed.reset;
 			armed.tables.reset();
 			armed.candidates.reset();
@@ -1149,7 +1099,7 @@ namespace DCLF
 
 	namespace
 	{
-		/** @brief Render thread: releases the last task's decoded batches (engine reads and publication retirement are its own). */
+		/** @brief Render thread. Releases the last task's decoded batches. */
 		void ReleaseDecoded(Readback& a_readback)
 		{
 			auto* batch = a_readback.decoded.exchange(nullptr, std::memory_order_acquire);
@@ -1160,9 +1110,7 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief Render thread: hands the harvested batches to one decode task on DCLF's executor, never joined (one at a time).
-		 */
+		/** @brief Render thread. Hands the harvested batches to one decode task on DCLF's executor. Only one runs at a time. */
 		void Dispatch(const std::shared_ptr<Readback>& a_readback)
 		{
 			auto& readback = *a_readback;
@@ -1185,7 +1133,7 @@ namespace DCLF
 			}
 			auto batches = std::exchange(readback.pending, {});
 			std::stable_sort(batches.begin(), batches.end(), [](const auto* a_a, const auto* a_b) { return a_a->frame < a_b->frame; });
-			// Engine samples (only taken under CS_DCLF_ACCUMULATED_PARITY).
+			// Engine samples, only taken under CS_DCLF_ACCUMULATED_PARITY.
 			auto samples = std::make_shared<std::vector<std::unique_ptr<Diagnostics::Accumulated::Sample>>>(Diagnostics::Accumulated::TakeSamples(batches.back()->frame));
 			readback.samplesUnmatched.fetch_add(Diagnostics::Accumulated::DropSamples(oldestPending), std::memory_order_relaxed);
 			auto decode = [readback = a_readback, batches = std::move(batches), holder = std::move(samples)] {
@@ -1198,7 +1146,7 @@ namespace DCLF
 				for (auto* batch : batches) {
 					reset = reset || batch->reset;
 					Apply(*readback, state, *batch);
-					// Earlier samples had no batch; this frame's is compared only if the batch is complete.
+					// Earlier samples had no batch. This frame's is compared only if the batch is complete.
 					for (; next < samples.size() && samples[next]->frame < batch->frame; ++next)
 						readback->samplesUnmatched.fetch_add(1, std::memory_order_relaxed);
 					if (next < samples.size() && samples[next]->frame == batch->frame) {
@@ -1238,16 +1186,15 @@ namespace DCLF
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		const std::uint32_t frameSlot = host->CurrentFrameSlot();
+		// The run's range. Its last copy is done because the lease retired.
+		const std::uint32_t frameSlot = readback.ranges.Of(host->CurrentRun());
 		if (frameSlot >= readback.armed.size())
 			return;
 		const std::size_t harvested = readback.pending.size();
 		Harvest(readback, frameSlot);
-		// Reset the header for this execution's VisibilityEventsCS.
 		static constexpr std::uint32_t kZeroHeader[kVisibilityEventHeaderWords]{};
 		a_uploads(a_scene.visibilityEvents, kZeroHeader, sizeof(kZeroHeader), 0);
-		// A reported-words version the decoder has not followed holds zeros (zero-filled at growth): it restarts with this frame's
-		// batch.
+		// A reported-words version the decoder has not followed is zero-filled from growth, so decoding restarts with this batch.
 		bool reset = false;
 		auto& followed = a_scene.visibilityReportedFollowed;
 		const auto &roots = Adopted().Of(a_scene.visibilityRootReported), &objects = Adopted().Of(a_scene.visibilityObjectReported);
@@ -1263,9 +1210,8 @@ namespace DCLF
 		armed.tables = Scene::FrameView::Get().AcceptedTables();
 		armed.publication = Scene::FrameView::Get().InstalledSequence();
 		armed.retirement = Scene::FrameView::Get().InstalledRetirement();
-		// For the wide writes' plain entry roots.
 		armed.candidates = Scene::FrameView::Get().GetSunCandidates();
-		// Decode a harvested batch now, so its writes reach the next Main::Update (one frame less latency).
+		// Decode a harvested batch now so its writes reach the next Main::Update, a frame sooner.
 		if (readback.pending.size() > harvested)
 			Dispatch(a_scene.visibilityReadback);
 	}
@@ -1278,7 +1224,7 @@ namespace DCLF
 
 	void IndirectDraws::KickVisibilityReadback()
 	{
-		// The CPU's batches join the harvested ones (Dispatch sorts them by frame); without a readback they are let go here.
+		// CPU batches join the harvested ones. Without a readback they are freed here.
 		for (auto* batch = cpuVisibility.exchange(nullptr, std::memory_order_acquire); batch;) {
 			auto* following = batch->next;
 			batch->next = nullptr;
@@ -1314,7 +1260,7 @@ namespace DCLF
 			return;
 		auto& r = *impl->scene->visibilityReadback;
 		const auto start = std::chrono::steady_clock::now();
-		// The stack is newest first: reverse into frame order.
+		// The stack is newest first, so reverse it into frame order.
 		Readback::Writes* ordered = nullptr;
 		for (auto* list = r.writes.exchange(nullptr, std::memory_order_acquire); list;) {
 			auto* following = list->next;
@@ -1322,7 +1268,7 @@ namespace DCLF
 			ordered = list;
 			list = following;
 		}
-		// DCLF not live: write nothing and request a full rewrite once it is (the engine's cull writes the roots meanwhile).
+		// While DCLF is not live, write nothing and ask for a full rewrite later. The engine's cull writes the roots meanwhile.
 		if (!a_live) {
 			for (auto* list = ordered; list;) {
 				auto* following = list->next;
@@ -1339,11 +1285,10 @@ namespace DCLF
 		const std::uint32_t cut = r.cutFrame.load(std::memory_order_acquire);
 		const bool wrote = ordered != nullptr;
 		for (auto* list = ordered; list;) {
-			// A batch older than the last cut applies sets only; the post-cut full write restores the clears.
+			// A batch older than the last cut applies sets only. The full write after the cut restores the clears.
 			const bool beforeCut = cut && list->frame < cut;
-			// Its nodes are its publication's (the one installed when its frame was armed), alive while it holds the publication's
-			// retirement node. One whose publication was released all the same (a list made without its node: a defect) writes nothing
-			// and asks for a full write, which follows from the installed publication.
+			// Its nodes stay alive while it holds its publication's retirement node. If the publication was released anyway, which is a defect,
+			// it writes nothing and asks for a full write.
 			const bool alive = EngineReleases::Alive(list->publication);
 			const std::uint32_t age = Scene::FrameView::Get().GetFrame() - list->frame;
 			for (std::uint32_t seen = r.writeAgeMax.load(std::memory_order_relaxed); age > seen && !r.writeAgeMax.compare_exchange_weak(seen, age, std::memory_order_relaxed);) {}
@@ -1374,12 +1319,11 @@ namespace DCLF
 			delete list;
 			list = following;
 		}
-		// The installed publication's tables and candidates (the main thread is the render thread): a cut's writes and the kept verdicts
-		// read them, every object they name alive while installed. Replaced every call, so nothing older is kept past a frame.
+		// The installed publication's tables and candidates, alive while installed. Replaced every call, so nothing older is kept past a frame.
 		r.writtenTables = Scene::FrameView::Get().AcceptedTables();
 		r.writtenRoots = r.writtenTables ? Extensions::RootListOf(*r.writtenTables) : Api::RootListView{};
 		r.writtenCandidates = Scene::FrameView::Get().GetSunCandidates();
-		// A new camera cut: every listed root, its geometry, and the plain entry roots set visible now.
+		// On a new camera cut, set every listed root, its geometry and the plain entry roots visible now.
 		if (cut && r.cutWritten != cut && r.writtenTables) {
 			r.cutWritten = cut;
 			const auto& tables = *r.writtenTables;
@@ -1406,7 +1350,6 @@ namespace DCLF
 					SetChain(r, geometry, rootList.nodes[root]);
 					continue;
 				}
-				// A plain entry root's geometry (no fade root).
 				if (root != kNoFadeRoot || !candidates)
 					continue;
 				const auto it = candidates->geometries.find(geometry);
@@ -1420,7 +1363,7 @@ namespace DCLF
 				SetChain(r, geometry, entryNode);
 			}
 		}
-		// Every 60th write pass, forget verdicts of roots no longer listed (lookups check the listing themselves).
+		// Every 60th write pass, forget verdicts of roots no longer listed.
 		if (wrote && ++r.verdictPrunes >= 60) {
 			r.verdictPrunes = 0;
 			for (auto it = r.rootVerdicts.begin(); it != r.rootVerdicts.end();)
@@ -1451,7 +1394,7 @@ namespace DCLF
 		const auto it = r.rootVerdicts.find(a_root);
 		if (it == r.rootVerdicts.end())
 			return false;
-		// Must still be listed: a kept verdict for a freed node must not answer for another at its address.
+		// Must still be listed, so a kept verdict for a freed node cannot answer for another at its address.
 		if (!(r.writtenTables && r.writtenRoots.Contains(a_root)) &&
 			!(r.writtenCandidates && r.writtenCandidates->entries.contains(static_cast<const RE::NiAVObject*>(a_root))))
 			return false;

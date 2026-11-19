@@ -1,5 +1,4 @@
-// DrawPipelines' main set (MainPipelines): the Z-prepass and colour pipelines of the Lighting and program family keys, their
-// requests, builds, admission into set versions, and the indirect state the epochs bind.
+// The main set: Z-prepass and colour pipelines for Lighting and program family keys, from request to the indirect state epochs bind.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -47,10 +46,7 @@ namespace DCLF
 {
 	namespace
 	{
-		/**
-		 * @brief A key's variable names: its family's port space's (Extensions::MaterialSpaceOf: the Effect port's names for an effect key,
-		 * Features/Effects/EffectConstants.h), else Lighting's (kind 0's space names none: these).
-		 */
+		/** @brief A key's variable names: its family's material space, else Lighting's. */
 		std::span<const std::string_view> VariableNames(const PipelineKey& a_key, bool a_pixel)
 		{
 			const auto& space = Extensions::MaterialSpaceOf(Extensions::FamilyRules(a_key.rasterFlags).kind);
@@ -59,9 +55,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief A stage's constant table from its modules, as ShaderCache's ReflectConstantBuffers: each variable's float offset in its
-		 * PerTechnique/PerMaterial/PerGeometry block, 0 where absent. The modules are one permutation's builds of one stage, and
-		 * Lighting.hlsl places every member with packoffset, so a variable has one offset. Pulled stages declare no blocks.
+		 * @brief A stage's constant table from its modules, as ShaderCache's ReflectConstantBuffers builds it.
+		 * Lighting.hlsl places every member with packoffset, so a variable has one offset across builds. Pulled stages declare no blocks.
 		 */
 		std::vector<std::uint8_t> ConstantTableOf(std::initializer_list<const SpirvReflection*> a_modules, bool a_pixel, const PipelineKey& a_key)
 		{
@@ -99,14 +94,11 @@ namespace DCLF
 
 	inline namespace DrawPipelinesDetail
 	{
-		// The main pass: pass-wide blocks by their uniform buffer views (FrameBlockViews, the frame record's frameBlocks), b0/b1/b2/b4 by
-		// the draw's pushed addresses (its sequence's, DrawSequence), the rest from the frame record.
+		// Pass-wide blocks come from uniform buffer views, b0/b1/b2/b4 from the draw's pushed addresses, the rest from the frame record.
 		std::vector<rhi::LayoutBindingRange> MainLayoutRanges(bool a_pulled)
 		{
-			// A pulled draw (Z-prepass plain draws) reads its rows itself (DCLF_PULLED): no row ranges.
+			// A pulled draw reads its rows itself, so it gets no row ranges.
 			auto fromRow = [](rhi::LayoutBindingRange a_range) { return RangeFrom(a_range, 0, kDrawPushPipelineRow); };
-			// The draw's push word of a row block's address (DrawPipelines.h, kDrawPush*): b0 technique, b1 material, b2 geometry, b4
-			// permutation (one block, both stages).
 			auto rowBlockWord = [](std::uint32_t a_register, bool a_pixel) {
 				switch (a_register) {
 				case 0:
@@ -120,7 +112,7 @@ namespace DCLF
 				}
 			};
 			std::vector<rhi::LayoutBindingRange> mainRanges;
-			std::uint32_t block = 0;  // ForEachFrameBlock's ordinal
+			std::uint32_t block = 0;
 			for (const bool pixel : { false, true }) {
 				const std::uint32_t mask = pixel ? kFramePushPS : kFramePushVS;
 				const auto stage = pixel ? rhi::ShaderStage::Pixel : rhi::ShaderStage::Vertex;
@@ -129,8 +121,7 @@ namespace DCLF
 					const std::uint32_t b = kBindingShiftB + r;
 					const auto address = rhi::LayoutRangeSource::IndirectAddress;
 					if ((mask >> r) & 1) {
-						// A heap descriptor, not the pushed address (FramePushWords, which the push data still holds): the descriptor-buffer
-						// model lowers an address-sourced block to raw pointer loads (kFrameBlocks).
+						// A heap descriptor, not the pushed address, since address-sourced blocks lower to raw pointer loads (see kFrameBlocks).
 						mainRanges.push_back(FromFrameRecord(LayoutRange(b, 1, stage, rhi::LayoutRangeSource::IndirectIndex,
 							offsetof(DrawBindings, frameBlocks) + 4 * std::size_t{ block++ })));
 					} else if (r <= 2 || r == 4) {
@@ -141,8 +132,7 @@ namespace DCLF
 					}
 				}
 			}
-			// Textures and samplers: t0-t15 and the features' from the material row, except the shadow mask (t14, pipeline row); the rest
-			// from the frame record.
+			// t0-t15 and the features' textures come from the material row, except the shadow mask t14 from the pipeline row. The rest from the frame record.
 			const auto index = rhi::LayoutRangeSource::IndirectIndex;
 			const auto pixelStage = rhi::ShaderStage::Pixel;
 			for (std::uint32_t t = 0; t < kPixelTextureSlots; ++t) {
@@ -157,7 +147,7 @@ namespace DCLF
 				}
 			}
 			std::uint32_t first = kPixelTextureSlots;
-			// The feature slots' registers ascend (Extensions::ResolveMaterialContributors), as the ranges between them need.
+			// The feature slots' registers ascend, as the ranges between them need.
 			const std::uint32_t featureTextures = Extensions::FeatureTextureCount();
 			for (std::uint32_t f = 0; f < featureTextures; ++f) {
 				const std::uint32_t t = Extensions::FeatureTextureRegister(f);
@@ -168,7 +158,6 @@ namespace DCLF
 				first = t + 1;
 			}
 			mainRanges.push_back(FromFrameRecord(LayoutRange(kBindingShiftT + first, kTextureRegisters - first, pixelStage, index, offsetof(DrawBindings, textures) + 4 * std::size_t{ first })));
-			// The vertex stage's buffers (t121-t127), from the frame record.
 			mainRanges.push_back(FromFrameRecord(LayoutRange(kVertexTextureBinding, kVertexTextureCount, rhi::ShaderStage::Vertex, index,
 				offsetof(DrawBindings, textures) + 4 * std::size_t{ kShadingBufferRegister })));
 			return mainRanges;
@@ -210,7 +199,6 @@ namespace DCLF
 		if (l.entries.contains(a_key))
 			return;  // requested, or failed for good
 		const auto* input = l.input.get();
-		// A program family's key (Api::ProgramFamily: the Effect port's): its programs are its source's, of its family's shader.
 		const auto family = KeyFamily(a_key.rasterFlags);
 		const bool member = family != Api::ProgramFamily::Count;
 		const auto f = static_cast<std::size_t>(family);
@@ -221,10 +209,9 @@ namespace DCLF
 		}
 		const auto asked = l.asked.find(a_key);
 		const std::uint32_t slot = asked != l.asked.end() ? asked->second : ~0u;
-		// A build here is one the precompile missed: each is logged with its key, slot and nearest relative to find the gap.
+		// A build here is one the precompile missed. Each is logged with its key, slot and nearest relative to find the gap.
 		std::uint8_t onDemand = 0;
 		bool programFailed = false;
-		// A family key's program is its source's (Effect.hlsl for an effect key).
 		const auto* shader = member ? static_cast<const RE::BSShader*>(input->familySource[f]) : input->lighting;
 		const auto program = member ? ShaderPrograms::Get().FindFamily(family, a_key, *shader, &programFailed) :
 		                              ShaderPrograms::Get().Find(a_key, *input->lighting, &onDemand, &programFailed);
@@ -233,7 +220,7 @@ namespace DCLF
 				SIE::ShaderCache::Instance().IsCompiling() ? "Community Shaders' compile workers still busy" : "Community Shaders' compile workers idle", slot,
 				DescribeKey(a_key));
 		if (programFailed) {
-			// Its objects stay native (no set index ever comes) until a shader reload makes its program again (RetryAfterSourcesMoved).
+			// Its objects stay native until a shader reload makes its program again.
 			l.FailForGood(a_key);
 			l.dirty = true;
 			if (member)
@@ -248,8 +235,7 @@ namespace DCLF
 			l.blocked.push_back(a_key);
 			return;
 		}
-		// The engine state behind the key's bits (CaptureEngineStates): asked for once, the key parked until the reply. An inexpressible
-		// state keeps its objects native.
+		// Ask for the engine state once and park the key until the reply. An inexpressible state keeps its objects native.
 		const auto& states = *input->states;
 		auto stateOf = [&](std::uint32_t a_bits) -> const EngineState* {
 			if (const auto it = states.find(a_bits); it != states.end())
@@ -266,10 +252,8 @@ namespace DCLF
 				return;
 			state = *found;
 		} else {
-			// An opaque key: the engine's blend state for its group's write mode.
 			constexpr std::uint32_t kDoAlphaTest = 1u << 20;
-			// LOD (LODLand 9, LODObjects 13, LODObjectHD 15, LODLandNoise 18) draws in write mode 1 even alpha-tested, as the engine's
-			// main pass does (dclf-architecture.md, "LOD"), so the G-buffer alphas keep what lies beneath.
+			// LOD techniques (9, 13, 15, 18) draw in write mode 1 even when alpha-tested, as the engine's main pass does, so G-buffer alpha keeps what lies beneath.
 			const std::uint32_t technique = (a_key.passDescriptor >> 24) & 0x3f;
 			const bool lod = technique == 9 || technique == 13 || technique == 15 || technique == 18;
 			const std::uint32_t writeMode = (a_key.pixelDescriptor & kDoAlphaTest) && !lod ? kAlphaTestedWriteMode : kOpaqueWriteMode;
@@ -283,15 +267,13 @@ namespace DCLF
 		org::services::PipelineRecipe recipe;
 		recipe.id = fmt::format("dclf.{}.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", member ? std::string_view(Extensions::ProgramFamilyOf(family).keyName) : std::string_view("lighting"),
 			a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags, a_key.vertexLayout);
-		// Its program's binaries (their fingerprint): a program made again from edited files is a new pipeline, never the service's active one.
+		// A program rebuilt from edited files must be a new pipeline, never the service's active one.
 		recipe.shaderKey = PipelineKeyHash{}(a_key) ^ (program->fingerprint * 0x9E3779B97F4A7C15ull);
 		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&inputTargets, sizeof(inputTargets));
-		// The blend state too: its write masks are the engine's, so other masks are another pipeline.
+		// The write masks are the engine's, so other masks mean another pipeline.
 		recipe.fixedFunctionKey ^= ankerl::unordered_dense::detail::wyhash::hash(&state.blend, sizeof(state.blend)) * 0x9E3779B97F4A7C15ull;
-		// No vertex input: never an artifact built with an input layout (kPulledVerticesSalt).
 		recipe.fixedFunctionKey ^= kPulledVerticesSalt;
-		// The same build from the lane's program and from a hot reload's (PipelineRegistry: its rebuild makes the program from the files as
-		// they are now, Lighting's or its family source's).
+		// The same build serves the lane's program and a hot reload's.
 		const auto build = [device = device, layout = layout->GetHandle(), zLayout = zLayout->GetHandle(), key = a_key, formats = inputTargets, state,
 							   frontCCW = *input->frontCCW](const ShaderPrograms::Program& a_program) {
 			return Build(device, layout, zLayout, key, &a_program, formats, state, frontCCW);
@@ -331,7 +313,6 @@ namespace DCLF
 				text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
 			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
 		};
-		// Every pipeline depends on the targets: start over (the new generation drops queued builds' completions).
 		logger::info("[DCLF] pipeline lane: main pass targets {} -> {}; rebuilding {} indirect pipelines", describe(a_from), describe(a_to), l.setPipelines.size());
 		ResetMainSet(fmt::format("main pass targets {} -> {}", describe(a_from), describe(a_to)));
 	}
@@ -342,13 +323,12 @@ namespace DCLF
 		l.StartOver();
 		l.versions.Retire();
 		l.setPipelines.clear();
-		l.setSlots.clear();  // their registry entries go with them
+		l.setSlots.clear();
 		l.zGroupOf.clear();
 		l.zGroupFirst.clear();
 		l.zGroups.clear();
 		l.usage.clear();
 		l.constantTables.clear();
-		// The state classes are the set's: the new one numbers its own.
 		l.classOf.clear();
 		l.classMembers.clear();
 		l.classIndex.clear();
@@ -358,7 +338,7 @@ namespace DCLF
 			for (auto* counter : { &programCounters.requested, &programCounters.ready, &programCounters.failed })
 				counter->store(0, std::memory_order_relaxed);
 		l.recreatedBy = std::move(a_by);
-		// The draw families depend on the targets too: rebuilt (TryRequestFamily), the last kept for the process.
+		// The draw families depend on the targets too. The last builds are kept for the process.
 		for (auto& t : l.families) {
 			if (t.built)
 				t.retired.push_back(std::move(t.built));
@@ -378,7 +358,7 @@ namespace DCLF
 	void DrawPipelines::Impl::AdmitLane()
 	{
 		auto& l = lane;
-		// Completed builds, admitted in completion order; one from an earlier generation is dropped (its entry went with the set).
+		// Admitted in completion order. One from an earlier generation is dropped.
 		completions->main.Drain([&](MainDone&& a_done) {
 			if (a_done.generation != l.generation)
 				return;
@@ -415,7 +395,7 @@ namespace DCLF
 				return false;
 			a_version.pipelines.assign(l.setPipelines.begin(), l.setPipelines.begin() + admitted);
 			a_version.zGroupOf.assign(l.zGroupOf.begin(), l.zGroupOf.begin() + admitted);
-			// A group's first pipeline is admitted before any other of it: the groups of [0, admitted) are a prefix.
+			// A group's first pipeline is admitted before any other of it, so the groups below admitted are a prefix.
 			const auto groups = static_cast<std::size_t>(std::ranges::lower_bound(l.zGroupFirst, admitted) - l.zGroupFirst.begin());
 			a_version.zGroupFirst.assign(l.zGroupFirst.begin(), l.zGroupFirst.begin() + static_cast<std::ptrdiff_t>(groups));
 			return true;
@@ -432,7 +412,6 @@ namespace DCLF
 	void DrawPipelines::Impl::IndexMainBuilt(std::uint32_t a_index, const Built& a_built)
 	{
 		auto& l = lane;
-		// Its Z-prepass group: the first pipeline of an equal depth pipeline (ZPipelineKey) made one, in admission order.
 		const auto [group, added] = l.zGroups.try_emplace(a_built.zKey, static_cast<std::uint32_t>(l.zGroupFirst.size()));
 		if (added) {
 			l.zGroupFirst.push_back(a_index);
@@ -464,7 +443,6 @@ namespace DCLF
 	void DrawPipelines::Impl::AdmitToClass(const Built& a_built, std::uint32_t a_index)
 	{
 		auto& l = lane;
-		// Its state class: the first pipeline of equal state (both variants, SameState) made one, in admission order.
 		const auto [found, added] = l.classIndex.try_emplace(a_built.stateClass, static_cast<std::uint32_t>(l.classMembers.size()));
 		const std::uint32_t c = found->second;
 		if (added)
@@ -480,10 +458,8 @@ namespace DCLF
 	bool DrawPipelines::Impl::ApplyClasses(SetVersion& a_version, std::uint32_t a_admitted)
 	{
 		auto& l = lane;
-		// Per state class, its own sets and signatures (its members only: a set's pipelines may differ in their shaders alone). A version
-		// brought up from an older generation catches up on every class; the classes it has not seen are made (initial pipeline: their
-		// first member). The classes' members are admitted in order, so those of [0, a_admitted) are a prefix of each.
-		// Without device-generated commands the classes keep their members' count alone (no sets or signatures: nothing executes them).
+		// Each state class gets its own sets and signatures, since a set's pipelines may differ only in their shaders.
+		// Without device-generated commands the classes only count members.
 		a_version.classes.resize(l.classMembers.size());
 		for (std::size_t c = 0; c < l.classMembers.size(); ++c) {
 			const auto& members = l.classMembers[c];
@@ -494,8 +470,7 @@ namespace DCLF
 					return static_cast<const Built*>(l.setPipelines[members[a_member]].get())->pipelines[variant]->GetHandle();
 				};
 				const auto name = fmt::format("DCLF indirect pipelines class {}{}", c, variant == kDepthVariant ? " (depth)" : "");
-				// A set's memory follows what it can hold, and most classes hold few. Nothing else references this version, so a class
-				// that outgrew its set is simply made again.
+				// Most classes hold few pipelines, so sets are sized to fit. Nothing else references this version, so an outgrown set is just remade.
 				if (sets.sets[variant] && count > sets.capacity[variant]) {
 					sets.signatures[variant] = {};
 					sets.sets[variant] = {};
@@ -536,7 +511,7 @@ namespace DCLF
 			a_check(stored == word, [&] {
 				return fmt::format("pipeline {} at class {} index {}: class word {:#x}, expected {:#x}", member, a_class, i, stored, word);
 			});
-			// The original defect: a pipeline admitted into a set whose initial pipeline's fixed-function state is not its own.
+			// The bug this guards against: a pipeline in a set whose initial pipeline has different fixed-function state.
 			if (initial && i != 0) {
 				KeyDifference fields;
 				a_check(SameState(built->stateClass, initial->stateClass, &fields), [&] {
@@ -562,7 +537,6 @@ namespace DCLF
 		auto& parity = l.classParity;
 		const std::uint32_t applied = a_version.applied;
 		std::uint32_t logged = 0;
-		// One comparison; a failure is logged at once (the first few of a version), its description the counter's first if it is.
 		auto check = [&](bool a_equal, auto&& a_describe) {
 			if (a_equal) {
 				parity.Check(true);
@@ -578,7 +552,6 @@ namespace DCLF
 					  a_version.classOf.size(), applied, a_version.classes.size(), l.classMembers.size()); });
 		std::vector<std::uint8_t> seen(applied, 0);
 		std::uint64_t members = 0;
-		// The classes' initial pipelines' keys, each class's own (none equal: StateClassEqual).
 		ankerl::unordered_dense::map<StateClassKey, std::uint32_t, StateClassHash, StateClassEqual> initials;
 		for (std::uint32_t c = 0; c < a_version.classes.size() && c < l.classMembers.size(); ++c) {
 			const auto& sets = a_version.classes[c];
@@ -626,8 +599,7 @@ namespace DCLF
 			plain.targets = a_colour.targets;
 			plain.Create(a_device, a_built.*a_into, fmt::format("{} pulled {}", a_name, a_into == &Built::pulledColour ? "color" : "depth"));
 		} catch (const std::exception& e) {
-			// Without device-generated commands the plain draws are the only way the key's colour is drawn: the key fails its build and
-			// stays native (SetClassPlan's buckets need a plain pipeline for every set index with draws).
+			// Without device-generated commands plain draws are the only colour path, so the key fails and stays native.
 			if (!DrawPipelines::Get().impl->deviceGenerated)
 				throw std::runtime_error(fmt::format("no plain colour pipeline, and no device-generated commands to draw it: {}", e.what()));
 			a_built.*a_into = {};
@@ -653,7 +625,7 @@ namespace DCLF
 			AddUsage(pixel, true, built->usage[variant]);
 		}
 		built->tables = std::make_shared<const ConstantTables>(ConstantTables{ ConstantTableOf({ &vertex }, false, a_key), ConstantTableOf({ &pixel }, true, a_key) });
-		built->zKey.vertex = ModuleHash(a_program->vertex) ^ a_slot.zSalt;  // no Lighting pipeline's
+		built->zKey.vertex = ModuleHash(a_program->vertex) ^ a_slot.zSalt;  // never shared with a Lighting pipeline
 		built->zKey.vertexBytes = static_cast<std::uint32_t>(a_program->vertex.size());
 		built->zKey.pixel = ModuleHash(a_program->pixel);
 		built->zKey.pixelBytes = static_cast<std::uint32_t>(a_program->pixel.size());
@@ -668,8 +640,7 @@ namespace DCLF
 			depth.depthWrite = !depthOnly && write;
 			depth.depthEnable = depthOnly || test || write;
 			depth.depthFunc = (depthOnly || test) ? rhi::CompareOp::LessEqual : rhi::CompareOp::Always;
-			// Decal rules: LESS_EQUAL; only the opaque group's depth variant writes depth. A decal (kRasterDecalNudge), a first-person effect
-			// decal drawn forward (Coordinator::ViewDecalForward) too, draws with the engine's bias.
+			// Decals use LESS_EQUAL and only the opaque group's depth variant writes depth. Decals draw with the engine's bias.
 			if (a_key.rasterFlags & kRasterDecalNudge) {
 				desc.raster.rs.depthBias = a_state.depthBias;
 				desc.raster.rs.depthBiasClamp = a_state.depthBiasClamp;
@@ -691,7 +662,9 @@ namespace DCLF
 				}
 			}
 			built->stateClass.variants[variant] = desc.State(pixel);
-			desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", a_keyName, depthOnly ? "depth" : "color"));
+			// D3D12 builds only the pulled pipelines.
+			if (!DrawPipelines::Get().impl->d3d12)
+				desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", a_keyName, depthOnly ? "depth" : "color"));
 			if (!depthOnly)
 				BuildPulledColour(a_device, a_zLayout, a_program->pulledVertex, a_program->pulledPixel, desc, a_keyName, *built);
 			else if (decalGroup == 1)
@@ -703,7 +676,6 @@ namespace DCLF
 	org::services::PipelinePayload DrawPipelines::Impl::Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key,
 		const ShaderPrograms::Program* a_program, TargetFormats a_targets, EngineState a_state, bool a_frontCCW)
 	{
-		// A program family's key: its build rule (Api::ProgramBuild; ForwardOrDecal, the one there is).
 		if (const auto family = KeyFamily(a_key.rasterFlags); family != Api::ProgramFamily::Count)
 			return BuildForwardOrDecal(ProgramFamilySlotOf(family), Extensions::ProgramFamilyOf(family).keyName, a_device, a_layout, a_zLayout, a_key, a_program, a_targets, a_state,
 				a_frontCCW);
@@ -714,10 +686,10 @@ namespace DCLF
 		CheckBindings(depthPixel, true);
 		CheckPulledBindings(pulledVertex, false);
 		CheckPulledBindings(pulledDepthPixel, true);
-		// Both vertex stages (DCLF_PULLED_VERTICES, DCLF_PULLED) read the same attributes (Lighting.hlsl, DCLFPulledInput).
+		// Both vertex stages read the same attributes.
 		CheckVertexAttributes(a_program->vertexAttributes, a_key.vertexLayout);
 		auto built = std::make_shared<Built>();
-		// CS_DCLF_FOLIAGE_PARITY: terrain LOD's depth stage records its pixels (DCLF_OWNED_PARITY), so it keeps its pixel stage.
+		// CS_DCLF_FOLIAGE_PARITY: terrain LOD's depth stage records its pixels, so it keeps its pixel stage.
 		const std::uint32_t technique = (a_key.passDescriptor >> 24) & 0x3f;
 		const bool pulledPixel = FragmentDefersDepth(a_program->pulledDepthPixel) || (Policy::RecordFoliagePixels() && (technique == 9 || technique == 18));
 		AddUsage(vertex, false, built->usage[kColorVariant]);
@@ -725,18 +697,15 @@ namespace DCLF
 		AddUsage(vertex, false, built->usage[kDepthVariant]);
 		AddUsage(depthPixel, true, built->usage[kDepthVariant]);
 		built->tables = std::make_shared<const ConstantTables>(ConstantTables{ ConstantTableOf({ &vertex }, false, a_key), ConstantTableOf({ &pixel, &depthPixel }, true, a_key) });
-		// Decal groups (engine notes, "Decals"): an opaque-group decal (hint 2) writes depth in the decal depth pass, before the colour
-		// pass, with the colour variant's bias and test. A blended decal writes none (depth mode 1). A multi-index layer (group 3, the
-		// engine's group 2: depth mode 3) writes depth from its colour draw after its host is shaded; its depth variant is never drawn.
+		// Decal groups: an opaque-group decal writes depth in the decal depth pass, a blended decal writes none, and a multi-index
+		// layer writes depth from its colour draw after its host is shaded.
 		const std::uint32_t decalGroup = a_state.valid ? RasterDecalGroup(a_key.rasterFlags) : 0u;
-		// A terrain group's key carries the engine's blend (PackTerrainRasterFlags) but no decal depth: an opaque depth variant without
-		// bias; the colour variant tests as Terrain Blending's replay: group 1 LESS_EQUAL with writes (terrainDepthStencilState),
-		// group 2 EQUAL.
+		// A terrain key has the engine's blend but no decal depth. Its colour variant tests as Terrain Blending's replay does:
+		// group 1 LESS_EQUAL with writes, group 2 EQUAL.
 		const std::uint32_t terrainGroup = RasterTerrainGroup(a_key.rasterFlags);
 		const bool engineDepth = a_state.valid && terrainGroup == 0;
-		// A forward key (kRasterForward) draws after the deferred composite on the colour pass's eight attachments (so it lives in the
-		// main set): the main target alone, blended per the engine's state, the G-buffer masked off (unbound in the engine); depth per
-		// the property (SetupGeometry: kZBufferTest, kZBufferWrite). Its depth variant is never drawn.
+		// A forward key draws after the deferred composite on the colour pass's eight attachments, writing only the main target.
+		// Its depth variant is never drawn.
 		const bool forward = a_state.valid && RasterForward(a_key.rasterFlags);
 		for (std::uint32_t variant = 0; variant < kVariantCount; ++variant) {
 			const bool depthOnly = variant == kDepthVariant;
@@ -744,19 +713,17 @@ namespace DCLF
 			desc.flags.flags = DrawPipelines::Get().IndirectBindable() ? rhi::PipelineFlags_IndirectBindable : rhi::PipelineFlags_None;
 			auto& raster = desc.raster.rs;
 			raster.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : rhi::CullMode::Back;
-			// A decal draws with the engine's bias, in its depth variant as in its colour one. An execution set's pipelines must share it, so
-			// a bias makes its own state class (StateClassKey). The vertex stage also moves the decal toward the eye (DCLFDecalNudged).
+			// An execution set's pipelines must share depth bias, so a biased decal gets its own state class.
 			if (a_key.rasterFlags & kRasterDecalNudge) {
 				raster.depthBias = a_state.depthBias;
 				raster.depthBiasClamp = a_state.depthBiasClamp;
 				raster.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
 			}
-			// The engine's winding (EngineFrontCCW); RasterState::frontCCW means the same on every backend.
 			raster.frontCCW = a_frontCCW;
 			auto& depth = desc.depth.ds;
 			depth.depthEnable = true;
-			// The colour variant tests EQUAL against DCLF's Z-prepass: where the prepass's alpha test discarded (foliage cards), LESS_EQUAL
-			// would pass those fragments and run full lighting before they discard. A decal keeps LESS_EQUAL: its depth bias never passes EQUAL.
+			// Colour tests EQUAL against DCLF's Z-prepass. LESS_EQUAL would light foliage fragments the prepass's alpha test discarded.
+			// Decals keep LESS_EQUAL because their bias never passes EQUAL.
 			depth.depthWrite = depthOnly ? decalGroup != 2 : (decalGroup == 3 || terrainGroup == 1);
 			depth.depthFunc = depthOnly ? (engineDepth ? rhi::CompareOp::LessEqual : rhi::CompareOp::Less) :
 			                              ((engineDepth || terrainGroup == 1) ? rhi::CompareOp::LessEqual : rhi::CompareOp::Equal);
@@ -767,7 +734,7 @@ namespace DCLF
 				depth.depthFunc = (depthOnly || test) ? rhi::CompareOp::LessEqual : rhi::CompareOp::Always;
 			}
 			if (!depthOnly) {
-				// A key with engine state blends exactly as the engine's state says, write masks included; others don't blend.
+				// Keys with engine state blend exactly as the engine says. Others do not blend.
 				if (a_state.valid || a_state.blendOnly)
 					desc.blend.bs = a_state.blend;
 				desc.Colours(a_targets);
@@ -779,17 +746,15 @@ namespace DCLF
 			}
 			built->stateClass.variants[variant] = desc.State(depthOnly ? depthPixel : pixel);
 			const std::string keyName = fmt::format("vs {:08X} ps {:08X} flags {:08X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags);
-			desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", keyName, depthOnly ? "depth" : "color"));
+			// On D3D12 no layout maps the unpulled stages' registers, so only the pulled pipelines are made.
+			if (!DrawPipelines::Get().impl->d3d12)
+				desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", keyName, depthOnly ? "depth" : "color"));
 			if (!depthOnly) {
-				// The plain colour draws' pipeline: a forward key's (the forward buckets), a main key's (the main buckets), a terrain group's
-				// (the terrain buckets) and a decal group's (the decal buckets).
 				BuildPulledColour(a_device, a_zLayout, a_program->pulledVertex, a_program->pulledPixel, desc,
 					fmt::format("{} {}", forward ? "Lighting forward" : terrainGroup ? "Lighting terrain" : RasterDecalGroup(a_key.rasterFlags) ? "Lighting decal" : "Lighting main", keyName), *built);
 				continue;
 			}
-			// The Z-prepass plain-draw pipeline: the depth variant's state, pulled stages, no vertex input, bound per call. Without a pixel
-			// stage its vertex stage is the depth-only build (DCLF_DEPTH_ONLY: the clip position alone, the same expression); an alpha-tested
-			// one keeps the full stage, whose outputs its pixel stage reads.
+			// The Z-prepass plain-draw pipeline. Without a pixel stage it uses the depth-only vertex build. An alpha-tested one keeps the full stage.
 			const auto& zVertex = !pulledPixel && !a_program->pulledDepthVertex.empty() ? a_program->pulledDepthVertex : a_program->pulledVertex;
 			if (&zVertex != &a_program->pulledVertex)
 				CheckPulledBindings(Parse<1>({ &zVertex })[0], false);
@@ -817,21 +782,19 @@ namespace DCLF
 
 	bool DrawPipelines::Impl::CreateSignature(SetVersion::ClassSets& a_class, std::uint32_t a_variant)
 	{
-		// No vertex buffer arguments: the vertex stages pull their attributes through the buffers' views in the push data
-		// (DCLF_PULLED_VERTICES), so no pipeline has vertex bindings or a dynamic stride (VUID-VkGeneratedCommandsInfoEXT-
-		// indirectCommandsLayout-11079).
+		// No vertex buffer arguments, since the vertex stages pull their attributes
+		// (VUID-VkGeneratedCommandsInfoEXT-indirectCommandsLayout-11079).
 		rhi::IndirectArg args[4]{};
 		args[0].kind = rhi::IndirectArgKind::PipelineIndex;
 		args[1].kind = rhi::IndirectArgKind::Constant;
-		// The rows' addresses, the object word, both vertex buffer views, the pad and the rows' other blocks' addresses (DrawSequence
-		// bytes 4-99) -> the layout's push data.
+		// DrawSequence bytes 4-99 go to the push data.
 		args[1].u.rootConstants = { 0, 0, kDrawPushArgumentWords };
 		args[2].kind = rhi::IndirectArgKind::IndexBuffer;
 		args[3].kind = rhi::IndirectArgKind::DrawIndexed;
 		rhi::CommandSignatureDesc desc{};
 		desc.args = { args, 4 };
 		desc.byteStride = sizeof(DrawSequence);
-		// One per state class and variant: a call that draws a class's sub-range selects from that class's set alone.
+		// One per state class and variant, so a call selects only from its class's set.
 		desc.pipelineSet = a_class.sets[a_variant]->GetHandle();
 		desc.explicitPreprocess = true;
 		return device.CreateCommandSignature(desc, layout->GetHandle(), a_class.signatures[a_variant]) == rhi::Result::Ok;
@@ -839,7 +802,7 @@ namespace DCLF
 
 	IndirectState GetIndirectState(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration)
 	{
-		// a_catalog's set version (its lookups' indices are of it); none once the targets differ from the set's.
+		// Invalid once the targets differ from the set's.
 		const auto& pipelines = DrawPipelines::Get();
 		const auto& impl = *pipelines.impl;
 		IndirectState state;
@@ -861,7 +824,7 @@ namespace DCLF
 		state.zGroups = version->zGroupOf;
 		state.zPipelines.reserve(version->zGroupFirst.size());
 		for (const auto first : version->zGroupFirst) {
-			// An effect pipeline's group has no Z-prepass pipeline, and no bucket names it (PlanZBuckets).
+			// Effect pipelines have no Z-prepass pipeline.
 			const auto& pulledDepth = static_cast<const DrawPipelines::Impl::Built*>(version->pipelines[first].get())->pulledDepth;
 			state.zPipelines.push_back(pulledDepth ? pulledDepth->GetHandle() : decltype(pulledDepth->GetHandle()){});
 		}
@@ -882,7 +845,6 @@ namespace DCLF
 		}
 		state.zLayout = impl.zLayout->GetHandle();
 		state.zDrawSignature = impl.zDrawSignature->GetHandle();
-		// The refraction draw, under the shadow views' layout.
 		if (a_catalog.refraction.pipeline && impl.shadowLayout && impl.shadowDrawSignature) {
 			state.refraction = (*static_cast<const rhi::PipelinePtr*>(a_catalog.refraction.pipeline.get()))->GetHandle();
 			state.refractionFormat = a_catalog.refraction.format;
@@ -904,7 +866,6 @@ namespace DCLF
 	{
 		if (!IndirectStateValid(a_catalog, a_targetsGeneration))
 			return false;
-		// As GetIndirectState makes them: zGroups is the version's zGroupOf, zPipelines[g] the pulled depth pipeline of zGroupFirst[g].
 		const auto& version = *static_cast<const DrawPipelines::Impl::SetVersion*>(a_catalog.setVersion.get());
 		if (a_setIndex >= version.zGroupOf.size())
 			return false;

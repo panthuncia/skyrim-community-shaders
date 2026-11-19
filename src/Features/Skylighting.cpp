@@ -2,7 +2,10 @@
 
 #include "Deferred.h"
 #include "DrawcallLimitFix.h"
+#include "Features/Skylighting/ORGSkylighting.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -39,20 +42,35 @@ void Skylighting::RestoreDefaultSettings()
 
 void Skylighting::ResetSkylighting()
 {
+	// While the probe update runs on the render graph, a graph pass clears its volumes, ordered with the graph's reads.
+	if (ORGSkylighting::Get().QueueReset()) {
+		probeGridBottomZ = -FLT_MAX;
+		queuedResetSkylighting = false;
+		return;
+	}
+
 	auto context = globals::d3d::context;
+	const auto uav = [](Texture3D* a_texture) -> ID3D11UnorderedAccessView* { return a_texture ? a_texture->uav.get() : nullptr; };
+	auto* probeArray = uav(texProbeArray);
+	auto* accumFrames = uav(texAccumFramesArray);
+	auto* shadowBitmask = uav(texShadowBitmask);
+	auto* shadowVisibility = uav(texShadowVisibility);
+	if (!probeArray || !accumFrames || !shadowBitmask || !shadowVisibility)
+		return;
+
 	// Unit SH (fully unoccluded), matching Skylighting::UNIT_SH; probes the occlusion map does not reach would otherwise keep the previous location's values
 	const float unitSH[4] = { std::sqrt(4.0f * std::numbers::pi_v<float>), 0.0f, 0.0f, 0.0f };
-	context->ClearUnorderedAccessViewFloat(texProbeArray->uav.get(), unitSH);
+	context->ClearUnorderedAccessViewFloat(probeArray, unitSH);
 
 	// ClearUnorderedAccessViewUint always reads four values
 	const UINT clr[4] = { 0, 0, 0, 0 };
-	context->ClearUnorderedAccessViewUint(texAccumFramesArray->uav.get(), clr);
+	context->ClearUnorderedAccessViewUint(accumFrames, clr);
 	// All 32 history bits lit, so a reset does not fade in from black while the history refills
 	const UINT litHistory[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
-	context->ClearUnorderedAccessViewUint(texShadowBitmask->uav.get(), litHistory);
+	context->ClearUnorderedAccessViewUint(shadowBitmask, litHistory);
 
 	float clrf[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	context->ClearUnorderedAccessViewFloat(texShadowVisibility->uav.get(), clrf);
+	context->ClearUnorderedAccessViewFloat(shadowVisibility, clrf);
 
 	// Grid bottom is stale until the next in-world buffer update, so don't cull this frame
 	probeGridBottomZ = -FLT_MAX;
@@ -94,61 +112,18 @@ void Skylighting::SetupResources()
 		precipitationOcclusion.depthSRV->GetDesc(&srvDesc);
 		precipitationOcclusion.views[0]->GetDesc(&dsvDesc);
 
-		texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
-		texOcclusion->CreateSRV(srvDesc);
-		texOcclusion->CreateDSV(dsvDesc);
+		// CS_ORG_SKYLIGHTING=1: a graph-owned map exported to D3D11, else a D3D11 texture.
+		texOcclusion = ORGSkylighting::Get().MakeOcclusionMap(texDesc, srvDesc.Format, dsvDesc.Format);
+		if (!texOcclusion) {
+			texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
+			texOcclusion->CreateSRV(srvDesc);
+			texOcclusion->CreateDSV(dsvDesc);
+		}
 	}
 
-	{
-		D3D11_TEXTURE3D_DESC texDesc{
-			.Width = probeArrayDims[0],
-			.Height = probeArrayDims[1],
-			.Depth = probeArrayDims[2],
-			.MipLevels = 1,
-			.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
-			.Usage = D3D11_USAGE_DEFAULT,
-			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-			.CPUAccessFlags = 0,
-			.MiscFlags = 0
-		};
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D,
-			.Texture3D = {
-				.MostDetailedMip = 0,
-				.MipLevels = texDesc.MipLevels }
-		};
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D,
-			.Texture3D = {
-				.MipSlice = 0,
-				.FirstWSlice = 0,
-				.WSize = texDesc.Depth }
-		};
-
-		texProbeArray = new Texture3D(texDesc, "Skylighting::ProbeArray");
-		texProbeArray->CreateSRV(srvDesc);
-		texProbeArray->CreateUAV(uavDesc);
-
-		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
-
-		texAccumFramesArray = new Texture3D(texDesc, "Skylighting::AccumFramesArray");
-		texAccumFramesArray->CreateSRV(srvDesc);
-		texAccumFramesArray->CreateUAV(uavDesc);
-
-		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_UINT;
-
-		texShadowBitmask = new Texture3D(texDesc, "Skylighting::ShadowBitmask");
-		texShadowBitmask->CreateSRV(srvDesc);
-		texShadowBitmask->CreateUAV(uavDesc);
-
-		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UNORM;
-
-		texShadowVisibility = new Texture3D(texDesc, "Skylighting::ShadowVisibility");
-		texShadowVisibility->CreateSRV(srvDesc);
-		texShadowVisibility->CreateUAV(uavDesc);
-	}
+	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes.
+	if (!ORGSkylighting::Get().Setup(*this))
+		CreateProbeVolumes();
 
 	{
 		D3D11_SAMPLER_DESC samplerDesc = {};
@@ -164,6 +139,101 @@ void Skylighting::SetupResources()
 	}
 
 	CompileComputeShaders();
+}
+
+void Skylighting::CreateProbeVolumes()
+{
+	if (texProbeArray)
+		return;
+	D3D11_TEXTURE3D_DESC texDesc{
+		.Width = probeArrayDims[0],
+		.Height = probeArrayDims[1],
+		.Depth = probeArrayDims[2],
+		.MipLevels = 1,
+		.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
+		.Usage = D3D11_USAGE_DEFAULT,
+		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+		.CPUAccessFlags = 0,
+		.MiscFlags = 0
+	};
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
+		.Format = texDesc.Format,
+		.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D,
+		.Texture3D = {
+			.MostDetailedMip = 0,
+			.MipLevels = texDesc.MipLevels }
+	};
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
+		.Format = texDesc.Format,
+		.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D,
+		.Texture3D = {
+			.MipSlice = 0,
+			.FirstWSlice = 0,
+			.WSize = texDesc.Depth }
+	};
+
+	texProbeArray = new Texture3D(texDesc, ORGSkylighting::kProbeArrayId.data());
+	texProbeArray->CreateSRV(srvDesc);
+	texProbeArray->CreateUAV(uavDesc);
+
+	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
+
+	texAccumFramesArray = new Texture3D(texDesc, ORGSkylighting::kAccumFramesId.data());
+	texAccumFramesArray->CreateSRV(srvDesc);
+	texAccumFramesArray->CreateUAV(uavDesc);
+
+	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_UINT;
+
+	texShadowBitmask = new Texture3D(texDesc, ORGSkylighting::kShadowBitmaskId.data());
+	texShadowBitmask->CreateSRV(srvDesc);
+	texShadowBitmask->CreateUAV(uavDesc);
+
+	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UNORM;
+
+	texShadowVisibility = new Texture3D(texDesc, ORGSkylighting::kShadowVisibilityId.data());
+	texShadowVisibility->CreateSRV(srvDesc);
+	texShadowVisibility->CreateUAV(uavDesc);
+}
+
+void Skylighting::ReleaseProbeVolumes()
+{
+	for (auto* volume : { &texProbeArray, &texAccumFramesArray, &texShadowBitmask, &texShadowVisibility }) {
+		delete *volume;
+		*volume = nullptr;
+	}
+}
+
+bool Skylighting::UpdateProbesOnGraph()
+{
+	if (!ORGSkylighting::Requested())
+		return false;
+	const bool onGraph = ORGSkylighting::Get().Update(*this);
+	// Only one path's volumes exist. When the graph path stops (the runtime went down), the D3D11 volumes are made here and start
+	// reset.
+	if (onGraph == (texProbeArray != nullptr)) {
+		if (onGraph)
+			ReleaseProbeVolumes();
+		else
+			CreateProbeVolumes();
+		ResetSkylighting();
+	}
+	return onGraph;
+}
+
+ID3D11ShaderResourceView* Skylighting::ProbeArraySRV() const
+{
+	const auto& graph = ORGSkylighting::Get();
+	if (graph.IsActive())
+		return graph.SRV(ORGSkylighting::Volume::ProbeArray);
+	return texProbeArray ? texProbeArray->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* Skylighting::ShadowVisibilitySRV() const
+{
+	const auto& graph = ORGSkylighting::Get();
+	if (graph.IsActive())
+		return graph.SRV(ORGSkylighting::Volume::ShadowVisibility);
+	return texShadowVisibility ? texShadowVisibility->srv.get() : nullptr;
 }
 
 void Skylighting::ClearShaderCache()
@@ -255,7 +325,7 @@ void Skylighting::Prepass()
 
 	auto context = globals::d3d::context;
 
-	{
+	if (!UpdateProbesOnGraph()) {
 		auto renderer = globals::game::renderer;
 		auto& esramDepthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM];
 
@@ -263,7 +333,8 @@ void Skylighting::Prepass()
 			texOcclusion->srv.get(),
 			shadowCascadeSRV ? shadowCascadeSRV : nullptr,
 			shadowCascadeSRV ? globals::deferred->directionalShadowLights->srv.get() : nullptr,
-			shadowCascadeSRV ? esramDepthStencil.depthSRV : nullptr
+			// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+			shadowCascadeSRV ? RenderGraph::Engine::Tripwire::Unwrap(esramDepthStencil.depthSRV) : nullptr
 		};
 		std::array<ID3D11UnorderedAccessView*, 4> uavs = {
 			texProbeArray->uav.get(),
@@ -301,10 +372,10 @@ void Skylighting::Prepass()
 
 	// Set PS shader resources
 	{
-		ID3D11ShaderResourceView* srv = texProbeArray->srv.get();
+		ID3D11ShaderResourceView* srv = ProbeArraySRV();
 		context->PSSetShaderResources(50, 1, &srv);
 
-		srv = texShadowVisibility->srv.get();
+		srv = ShadowVisibilitySRV();
 		context->PSSetShaderResources(53, 1, &srv);
 	}
 }
@@ -321,6 +392,8 @@ void Skylighting::PostPostLoad()
 	stl::write_vfunc<0x28, BSShaderAccumulator_StartGroupingAlphas>(RE::VTABLE_BSShaderAccumulator[0]);
 
 	MenuOpenCloseEventHandler::Register();
+
+	ORGSkylighting::Reserve();
 }
 
 //////////////////////////////////////////////////////////////
@@ -574,12 +647,18 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	[[maybe_unused]] auto state = globals::state;  // Tracy only
 	auto renderer = globals::game::renderer;
 
+	// Native mode: nothing the engine draws reaches the GPU, so the engine has nothing to draw into the map: no slot of its depth table is
+	// lent to it, the engine culls nothing for it, and nothing clears it here. Drawcall Limit Fix draws the map, and ORGSkylighting clears it
+	// with its own pass's load operation after the probe update read it. RenderMask still sets the camera and the projection.
+	const bool native = RenderGraph::Engine::Native::Active();
 	auto& precipitation = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
 	RE::BSGraphics::DepthStencilData precipitationCopy = precipitation;
 
-	precipitation.depthSRV = texOcclusion->srv.get();
-	precipitation.texture = texOcclusion->resource.get();
-	precipitation.views[0] = texOcclusion->dsv.get();
+	if (!native) {
+		precipitation.depthSRV = texOcclusion->srv.get();
+		precipitation.texture = texOcclusion->resource.get();
+		precipitation.views[0] = texOcclusion->dsv.get();
+	}
 
 	static float& PrecipitationShaderCubeSize = (*(float*)REL::RelocationID(515451, 401590).address());
 	float originalPrecipitationShaderCubeSize = PrecipitationShaderCubeSize;
@@ -601,10 +680,12 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	// GPU-culled, in its shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera
 	// and clears the map. Otherwise, or on a frame DCLF did not draw it, the engine does.
 	auto& dclf = globals::features::drawcallLimitFix;
-	const bool reference = a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
-	// Held by Drawcall Limit Fix's startup hold: rendered here without the engine's cull, as DCLF's own variant is.
+	const bool reference = !native && a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
+	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
 	const bool held = !a_dclf && dclf.OcclusionHeld(DrawcallLimitFix::kSkyOcclusion);
-	const bool engine = (!a_dclf && !held) || reference;
+	const bool engine = !native && ((!a_dclf && !held) || reference);
+	// Engine-only occluders: the engine draws them into DCLF's map at RenderMask.
+	bool engineOnly = false;
 	{
 		ZoneScopedN("Skylighting - Setup Projection");
 		// The engine positions the precipitation camera using its previous world
@@ -617,7 +698,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		_computeProjection(a_precip, a_precip->occlusionData.camera);
 		if (engine)
 			a_precip->SetupMask();
-		else if (dclf.OcclusionEngineOnlyMask(a_precip))
+		else if (!native && (engineOnly = dclf.OcclusionEngineOnlyMask(a_precip)))
 			;  // DCLF's map, the engine's cull for its engine-only occluders alone (SetupMask set the camera)
 		else if (auto* accumulator = a_precip->occlusionData.accumulator.get())
 			accumulator->camera = a_precip->occlusionData.camera.get();  // what SetupMask sets
@@ -637,8 +718,17 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		// RenderMask defers its clear until the first engine draw. The DCLF
 		// accumulator may be empty, so explicitly discard the previous sky
 		// direction's depths before the shadow epoch draws into this map.
-		if (a_dclf)
-			globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		// On the ORG path the graph cleared the twin after the last probe
+		// update read it (ORGSkylighting::Update), unless the engine drew
+		// into the map since; then no D3D11 clear is needed. The reference
+		// and engine-only frames, whose engine draws come first, keep it.
+		auto& graph = ORGSkylighting::Get();
+		const bool clearedOnGraph = graph.TakeOcclusionCleared();
+		if (a_dclf) {
+			if (!native && (!clearedOnGraph || reference || engineOnly))
+				globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+			graph.NoteOcclusionDrawn();
+		}
 		globals::profiler->EndPass();
 	}
 	inOcclusion = false;
@@ -655,7 +745,8 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 
 	PrecipitationShaderDirection = originalParticleShaderDirection;
 
-	precipitation = precipitationCopy;
+	if (!native)
+		precipitation = precipitationCopy;
 
 	{
 		ZoneScopedN("Skylighting - Restore Projection");
@@ -757,11 +848,11 @@ void Skylighting::RenderOcclusion()
 	}
 }
 
-void Skylighting::CaptureShadowCascadeSRV()
+void Skylighting::CaptureShadowCascadeSRV(ID3D11ShaderResourceView* a_shadowMap)
 {
-	auto context = globals::d3d::context;
-	ID3D11ShaderResourceView* srv = nullptr;
-	context->PSGetShaderResources(4, 1, &srv);
+	ID3D11ShaderResourceView* srv = a_shadowMap;
+	if (srv)
+		srv->AddRef();
 	if (shadowCascadeSRV)
 		shadowCascadeSRV->Release();
 	shadowCascadeSRV = srv;

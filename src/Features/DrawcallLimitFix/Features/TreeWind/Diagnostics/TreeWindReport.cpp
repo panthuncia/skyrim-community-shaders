@@ -1,5 +1,4 @@
-// Tree wind's report line (CS_DCLF_STATS, among the primary cull's lines): the tree animation list and the tree list's loop, with the
-// persistent parity's owned trees still on the list.
+// Tree wind's report line under CS_DCLF_STATS: the tree animation list and the tree list's loop.
 
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeAnimation.h"

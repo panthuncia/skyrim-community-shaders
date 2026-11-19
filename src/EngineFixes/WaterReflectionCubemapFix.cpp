@@ -1,6 +1,7 @@
 #include "WaterReflectionCubemapFix.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 
 void WaterReflectionCubemapFix::Install()
@@ -31,8 +32,9 @@ void WaterReflectionCubemapFix::ResetCubemapOnSceneChange()
 			return;
 
 	const float clear[4]{};
+	// The faces can be tripwire handles (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's context takes the objects they wrap.
 	for (auto* rtv : reflections.cubeSideRTV)
-		context->ClearRenderTargetView(rtv, clear);
+		context->ClearRenderTargetView(RenderGraph::Engine::Tripwire::Unwrap(rtv), clear);
 
 	previousInteriorCell = interiorCell;
 	previousWorldSpace = worldSpace;

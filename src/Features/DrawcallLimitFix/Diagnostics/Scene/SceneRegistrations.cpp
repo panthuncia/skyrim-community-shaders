@@ -1,6 +1,5 @@
-// What the frame registered, observed: the capture's drain read on the render thread (the Lighting shader check, the main camera's
-// registrations), posted for the next scene pass, which checks the registrations against the residency its walk left (the registration
-// parity). The normal path reads no registration. (The reflection residue's classification is Features/Reflection's, Diagnostics/Residue.cpp.)
+// Registration parity. The render thread reads the capture's drain and posts it for the next scene pass, which checks the
+// registrations against the residency its walk left. The normal path reads no registration.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -16,7 +15,7 @@ namespace DCLF::Diagnostics
 
 		bool parityOn = false;
 
-		/** @brief The main camera's batch renderers, for the filter of the capture; false before the first latch (the first frame). */
+		/** @brief The main camera's batch renderers, used to filter the capture. False before the first latch. */
 		bool RefreshMainBatchRenderers()
 		{
 			auto* accumulator = V::latchedAccumulator() ? V::latchedAccumulator() : *globals::game::currentAccumulator.get();
@@ -40,7 +39,7 @@ namespace DCLF::Diagnostics
 			drain->observed = parityOn;
 			const auto entries = a_event.entries;
 			if (RefreshMainBatchRenderers()) {
-				// Any Lighting pass the frame registered names the engine's instance DCLF's programs are of (CaptureLightingShader).
+				// Any Lighting pass registered names the engine instance DCLF's programs are built from.
 				if (auto* lighting = EngineShaders::Lighting())
 					for (const auto& entry : entries)
 						if (entry.pass && entry.pass->shader && entry.pass->shader->shaderType.get() == RE::BSShader::Type::Lighting) {
@@ -49,30 +48,28 @@ namespace DCLF::Diagnostics
 									static_cast<const void*>(entry.pass->shader), static_cast<const void*>(lighting));
 							break;
 						}
-				// Eligible objects DCLF has not bound that the engine registered: a scene event DCLF missed (a record not written again,
-				// a verdict not taken again). The tracked set is the coordinator's: checked by the next scene pass.
+				// Eligible objects the engine registered that DCLF has not bound mean a missed scene event. The next scene pass checks them.
 				for (const auto& entry : entries)
 					if (entry.geometry && state.mainBatchRenderers.contains(entry.batch))
 						drain->registrations.push_back({ entry.geometry, entry.hint });
 			} else {
 				drain->observed = false;
 			}
-			// Latest wins (the newest frame's registrations alone are checked).
+			// Latest wins, so only the newest frame's registrations are checked.
 			state.drainPosted.store(std::shared_ptr<const RegistrationDrain>(std::move(drain)), std::memory_order_release);
 		}
 
 		void OnInputsTaken(const On<ScenePoint::AccumulateInputsTaken>&)
 		{
-			// None posted since the last pass leaves none, so no drain is checked twice.
+			// Nothing posted since the last pass leaves none, so no drain is checked twice.
 			auto& state = SceneDiagnostics();
 			state.drain = state.drainPosted.exchange(nullptr, std::memory_order_acq_rel);
 		}
 
 		void CheckRegistrations(const Scene::Coordinator& a_store)
 		{
-			// The registration parity: only while the render thread observed the frame's registrations; the normal path reads none of them.
-			// The newest frame's drain posted since the last pass (the frame before this pass's), judged against the residency this pass's
-			// walk left, before its joins: a record bound by the last pass counts as bound.
+			// Only while the render thread observed the frame's registrations. The newest drain is judged against the residency this pass's
+			// walk left, before its joins, so a record bound by the last pass counts as bound.
 			auto& state = SceneDiagnostics();
 			const auto& drain = state.drain;
 			if (!drain || !drain->observed)
@@ -86,7 +83,7 @@ namespace DCLF::Diagnostics
 				if (it == tracked.end() || it->second.candidateReason != Ineligible::None || V::ResidentObject(a_store, a_store.FindObject(entry.geometry)))
 					continue;
 				++r.registeredUnbound;
-				// The names are the engine's: read under a lease (the scene lane), skipped without one.
+				// The names are the engine's, so read them under a lease and skip without one.
 				if (r.registeredUnboundFirst.empty())
 					if (const EngineReadWindow::Lease lease; lease)
 						r.registeredUnboundFirst = fmt::format("'{}' under '{}' (hint {})", entry.geometry->name.c_str() ? entry.geometry->name.c_str() : "",

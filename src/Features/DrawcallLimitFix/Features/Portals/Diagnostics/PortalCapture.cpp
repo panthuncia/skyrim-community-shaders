@@ -1,12 +1,7 @@
-// CS_DCLF_PORTAL_CAPTURE=<directory>: every CS_DCLF_PORTAL_CAPTURE_EVERY-th depth epoch (default 300), each registered portal batch's
-// queries as the GPU prepared them, with the frame's program encoding, into a corpus file for the portal bench (Portals/PortalCorpus.h,
-// tests/DclfPortalBench). The queries are copied after the depth epoch into a staging buffer and written three epochs later.
-//
-// Each capture also checks the batch's verdicts against the CPU's PortalTest on the same words and queries ("<- PORTAL VERDICTS
-// DIFFER"). With CS_DCLF_PORTAL_TRACE the inline batch writes each query's decision trace (PortalPrograms.hlsli: the step that decided
-// it, the view test, hashes of the view planes and directory entry it loaded), and a disagreement logs the GPU's trace against the
-// CPU's. The copies are on the immediate context, which the async compute queue can run frames behind: the trace names the frame
-// whose programs the batch read, and the check uses that frame's words.
+// CS_DCLF_PORTAL_CAPTURE=<directory>: every Nth depth epoch (CS_DCLF_PORTAL_CAPTURE_EVERY, default 300), writes each portal batch's
+// queries and the frame's program encoding to a corpus file for tests/DclfPortalBench. Written three epochs after the copy.
+// Each capture also checks the batch's verdicts against the CPU's PortalTest. The copies run on the immediate context, which the
+// async compute queue can run frames behind, so the check uses the words of the frame the batch actually read.
 
 #include "Features/DrawcallLimitFix/Features/Portals/PortalBatch.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalContext.h"
@@ -110,8 +105,7 @@ namespace DCLF::Features::Portals
 			std::vector<std::uint32_t> words;
 			std::string metadata;
 			std::vector<Pending> pending;
-			// CS_DCLF_PORTAL_TRACE: the walk's words at each recent depth epoch (and their view-plane hash), by scene frame: the
-			// frame whose planes a batch's dispatch read, when the async compute queue ran it behind this copy.
+			// Recent epochs' words by scene frame, to find the frame whose planes a late async dispatch read.
 			struct Epoch
 			{
 				std::uint32_t frame = 0, planes = 0;
@@ -162,17 +156,14 @@ namespace DCLF::Features::Portals
 					const std::uint32_t* traceWords = p.trace && SUCCEEDED(context->Map(p.trace.get(), 0, D3D11_MAP_READ, 0, &traceMapped)) ?
 					                                      static_cast<const std::uint32_t*>(traceMapped.pData) :
 					                                      nullptr;
-					// The buffer holds slots past the batch's live queries, which no dispatch reads any more (their results are left over).
-					// With the trace, the batch's last dispatch stamped every query it evaluated with its frame (the first evaluated
-					// query's stamp): a slot with another stamp was not evaluated, and is not checked.
+					// Slots past the live queries are leftovers. With the trace on, a slot whose stamp differs from the last dispatch's was not
+					// evaluated, and is not checked.
 					std::optional<std::uint32_t> lastStamp;
 					std::uint32_t unevaluated = 0;
 					for (std::size_t i = 0; traceWords && i < corpus.queries.size() && i < p.traceBytes / 16 && !lastStamp; ++i)
 						if (!(corpus.queries[i].flags & PortalCorpus::kImmediate))
 							lastStamp = traceWords[i * 4] >> 24;
-					// The async compute queue can run frames behind the graphics queue, which this copy is ordered on: the batch's
-					// buffers then hold an earlier frame's dispatch. With the trace, the words checked against are the frame's whose
-					// view planes that dispatch read (the planes of its first view-tested query), when one of the recent epochs has them.
+					// The async compute queue can run frames behind, so the buffers may hold an earlier frame's dispatch. Check against that frame's words when a recent epoch has them.
 					std::span<const std::uint32_t> checkWords = corpus.words;
 					std::optional<std::uint32_t> readFrame;
 					for (std::size_t i = 0; lastStamp && i < corpus.queries.size() && i < p.traceBytes / 16; ++i) {
@@ -204,7 +195,6 @@ namespace DCLF::Features::Portals
 						std::string why;
 						const int cpu = PortalTest(checkWords, q.program, centre, q.bound[3], q.flags, why);
 						++checked;
-						// The query's trace (its index in the queries buffer), against the CPU's same fields.
 						const std::size_t index = static_cast<std::size_t>(&q - corpus.queries.data());
 						const std::uint32_t* trace = traceWords && index < p.traceBytes / 16 ? traceWords + index * 4 : nullptr;
 						CpuTrace expected;
@@ -276,7 +266,6 @@ namespace DCLF::Features::Portals
 			a_capture.words = PortalViews::Get().Encoded();
 			a_capture.metadata = Location();
 			a_capture.frame = Scene::FrameView::Get().GetFrame();
-			// A staging copy of a batch buffer (its whole elements of a_stride bytes), on the immediate context; its size, 0 if none.
 			const auto stage = [](const std::shared_ptr<org::Buffer>& a_buffer, UINT a_stride, winrt::com_ptr<ID3D11Buffer>& a_staging) -> UINT {
 				const UINT bytes = a_buffer ? static_cast<UINT>(a_buffer->GetSize() / a_stride * a_stride) : 0u;
 				if (!bytes)

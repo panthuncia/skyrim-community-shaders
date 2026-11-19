@@ -1,6 +1,7 @@
 #include "TerrainHelper.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 
@@ -109,7 +110,8 @@ struct THExtendedRendererState
 
 	void SetPSTexture(size_t textureIndex, RE::BSGraphics::Texture* newTexture)
 	{
-		ID3D11ShaderResourceView* resourceView = newTexture ? newTexture->resourceView : nullptr;
+		// Bound on the raw context: an engine texture's tripwire handle goes as the D3D11 view it wraps.
+		ID3D11ShaderResourceView* resourceView = newTexture ? RenderGraph::Engine::Tripwire::Unwrap(newTexture->resourceView) : nullptr;
 
 		PSTexture[textureIndex] = resourceView;
 		PSResourceModifiedBits |= (1 << textureIndex);

@@ -1,5 +1,4 @@
-// LocalLightCull: the point lights' shadow culls without DCLF's entries (LocalLightCull.h describes it): the frame's exclusion and
-// category filter (render thread), the Process1 skip and NiNode::OnVisible filter inside the lights' culls, and the lights' bits.
+// Point-light shadow culls that skip the entries DCLF draws. LocalLightCull.h has the overview.
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
 #include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
@@ -47,8 +46,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		constexpr std::uint32_t kParabolicMode = 0xF - PassCapture::kFirstShadowMode;
 
 		bool installed = false;
-		// This frame's exclusion (the one the next frame applies waits in Core's ParabolicExclusionSlot), held until the next
-		// selection: the culls that read it run between the two on the render thread.
+		// This frame's exclusion. Held until the next selection because the light culls that read it run in between.
 		std::shared_ptr<SunExclusion> frameHeld;
 		std::atomic<const SunExclusion*> frameExclusion{ nullptr };
 		std::atomic<bool> cullsWhole{ false };  // this frame's culls skip nothing (Policy::FilterLightCulls)
@@ -69,7 +67,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 		bool Excluded(const SunExclusion& a_exclusion, const void* a_object) { return ExcludedIndex(a_exclusion, a_object) != ~0u; }
 
-		// ---- The category filter (LocalLightCull.h).
 		constexpr DCLF::Engine::Offset kNodeOnVisible{ { 70307 }, { 68956 } };  // NiNode::OnVisible, VTABLE_NiNode slot 0x34
 		constexpr DCLF::Engine::Offset kCull{ { 70267 }, { 68916 } };           // NiAVObject::Cull(object, process, arg)
 		constexpr std::uint32_t kAlwaysDraw = 1u << 11;
@@ -79,8 +76,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		/** @brief One category node's children less its excluded entries, in child order. */
 		struct CategoryFilter
 		{
-			// The node, held: the snapshots key it and a later selection builds it again from here, so it must not be freed (nor its
-			// address reused by another node) while a snapshot names it. Released with the snapshot, at Present.
+			// Held so the node is not freed or its address reused while a snapshot still names it. Released with the snapshot at Present.
 			RE::NiPointer<RE::NiNode> node;
 			std::vector<RE::NiPointer<RE::NiAVObject>> children;
 			std::uint32_t cut = 0;               // the excluded entries left out
@@ -115,7 +111,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		};
 		FilterStats filterStats;
 
-		// ---- The point lights' bits for the engine's main passes under cut entries (NoteMainRegistration).
 		constexpr std::size_t kProcessCullMode = 0x30198;         // BSCullingProcess::cullMode
 		constexpr std::size_t kProcessCompoundFrustum = 0x301A0;  // BSCullingProcess::compoundFrustum
 		constexpr std::size_t kFrustumFreeOp = 0xBC;              // BSCompoundFrustum::freeOp
@@ -125,8 +120,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		constexpr std::size_t kAccumulatorLightBit = 0x164;
 		constexpr std::uint32_t kMaxLights = 32;
 		constexpr std::uint32_t kNoLight = ~0u;
-		// How a light's cull reached a node's children: untested (cull mode 1, under a kAllPass multibound), against its sphere
-		// (FUN_14151a1e0), or against that and the portals' compound frustum (mode 4 with one), which DCLF does not test.
+		// How a light's cull reached a node's children. Mode 4 adds the portal compound frustum, which DCLF does not test.
 		enum ReachKind : std::uint32_t
 		{
 			kReachAll,
@@ -143,17 +137,14 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			float centre[3]{};
 			float radius = 0.0f;
 			bool captured = false;
-			// The sphere its cull tests, known before it (FUN_141519d20: the first view's camera position, the light's radius): an empty
-			// cull's bits test it, and the parity frames compare it with the one the cull captured.
+			// The sphere the light's cull will test (FUN_141519d20). Empty culls test against it, and parity frames compare it.
 			float predictedCentre[3]{};
 			float predictedRadius = 0.0f;
 			bool predicted = false;
-			// The light, and whether it is portal-strict: its bits pass its strict gates too (Portals/StrictGates.h), from the selection's
-			// context of it (made after its Accumulate, before any main registration).
+			// Portal-strict lights also pass their strict gates (Portals/StrictGates.h).
 			const RE::BSShadowLight* light = nullptr;
 			bool strict = false;
-			// A spot light (BSShadowFrustumLight): its cull tests its culling process's planes (Process2: the caster volume, else the
-			// frustum), not a sphere; the predicted volume, as its cull will test it.
+			// A spot light's cull tests its process's planes, not a sphere. The predicted volume is what it will test.
 			bool spot = false;
 			ShadowCameras::Planes volume;
 		};
@@ -164,7 +155,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		std::atomic<bool> lightsReady{ false };              // a light accumulated since the selection
 		thread_local std::uint32_t currentLight = kNoLight;  // the ordinal of the light whose Accumulate runs on this thread
 
-		// ---- The empty culls (LocalLightCull.h): a light whose every paraboloid view DCLF draws is not culled at all.
 		constexpr std::size_t kLightPortalStrict = 0x47;    // BSLight::portalStrict: its cull tests the portals' compound frustum
 		std::atomic<bool> frameCullsEmpty{ false };         // the selection's: the exclusion live and not a parity frame
 		std::atomic<bool> frameSpotsEmpty{ false };         // the selection's: the spot views' casters withheld and not a parity frame
@@ -174,15 +164,13 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		struct EmptyStats
 		{
 			std::atomic<std::uint64_t> lights{ 0 }, notCovered{ 0 }, portalStrict{ 0 }, given{ 0 }, withBits{ 0 }, unstamped{ 0 };
-			// Covered lights culled for the engine-only subset alone (Scene/EngineCasters.h), not empty.
+			// Lights culled only for the engine-only subset, not empty.
 			std::atomic<std::uint64_t> subset{ 0 };
-			// Lights culled empty a frame early: their views not made yet (a newly selected light), so no shadow until they are.
+			// Newly selected lights with no views yet. They cast no shadow until the views exist.
 			std::atomic<std::uint64_t> late{ 0 };
-			// The spot lights' of these: culled empty, with a view not DCLF's, portal-strict kept native.
 			std::atomic<std::uint64_t> spots{ 0 }, spotsNotCovered{ 0 }, spotsStrict{ 0 };
 			std::atomic<std::uint64_t> spheresChecked{ 0 }, spheresDiffer{ 0 };
-			// Portal-strict lights culled empty; their sphere bits tested against their gates, and refused by them; tested without a portal
-			// graph (no rooms: nothing to gate, by design); tested without a context otherwise (not selected, or not walked: given, ungated).
+			// Portal-strict counters. No graph means nothing to gate. No context means the bit is given ungated.
 			std::atomic<std::uint64_t> strictLights{ 0 }, strictTested{ 0 }, strictRefused{ 0 }, strictNoGraph{ 0 }, strictNoContext{ 0 };
 		};
 		EmptyStats emptyStats;
@@ -194,9 +182,8 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		BitStats bitStats;
 
 		/**
-		 * @brief Render thread, at the selection (every frame, before Main::Draw): a new frame of lights. Not Main::Draw's mask
-		 * clear (FUN_1414cb640), which it calls only while the player's third-person 3D is drawn: in first person the lights
-		 * accumulate with no clear before them.
+		 * @brief Starts a new frame of lights at the selection, on the render thread.
+		 * Main::Draw's mask clear (FUN_1414cb640) runs only in third person, so this cannot rely on it.
 		 */
 		void ResetFrameLights()
 		{
@@ -208,7 +195,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				light.captured = light.predicted = light.strict = light.spot = false;
 				light.light = nullptr;
 			}
-			// No registration reads it now: the last frame's main registrations ended at its Main::Draw.
+			// The last frame's main registrations ended at its Main::Draw.
 			mainSeen.NewRound();
 			if (lightStamp.fetch_add(1, std::memory_order_relaxed) + 1 == 0)
 				lightStamp.store(1, std::memory_order_relaxed);
@@ -220,18 +207,18 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			const std::uint32_t light = currentLight;
 			if (light == kNoLight || !a_words)
 				return;
-			const auto mode = Engine::At<std::uint32_t>(a_process, kProcessCullMode);
+			const auto mode = DCLF::Engine::At<std::uint32_t>(a_process, kProcessCullMode);
 			if (mode == 2)  // kAllFail
 				return;
-			const void* frustum = Engine::At<void*>(a_process, kProcessCompoundFrustum);
+			const void* frustum = DCLF::Engine::At<void*>(a_process, kProcessCompoundFrustum);
 			const std::uint32_t kind = mode == 1                                                                     ? kReachAll :
-			                           frustum && Engine::At<std::uint32_t>(frustum, kFrustumFreeOp) != 0 && mode != 3 ? kReachPortal :
+			                           frustum && DCLF::Engine::At<std::uint32_t>(frustum, kFrustumFreeOp) != 0 && mode != 3 ? kReachPortal :
 			                                                                                                          kReachTested;
-			// The static process is every point light's: its sphere is this light's only during its cull.
+			// The static process is shared by every point light. Its sphere is this light's only during its cull.
 			auto& sphere = frameLights[light];
 			if (!sphere.captured) {
-				std::memcpy(sphere.centre, &Engine::At<float>(a_process, kProcessLightCentre), sizeof(sphere.centre));
-				sphere.radius = Engine::At<float>(a_process, kProcessLightRadius);
+				std::memcpy(sphere.centre, &DCLF::Engine::At<float>(a_process, kProcessLightCentre), sizeof(sphere.centre));
+				sphere.radius = DCLF::Engine::At<float>(a_process, kProcessLightRadius);
 				sphere.captured = true;
 			}
 			const std::uint64_t stamp = static_cast<std::uint64_t>(lightStamp.load(std::memory_order_relaxed)) << 32;
@@ -274,10 +261,8 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 
 		/**
-		 * @brief A portal-strict light's gates for a geometry in its sphere (Portals/StrictGates.h): its chain's verdict in the light's context and
-		 * its bound in the room frustum. Without a portal graph there is nothing to gate; without a context otherwise (not selected, or not
-		 * walked this frame) the bit stands, counted apart. Any thread: the selection's frame is not written between its Select and the next
-		 * frame's.
+		 * @brief Whether a portal-strict light's gates admit a geometry in its sphere (Portals/StrictGates.h).
+		 * Safe on any thread because the selection's frame is not written until the next frame.
 		 */
 		bool StrictAdmits(const FrameLight& a_light, const RE::BSGeometry& a_geometry)
 		{
@@ -303,7 +288,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return admitted;
 		}
 
-		bool Hidden(const RE::NiAVObject* a_object) { return Engine::IsHidden(a_object); }
+		bool Hidden(const RE::NiAVObject* a_object) { return DCLF::Engine::IsHidden(a_object); }
 
 		/** @brief A node whose OnVisible is NiNode's own through the vtable: exactly NiNode (the category nodes). */
 		bool ExactNiNode(const RE::NiAVObject* a_object)
@@ -313,13 +298,13 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 
 		/**
-		 * @brief Whether a subtree holds no geometry: nothing a light's registration would take, and no light entry. Under a
-		 * tracked category node every geometry attached later is tracked, and its entry appearing builds the filter again.
+		 * @brief Whether a subtree holds no geometry.
+		 * Geometry attached later under a tracked category node rebuilds the filter when its entry appears.
 		 */
 		bool HoldsNoGeometry(const RE::NiAVObject* a_object)
 		{
 			// Past 64 levels it counts as holding one.
-			return Engine::ForEachLive(a_object, [](RE::NiAVObject& a_node, std::uint32_t a_depth) { return a_depth <= 64 && !a_node.AsGeometry(); });
+			return DCLF::Engine::ForEachLive(a_object, [](RE::NiAVObject& a_node, std::uint32_t a_depth) { return a_depth <= 64 && !a_node.AsGeometry(); });
 		}
 
 		std::shared_ptr<CategoryFilter> BuildCategory(const RE::NiNode& a_node, const SunExclusion& a_exclusion)
@@ -357,10 +342,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		std::atomic<FilterBuild*> filterReady{ nullptr };  // the pool's result, taken at the next selection
 		bool filterInFlight = false;                        // render thread: a build is on the pool
 
-		/**
-		 * @brief The pool: the filter a_build asks for. Whole for a new verdict (every category node that is the parent of an excluded
-		 * entry); otherwise the base's nodes, those a detour made dirty built again. A lease per entry or node read.
-		 */
+		/** @brief Builds the filter on the pool, whole for a new verdict or else rebuilding only the dirty nodes. */
 		void BuildFilter(FilterBuild& a_build)
 		{
 			DCLF_ZONE("CS.DCLF.LightCullFilter");
@@ -402,10 +384,8 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 
 		/**
-		 * @brief Render thread, at the selection: the filter for this exclusion. A finished build is installed if it is still for the
-		 * frame's verdict; a new one goes to the pool when the verdict, an entry's appearance or a dirty node moved (one at a time). The
-		 * frame's light culls use the installed filter only when it is for the frame's verdict (its dirty nodes walked natively);
-		 * otherwise they walk every category node natively until the build lands.
+		 * @brief Installs a finished filter or starts a new build, on the render thread at the selection.
+		 * Until a filter for the frame's verdict lands, the light culls walk every category node natively.
 		 */
 		void UpdateFilter(const std::shared_ptr<SunExclusion>& a_exclusion)
 		{
@@ -425,7 +405,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 					++filterStats.stale;
 					retired[0].push_back(std::move(done->built));
 				}
-				// The exclusion and base (engine references through the snapshot) go here, on the render thread.
+				// Engine references are released here on the render thread.
 				if (done->base)
 					retired[0].push_back(std::move(done->base));
 			}
@@ -436,8 +416,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				return;
 			}
 			const std::uint64_t appeared = Scene::FrameView::Get().GetLightEntriesAppeared();
-			// Whole for a new verdict; for one translated to newer candidates (the same version) the nodes of the entries that moved were
-			// made dirty (SelectFrame), and the rest stand.
+			// A verdict translated to newer candidates keeps the same version. SelectFrame marked the moved entries' nodes dirty.
 			const bool current = filterBuilt && filterBuilt->exclusionVersion == a_exclusion->version;
 			// An entry appeared: the nodes that cut a child for holding no geometry judge it again (it may hold one now).
 			const bool appearedNow = current && filterBuilt->entriesAppeared != appeared;
@@ -461,15 +440,13 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 
 		/**
-		 * @brief NiNode::OnVisible (AE 0x140d1e2c0, VTABLE_NiNode slot 0x34): when the node's bound radius is not 0 or it is
-		 * kAlwaysDraw, NiAVObject::Cull on each child (which skips a hidden one, else calls the process's Process1). Inside a
-		 * point light's cull, a filtered category node does the same over its children less the excluded entries.
+		 * @brief NiNode::OnVisible detour (AE 0x140d1e2c0, vtable slot 0x34).
+		 * Inside a point light's cull, a filtered category node culls its children less the excluded entries.
 		 */
 		struct NodeOnVisible
 		{
 			static void thunk(RE::NiNode* a_node, RE::NiCullingProcess* a_process, std::int32_t a_arg)
 			{
-				// The frame's filter (built on the frames the culls keep whole too): the light reaching its nodes is what its bits follow.
 				if (const auto* filter = currentLight != kNoLight ? filterCurrent.load(std::memory_order_acquire) : nullptr)
 					if (const auto it = filter->nodes.find(a_node); it != filter->nodes.end()) {
 						const auto& category = *it->second;
@@ -496,11 +473,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief The point lights' bits for a geometry of a cut entry: per light that reached the entry (its category node's reach,
-		 * or its own when Process1 skipped it), the light's bit, untested or when the geometry's bound is in the light's sphere.
-		 * a_reach: the lights by reach kind.
-		 */
+		/** @brief The point lights' bits for a geometry of a cut entry, from each light that reached it. */
 		std::uint32_t BitsOf(const SunExclusion& a_exclusion, std::uint32_t a_entry, const RE::BSGeometry& a_geometry, std::array<std::uint32_t, kReachKinds>& a_reach)
 		{
 			a_reach = {};
@@ -523,10 +496,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return bits;
 		}
 
-		/**
-		 * @brief Whether a registered geometry hangs from a filtered category node's kept child, when its chain passes through one
-		 * (a_through): the observers' check on the frames the culls skip nothing.
-		 */
+		/** @brief Whether a geometry hangs from a filtered category node's kept child, for the observers' check. */
 		bool UnderKeptChild(const Filter& a_filter, const RE::NiAVObject* a_object, bool& a_through)
 		{
 			a_through = false;
@@ -541,10 +511,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return false;
 		}
 
-		/**
-		 * @brief The bits a_lights (ordinals) give a_geometry: each light's whose predicted sphere its bound is in, a portal-strict light's
-		 * through its gates too.
-		 */
+		/** @brief The bits a_lights give a_geometry by predicted sphere, with portal-strict lights also gated. */
 		std::uint32_t SphereBits(std::uint32_t a_lights, const RE::BSGeometry& a_geometry)
 		{
 			const auto& bound = a_geometry.worldBound;
@@ -589,7 +556,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			a_frameLight.predictedCentre[1] = camera->world.translate.y;
 			a_frameLight.predictedCentre[2] = camera->world.translate.z;
 			a_frameLight.predictedRadius = niLight->GetLightRuntimeData().radius.x;
-			// A spot light's cull (FUN_1414f0920): descriptor 0's culling process, set up by its UpdateCamera before this Accumulate.
 			a_frameLight.spot = a_light.GetIsFrustumLight();
 			if (a_frameLight.spot) {
 				const auto* process = static_cast<const RE::NiCullingProcess*>(descriptors[0].cullingProcess);
@@ -609,17 +575,12 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		};
 
 		/**
-		 * @brief How a light's Accumulate culls. Its views and their casters DCLF's (its cull's bits DCLF's to give): Empty, with its
-		 * bookkeeping as BSShadowParabolicLight::Accumulate does it - the first accumulator's light index and bit, the shadow-light count
-		 * - and no cull, no registration (which would take the accumulation context's lock against the main camera's list jobs); or Subset
-		 * while the frame has engine-only geometry (Scene/EngineCasters.h), the engine's own Accumulate culling that subset alone
-		 * (EngineOnlyCull), its bits DCLF's for the rest as for an empty one.
+		 * @brief Decides how a light's Accumulate culls.
+		 * Empty skips the cull, which would otherwise take the accumulation lock against the main camera's list jobs.
 		 */
 		LightCull CullEmpty(RE::BSShadowLight& a_light, std::uint32_t a_ordinal, std::uint32_t* a_count)
 		{
 			auto& descriptors = a_light.GetRuntimeData().shadowmapDescriptors;
-			// Every view of the light DCLF's this frame and its casters the set's (KeepLight covered them, before this Accumulate): nothing
-			// the engine's cull would register is drawn by them.
 			const bool spot = frameLights[a_ordinal].spot;
 			const auto kind = spot ? ShadowViews::Kind::Frustum : ShadowViews::Kind::Parabolic;
 			std::uint32_t views = 0;
@@ -636,15 +597,12 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				(spot ? emptyStats.spotsNotCovered : emptyStats.notCovered).fetch_add(1, std::memory_order_relaxed);
 				return LightCull::Engine;
 			}
-			// A light whose views DCLF has not made yet (newly selected: usually the next frame's) is not handed to the engine's whole cull:
-			// it casts no shadow until they exist, as a caster not yet a member casts none until it joins. Culled empty below.
+			// A light whose views DCLF has not made yet is not handed to the engine's cull. It casts no shadow until they exist.
 			const bool late = !covered || views < descriptors.size();
 			if (late)
 				emptyStats.late.fetch_add(1, std::memory_order_relaxed);
-			// Portal-strict: its cull's rooms, shared nodes and room frusta are DCLF's strict gates (Portals/StrictGates.h), on its views'
-			// casters (BuildDrawsLatch::strictContext), DCLF's receivers (GpuShadowVolume::portalContext) and the engine's receivers' bits
-			// (StrictAdmits), always: no switch hands a portal-strict light back to the engine's whole cull.
-			if (Engine::At<bool>(&a_light, kLightPortalStrict))
+			// Portal-strict lights are always gated by DCLF's strict gates. No switch hands them back to the engine's whole cull.
+			if (DCLF::Engine::At<bool>(&a_light, kLightPortalStrict))
 				emptyStats.strictLights.fetch_add(1, std::memory_order_relaxed);
 			// A caster that stays the engine's has only the engine's cull to draw its shadow: the light's Accumulate culls the subset.
 			if (const auto& subset = Scene::FrameView::Get().GetEngineCasters(); !late && subset && !subset->Of(Scene::EngineOnlySubset::kCaster).roots.empty()) {
@@ -652,19 +610,16 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				return LightCull::Subset;
 			}
 			const std::uint32_t count = *a_count;
-			Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex) = count + 1;
-			Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit) = count < 0x1F ? 1u << count : 0u;
-			// A spot light's FUN_1414f0920 counts its one view; a point light's Accumulate one per hemisphere.
+			DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex) = count + 1;
+			DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit) = count < 0x1F ? 1u << count : 0u;
+			// A spot light counts one view, a point light one per hemisphere.
 			*a_count = count + (!spot && a_light.shadowMapCount == 2 ? 2 : 1);
 			emptyLights.fetch_or(1u << a_ordinal, std::memory_order_relaxed);
 			(spot ? emptyStats.spots : emptyStats.lights).fetch_add(1, std::memory_order_relaxed);
 			return LightCull::Empty;
 		}
 
-		/**
-		 * @brief A light the engine culls whole while DCLF draws the shadows (EngineOnlyCull::NoteWholeCull): past the mask's 32 (no ordinal),
-		 * or a view not DCLF's. Not while DCLF is off, with the shadows not DCLF's, or on the parity frames (cullsWhole).
-		 */
+		/** @brief Counts a light the engine culls whole while DCLF draws the shadows. */
 		void NoteWholeLight(std::uint32_t a_ordinal, bool a_spot)
 		{
 			if (!installed || !ShellState::Running() || !PassCapture::ShadowWithholdingEnabled() || cullsWhole.load(std::memory_order_relaxed))
@@ -673,10 +628,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			EngineOnlyCull::NoteWholeCull(a_ordinal == kNoLight ? (a_spot ? W::SpotPastMask : W::PointPastMask) : (a_spot ? W::SpotNotCovered : W::PointNotCovered));
 		}
 
-		/**
-		 * @brief A Subset light's Accumulate: the engine's own, its cull limited to the frame's engine-only subset (EngineOnlyCull), then
-		 * the light's bits DCLF's to give for the rest, as an empty one's.
-		 */
+		/** @brief A Subset light's Accumulate: the engine's cull limited to the engine-only subset, then DCLF's bits for the rest. */
 		template <class Accumulate>
 		void CullSubset(std::uint32_t a_ordinal, Accumulate&& a_accumulate)
 		{
@@ -705,9 +657,9 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			std::uint32_t bit = 0;
 			for (const auto& descriptor : a_light.GetRuntimeData().shadowmapDescriptors)
 				if (const auto* accumulator = descriptor.shaderAccumulator.get()) {
-					const auto index = Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex);
+					const auto index = DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex);
 					if (index != 0 && index != 0xFFFF)
-						bit |= Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit);
+						bit |= DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit);
 				}
 			frameLights[a_ordinal].bit = bit;
 			frameLightBits.fetch_or(bit, std::memory_order_relaxed);
@@ -715,8 +667,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			lightsReady.store(true, std::memory_order_release);
 		}
 
-		// BSShadowParabolicLight::Accumulate (vtable slot 9, 0x14151b960): the point lights' cull and registration, timed; the
-		// frame's category filter applies for the call, or none runs (CullEmpty).
+		// BSShadowParabolicLight::Accumulate (vtable slot 9, 0x14151b960).
 		std::atomic<std::int64_t> accumulateTicks{ 0 };
 		std::atomic<std::uint64_t> accumulateCalls{ 0 };
 		struct Accumulate
@@ -725,14 +676,13 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			{
 				LARGE_INTEGER start{}, end{};
 				QueryPerformanceCounter(&start);
-				// A light DCLF cannot give its bits to (past the mask's 32) culls everything, as does every light while DCLF is switched off
-				// (no selection ran: the frame's exclusion, filter and empty culls are a running frame's).
+				// Past the mask's 32 lights, or with DCLF off, a light culls everything.
 				const std::uint32_t ordinal = TakeOrdinal();
 				auto& light = *static_cast<RE::BSShadowLight*>(a_light);
 				if (ordinal != kNoLight) {
 					Predict(light, frameLights[ordinal]);
 					frameLights[ordinal].light = &light;
-					frameLights[ordinal].strict = Engine::At<bool>(&light, kLightPortalStrict);
+					frameLights[ordinal].strict = DCLF::Engine::At<bool>(&light, kLightPortalStrict);
 				}
 				const auto mode = ordinal != kNoLight && !a_arg3 && frameCullsEmpty.load(std::memory_order_relaxed) ? CullEmpty(light, ordinal, a_count) :
 				                                                                                                          LightCull::Engine;
@@ -747,7 +697,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 					}
 					currentLight = ordinal;
 					lightFilter = filter;
-					// CS_DCLF_STRICT_LIGHT_PARITY: a portal-strict light's cull traced where nothing is skipped or filtered.
 					const auto frame = Scene::FrameView::Get().GetFrame();
 					const bool whole = !filter && (!frameExclusion.load(std::memory_order_acquire) || cullsWhole.load(std::memory_order_relaxed));
 					const bool traced = StrictLightParity::Begin(light, whole, frame);
@@ -761,7 +710,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 					currentLight = kNoLight;
 				}
 				if (ordinal != kNoLight) {
-					// The parity frames: the sphere the cull tested (captured where it reached a node or entry DCLF notes) is the predicted one.
 					if (const auto& frameLight = frameLights[ordinal]; cullsWhole.load(std::memory_order_relaxed) && frameLight.captured && frameLight.predicted) {
 						bool same = std::abs(frameLight.radius - frameLight.predictedRadius) <= 1e-3f;
 						for (std::uint32_t i = 0; i < 3; ++i)
@@ -778,11 +726,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * BSShadowFrustumLight::Accumulate (vtable slot 9, AE 0x14151aa60): descriptor 0's accumulator takes the light's index and bit, then
-		 * FUN_1414f0920 culls the scene's object root through descriptor 0's culling process (mode 3; 4 portal-strict), registers what it
-		 * reaches and counts the view. Culled empty as a point light's is (CullEmpty), its receivers' bits from its process's planes.
-		 */
+		// BSShadowFrustumLight::Accumulate (vtable slot 9, AE 0x14151aa60). Culled empty like a point light.
 		std::atomic<std::int64_t> spotTicks{ 0 };
 		std::atomic<std::uint64_t> spotCalls{ 0 };
 		struct SpotAccumulate
@@ -796,7 +740,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				if (ordinal != kNoLight) {
 					Predict(light, frameLights[ordinal]);
 					frameLights[ordinal].light = &light;
-					frameLights[ordinal].strict = Engine::At<bool>(&light, kLightPortalStrict);
+					frameLights[ordinal].strict = DCLF::Engine::At<bool>(&light, kLightPortalStrict);
 				}
 				const auto mode = ordinal != kNoLight && !a_arg3 && frameSpotsEmpty.load(std::memory_order_relaxed) ? CullEmpty(light, ordinal, a_count) :
 				                                                                                                         LightCull::Engine;
@@ -823,7 +767,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 					if (const auto* exclusion = frameExclusion.load(std::memory_order_acquire)) {
 						stats.visited.fetch_add(1, std::memory_order_relaxed);
 						if (const std::uint32_t index = ExcludedIndex(*exclusion, a_object); index != ~0u) {
-							// The light reached it, in the state its geometries' tests would have run in.
 							if (exclusion->lightReach)
 								NoteReach(a_process, &exclusion->lightReach[index * kReachKinds]);
 							if (!cullsWhole.load(std::memory_order_relaxed)) {
@@ -851,17 +794,15 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 	{
 		static bool timed = false;
 		if (!timed) {
-			// Timed whether or not the skip is on: the A/B's measure.
+			// Timed whether or not the skip is on, for A/B measurement.
 			stl::write_vfunc<0x9, Accumulate>(RE::VTABLE_BSShadowParabolicLight[0]);
 			stl::write_vfunc<0x9, SpotAccumulate>(RE::VTABLE_BSShadowFrustumLight[0]);
-			// The culls limited to the engine-only subset (a Subset light's).
 			EngineOnlyCull::Install();
 			timed = true;
 		}
 		if (installed)
 			return;
-		// A cut entry's geometries take the lights' bits from the Sun source's registration and mask-clear hooks (Features/Shadows/Sun).
-		// Their sites passed the preflight, so their absence is an install that failed: DCLF is forced off at the end of PostPostLoad.
+		// These sites passed preflight, so a missing install is a failure. DCLF is forced off at the end of PostPostLoad.
 		if (!Extensions::SourceCullsInstalled(Api::ShadowSource::Sun)) {
 			HookSites::NoteFailed("the point lights' shadow culls", "the sun's accumulation hooks are not installed");
 			return;
@@ -870,8 +811,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		const auto base = REL::Module::get().base();
 		stl::write_vfunc<0x16, Process1>(RE::VTABLE_BSParabolicCullingProcess[0]);
 		installed = true;
-		// The category filter, optional: it walks the children itself, so another hook in NiNode::OnVisible's slot (Grass Optimizations')
-		// would be skipped; it stays out then.
+		// The filter walks the children itself, so it would skip another hook in this slot, such as Grass Optimizations'. It stays out then.
 		{
 			REL::Relocation<std::uintptr_t> nodeVtable{ RE::VTABLE_NiNode[0] };
 			if (const auto held = reinterpret_cast<const std::uintptr_t*>(nodeVtable.address())[0x34]; held != base + kNodeOnVisible) {
@@ -891,11 +831,11 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 	{
 		if (!installed)
 			return;
-		// The switches are read after the sources' hooks: the parity's trace goes in at the first frame, before any light's cull.
+		// The parity trace must go in before any light's cull on the first frame.
 		StrictLightParity::Install();
 		ResetFrameLights();
 		++stats.frames;
-		// The culls of the frame read this one; the previous frame's culls are over (they ran before its shadow epoch).
+		// The previous frame's culls are over, since they ran before its shadow epoch.
 		std::shared_ptr<SunExclusion> next = std::move(a_pending);
 		if (!next || !next->candidates)
 			++stats.noExclusion, next.reset();
@@ -904,10 +844,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		else if (const auto candidates = Scene::FrameView::Get().GetLightCandidates(); !candidates)
 			++stats.stale, next.reset();  // no candidates this frame (a load, a reset)
 		else if (next->candidates != candidates) {
-			// A verdict on the frame's candidates, as the builder translated it (ForwardExclusion): the entries changed since its snapshot
-			// are the engine's (the lights cull them natively), the rest stand. The filter's nodes holding a changed entry are walked
-			// natively until they are built again (dirty: UpdateFilter); the version is kept, so the rest of the filter stands. None made
-			// for these candidates: no exclusion this frame.
+			// Entries changed since the builder's snapshot fall back to the engine's cull. Their filter nodes are walked natively until rebuilt.
 			std::vector<std::uint32_t> changed;
 			auto translated = ForwardExclusion(next, candidates, &changed);
 			if (!translated)
@@ -915,8 +852,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			else if (filterInstalled && filterBuilt)
 				for (const std::uint32_t e : changed)
 					for (const auto* snapshot : { next->candidates.get(), candidates.get() }) {
-						// The parent as a key only (its parent may be detached meanwhile). A snapshot past the release horizon may name
-						// roots already released: a released root left its parent, which NoteStructure dirtied as it did.
+						// The parent is only a key, since it may be detached meanwhile.
 						if (!EngineReleases::Alive(snapshot->publication))
 							continue;
 						const auto* root = e < snapshot->Capacity() ? snapshot->entryNodes[e] : nullptr;
@@ -930,9 +866,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		}
 		const bool whole = next && !Policy::FilterLightCulls(a_frame);
 		cullsWhole.store(whole, std::memory_order_relaxed);
-		// The empty culls whenever the mode's casters are withheld and the frame is no parity frame, exclusion or not: an empty cull's bits
-		// are the lights' spheres (NoteMainRegistration), and the exclusion is only what a light the engine culls skips. A frame without one
-		// (a cell change, stale candidates) is not handed to the engine's whole culls.
+		// Empty culls whenever the mode's casters are withheld outside parity frames, with or without an exclusion.
 		frameCullsEmpty.store(Policy::FilterLightCulls(a_frame) && PassCapture::Get().CastersWithheld(kSetCasterPoint), std::memory_order_relaxed);
 		// The spot lights' need no exclusion (their casters are the plain and clamped set's): every frame those are withheld, but a parity one.
 		frameSpotsEmpty.store(Policy::FilterLightCulls(a_frame) && PassCapture::Get().CastersWithheld(kSetCaster), std::memory_order_relaxed);
@@ -949,7 +883,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 
 	void NoteStructure(const void* a_node)
 	{
-		// A child of a filtered category node attached or detached: the node is walked natively until the next selection.
 		const auto* a_parent = static_cast<const RE::NiNode*>(a_node);
 		const auto* filter = filterInstalled && a_parent ? filterCurrent.load(std::memory_order_acquire) : nullptr;
 		if (!filter)
@@ -968,14 +901,11 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		if (!exclusion && !empty && !parity)
 			return;
 		const auto* property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
-		void* lightData = property ? Engine::At<void*>(property, Engine::kPropertyLightData) : nullptr;
+		void* lightData = property ? DCLF::Engine::At<void*>(property, DCLF::Engine::kPropertyLightData) : nullptr;
 		if (!lightData)
 			return;
 		const bool whole = cullsWhole.load(std::memory_order_relaxed);
-		// The empty culls' lights reached nothing: at a geometry's first clearing main registration of the frame (the later ones read the
-		// cleared mask) it takes the bit of each whose sphere it is in, as their culls' registration would have ORed it. The parity frames
-		// (none culled empty) compute the same over every light, for the observer to compare with the engine's, with or without an exclusion
-		// (a frame of spot lights alone has none).
+		// Lights culled empty reached nothing. The first clearing main registration of a geometry takes their sphere bits instead.
 		bool first = false;
 		std::uint32_t sphereBits = 0;
 		if (empty || whole || parity) {
@@ -986,7 +916,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			if (first)
 				sphereBits = SphereBits(empty ? empty : PredictedLights(), *a_geometry);
 			if (first && empty) {
-				Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask) |= sphereBits;
+				DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask) |= sphereBits;
 				emptyStats.given.fetch_add(1, std::memory_order_relaxed);
 				emptyStats.withBits.fetch_add(sphereBits ? 1 : 0, std::memory_order_relaxed);
 			}
@@ -995,7 +925,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			static constexpr std::array<std::uint32_t, kReachKinds> kNoReach{};
 			if (parity && first)
 				Diagnostics::Notify(Diagnostics::PointLightBits{ a_geometry, ~0u, 0u, kNoReach,
-					Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask) & frameLightBits.load(std::memory_order_relaxed), true, sphereBits });
+					DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask) & frameLightBits.load(std::memory_order_relaxed), true, sphereBits });
 			return;
 		}
 		const auto& candidates = *exclusion->candidates;
@@ -1011,7 +941,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return;
 		std::array<std::uint32_t, kReachKinds> reach{};
 		const std::uint32_t bits = entry != ~0u ? BitsOf(*exclusion, entry, *a_geometry, reach) : 0u;
-		auto& mask = Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask);
+		auto& mask = DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask);
 		if (!whole) {
 			mask |= bits;
 			bitStats.given.fetch_add(1, std::memory_order_relaxed);

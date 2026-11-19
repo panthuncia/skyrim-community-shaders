@@ -1,12 +1,8 @@
 #pragma once
 
-// The direct sites' shared internals (Sites.h's implementation, split by site): the frame slots and what a site's frame is made of, the
-// culls' dispatch, the callback's recording helpers, and the hooks each site's own file defines. Sites.cpp owns the frame (FrameStart,
-// EndFrame, ExecuteEpoch, the slots' retirement) and the main depth, colour and forward sites; the others are in their own files:
-// - ShadowSite.cpp: the shadow site (the shadow views and the occlusion maps);
-// - ViewSites.cpp: the depth site's hosted views (the reflection's faces, first person's depth) and the first-person colour site;
-// - Families.cpp: the draw families' draws at the depth and colour sites.
-// Included by those files only (volk first: include Main/Resources.h before it).
+// The direct sites' shared internals: frame slots, cull dispatch, the callback's recording helpers and each site file's hooks.
+// Sites.cpp owns the frame and the main depth, colour and forward sites. ShadowSite.cpp, ViewSites.cpp and Families.cpp hold the rest.
+// Included by those files only. Include Main/Resources.h first so volk comes before any Vulkan header.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Recorder.h"
@@ -27,11 +23,15 @@ namespace org
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <utility>
 #include <vector>
+
+#include <Render/RunRef.h>
 
 namespace org
 {
-	class ExternalTextureResource;
+	class GloballyIndexedResource;
 }
 
 namespace DCLF::Direct::detail
@@ -50,40 +50,37 @@ namespace DCLF::Direct::detail
 		std::atomic_ref<T>(a_counter).fetch_add(a_value, std::memory_order_relaxed);
 	}
 
-	/** @brief One thread's secondaries for one frame slot: its own command pool, reset at the slot's retirement. */
+	/** @brief One thread's secondaries for one frame slot, from its own command pool. Reset when the slot retires. */
 	struct ListPool
 	{
 		rhi::CommandAllocatorPtr allocator;
-		std::deque<rhi::CommandListPtr> lists;  // never moved: a CulledBatch names one by address
+		std::deque<rhi::CommandListPtr> lists;  // never moved, because a CulledBatch names one by address
 		std::size_t used = 0;
 
-		/** @brief A secondary recycled for recording (begun by its recorder), or null when one could not be made. */
+		/** @brief A recycled secondary for recording, or null when one could not be made. */
 		rhi::CommandList* Next(rhi::Device& a_device);
 		void Reset();
 	};
 
-	/**
-	 * @brief Any thread: a_pool reset on DCLF's pool (none of its lists in use: its frame's signal completed, or its recording released), then
-	 * ready for TakeResetPool. Off the render thread: a reset is a driver call per pool.
-	 */
+	/** @brief Any thread. Resets a_pool on DCLF's pool, since each reset is a driver call. None of its lists may be in use. */
 	void ResetLater(ListPool&& a_pool);
-	/** @brief Render thread: a pool ResetLater made ready (or a new one when none is): nothing recorded in it. */
+	/** @brief Render thread. A pool ResetLater made ready, or a new one. */
 	ListPool TakeResetPool();
 
-	/** @brief A pool worker's state for one frame slot: its cull arena and its secondaries. */
+	/** @brief A pool worker's cull arena and secondaries for one frame slot. */
 	struct Worker
 	{
 		CullArena arena;
 		ListPool lists;
 	};
 
-	/** @brief The main resources' targets as the direct sites attach them: views of DCLF's own, made once per resources. */
+	/** @brief DCLF's own views of the main targets, made once per resources. */
 	struct TargetViews
 	{
-		// The images the views are of, held as long as the views (and keyed by: a Resources' address can be reused by the next one, and
-		// its targets change with new main resources; views of a released image drew into freed memory DXVK had reused).
-		std::array<std::shared_ptr<org::ExternalTextureResource>, Draws::kColorTargets> native{};
-		std::shared_ptr<org::ExternalTextureResource> nativeDepth, refractionNormals;
+		// Hold the images as long as the views and key on them. A Resources address can be reused, and views of a released image
+		// once drew into freed memory DXVK had reused.
+		std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kColorTargets> native{};
+		std::shared_ptr<org::GloballyIndexedResource> nativeDepth, refractionNormals;
 		rhi::DescriptorHeapPtr rtvHeap, dsvHeap;
 		std::uint32_t count = 0;
 		std::array<rhi::DescriptorSlot, Draws::kColorTargets> colours{};
@@ -99,35 +96,32 @@ namespace DCLF::Direct::detail
 
 	struct SnapshotRecording;  // Sites.cpp
 
-	/** @brief One view of a site in a frame: its cull's inputs and its culled batches as the site's callback receives them. */
+	/** @brief One view of a site in a frame, with its cull inputs and culled batches. */
 	struct SiteView
 	{
 		ViewType type = ViewType::Main;
 		CullView view;
 		bool depthPass = false;
-		// Main colour: its object words from the depth site's batches (ColourObjectWords); mainView culls them when the depth site did
-		// not run this frame.
+		// Main colour takes its object words from the depth site's batches. mainView culls them when the depth site did not run.
 		bool colourWords = false;
 		CullView mainView;
 		const std::vector<ViewBatch>* list = nullptr;
 		CulledQueue* queue = nullptr;
-		std::vector<const CulledBatch*> arrived;  // the callback's: by batch index
+		std::vector<const CulledBatch*> arrived;  // by batch index
 		std::uint32_t received = 0;
-		// Parallel mode: the rendering its batches' secondaries are recorded inside (CullJob; formats, extent). Main's is the main
-		// targets' (CullJob fills it); another view's site sets it before its culls are dispatched (secondary: record them).
+		// Parallel mode records this view's batches into secondaries inside its rendering. The site sets this before dispatching culls.
 		bool secondary = false;
 		rhi::SecondaryInheritance inheritance{};
-		// The bindings its recordings use (null: its run's bindings).
+		// Null uses the run's bindings.
 		const RecordBindings* bindings = nullptr;
-		// A per-snapshot view (PrepareSnapshotView): its recording, drawn from this frame (fromSnapshot: no culls, RecordViewPass executes
-		// it), or made this frame by a job of its own beside its per-frame culls.
+		// A per-snapshot view's recording, drawn from this frame or made this frame by its own job.
 		std::shared_ptr<SnapshotRecording> snapshot;
 		bool fromSnapshot = false;
 	};
 
 	struct FrameSlot;
 
-	/** @brief One site's frame: its inputs, its views and what its callback records. */
+	/** @brief One site's frame, with its inputs, views and what its callback records. */
 	struct SiteRun
 	{
 		Site site = Site::Depth;
@@ -136,63 +130,54 @@ namespace DCLF::Direct::detail
 		rhi::Device device;
 		std::shared_ptr<const Draws::PassFrame> shape;
 		std::shared_ptr<Draws::Resources> resources;
-		std::shared_ptr<const TargetViews> targets;  // the main sites' (null: the site attaches its own)
-		// Its epoch's ORG execution (an external epoch's: the commits' uploads, its CPU pipeline passes, then its draws as the epoch's late
-		// pass, SitePasses.cpp, with ORG's barriers), executed by its callback; its waits and signals join DXVK's submission.
+		std::shared_ptr<const TargetViews> targets;  // null when the site attaches its own
+		// The epoch's ORG execution, run by the callback. Its waits and signals join DXVK's submission.
 		std::shared_ptr<org::ExternalEpochExecution> execution;
-		std::shared_ptr<const CullFrame> cullFrame;  // its views' culls' (written by their dispatch alone)
+		std::shared_ptr<const CullFrame> cullFrame;  // written only by the dispatch
 		RecordBindings bindings, refractionBindings;
 		std::vector<SiteView*> views;
 		SiteView *main = nullptr, *decal = nullptr, *forward = nullptr, *refractionView = nullptr;
-		bool refraction = false;  // the forward site's refraction pass (SubmitSharedEpoch's optional part)
-		// Whether its callback records its passes (false: the run's inputs were not complete; its queues are still drained).
+		bool refraction = false;
+		// False when the run's inputs were incomplete. Its queues are still drained.
 		bool valid = true;
-		// Its callback executed batches' secondaries (Parallel mode: their draws were counted when the pool recorded them, before it ran).
+		// In Parallel mode draws were counted when the pool recorded them.
 		bool executedSecondaries = false;
-		// Its execution's late pass recorded its draws (RecordExecutingSite).
 		bool recordedDraws = false;
-		// Its views' draw count when its execution's first segment began (SiteCallback runs once per segment).
+		// SiteCallback runs once per segment, so remember the count at the first.
 		std::uint32_t drawnBefore = 0;
-		// The site file's own state for this run (ShadowSite.cpp's views and maps, ViewSites.cpp's hosted views, Families.cpp's draws), by
-		// file; released with the run at the slot's retirement.
+		// Per-file state for this run, released with it when the slot retires.
 		std::shared_ptr<void> shadowState, viewState, familyState;
-		rhi::CommandListPtr adopted;  // DXVK's buffer, wrapped: kept to the slot's retirement (what its recording allocated)
-		std::vector<rhi::CommandListPtr> adoptedEarlier;  // the same for its execution's earlier segments
+		// The CPU-frame timeline value after which its site stats can be read.
+		std::uint64_t frameValue = 0;
 	};
 
-	/** @brief A frame slot: everything a CPU frame's sites made, kept until the frame's signal completes. */
+	/** @brief Everything a CPU frame's sites made, kept until the frame's signal completes. */
 	struct FrameSlot
 	{
+		// Index into the sites' per-slot tables. Forward slots come after the CPU frames' slots.
 		std::uint32_t index = 0;
-		// The host frame slot the colour commit writes its latch regions at; the frame's other commits write at index. The depth and colour
-		// commits share the main latch block, whose region the GPU reads when the site's work runs, after both commits: one region would
-		// hand the depth site's readers the colour latch (the GPU path's epochs take a slot each).
-		std::uint32_t colourSlot = 0;
-		std::uint64_t signal = 0;  // the CPU-frame timeline's value of the frame that used it last (0: none)
-		bool used = false;         // a frame used it since its last Release
-		// Whether its frame is the CPU pipeline's, and owns the frame's epochs: the host's latch regions, every site, the frame's signal.
-		// False: a GPU-driven frame's forward family alone (GraphConditions::forwardDirect), in a slot of State::forwardSlots. No signal: it
-		// retires by its point on the retirement clock, noted at the frame's end.
+		std::uint64_t signal = 0;  // last frame's CPU-frame timeline value, 0 for none
+		bool used = false;
+		// False for a GPU-driven frame's forward family alone. Such a slot has no signal and retires by its point on the retirement clock.
 		bool ownsEpochs = true;
 		std::uint64_t retirePoint = 0;
 		bool retireNoted = false;
 		std::unique_ptr<Worker[]> workers;
 		std::uint32_t workerCount = 0;
 		Worker cs;  // DXVK's CS thread's
-		std::vector<std::unique_ptr<CulledQueue>> queues;  // reused: an EventQueue's ring is never freed
+		std::vector<std::unique_ptr<CulledQueue>> queues;  // reused, because an EventQueue's ring is never freed
 		std::size_t queuesUsed = 0;
 		std::deque<SiteView> views;
 		std::deque<SiteRun> runs;
 		std::vector<std::shared_ptr<const void>> holds;
 		std::shared_ptr<const ViewBatchSet> set;
 		std::uint32_t sceneFrame = 0;
-		// The index pool's first indices as the frame's first drawing commit left them (the recorder adds them per draw).
+		// The pool's first indices after the frame's first drawing commit. The recorder adds them per draw.
 		std::vector<std::uint32_t> poolFirsts;
 		bool poolFirstsTaken = false;
-		// The forward and refraction lanes' placement rows (by object; the others unwritten), for their sort on the CS thread.
+		// Placement rows for the forward and refraction sort on the CS thread. Only those objects are written.
 		std::vector<BindlessPlacement> forwardRows;
-		// The main list's depth batches, by batch index, which the colour site's object words are made from; and the gate that
-		// dispatches the main colour culls once both the depth site's culls and the colour site's cull frame are in.
+		// The main list's depth batches, which colour's object words come from, and the gate that dispatches colour culls.
 		std::unique_ptr<std::atomic<const CulledBatch*>[]> mainDepth;
 		std::size_t mainDepthCount = 0;
 		std::atomic<std::uint32_t> mainDepthPending{ 0 };
@@ -200,17 +185,15 @@ namespace DCLF::Direct::detail
 		std::function<void()> colourDispatch;
 		bool depthRan = false;
 		SiteRun* forwardRun = nullptr;
-		// The site files' own state for this frame (as SiteRun's), released at the slot's retirement.
 		std::shared_ptr<void> shadowState, viewState, familyState;
-		// The slot's frame's work still running on the pool: its cull jobs, and its cull-frame continuations once they started (one
-		// that starts after the slot moved to another frame, generation, does nothing). Release waits for none to be left.
+		// Pool work still running for this slot's frame. A continuation that starts after the slot moves on does nothing.
+		// Release waits until none is left.
 		std::atomic<std::uint32_t> outstanding{ 0 };
 		std::atomic<std::uint64_t> generation{ 0 };
 		FrameCounters counters;
 		std::array<std::uint32_t, kSites> siteRuns{}, siteEmpty{};
 		std::uint32_t waits = 0;
-		// Indirect mode's draw buffer: written by the frame's cull jobs, read by the GPU until the frame's signal. It grows when a frame
-		// reserved more than it holds (EnsureDrawBuffer); that frame's other batches drew directly.
+		// Written by cull jobs and read by the GPU until the frame's signal. A frame that needs more grows it, and its overflow draws directly.
 		std::shared_ptr<org::Buffer> drawBuffer;
 		IndirectBuffer indirect;
 		std::atomic<std::uint32_t> drawCursor{ 0 };
@@ -220,84 +203,72 @@ namespace DCLF::Direct::detail
 	{
 		rhi::Device device;
 		bool deviceSet = false;
-		std::shared_ptr<rhi::TimelinePtr> timeline;
-		VkSemaphore semaphore = VK_NULL_HANDLE;
+		std::shared_ptr<rhi::TimelinePtr> timeline;  // cs.dclf.cpu-frames, on the host's device
 		std::uint64_t signalled = 0;  // the timeline's last value queued
-		std::uint64_t submitted = 0;  // the last value known submitted (SubmitQueued's flush, or a frame's own work after it)
-		std::uint64_t hostSubmitted = 0;  // the host's submissions made at SubmitQueued's last flush
+		std::uint64_t submitted = 0;  // the last value known to be submitted
+		std::uint64_t hostSubmitted = 0;
 		std::vector<std::unique_ptr<FrameSlot>> slots;
-		std::vector<std::unique_ptr<FrameSlot>> forwardSlots;  // FrameSlot::ownsEpochs false
+		std::vector<std::unique_ptr<FrameSlot>> forwardSlots;
 		std::uint64_t frames = 0;
-		FrameSlot* current = nullptr;  // the frame's (FrameStart to EndFrame)
-		FrameSlot* signalQueuedFor = nullptr;  // the slot whose signal QueueFrameSignal queued (until EndFrame)
-		SiteRun* pending = nullptr;    // the site the epoch body being run opened (ExecuteEpoch)
-		// A GPU-driven frame's forward run, on its way to its epoch's late pass (ForwardReached, in DXVK's stream; RecordExecutingSite).
+		FrameSlot* current = nullptr;
+		FrameSlot* signalQueuedFor = nullptr;
+		SiteRun* pending = nullptr;  // the site the running epoch body opened
+		// A GPU-driven frame's forward run, on its way to its epoch's late pass.
 		std::atomic<SiteRun*> handedOff{ nullptr };
-		// The per-snapshot views' recordings of the newest set (PrepareSnapshotView; a released one's pool goes to ResetLater).
+		// Native. The late pass may record on the submission thread after the render thread opened the next site, so pending and
+		// handedOff may already name another run. Each commit stores its run by lease index for the late pass to take.
+		std::mutex siteRunsLock;
+		std::vector<std::pair<org::RunRef, SiteRun*>> siteRuns;
+		// Recordings of the newest set. A released one's pool goes to ResetLater.
 		std::vector<std::shared_ptr<SnapshotRecording>> snapshots;
 		bool wasCpu = false;
 		std::shared_ptr<const TargetViews> targets;
 		std::atomic<std::uint32_t> nextWorker{ 0 };
 		WindowCounters window;
 		bool loggedNoCallback = false, loggedNotAdopted = false, loggedNoLatePass = false, loggedExternal = false;
-		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride
-		// Emit's scratch (render thread): a site's waits and signals for DXVK's submission.
-		std::vector<RenderGraphRuntime::ExternalCommandsWait> emitWaits, emitSignals;
+		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride, read past its instance word
+		// D3D12 needs one per layout: the instance word, then the indexed draw.
+		std::vector<std::pair<rhi::PipelineLayoutHandle, rhi::CommandSignaturePtr>> layoutSignatures;
+		std::vector<rhi::TimelinePoint> emitWaits, emitSignals;
 	};
 
 	State& S();
 
-	// ---- The frame's runs and views (render thread) ----
 
-	/** @brief A run of a_site in a_slot, with only the frame's parts (no bindings, targets or shape: the site fills what it binds). */
+	/** @brief A run with only the frame's parts. The site fills in what it binds. */
 	SiteRun& NewBareRun(FrameSlot& a_slot, Site a_site);
-	/** @brief A main site's run (Depth, Colour, Forward): NewBareRun with the commit's shape, resources, main targets and bindings. */
+	/** @brief A main site's run with the commit's shape, resources, main targets and bindings. */
 	SiteRun& NewRun(FrameSlot& a_slot, Site a_site, const MainCommitInputs& a_inputs);
-	/** @brief A view of a_run: a_type's list of the frame's set, its queue, its batch counters. */
+	/** @brief Adds a view of a_type's list to a_run. */
 	SiteView& NewView(FrameSlot& a_slot, SiteRun& a_run, ViewType a_type, const CullView& a_view, bool a_depthPass);
 	/**
-	 * @brief Render thread, after a_view's bindings and inheritance are set and before its culls are dispatched (the slot's index pool
-	 * firsts taken): a view of a type at the PerSnapshot cadence (not the main camera's lists, nor first person, whose colour site draws
-	 * its depth view's batches) draws its set's recording when one is ready for the same bindings and pass, and its index ranges have
-	 * not moved; else it is culled per frame this frame, and a recording is made beside it for the frames after (culled once, with the
-	 * snapshot's spheres, against the view as this frame captured it: pops at its edges are accepted).
+	 * @brief A PerSnapshot view draws its set's recording when one is ready for the same bindings, pass and index ranges.
+	 * Otherwise it is culled this frame and a recording is made alongside for later frames, accepting pops at its edges.
 	 */
 	void PrepareSnapshotView(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view);
-	/**
-	 * @brief Render thread: the slot's copy of the index pool's first indices, once a frame (the first site's, after its commit), without
-	 * the slots whose geometry is no longer the set's (ViewBatchSet::geometryIndexAddress).
-	 */
+	/** @brief Render thread. Copies the pool's first indices once a frame, leaving out slots whose geometry is no longer the set's. */
 	void TakePoolFirsts(FrameSlot& a_slot, const Draws::IndexPool* a_pool);
-	/**
-	 * @brief The run its epoch body opened: ExecuteEpoch queues its callback after the body (Emit). A site that runs outside
-	 * Direct::ExecuteEpoch queues it with Emit itself.
-	 */
+	/** @brief Marks the run its epoch body opened. A site outside Direct::ExecuteEpoch calls Emit itself. */
 	void SetPending(SiteRun& a_run);
-	/** @brief Render thread: a_run's callback queued (with the uploads its commits staged and the frame values' wait). False: not queued. */
+	/** @brief Render thread. Queues a_run's callback. False when not queued. */
 	bool Emit(SiteRun& a_run);
 	/**
-	 * @brief Render thread, a GPU-driven frame, before an epoch whose late pass draws a_run: the run handed to that pass in DXVK's stream.
-	 * a_run's culls ran when the frame's cull frame was published, which a_rowsDone (the producer done) means. Without one its recording
-	 * would wait for a later frame's, which a frame's start may wait on this frame's GPU work for: false, no draws this frame (counted).
+	 * @brief Render thread. Hands a_run to the late pass of a GPU-driven frame's epoch. Without a_rowsDone its recording would wait for a
+	 * later frame while frame start waits on this frame's GPU work, so it returns false and draws nothing.
 	 */
 	bool HandOffRun(SiteRun& a_run, bool a_rowsDone);
 
-	// ---- The culls (DCLF's pool) ----
 
-	/** @brief Any thread: a_view's culls dispatched on DCLF's pool (never run on the caller: it may be the render thread). */
+	/** @brief Any thread. Dispatches a_view's culls on DCLF's pool, never on the caller. */
 	void DispatchCulls(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view, const std::shared_ptr<const CullFrame>& a_frame);
 
 	/**
-	 * @brief Any thread: a_dispatch (a site's DispatchCulls calls) run as one frame-critical pool task, held in a_slot's outstanding work.
-	 * Each dispatch wakes a worker, so the caller (often the render thread, when the cull frame is in before the commit) makes one
-	 * instead of one per cull job.
+	 * @brief Any thread. Runs a site's dispatches as one frame-critical pool task. Each dispatch wakes a worker,
+	 * so this keeps the render thread to one wake instead of one per cull job.
 	 */
 	void DispatchSiteCulls(FrameSlot& a_slot, std::function<void()> a_dispatch);
 
-	/**
-	 * @brief AfterCullFrame for a_slot's frame: a_then(frame) on the cull frame's publication, unless the slot moved to another frame
-	 * first (it then does nothing: Release waits only for continuations that started).
-	 */
+	/** @brief Runs a_then when the cull frame is published, unless the slot moved to another frame first. */
 	template <class Then>
 	void OnCullFrame(FrameSlot& a_slot, Then a_then)
 	{
@@ -310,7 +281,7 @@ namespace DCLF::Direct::detail
 		});
 	}
 
-	/** @brief Whether a_run draws a_view from indirect runs: Indirect mode's plain lists, with the frame slot's draw buffer made. */
+	/** @brief Whether a_run draws a_view from indirect runs. */
 	inline bool DrawsIndirect(const SiteRun& a_run, const SiteView& a_view)
 	{
 		if (a_run.record != RecordMode::Indirect || !a_run.slot->indirect.mapped)
@@ -325,82 +296,68 @@ namespace DCLF::Direct::detail
 		case ViewType::Reflection:
 			return true;
 		default:
-			// Ordered streams (decals, forward, refraction), and first person: its colour draws its depth view's batches with other words.
+			// Ordered streams and first person, whose colour draws its depth view's batches with other words.
 			return false;
 		}
 	}
 
-	// ---- The callback (DXVK's CS thread) ----
 
-	/** @brief a_view's batch a_index, once its job pushed it (the reorder window: later ones are kept as they come). */
+	/** @brief Waits for batch a_index. Later batches are kept as they arrive. */
 	const CulledBatch& Await(SiteRun& a_run, SiteView& a_view, std::size_t a_index);
-	/** @brief Every batch of a_view, in list order. */
 	std::vector<const CulledBatch*> AwaitAll(SiteRun& a_run, SiteView& a_view);
 
 	/**
-	 * @brief Where a site's callback records (DXVK's CS thread). DXVK's own buffer takes only barriers, the passes whose contents are
-	 * executed secondaries, and the executions themselves; everything that binds state goes into secondaries of the CS thread's
-	 * (Inline), each executed in DXVK's buffer once the next primary command or the callback's end needs it (Flush). A secondary begins
-	 * with no state bound, so nothing of DXVK's leaks into the RHI's recording or back.
-	 *
-	 * This does not make the descriptor models mixable: with the RHI on descriptor heaps and DXVK on descriptor buffers, NVIDIA fetched
-	 * garbage descriptors in these secondaries too (faults with no owning resource, by where in DXVK's stream the callback landed). So the
-	 * two always share one model, heaps or descriptor buffers: DXVK negotiates it with the render graph at device creation and grants the
-	 * graph only its own (RenderGraphRuntime's NegotiateBindingModel; dxvk_device_info.cpp, negotiateBindingModel).
+	 * @brief Where a site's callback records on the CS thread. DXVK's buffer gets only barriers, passes and secondary executions.
+	 * Everything that binds state goes into secondaries, which start with no state, so nothing leaks between DXVK and the RHI.
+	 * The descriptor models still cannot mix. With the RHI on heaps and DXVK on descriptor buffers, NVIDIA fetched garbage descriptors
+	 * in these secondaries too, so DXVK and the graph negotiate one model at device creation.
 	 */
 	struct SiteOut
 	{
 		rhi::CommandList& primary;
 		ListPool& pool;
 		rhi::Device& device;
-		// The run's descriptor heaps (its bindings'), bound in DXVK's buffer before each execution of the site's secondaries (BindHeaps).
+		// Bound in DXVK's buffer before each execution of the site's secondaries.
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
 		rhi::CommandList* open = nullptr;
+		// Native. primary is the epoch's own list with nothing of DXVK's bound, so everything goes straight into it.
+		bool direct = false;
 
 		rhi::CommandList& Inline();
 		rhi::CommandList& Primary();
 		void Flush();
 		/**
-		 * @brief The run's heaps bound in DXVK's buffer, as well as in the secondaries it is about to execute (SetDescriptorHeaps: descriptor
-		 * heaps, or descriptor buffers and their offsets, whichever model the device runs on). On NVIDIA, on heaps, a secondary's own heap
-		 * binding did not hold while the executing buffer had DXVK's heap bound (the draws fetched DXVK's descriptors at the graph's
-		 * indices: MMU faults with no owning resource, for a callback recorded mid command list; one at a command list's start, before
-		 * DXVK bound a heap, ran clean). Descriptor buffers are bound the same way, as the safe assumption. Every execution leaves the
-		 * buffer's bindings undefined, so before each one. DXVK binds its own heaps or buffers again after the callback
-		 * (DXVK_ORG_EXTERNAL_COMMANDS_BINDS_STATE).
+		 * @brief Binds the run's heaps in DXVK's buffer before each execution. On NVIDIA a secondary's own heap binding did not hold while
+		 * DXVK's heap was bound, causing MMU faults. Every execution leaves bindings undefined, so this runs before each one.
 		 */
 		void BindHeaps();
 	};
 
-	/** @brief The stencil format of a depth format with stencil (Unknown: none). */
+	/** @brief The stencil format of a depth format, or Unknown. */
 	rhi::Format StencilOf(rhi::Format a_depth);
 
 	/**
-	 * @brief A view's pass over its batches: Serial (or a view without secondaries), each batch recorded inline as it arrives, in list
-	 * order, inside a_begin's rendering; Parallel with a_view.secondary, the batches' secondaries executed in list order in DXVK's buffer
-	 * once all arrived, in a_begin's rendering with secondary contents. a_context's list is replaced by the one recorded to. Returns the
-	 * batches, in list order.
+	 * @brief Records a view's pass. Serial records each batch inline as it arrives. Parallel executes the batches' secondaries in list
+	 * order once all arrived. Returns the batches in list order.
 	 */
 	std::vector<const CulledBatch*> RecordViewPass(SiteOut& a_out, SiteRun& a_run, SiteView& a_view, rhi::PassBeginInfo a_begin, RecordBindings const& a_bindings);
 
 	/**
-	 * @brief DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), from its epoch's late pass (SitePasses.cpp):
-	 * the run being executed, if it is a_site's, records its draws into a_list (the pass's list: DXVK's buffer), after a full barrier
-	 * (its epoch's CPU pipeline passes write memory the graph does not track, by address). False: no run of a_site is being executed,
-	 * or its inputs are incomplete.
+	 * @brief Any thread. Whether the host records late passes inline (native mode). Site epochs are then submitted by the graph and
+	 * record into their own primary lists with no secondaries and no external commands.
 	 */
-	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list);
+	bool SitesInline();
 
-	// ---- The site files' hooks ----
+	/**
+	 * @brief From a site epoch's late pass, after a full barrier, records the site's draws into a_list. The barrier is needed because
+	 * the CPU pipeline passes write memory the graph does not track. False when there is no run or its inputs are incomplete.
+	 */
+	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run = nullptr);
 
-	// ShadowSite.cpp: the shadow site's callback body (Site::Shadow); its slot state released.
+
 	void RecordShadowSite(SiteOut& a_out, SiteRun& a_run);
-	// ViewSites.cpp: the depth site's hosted views, after main depth (their runs' views, rendered into their own targets); the first-person
-	// colour site's callback body (Site::FirstPerson).
 	void RecordHostedDepthViews(SiteOut& a_out, SiteRun& a_run);
 	void RecordFirstPersonSite(SiteOut& a_out, SiteRun& a_run);
-	// Families.cpp: the depth and colour sites' families (render thread, from NewRun's main commit: what their draws bind); their draws in
-	// the callback, after the site's main pass (a pass of their own: a_depthPass, the depth site's).
 	void PrepareFamilies(FrameSlot& a_slot, SiteRun& a_run, const MainCommitInputs& a_inputs);
 	void RecordFamilies(SiteOut& a_out, SiteRun& a_run, bool a_depthPass);
 }

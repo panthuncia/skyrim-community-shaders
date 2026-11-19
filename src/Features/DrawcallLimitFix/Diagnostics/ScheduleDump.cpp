@@ -1,6 +1,5 @@
-// CS_DCLF_SCHEDULE_DUMP=1: the epochs' pass lists as gathered (ScheduleDump.h). One line per epoch whose list changed:
-//   [DCLF schedule] epoch <n>: <name>/<type>/<queue> | ...
-// and its passes' C++ types (ORG names a pass's recipe by them) on a second line, which the diff only warns about.
+// CS_DCLF_SCHEDULE_DUMP=1. Logs each epoch's pass list when it changes, as "[DCLF schedule] epoch <n>: <name>/<type>/<queue> | ...".
+// A second line lists the passes' C++ types, which ORG names recipes by. The diff only warns about that line.
 
 #include "Features/DrawcallLimitFix/Diagnostics/ScheduleDump.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"

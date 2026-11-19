@@ -1,4 +1,4 @@
-// EngineOnlyCull: the culling processes' Process1 hooks that limit an armed cull to the engine-only subset (EngineOnlyCull.h).
+// The culling processes' Process1 hooks that limit an armed cull to the engine-only subset.
 
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
 
@@ -18,7 +18,7 @@ namespace DCLF::EngineOnlyCull
 		std::atomic<std::uint64_t> culled{ 0 }, descended{ 0 }, skipped{ 0 };
 		bool installed = false;
 
-		/** @brief Whether an armed cull skips a_object (counted either way); false while nothing is armed. */
+		/** @brief Whether an armed cull skips a_object. False while nothing is armed. */
 		bool Skips(const RE::NiAVObject* a_object)
 		{
 			const auto* subset = armed;
@@ -37,7 +37,7 @@ namespace DCLF::EngineOnlyCull
 			}
 		}
 
-		/** @brief Process1 (vtable slot 0x16) of a culling process class: the object culled unless an armed cull skips it. */
+		/** @brief A culling process class's Process1 (vtable slot 0x16). */
 		template <std::uint32_t Class>
 		struct Process1
 		{
@@ -68,11 +68,10 @@ namespace DCLF::EngineOnlyCull
 	{
 		if (std::exchange(installed, true))
 			return;
-		// The spot lights' and the sun's cascades' processes, and the point lights' (each class has its own slot).
+		// Each class has its own slot.
 		stl::write_vfunc<0x16, Process1<0>>(RE::VTABLE_BSCullingProcess[0]);
 		stl::write_vfunc<0x16, Process1<1>>(RE::VTABLE_BSParabolicCullingProcess[0]);
-		// The scene lists' (an occlusion map's SetupMask): after the primary cull's own hook of the slot (PrimaryCull::Install, which only
-		// stands in for the main camera's list processes).
+		// Installed after PrimaryCull's hook of the same slot, which only stands in for the main camera's list processes.
 		stl::write_vfunc<0x16, Process1<2>>(RE::VTABLE_BSGeometryListCullingProcess[0]);
 		logger::info("[DCLF] engine-only culls: Process1 limited to the subset on BSCullingProcess, BSParabolicCullingProcess and BSGeometryListCullingProcess while armed");
 	}

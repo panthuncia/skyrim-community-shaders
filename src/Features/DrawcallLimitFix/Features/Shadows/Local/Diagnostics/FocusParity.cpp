@@ -1,6 +1,5 @@
-// The focus views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the Focus board against the engine's views (the tally,
-// Diagnostics::ShadowViewTally, filled by the shadow epochs' checks), and what the engine registers into a covered focus view against
-// its target's fade root. Render thread, but for the membership check on the registration threads.
+// The focus views' parity (CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY): the Focus board against the engine's views, and what the
+// engine registers into a covered focus view against its target's fade root. Render thread, except the membership check.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/FocusViews.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
@@ -24,7 +23,7 @@ namespace DCLF::Features::Shadows::Local
 		std::atomic<std::uint32_t> firstState{ 0 };  // 0 free, 1 being written, 2 written
 		std::array<char, 512> first{};  // named when met: the geometry need not outlive the window
 
-		/** @brief The focus views' membership check since the last Take: registrations into a covered focus view, those under another fade root, the first named. */
+		/** @brief The membership check since the last Take: registrations into a covered focus view, those under another fade root, the first named. */
 		struct FocusMembers
 		{
 			std::uint64_t registrations = 0, outside = 0;
@@ -44,7 +43,7 @@ namespace DCLF::Features::Shadows::Local
 			return m;
 		}
 
-		/** @brief The focus views' parity line with the membership line, logged, the tally reset: every 300 frames with focus views. */
+		/** @brief Logs the parity and membership lines every 300 frames with focus views, and resets the tally. */
 		void FocusViewsLines()
 		{
 			auto& p = Diagnostics::ShadowViewTally(Diagnostics::ShadowView::Focus);

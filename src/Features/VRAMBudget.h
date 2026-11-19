@@ -8,8 +8,9 @@
  *
  * The engine keeps recently left cells loaded (`uInterior Cell Buffer`, `uExterior Cell Buffer`) and unloads them only
  * when a buffer overflows, on `pcb`, or when its own heap runs out, never for VRAM. Over the threshold this feature
- * unloads the oldest buffered cells a few at a time on the main thread, then runs the engine's purge (what `pcb` runs)
- * so their models and textures are released at once. Engine details: docs/development/skyrim-cell-buffer.md.
+ * unloads the oldest buffered cells a few at a time, then runs the engine's purge (what `pcb` runs) so their models and
+ * textures are released at once. It runs on the main thread after Main::Update's frame jobs are done, where nothing else
+ * touches the cells. Engine details: docs/development/skyrim-cell-buffer.md.
  */
 struct VRAMBudget : Feature
 {
@@ -35,8 +36,14 @@ struct VRAMBudget : Feature
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 
-	/** @brief Queues the controller's tick (four times a second) on the main thread. */
+	/** @brief Passes the threshold to DXVK's defragmentation. */
 	virtual void EarlyPrepass() override;
+
+	/** @brief Hooks Main::Update's frame-job wait, after which the controller runs. */
+	virtual void PostPostLoad() override;
+
+	/** @brief Main thread, once the frame's jobs are done: runs the controller's tick when due (four times a second). */
+	void OnFrameJobsDone();
 
 	struct Settings
 	{
@@ -47,7 +54,7 @@ struct VRAMBudget : Feature
 	Settings settings;
 
 private:
-	/** @brief One controller cycle, on the main thread (an SKSE task): samples VRAM use and takes the next step if it is over. */
+	/** @brief One controller cycle, on the main thread after the frame jobs: samples VRAM use and takes the next step if it is over. */
 	void Tick();
 
 	/** @brief Main thread: unloads up to a_cells cells (or the step that has to come first), describing it in o_what (left empty
@@ -63,10 +70,9 @@ private:
 	/** @brief Main thread: pcb's purge (garbage, the model DB, then the texture DB), with IO paused. */
 	void Purge();
 
-	std::atomic<bool> tickQueued = false;
-	std::atomic<std::int64_t> nextTick = 0;  // steady_clock ticks
-
 	// The controller (main thread).
+	std::int64_t nextTick = 0;  // steady_clock ticks
+	bool threadLogged = false;
 	enum class Phase
 	{
 		kIdle,
@@ -77,6 +83,7 @@ private:
 	std::int64_t phaseEnd = 0;
 	double stepUsageMiB = 0.0;
 	std::uint32_t stepCells = 0;
+	bool stepLearns = true;                          // false for a step whose drop is not per cell (pcb, the distant land)
 	double mibPerCell = 64.0;                        // learnt from each step's response
 	RE::TESObjectCELL* terrainUnloadedIn = nullptr;  // the interior whose stay already unloaded the distant land
 

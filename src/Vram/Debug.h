@@ -6,10 +6,6 @@
 
 #include <d3d11.h>
 
-#ifndef VK_VERSION_1_0
-#	include <vulkan/vulkan.h>
-#endif
-
 /**
  * @brief VRAM attribution's tracing: finds the creators of memory no owner scope or name claims.
  *
@@ -18,9 +14,8 @@
  *   outside DXVK (SkyrimSE.exe -> the game, another module -> that plugin, CS -> the function).
  * - The game's texture loads (BSShaderManager::GetTexture) label their textures "Game/Textures/<folder>" with their path.
  *
- * Debug mode (CS_VRAM_DEBUG=1, from the environment or the switches file) adds a ledger every vkAllocateMemory/vkFreeMemory the
- * render graph makes goes through, so ORG's device memory is exact and its allocations no tracked resource claims are listed by
- * call site.
+ * Debug mode (CS_VRAM_DEBUG=1, from the environment or the switches file) is read by the attribution's callers. ORG's device memory
+ * comes from BasicRHI's live ledger (VramLedger.cpp), in every mode.
  */
 namespace Vram::Debug
 {
@@ -32,6 +27,9 @@ namespace Vram::Debug
 
 	/** @brief Installs the game texture-load hook; with the other game hooks. */
 	void InstallGameHooks();
+
+	/** @brief The owner a game texture of a_path's folder is labelled with ("Game/Textures/landscape"). The string lives as long as the process. Any thread. */
+	const char* GameTextureOwner(std::string_view a_path);
 
 	/** @brief Labels a texture as a game texture of a_path's folder, with a_path as its name. Any thread. */
 	void TagGameTexture(ID3D11Resource* a_resource, std::string_view a_path);
@@ -48,22 +46,4 @@ namespace Vram::Debug
 
 	/** @brief A DXVK resource's creation call site; empty module if no stack was recorded. */
 	CallSite DxvkCreationSite(std::uint64_t a_cookie);
-
-	/** @brief The vkGetInstanceProcAddr to give BasicRHI: a_real, with vkAllocateMemory and vkFreeMemory routed through the ledger. */
-	PFN_vkGetInstanceProcAddr OrgProcAddr(PFN_vkGetInstanceProcAddr a_real, VkInstance a_instance, VkPhysicalDevice a_physicalDevice);
-
-	/** @brief One live ORG device memory allocation. */
-	struct OrgAllocation
-	{
-		std::uint64_t bytes = 0;
-		std::uint32_t memoryType = 0;
-		bool deviceLocal = true;
-		std::string site;  // the call site in BasicRHI or ORG
-	};
-
-	/** @brief Whether the ledger is installed (debug mode, and the render graph adopted the device). */
-	bool HasOrgLedger();
-
-	/** @brief The ledger's live allocations. */
-	std::vector<OrgAllocation> OrgAllocations();
 }

@@ -1,5 +1,4 @@
-// Effects' report lines (CS_DCLF_STATS, among the forward epoch's in the draws' async work): the Effect port's members, materials and
-// pipelines, and with CS_DCLF_SET_PARITY its Lighting variant's passes against the sun light.
+// Effects report lines for the Effect port's members, materials and pipelines, with the Lighting parity under CS_DCLF_SET_PARITY.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -19,8 +18,6 @@ namespace DCLF::Features::Effects
 		void Lines(std::string& a_text)
 		{
 			std::string text;
-			// The Effect port: its members in the installed tables (objects of an effect key: forward ones, decals in the decal groups, and
-			// skinned ones), its material records, its pipelines.
 			{
 				const auto& tables = Scene::FrameView::Get().GetTables();
 				std::uint32_t members = 0, forwardMembers = 0, materials = 0, lit = 0, decals = 0, skinned = 0, opaque = 0;
@@ -32,9 +29,9 @@ namespace DCLF::Features::Effects
 					forwardMembers += (object.flags & kObjectForward) ? 1u : 0u;
 					if (object.pipelineIndex < tables.pipelines.size() && KeyFamily(tables.pipelines[object.pipelineIndex].rasterFlags) == Api::ProgramFamily::Effect) {
 						++members;
-						lit += (tables.pipelines[object.pipelineIndex].passDescriptor & EffectFlag::Lighting) ? 1u : 0u;  // the Lighting variant
+						lit += (tables.pipelines[object.pipelineIndex].passDescriptor & EffectFlag::Lighting) ? 1u : 0u;
 						decals += ObjectDecalGroup(object.flags) ? 1u : 0u;
-						// An opaque effect (CS_DCLF_OPAQUE_EFFECTS) is decal group 1's with the opaque write mode, 1 (a decal's is 10 or 11).
+						// An opaque effect is in decal group 1 with write mode 1. Real decals use 10 or 11.
 						const auto rasterFlags = tables.pipelines[object.pipelineIndex].rasterFlags;
 						if (RasterDecalGroup(rasterFlags) == 1 && RasterWriteMode(rasterFlags) == 1 && opaque++ == 0 && o < tables.objectGeometry.size() && tables.objectGeometry[o]) {
 							const auto* geometry = tables.objectGeometry[o];
@@ -42,7 +39,7 @@ namespace DCLF::Features::Effects
 								geometry->world.translate.x, geometry->world.translate.y, geometry->world.translate.z, rasterFlags,
 								tables.pipelines[object.pipelineIndex].passDescriptor);
 						}
-						// A particle member's block is its quads', not a skin's palette.
+						// A particle member's block holds its quads, not a skin palette.
 						skinned += (object.flags & kObjectPaletteBlock) && !(tables.pipelines[object.pipelineIndex].passDescriptor & EffectFlag::Particles) ? 1u : 0u;
 					}
 				}
@@ -57,11 +54,11 @@ namespace DCLF::Features::Effects
 						on ? "on" : "off", members, lit, decals, skinned, forwardMembers, opaque, materials, pipelines.requested, pipelines.ready, pipelines.failed,
 						pipelines.failed ? " <- EFFECT PIPELINE FAILED" : "", firstOpaque);
 			}
-			// CS_DCLF_SET_PARITY: the members' Lighting-variant passes the engine registered, against the sun light the port reads as their light 0.
-			if (const auto [checked, other] = TakeLight(); checked)
-				text += fmt::format("[DCLF] effects' Lighting variant (CS_DCLF_SET_PARITY): {} engine passes of members checked, {} with a light 0 other than the sun "
-									"light{}\n",
-					checked, other, other ? " <- EFFECT LIGHT" : " <- OK");
+			if (const auto [checked, other, cloud] = TakeLight(); checked)
+				text += fmt::format(
+					"[DCLF] effects' Lighting variant (CS_DCLF_SET_PARITY): {} engine passes of members checked ({} kCloudLOD), {} with a light 0 "
+					"other than the port's{}\n",
+					checked, cloud, other, other ? " <- EFFECT LIGHT" : " <- OK");
 			a_text += text;
 		}
 	}

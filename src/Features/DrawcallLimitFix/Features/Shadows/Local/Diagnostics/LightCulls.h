@@ -7,16 +7,12 @@
 namespace DCLF::Features::Shadows::Local::LightCulls
 {
 	/**
-	 * @brief The point lights' culls' parity (CS_DCLF_PERSISTENT_PARITY): on the frames the culls skip nothing (Policy::FilterLightCulls),
-	 * a paraboloid pass the registration did not withhold under an excluded entry is one the skip would lose (<- LIGHT EXCLUSION, by the
-	 * object's shadow reject, the first named), a caster under a filtered category node must hang from a child the filter keeps
-	 * (<- LIGHT FILTER), a cut entry's geometry's point light bits are compared with the engine's (<- LIGHT BITS), and so are the bits the
-	 * empty culls would give every geometry (<- EMPTY CULL BITS: an engine bit the lights' spheres do not give). Subscribed by the
-	 * feature's install.
+	 * @brief The point lights' cull parity (CS_DCLF_PERSISTENT_PARITY), on frames whose culls skip nothing.
+	 * Flags passes the skip would lose, casters outside the filter's kept children, and point light bits that differ from the engine's.
 	 */
 	void Install();
 
-	/** @brief The counts since the last Take (render thread, the report; the registration threads count). */
+	/** @brief The counts since the last Take. The registration threads count. */
 	struct Counts
 	{
 		std::uint64_t frames = 0, passes = 0, lost = 0, filterChecked = 0, filterMissed = 0;

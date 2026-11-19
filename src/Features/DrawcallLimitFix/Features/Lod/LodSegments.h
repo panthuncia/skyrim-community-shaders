@@ -10,30 +10,24 @@
 
 namespace DCLF::LodSegments
 {
-	/**
-	 * @brief Object LOD's segments (AE 1.6.1170; dclf-architecture.md, "Object LOD: segments").
-	 *
-	 * A BSSubIndexTriShape (geometry type 8) of a LOD block has one segment per cell of its terrain node. While the node is in
-	 * the active grid, the terrain manager hides the segments of the cells that are attached (FUN_1405110b0, and
-	 * FUN_1405112f0 for the large-reference grid): FUN_140e31160 clears a segment's enabled byte, FUN_140e31130 sets it
-	 * again (if it has triangles), both setting the shape's dirty byte. FUN_140e310b0 shows every segment as one run over the
-	 * whole shape and clears the dirty byte. The draw (FUN_1414f2ad0, type 8) rebuilds the runs when dirty (FUN_140e31180:
-	 * consecutive enabled segments merged, each run's start flagged with its triangle count) and draws each run:
-	 * DrawIndexed(runTriangles * 3, firstIndex, 0). A non-segmented shape draws whole.
-	 */
+	// Object LOD segments (AE 1.6.1170). A LOD BSSubIndexTriShape has one segment per cell of its terrain node.
+	// The terrain manager disables the segments of attached cells so loaded cells and LOD do not overlap.
+	// FUN_140e31160 disables a segment and FUN_140e31130 enables it. Both set the shape's dirty byte.
+	// When dirty, the draw (FUN_1414f2ad0) first merges consecutive enabled segments into runs (FUN_140e31180),
+	// then issues one DrawIndexed per run. A non-segmented shape draws whole.
 	struct Segment
 	{
-		std::uint32_t firstIndex;    // 00: its first index
-		std::uint32_t triangles;     // 04: its own triangles
-		std::uint8_t enabled;        // 08: shown (FUN_140e31130 / FUN_140e31160)
+		std::uint32_t firstIndex;    // 00
+		std::uint32_t triangles;     // 04
+		std::uint8_t enabled;        // 08
 		std::uint8_t pad09[3];       // 09
-		std::uint32_t runTriangles;  // 0C: a run's triangles, from its start (FUN_140e31180)
-		std::uint8_t runStart;       // 10: a run starts here
+		std::uint32_t runTriangles;  // 0C: the whole run's triangles, set on its first segment
+		std::uint8_t runStart;       // 10
 		std::uint8_t pad11[3];       // 11
 	};
 	static_assert(sizeof(Segment) == 0x14);
 
-	inline constexpr std::size_t kTriangleCount = 0x158;  // BSTriShape's triangle count (uint16)
+	inline constexpr std::size_t kTriangleCount = 0x158;  // uint16
 	inline constexpr std::size_t kSegments = 0x160;       // Segment*
 	inline constexpr std::size_t kSegmentCount = 0x168;   // uint32
 	inline constexpr std::size_t kDirty = 0x170;          // the runs need rebuilding
@@ -46,8 +40,8 @@ namespace DCLF::LodSegments
 	}
 
 	/**
-	 * @brief The index ranges the engine's draw of a_shape draws now, contiguous ones merged: the runs, or (dirty) the enabled
-	 * segments the rebuild will merge into runs, which cover the same triangles.
+	 * @brief The index ranges the engine would draw for a_shape now. When dirty we read the enabled segments,
+	 * which cover the same triangles the rebuilt runs will.
 	 */
 	inline void DrawnRanges(const void* a_shape, std::vector<Api::EntryRange>& a_out)
 	{
@@ -82,7 +76,7 @@ namespace DCLF::LodSegments
 		}
 	}
 
-	/** @brief Whether a_ranges are the shape's whole index list in one range: drawn as the TriShape's own geometry slot. */
+	/** @brief True when a_ranges are the whole index list, so the shape is drawn as its own geometry slot. */
 	inline bool Whole(const void* a_shape, const std::vector<Api::EntryRange>& a_ranges)
 	{
 		return Api::EntryRangesWhole(At<std::uint16_t>(a_shape, kTriangleCount), a_ranges);

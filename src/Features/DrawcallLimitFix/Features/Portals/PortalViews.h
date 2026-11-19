@@ -28,16 +28,13 @@ namespace DCLF::Diagnostics
 namespace DCLF
 {
 	/**
-	 * @brief The main camera's portal and occluder visibility: a port of the engine's walk (FUN_1401a43c0 -> Traverse FUN_1414a41e0)
-	 * and its BSCompoundFrustum builders (skyrim-engine-notes.md, "Portals, rooms and occluders"). The engine builds, in Main::Update,
-	 * a compound frustum per visible room (its children are culled through it; an unreached room is not culled into) and one for
-	 * unbound space. DCLF builds the same programs with its own copies of the shapes' scratch: it writes no engine object and reads
-	 * nothing the engine's culls wrote. Render thread, right after Main::Update's walk (the feature's PortalWalk thunk, PortalsFeature.cpp).
+	 * @brief A port of the engine's portal and occluder walk for the main camera (FUN_1401a43c0, Traverse FUN_1414a41e0).
+	 * Builds one compound-frustum program per visible room and one for unbound space, using DCLF's own copy of the shape scratch.
+	 * It writes no engine object and reads nothing the engine's culls wrote. Render thread, right after Main::Update's walk.
 	 */
 	class PortalViews
 	{
 	public:
-		// The compound frustum's model (Portals/PortalProgramModel.h, engine-independent).
 		using PlaneSet = PortalModel::PlaneSet;
 		using Op = PortalModel::Op;
 		using Program = PortalModel::Program;
@@ -57,22 +54,19 @@ namespace DCLF
 
 		static PortalViews& Get();
 
-		/** @brief Render thread, after Main::Update's walk: this frame's programs. */
+		/** @brief Builds this frame's programs. Render thread, after Main::Update's walk. */
 		void Build();
 		const Frame& Current() const { return frame; }
-		/**
-		 * @brief Whether this frame's walk reached unbound space (visibleUnboundSpace; DrawWorld_BuildSceneLists' branch). Any thread; a
-		 * frame with no graph keeps the last walk's, as the engine does.
-		 */
+		/** @brief Whether this frame's walk reached unbound space. A frame with no graph keeps the last answer, as the engine does. */
 		bool VisibleUnbound() const { return visibleUnbound.load(std::memory_order_acquire); }
-		/** @brief a_room's program this frame, or null (not reached: not culled into). */
+		/** @brief a_room's program this frame, or null when the room was not reached. */
 		const Program* RoomProgram(const void* a_room) const;
 		/** @brief Portal tests, occlusion planes and boxes the built programs held. */
 		struct ProgramCounts
 		{
 			std::uint64_t portals = 0, planes = 0, boxes = 0;
 		};
-		/** @brief Walks since the last Take: built, skipped (no graph or camera), and their programs' contents. */
+		/** @brief Walks since the last Take, and their programs' contents. */
 		struct BuildCounts
 		{
 			std::uint64_t built = 0, skipped = 0;
@@ -80,37 +74,30 @@ namespace DCLF
 		};
 		BuildCounts TakeBuildCounts();
 
-		/**
-		 * @brief This frame's programs as FadeStateCS and BuildDraws read them (PortalPrograms.h, kPortal*): view planes, directory (unbound
-		 * space, then rooms in order) and records; a header of no programs without a walk.
-		 */
+		/** @brief Encodes this frame's programs as FadeStateCS and BuildDraws read them (PortalPrograms.h). */
 		void Encode(std::vector<std::uint32_t>& a_words) const;
-		/** @brief This frame's Encode, made at Build (the GPU copy and CPU checks read the same words). */
+		/** @brief This frame's Encode, made at Build so the GPU copy and the CPU checks read the same words. */
 		const std::vector<std::uint32_t>& Encoded() const { return encoded; }
 		/** @brief Owned main-view context, independent of mutable walk scratch. Render thread. */
 		Portals::ContextHold MainContext() const { return mainContext; }
 		/**
-		 * @brief PortalPrograms.hlsli's PortalTest on the CPU (a_nodeFlags: always-draw bit 11, preprocessed 12, preprocess-hidden 20).
-		 * 1 in view, 0 culled, -1 no program; a_why names the deciding test.
+		 * @brief PortalPrograms.hlsli's PortalTest on the CPU. Returns 1 in view, 0 culled, -1 no program.
+		 * a_nodeFlags bits: always-draw 11, preprocessed 12, preprocess-hidden 20.
 		 */
 		static int Visible(std::span<const std::uint32_t> a_words, std::uint32_t a_program, const float a_centre[3], float a_radius, std::uint32_t a_nodeFlags,
 			std::string& a_why);
-		/**
-		 * @brief The program a node is culled through: 1 + its nearest BSMultiBoundRoom ancestor's room index, 0 (unbound space) with
-		 * none, kPortalNoProgram with no graph. Render thread.
-		 */
+		/** @brief The program a node is culled through: 1 + its nearest room's index, 0 for unbound space. Render thread. */
 		std::uint32_t ProgramOf(const RE::NiAVObject* a_node) const;
-		/** @brief A room of the walked graph's program (1 + its room index), else kPortalNoProgram (not a room of it). Render thread. */
+		/** @brief A walked room's program (1 + its room index), else kPortalNoProgram. Render thread. */
 		std::uint32_t ProgramOfRoom(const void* a_room) const;
-		/** @brief Changes when ProgramOf's answers may have (room child attached/detached, new graph). */
+		/** @brief Changes whenever ProgramOf's answers may have changed. */
 		std::uint64_t ProgramsVersion() const { return structure.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull ^ graphVersion; }
-		/** @brief Any thread (attach/detach detours): a room's, a portal shared node's or a multibound node's child changed. */
+		/** @brief Notes that a room's, portal shared node's or multibound node's child changed. Any thread. */
 		void NoteStructure(const RE::NiNode* a_parent);
 
 		/**
-		 * @brief What the main view sees as Main::IsRoomVisible's (0x140649f20) keys: the walk's rooms, and the portal shared nodes the
-		 * engine's entry holds after the scene lists (crossed portals' and every portal of a popped room: DrawWorld_BuildSceneLists'
-		 * AddVisibilityToMap). Immutable once published; built at Build only after PublishVisibleSets.
+		 * @brief The keys Main::IsRoomVisible (0x140649f20) answers for the main view: walked rooms and held portal shared nodes.
+		 * Immutable once published.
 		 */
 		struct VisibleSet
 		{
@@ -147,16 +134,13 @@ namespace DCLF
 			Keys current;
 			Keys previous;  // the previous set's current (for observers' frame alignment)
 
-			/**
-			 * @brief Main::IsRoomVisible on keys alone: a room when walked; a shared node when held or either of its portal's rooms is.
-			 * a_previous: from the previous walk's keys.
-			 */
+			/** @brief Main::IsRoomVisible on keys alone. a_previous reads the previous walk's keys. */
 			Answer Visible(const void* a_key, bool a_previous = false) const;
 		};
 
 		/**
-		 * @brief A lock-free hold on the newest VisibleSet (reader count + atomic pointer; MSVC's atomic shared_ptr locks). Any thread;
-		 * not freed while held; null before the first publish.
+		 * @brief A lock-free hold on the newest VisibleSet, because MSVC's atomic shared_ptr takes a lock.
+		 * Any thread. Not freed while held. Null before the first publish.
 		 */
 		class VisibleSetHold
 		{
@@ -172,16 +156,14 @@ namespace DCLF
 		private:
 			const VisibleSet* set = nullptr;
 		};
-		/** @brief From now on Build publishes a VisibleSet every frame (RoomVisibility's install). */
+		/** @brief From now on Build publishes a VisibleSet every frame. */
 		void PublishVisibleSets() { publishVisible.store(true, std::memory_order_release); }
-		/** @brief The newest set's generation (any thread): an older hold raced a publish. */
+		/** @brief The newest set's generation. An older hold raced a publish. */
 		std::uint64_t VisibleGeneration() const { return visibleGeneration.load(std::memory_order_acquire); }
 
 		/**
-		 * @brief A shadow light's rooms as its own portal-graph entry holds them (FUN_1414a2530 -> FUN_1414a6400 ported; the cases are
-		 * in dclf-architecture.md, "PortalViews::WalkLight"). Kept per light by the caller; an unwalked light keeps its entry. The
-		 * camera is the light's room process's (+0x128 -> +0x18, or the NiCamera constructor's before one exists); +0x30200 (a shadow
-		 * light's process) is read with it. Occluder states and boxes are the main walk's; edge flags persist only for a kept light.
+		 * @brief A shadow light's rooms as its portal-graph entry holds them (port of FUN_1414a2530 / FUN_1414a6400).
+		 * The cases are in dclf-architecture.md, "PortalViews::WalkLight". An unwalked light keeps its entry.
 		 */
 		struct LightRooms
 		{
@@ -197,16 +179,13 @@ namespace DCLF
 			kLightWalked,
 			kLightNoGraph,    // no portal graph with rooms: nothing for a strict light's walk to reach, nor to gate
 		};
-		/** @brief Render thread, after Build: a_light's entry as FUN_1414a2530 would leave it this frame. */
+		/** @brief Walks a_light's entry as FUN_1414a2530 would this frame. Render thread, after Build. */
 		void WalkLight(const void* a_light, LightRooms& a_rooms);
-		/** @brief The last WalkLight's light is kept: its edge flags become the shapes' (the engine walks only kept lights). */
+		/** @brief Keeps the last walked light, so its edge flags become the shapes'. The engine walks only kept lights. */
 		void CommitLightWalk();
-		/** @brief FUN_140e14300 (the light's entry, the world camera's): both see unbound space, or a room in common. */
+		/** @brief FUN_140e14300: the light and the world camera both see unbound space, or share a room. */
 		bool SharesRoom(const LightRooms& a_light) const;
-		/**
-		 * @brief Whether a light's room process (+0x128) is what WalkLight assumes (BSParabolicCullingProcess portal test, no view
-		 * planes, plane 0 zero); a_why names the first mismatch.
-		 */
+		/** @brief Whether a light's room process (+0x128) matches what WalkLight assumes. a_why names the first mismatch. */
 		bool LightProcessAsAssumed(const void* a_roomProcess, std::string& a_why) const;
 
 	private:
@@ -219,7 +198,7 @@ namespace DCLF
 		};
 		using Quad = std::array<Vec3, 4>;
 		using Flags = std::array<std::uint8_t, 4>;
-		/** @brief The engine's scratch on an occlusion box while its state is 1 (BoxSilhouette's sets, hull, face slots). */
+		/** @brief The engine's scratch on an occlusion box while its state is 1. */
 		struct BoxScratch
 		{
 			PlaneSet set[2];
@@ -235,7 +214,6 @@ namespace DCLF
 			PlaneSet relative;  // FUN_140e16f70's camera-relative copy (box refinement)
 		};
 
-		// The walk (FUN_1414a41e0) and its builders.
 		void Walk(const void* a_graph, const void* a_startRoom, bool a_isFirst);
 		void BuildRoom(const void* a_room, std::uint32_t a_parent, bool a_parentUnbound, const void* a_portal, const void* a_startRoom);
 		void BuildUnbound(std::uint32_t a_parent, bool a_parentUnbound, const void* a_portal, const void* a_graph);
@@ -257,13 +235,11 @@ namespace DCLF
 		bool AddBox(Program& a_program, const void* a_box);
 		void AddPlane(Program& a_program, const void* a_plane);
 		/**
-		 * @brief The portal parity's (PortalViewsView): unbound space's top program built again as the engine's walk builds it, with every
-		 * graph occluder's state as the engine holds it (+0x40) instead of DCLF's (and a judged plane's edge flags, +0xF0) and an untested
-		 * plane judged by the walk's WithinFrustumDistFirst, DCLF's shape scratch kept as it was. Only for a walk that started in unbound space.
+		 * @brief For portal parity: unbound space's program rebuilt with the engine's occluder states instead of DCLF's.
+		 * Only for a walk that started in unbound space.
 		 */
 		Program UnboundWithEngineStates(const void* a_graph);
 
-		// The shapes' tests.
 		static Quad Corners(const void* a_quad);
 		static PlaneSet& Grow(Program& a_program, std::uint32_t a_index) { return PortalModel::Grow(a_program, a_index); }
 		PlaneSet PortalPlanes(const void* a_quad, const Vec3& a_eye);
@@ -278,14 +254,14 @@ namespace DCLF
 		bool BoxSilhouette(const void* a_box, BoxScratch& a_scratch);
 		bool BoxRefine(const void* a_box, BoxScratch& a_scratch) const;
 
-		/** @brief The end of every Build: the encoded words and, after PublishVisibleSets, the VisibleSet and its report. */
+		/** @brief Encodes the words at the end of every Build, and publishes the VisibleSet once enabled. */
 		void AfterBuild();
 		void PublishVisible();
 
 		Frame frame;
 		Camera camera;
-		// DCLF's copies of the engine's shape scratch: edge flags (last test wins, across frames), per-frame states (0 untested,
-		// 1 accepted, 2 rejected: FUN_1401a4a00 resets them before each walk) and box sets.
+		// DCLF's copies of the engine's shape scratch. States are 0 untested, 1 accepted, 2 rejected, and FUN_1401a4a00 resets them
+		// before each walk. Edge flags persist across frames.
 		ankerl::unordered_dense::map<const void*, Flags> edgeFlags;
 		ankerl::unordered_dense::map<const void*, std::uint32_t> states;
 		ankerl::unordered_dense::map<const void*, BoxScratch> boxes;
@@ -301,7 +277,7 @@ namespace DCLF
 		std::uint64_t contextGeneration = 0;
 		std::atomic<bool> visibleUnbound{ true };  // VisibleUnbound (the engine entry's initial value)
 
-		// The published VisibleSet and replaced ones, freed at a publish that sees no reader (readers count themselves before loading).
+		// Replaced VisibleSets are freed at a publish that sees no reader. Readers count themselves before loading.
 		std::atomic<bool> publishVisible{ false };
 		std::atomic<const VisibleSet*> visibleSet{ nullptr };
 		std::atomic<std::uint32_t> visibleReaders{ 0 };
@@ -321,7 +297,6 @@ namespace DCLF
 		};
 		static bool ParabolicVisible(const Parabolic& a_parabolic, const void* a_portal);
 		const Parabolic* parabolic = nullptr;  // set during a light's walk
-		// A light walk's own frame, camera, crossed portals (swapped in) and edge flags.
 		Frame lightFrame;
 		ankerl::unordered_dense::set<const void*> lightCrossed;
 		ankerl::unordered_dense::map<const void*, Flags> lightEdgeFlags;  // the last light walk's copy of edgeFlags

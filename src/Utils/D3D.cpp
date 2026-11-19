@@ -5,6 +5,7 @@
 #include "Deferred.h"
 #include "Feature.h"
 #include "Features/TerrainBlending.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/FileRename.h"
@@ -16,7 +17,6 @@
 #include <d3dcompiler.h>
 #include <fstream>
 #include <mutex>
-#include <optional>
 #include <unordered_set>
 
 namespace Util
@@ -58,17 +58,19 @@ namespace Util
 		auto renderer = globals::game::renderer;
 		if (!renderer)
 			return nullptr;
-		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+		// The field can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES). Callers bind it on DXVK's context, so they get the
+		// wrapped view.
+		auto* zPrepassCopy = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV);
 		if (globals::deferred && globals::deferred->sceneDepthFinal)
-			return zPrepassCopy.depthSRV;
+			return zPrepassCopy;
 
 		auto& tb = globals::features::terrainBlending;
 		if (tb.loaded && tb.settings.Enabled) {
-			auto* srv = prefer16bit ? (tb.blendedDepthTexture16 ? tb.blendedDepthTexture16->srv.get() : nullptr) : (tb.blendedDepthTexture ? tb.blendedDepthTexture->srv.get() : nullptr);
-			if (srv)
+			// The graph's export on Terrain Blending's ORG path, else its D3D11 texture.
+			if (auto* srv = tb.GetBlendedDepthSRV(prefer16bit))
 				return srv;
 		}
-		return zPrepassCopy.depthSRV;
+		return zPrepassCopy;
 	}
 
 	ID3D11ShaderResourceView* GetSRVFromRTV(const ID3D11RenderTargetView* a_rtv)
@@ -203,6 +205,25 @@ namespace Util
 		}
 	}
 
+	std::vector<std::pair<std::string, std::string>> GetCommonShaderDefines(std::span<const std::string_view> a_explicit)
+	{
+		std::vector<std::pair<std::string, std::string>> defines;
+		const auto shaderDefines = globals::state->GetDefines();
+		defines.assign(shaderDefines->begin(), shaderDefines->end());
+		const auto present = [&](std::string_view a_name) {
+			return std::ranges::find(a_explicit, a_name) != a_explicit.end() ||
+			       std::ranges::any_of(defines, [&](const auto& a_define) { return a_define.first == a_name; });
+		};
+		for (auto* feature : Feature::GetFeatureList()) {
+			if (!feature->loaded)
+				continue;
+			for (const auto& [name, value] : feature->GetCommonShaderDefines())
+				if (!present(name))
+					defines.emplace_back(name, value);
+		}
+		return defines;
+	}
+
 	ID3D11DeviceChild* CompileShader(const wchar_t* FilePath, const std::vector<std::pair<const char*, const char*>>& Defines, const char* ProgramType, const char* Program)
 	{
 		auto device = globals::d3d::device;
@@ -224,20 +245,12 @@ namespace Util
 			macros.push_back({ "D3DCOMPILE_SKIP_OPTIMIZATION", "" });
 			macros.push_back({ "D3DCOMPILE_DEBUG", "" });
 		}
-		auto shaderDefines = globals::state->GetDefines();
-		if (!shaderDefines->empty()) {
-			for (unsigned int i = 0; i < shaderDefines->size(); i++)
-				macros.push_back({ shaderDefines->at(i).first.c_str(), shaderDefines->at(i).second.c_str() });
-		}
-
-		for (auto* feature : Feature::GetFeatureList()) {
-			if (!feature->loaded)
-				continue;
-			for (const auto& [name, value] : feature->GetCommonShaderDefines()) {
-				if (std::ranges::none_of(macros, [&](const auto& macro) { return name == macro.Name; }))
-					macros.push_back({ name.data(), value.empty() ? nullptr : value.data() });
-			}
-		}
+		std::vector<std::string_view> explicitNames;
+		for (const auto& macro : macros)
+			explicitNames.push_back(macro.Name);
+		const auto commonDefines = GetCommonShaderDefines(explicitNames);
+		for (const auto& [name, value] : commonDefines)
+			macros.push_back({ name.c_str(), value.c_str() });
 		if (!_stricmp(ProgramType, "ps_5_0"))
 			macros.push_back({ "PSHADER", "" });
 		else if (!_stricmp(ProgramType, "vs_5_0"))
@@ -515,24 +528,34 @@ namespace Util
 			return E_INVALIDARG;
 		}
 
-		namespace fs = std::filesystem;
-
 		DirectX::ScratchImage cpuImage;
 		if (const auto hr = CaptureTexture(device, context, tex, cpuImage); FAILED(hr))
 			return hr;
+
+		return SaveImageToFile(path, cpuImage);
+	}
+
+	HRESULT SaveImageToFile(const std::filesystem::path& path, const DirectX::ScratchImage& image)
+	{
+		if (path.empty()) {
+			logger::error("SaveImageToFile: path parameter is empty");
+			return E_INVALIDARG;
+		}
+
+		namespace fs = std::filesystem;
 
 		const auto parent = path.parent_path();
 		std::error_code ec;
 		if (!parent.empty() && !fs::exists(parent, ec)) {
 			if (!fs::create_directories(parent, ec)) {
-				logger::error("SaveTextureToFile: failed to create directories");
+				logger::error("SaveImageToFile: failed to create directories");
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
 		}
 
 		const std::wstring tmp = path.wstring().append(L".tmp");
-		if (const auto hr = SaveToDDSFile(cpuImage.GetImages(), cpuImage.GetImageCount(), cpuImage.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
-			logger::error("SaveTextureToFile: failed to save to file");
+		if (const auto hr = SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DirectX::DDS_FLAGS_NONE, tmp.c_str()); FAILED(hr)) {
+			logger::error("SaveImageToFile: failed to save to file");
 			fs::remove(tmp);
 			return hr;
 		}
@@ -541,13 +564,13 @@ namespace Util
 		if (ec) {
 			fs::remove(path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to remove existing file");
+				logger::error("SaveImageToFile: failed to remove existing file");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));
 			}
 			Util::RenameSerialized(tmp, path, ec);
 			if (ec) {
-				logger::error("SaveTextureToFile: failed to rename {} onto {}: {} {} ({})", Util::WStringToString(tmp), Util::WStringToString(path.wstring()),
+				logger::error("SaveImageToFile: failed to rename {} onto {}: {} {} ({})", Util::WStringToString(tmp), Util::WStringToString(path.wstring()),
 					ec.value(), ec.message(), Util::UnderUsvfs() ? "under usvfs" : "no usvfs");
 				fs::remove(tmp);
 				return HRESULT_FROM_WIN32(static_cast<DWORD>(ec.value()));

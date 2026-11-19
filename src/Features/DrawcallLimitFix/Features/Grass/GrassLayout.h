@@ -1,9 +1,9 @@
 #pragma once
 
-// The Grass draw family's GPU layout (Api::DrawFamily::Grass; dclf-architecture.md, "Grass: the draws"): the records, rows and
-// argument arrays its passes and draws read - GrassCullCS.hlsl and GrassArgsCS.hlsl (the depth segment's cull and the draws' arguments,
-// in the feature's shader folder) and RunGrass.hlsl's DCLF_PULLED path (package/Shaders) - and its engine shapes. The shaders mirror
-// it byte for byte (little-endian), so it stays compile-time. Included by the feature's sources only.
+#include "RenderGraph/BufferRef.h"
+
+// GPU layout of the grass draw family (dclf-architecture.md, "Grass: the draws").
+// GrassCullCS.hlsl, GrassArgsCS.hlsl and RunGrass.hlsl's DCLF_PULLED path mirror these structs byte for byte. Change both together.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/OwnedRows.h"
@@ -14,18 +14,11 @@
 
 namespace DCLF::GrassInstances
 {
-	/*
-	 * The engine's grass (AE 1.6.1170): each cell's grass types become BSMultiStreamInstanceTriShapes with a BSGrassShaderProperty,
-	 * each drawn instanced from its records - 32 bytes, 16 halfs an instance - in a group per cell, which GrassShared's capture hands
-	 * DCLF when the shape gets them (src/GrassShared/GrassCapture.h). The mirror (GrassMirror.h) keeps them in a flat instance table, a
-	 * range per group.
-	 */
 	inline constexpr std::uint32_t kInstanceShorts = 16;
 
 	/**
-	 * @brief One instance record, as the engine packs it (halfs): [0..2] the position, local to the shape's origin; [3] the colour
-	 * scale; [4..6] InstanceData2.xyz and [7] .w; [8..10] InstanceData3.xyz and [11] .w; [12] InstanceData4.x; [13] InstanceData4.y,
-	 * the scale variance; [14..15] unused. The rotation's rows are (h4, h5, h6), (h8, h9, h10) and (h12, h7, h11).
+	 * @brief One engine instance record, 16 halfs. [0..2] position relative to the shape origin, [3] colour scale, [13] scale variance.
+	 * The rotation rows are (h4, h5, h6), (h8, h9, h10) and (h12, h7, h11).
 	 */
 	struct Instance
 	{
@@ -34,69 +27,61 @@ namespace DCLF::GrassInstances
 	};
 	static_assert(sizeof(Instance) == 32);
 
-	/** @brief A shape slot's row: its origin (the shape's world translation at capture), bucket and instance range. */
 	struct ShapeRow
 	{
-		float origin[3]{};
+		float origin[3]{};  // the shape's world translation at capture
 		std::uint32_t bucket = 0;
-		std::uint32_t firstInstance = 0;  // its range in the instance table
-		std::uint32_t count = 0;          // 0: free, or not uploaded
-		float spawnStart = 0.0f;          // the mirror's fade clock when the shape came (the spawn fade-in)
+		std::uint32_t firstInstance = 0;
+		std::uint32_t count = 0;          // 0 when free or not uploaded
+		float spawnStart = 0.0f;          // fade clock when the shape arrived, for the spawn fade-in
 		std::uint32_t flags = 0;
 	};
 	static_assert(sizeof(ShapeRow) == 32);
 
-	/** @brief A mesh slot's row: the vertex and index buffers' device addresses (R16 indices, read as words), its layout. */
+	/** @brief Indices are R16, read as words. */
 	struct MeshRow
 	{
-		std::uint64_t vertexAddress = 0;
-		std::uint64_t indexAddress = 0;
-		std::uint64_t vertexDesc = 0;  // the engine's vertex descriptor (the pulled vertex stage's layout)
+		RenderGraph::BufferRef vertexRef;
+		RenderGraph::BufferRef indexRef;
+		std::uint64_t vertexDesc = 0;  // the engine's vertex descriptor
 		std::uint32_t indexCount = 0;
 		std::uint32_t vertexStride = 0;
 	};
 	static_assert(sizeof(MeshRow) == 32);
 
-	// A bucket's LOD tiers: 0 the full mesh, 1 the middle LOD mesh, 2 the far one (Grass Optimizations' _LOD0 and _LOD1).
+	// Tier 0 is the full mesh. Tiers 1 and 2 are Grass Optimizations' _LOD0 and _LOD1 meshes.
 	inline constexpr std::uint32_t kTiers = 3;
 	inline constexpr std::uint32_t kNoMesh = ~0u;
-	// BucketRow::flags.
-	inline constexpr std::uint32_t kBucketTruePbr = 1u << 0;       // drawn by the second colour program (TruePbr)
-	inline constexpr std::uint32_t kBucketSphereNormal = 1u << 1;  // the GrassSphereNormal descriptor
-	inline constexpr std::uint32_t kBucketTierOne = 1u << 2;       // a middle LOD mesh
-	inline constexpr std::uint32_t kBucketTierTwo = 1u << 3;       // a far LOD mesh
+	inline constexpr std::uint32_t kBucketTruePbr = 1u << 0;       // drawn by the second colour program
+	inline constexpr std::uint32_t kBucketSphereNormal = 1u << 1;
+	inline constexpr std::uint32_t kBucketTierOne = 1u << 2;
+	inline constexpr std::uint32_t kBucketTierTwo = 1u << 3;
 
-	/**
-	 * @brief A bucket slot's row: the shapes that draw alike (mesh, material, texture, descriptors), their meshes per tier, their
-	 * visible lists' bases (tier 0's range and tiers 1 and 2's shared one, each the bucket's instance count long: an instance is in one
-	 * tier a frame), and what their draws bind and the cull reads.
-	 */
 	struct BucketRow
 	{
-		std::uint32_t mesh[kTiers]{ kNoMesh, kNoMesh, kNoMesh };  // mesh slots; kNoMesh: none
+		std::uint32_t mesh[kTiers]{ kNoMesh, kNoMesh, kNoMesh };
 		std::uint32_t flags = 0;
-		// Tiers 0 and 1: their first entries in the visible list, filled upward; tier 2: the end of the range it shares with tier 1, filled
-		// downward from it (GrassCullCS Append).
+		// Tiers 0 and 1 fill upward from their base. Tier 2 shares tier 1's range and fills downward from its end.
 		std::uint32_t visibleBase[kTiers]{};
-		std::uint32_t instanceCount = 0;  // each range's capacity in the visible list; 0: a free slot (or not drawable yet)
-		DescriptorIndex diffuseIndex, depthSampler, colourSampler;  // OwnedRow's (GrassTables.cpp, BindBucket)
+		std::uint32_t instanceCount = 0;  // capacity of each visible range. 0 for a free or not yet drawable slot.
+		DescriptorIndex diffuseIndex, depthSampler, colourSampler;
 		float alphaRef = 0.0f;
 		float boundCenter[3]{};
 		float modelRadius = 0.0f;
 		float wavePeriod = 0.0f;
-		float distScale = 1.0f, minPixelScale = 1.0f;  // Grass Optimizations' mesh cost bias, tier 0's: 1/sqrt(cost), sqrt(cost)
+		float distScale = 1.0f, minPixelScale = 1.0f;  // tier 0 mesh cost bias: 1/sqrt(cost) and sqrt(cost)
 		std::uint32_t pbrFlags = 0;
 		float scaleMask[3]{};
 		std::uint32_t pad = 0;
 		DescriptorIndex normalIndex, rmaosIndex, featuresIndex, pbrSampler;
 		float pbrParams1[4]{};  // roughness scale, specular level, emissive scale, 0
 		float pbrParams2[4]{};  // subsurface colour rgb, opacity
-		float windDirection[2]{ 0.0f, 1.0f };  // the vertex stage's WindVector.xy: the shapes' model Y axis in world space
-		float lodMeshCost[2]{ 1.0f, 1.0f };    // tiers 1 and 2's sqrt(cost) (tier 0's minPixelScale where the tier has no mesh)
+		float windDirection[2]{ 0.0f, 1.0f };  // WindVector.xy, the shapes' model Y axis in world space
+		float lodMeshCost[2]{ 1.0f, 1.0f };    // sqrt(cost) of tiers 1 and 2
 		float pbrParams3[4]{};                 // fuzz colour rgb, weight
 		float pbrParams4[4]{};                 // subsurface balance, front and back specular weights, back roughness scale
 		DescriptorIndex fuzzIndex, emissiveIndex;
-		float canopyHeight[kTiers]{ 1.0f, 1.0f, 1.0f };  // the mesh's model-space height, by tier
+		float canopyHeight[kTiers]{ 1.0f, 1.0f, 1.0f };  // model-space height per tier
 		std::uint32_t pad2[3]{};
 	};
 	static_assert(sizeof(BucketRow) == 224);
@@ -109,28 +94,24 @@ namespace DCLF::GrassInstances
 				  offsetof(BucketRow, lodMeshCost) == 152 && offsetof(BucketRow, pbrParams3) == 160 && offsetof(BucketRow, pbrParams4) == 176 &&
 				  offsetof(BucketRow, fuzzIndex) == 192 && offsetof(BucketRow, emissiveIndex) == 196 && offsetof(BucketRow, canopyHeight) == 200);
 
-	// InstanceFrame::flags: the tier, whether the instance is in the collision's range, whether it is shaded simply (far).
+	// InstanceFrame flags, stored in fadeFlags' high 16 bits.
 	inline constexpr std::uint32_t kFrameTierMask = 3u;
 	inline constexpr std::uint32_t kFrameCollision = 1u << 2;
-	inline constexpr std::uint32_t kFrameSimpleShading = 1u << 3;  // InstanceFrame's flags (fadeFlags' high 16 bits)
+	inline constexpr std::uint32_t kFrameSimpleShading = 1u << 3;
 
-	/**
-	 * @brief An instance slot's per-frame values, the cull's (written before its occlusion verdict), the vertex stage's. Packed, as
-	 * every instance slot holds one (millions in a large list's grass): the wind scalars (about -1 to 1) as halfs, the fade as a unorm16.
-	 */
+	/** @brief Per-instance values the cull writes for the vertex stage. Packed tight because large lists have millions of instances. */
 	struct InstanceFrame
 	{
-		std::uint32_t wind = 0;       // the wind scalars at this frame's (low half) and the previous frame's timer (high), halfs
-		std::uint32_t fadeFlags = 0;  // the fade, unorm16 (low); the flags (high 16 bits)
+		std::uint32_t wind = 0;       // halfs: wind at this frame's timer (low) and the previous frame's (high)
+		std::uint32_t fadeFlags = 0;  // fade as unorm16 (low), flags (high)
 	};
 	static_assert(sizeof(InstanceFrame) == 8);
 
-	// CullRow::flags.
-	inline constexpr std::uint32_t kCullMidLod = 1u << 0;     // Grass Optimizations' mesh LOD, middle tier
-	inline constexpr std::uint32_t kCullFarLod = 1u << 1;     // and far tier
+	inline constexpr std::uint32_t kCullMidLod = 1u << 0;
+	inline constexpr std::uint32_t kCullFarLod = 1u << 1;
 	inline constexpr std::uint32_t kCullOcclusion = 1u << 2;  // test the HZB
 
-	/** @brief The cull's frame values (Grass Optimizations' CullParams, from GrassShared::Settings() and the engine's). */
+	/** @brief Mirrors Grass Optimizations' CullParams. */
 	struct CullRow
 	{
 		float minPixelSize = 0.0f, fullDetailPx = 0.0f, minKeep = 1.0f, fadeBand = 0.15f;
@@ -139,33 +120,28 @@ namespace DCLF::GrassInstances
 		float simpleShadingPx = 0.0f, collisionDistSq = 0.0f, midLodPx = 0.0f, farLodPx = 0.0f;
 		float lodBandPx = 0.0f;
 		std::uint32_t flags = 0;
-		float densityDistanceRcp = 0.0f;  // 1 / the INI grass distance: the density thinning ramps in over it
+		float densityDistanceRcp = 0.0f;  // 1 / INI grass distance, over which thinning ramps in
 		std::uint32_t pad[13]{};
 	};
 	static_assert(sizeof(CullRow) == 128 && offsetof(CullRow, alphaParam1) == 36 && offsetof(CullRow, alphaParam2) == 40 && offsetof(CullRow, flags) == 68 &&
 				  offsetof(CullRow, densityDistanceRcp) == 72);
 
-	/**
-	 * @brief The draw row: one, written by every depth commit (and latched by it), read by the cull, the arguments' pass and the
-	 * pulled vertex and pixel stages (its address is their push data's). The tables' addresses (the adopted versions'), the slots the
-	 * cull walks (0: grass draws nothing this frame), the engine's per-frame grass constants (BSGrassShader::SetupGeometry's b2),
-	 * the shadow mask's and collision texture's descriptors, Grass Collision's PerFrame, the eye and the cull's values.
-	 */
+	/** @brief The single per-frame row, written by each depth commit. Holds the engine's grass constants from SetupGeometry's b2. */
 	struct DrawRow
 	{
-		std::uint64_t instances = 0, shapes = 0, buckets = 0, meshes = 0, owners = 0, frame = 0, visible = 0;
-		std::uint32_t instanceSlots = 0, shapeSlots = 0;
-		float windVector[4]{};  // z the strength (xy are the bucket's windDirection)
+		RenderGraph::BufferRef instances, shapes, buckets, meshes, owners, frame, visible;
+		std::uint32_t instanceSlots = 0, shapeSlots = 0;  // 0 means grass draws nothing this frame
+		float windVector[4]{};  // z is the strength. xy come from each bucket.
 		float timeBase = 0.0f, prevTimeBase = 0.0f, fadeNow = 0.0f, fadeInTimeRcp = 0.0f;
 		float dirLightDirection[4]{};  // w: ShadowClampValue
 		float dirLightColor[4]{};      // w: FogNearColor.w
 		float ambientColor[4]{};
-		DescriptorIndex shadowMaskIndex;  // OwnedRow's (GrassTables.cpp, BindFrameTextures)
-		DescriptorIndex collisionIndex = DescriptorIndex::Sentinel(~0u);  // ~0u: no collision displacement
+		DescriptorIndex shadowMaskIndex;
+		DescriptorIndex collisionIndex = DescriptorIndex::Sentinel(~0u);  // ~0u means no collision displacement
 		std::uint32_t bucketSlots = 0;
 		std::uint32_t flags = 0;
-		std::array<std::byte, 64> collision{};  // GrassCollision::PerFrame (GrassShared::Collision::perFrame)
-		float eye[4]{};                         // the main camera's world position (the cull's distances)
+		std::array<std::byte, 64> collision{};  // GrassCollision::PerFrame
+		float eye[4]{};
 		std::uint32_t reserved[4]{};
 		CullRow cull;
 	};
@@ -176,35 +152,34 @@ namespace DCLF::GrassInstances
 				  offsetof(DrawRow, collisionIndex) == 148 && offsetof(DrawRow, bucketSlots) == 152 && offsetof(DrawRow, flags) == 156 &&
 				  offsetof(DrawRow, collision) == 160 && offsetof(DrawRow, eye) == 224 && offsetof(DrawRow, cull) == 256);
 
-	/*
-	 * The draws buffer (fixed, not versioned; the family's declared indirect-argument resource): per draw slot (a bucket's tier,
-	 * ds = bucket * 3 + tier) the cull's count, phase 1's count, and four arrays of non-indexed DrawInstanced arguments - phase 1's
-	 * depth draws, phase 2's, the colour draws of each colour program - each packed by GrassArgsCS with its draws' count in the header.
-	 */
+	// The draws buffer is fixed size, not versioned. A draw slot is bucket * 3 + tier. After the header come two count arrays,
+	// then four DrawArgs arrays: phase 1 depth, phase 2 depth, and one per colour program.
 	inline constexpr std::uint32_t kMaxBuckets = 1024;
 	inline constexpr std::uint32_t kMaxDrawSlots = kTiers * kMaxBuckets;
 
-	/** @brief The draws buffer's header: the arrays' draw counts (read by ExecuteIndirect as its count), the cull's counters. */
+	/** @brief The draw counts are read by ExecuteIndirect as its count. */
 	struct DrawsHeader
 	{
 		std::uint32_t phaseOneDraws = 0, phaseTwoDraws = 0, colourDraws[2]{};
-		std::uint32_t retests = 0;            // phase 1's occluded instances (the retest list's length)
+		std::uint32_t retests = 0;            // length of the retest list
 		std::uint32_t tested = 0;             // instances that reached the occlusion test in phase 1
 		std::uint32_t phaseOneInstances = 0, phaseTwoInstances = 0;
 		std::uint32_t stats[8]{};             // kStat*
 	};
 	static_assert(sizeof(DrawsHeader) == 64 && offsetof(DrawsHeader, retests) == 16 && offsetof(DrawsHeader, phaseOneInstances) == 24 &&
 				  offsetof(DrawsHeader, stats) == 32);
-	// DrawsHeader::stats: the live instances the cull walked, those culled by the frustum, by size or thinning, by fade, by distance
-	// (the cull's, or the tier's cost-biased one).
 	inline constexpr std::uint32_t kStatLive = 0, kStatOutside = 1, kStatThinned = 2, kStatFaded = 3, kStatFar = 4;
 
-	/** @brief One non-indexed DrawInstanced's arguments (the family's signature). */
+	/**
+	 * @brief The instance word, then non-indexed DrawInstanced arguments. D3D12 writes the word into a push constant.
+	 * Vulkan skips it and starts at vertexCount (FamilyPipelines::argumentsOffset).
+	 */
 	struct DrawArgs
 	{
+		std::uint32_t instanceWord = 0;
 		std::uint32_t vertexCount = 0, instanceCount = 0, firstVertex = 0, firstInstance = 0;
 	};
-	static_assert(sizeof(DrawArgs) == 16);
+	static_assert(sizeof(DrawArgs) == 20 && offsetof(DrawArgs, vertexCount) == 4);
 
 	inline constexpr std::uint64_t kCountsOffset = sizeof(DrawsHeader);
 	inline constexpr std::uint64_t kPhaseOneCountsOffset = kCountsOffset + kMaxDrawSlots * sizeof(std::uint32_t);
@@ -212,21 +187,15 @@ namespace DCLF::GrassInstances
 	inline constexpr std::uint64_t kPhaseTwoArgs = kPhaseOneArgs + kMaxDrawSlots * sizeof(DrawArgs);
 	inline constexpr std::uint64_t kColourArgs[2] = { kPhaseTwoArgs + kMaxDrawSlots * sizeof(DrawArgs), kPhaseTwoArgs + 2ull * kMaxDrawSlots * sizeof(DrawArgs) };
 	inline constexpr std::uint64_t kDrawsBytes = kColourArgs[1] + kMaxDrawSlots * sizeof(DrawArgs);
-	static_assert(kCountsOffset == 64 && kPhaseOneCountsOffset == 12352 && kPhaseOneArgs == 24640 && kPhaseTwoArgs == 73792 && kColourArgs[0] == 122944 &&
-				  kColourArgs[1] == 172096 && kDrawsBytes == 221248);
+	static_assert(kCountsOffset == 64 && kPhaseOneCountsOffset == 12352 && kPhaseOneArgs == 24640 && kPhaseTwoArgs == 86080 && kColourArgs[0] == 147520 &&
+				  kColourArgs[1] == 208960 && kDrawsBytes == 270400);
 
-	/*
-	 * The visible list (versioned, a unit per instance slot, 12 bytes a unit): the visible entries (instance indices) at
-	 * [0, 2 * units) words, each bucket's ranges at their visibleBase (tier 0's; tiers 1 and 2 sharing one); then the retest list
-	 * (phase 1's occluded instances) at kRetestOffsetPerUnit * units bytes.
-	 */
+	// The visible list holds 12 bytes per instance slot. Visible entries fill the first 2 words per slot.
+	// The retest list of phase 1's occluded instances starts at kRetestOffsetPerUnit * units bytes.
 	inline constexpr std::uint32_t kVisibleUnitBytes = 12;
 	inline constexpr std::uint32_t kRetestOffsetPerUnit = 8;
 
-	/**
-	 * @brief Whether a geometry is one of the family's engine shapes: its shader property is a BSGrassShaderProperty. Any thread
-	 * (its feature's parity; PassCapture's withholding reads the family's DrawFamilyEntry::engineShapeVtable instead).
-	 */
+	/** @brief True when the shader property is a BSGrassShaderProperty. Safe from any thread. */
 	inline bool IsEngineShape(const RE::BSGeometry* a_shape)
 	{
 		const auto* property = a_shape ? a_shape->GetGeometryRuntimeData().shaderProperty.get() : nullptr;

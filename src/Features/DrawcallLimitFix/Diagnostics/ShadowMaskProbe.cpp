@@ -15,7 +15,7 @@ namespace DCLF::Diagnostics::ShadowMaskProbe
 		std::mutex mutex;
 		std::unordered_map<std::uint32_t, std::string> pending;
 		std::atomic<bool> armed{ false };
-		// A slot is another object's once the cell changes: the probe lapses after a second.
+		// A slot belongs to another object once the cell changes, so the probe lapses after a second.
 		std::chrono::steady_clock::time_point armedAt;
 	}
 

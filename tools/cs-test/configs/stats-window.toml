@@ -1,0 +1,25 @@
+# One DCLF report window after the load: the autoloaded save, the stats report on, a shot after two windows (300 frames each with stats on; the pass statistics need 300 sampled colour frames),
+# then exit. Compose it: native-d3d12+stats-window, guest+stats-window.
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+[dclf]
+stats = true
+pass_stats = true
+
+[[steps]]
+at = "world-ready"
+frames = 800
+do = "shot"
+arg = "window"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["window"]

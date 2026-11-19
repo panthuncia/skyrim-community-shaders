@@ -1,10 +1,10 @@
-// CS_DCLF_SKYLIGHT_PARITY: the two renders of one occlusion map, the engine's (kept before the map is cleared again) and DCLF's (kept
-// after its epoch drew it), compared texel by texel once both copies are readable. Render thread.
+// CS_DCLF_SKYLIGHT_PARITY: the engine's and DCLF's renders of one occlusion map, compared texel by texel. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/Skylighting.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <filesystem>
 #include <fstream>
@@ -101,17 +101,18 @@ namespace DCLF::Features::OcclusionMaps
 				texels - equal ? sumDiff / double(texels - equal) : 0.0, engineFar, dclfFar);
 		}
 
-		/** @brief Stage 0: the engine's render, kept before the map is cleared for DCLF's; stage 1: DCLF's, once its epoch drew it. */
+		/** @brief Stage 0 keeps the engine's render before the map is cleared. Stage 1 keeps DCLF's once its epoch drew it. */
 		void Copy(std::uint32_t a_map, std::uint32_t a_stage)
 		{
 			auto& map = maps[a_map];
-			// The map's texture: Skylighting's own, or depth target 10 as stage 0 finds it (Skylighting swaps its own in later).
+			// Skylighting swaps its own texture in later, so take what stage 0 finds.
 			ID3D11Texture2D* texture = map.texture;
 			if (a_stage == 0) {
 				if (a_map == 0)
 					texture = globals::features::skylighting.texOcclusion ? globals::features::skylighting.texOcclusion->resource.get() : nullptr;
 				else if (auto* renderer = globals::game::renderer)
-					texture = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].texture;
+					// Copied through DXVK's context, since the field can be a tripwire handle.
+					texture = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].texture);
 				map.texture = texture;
 			}
 			if (!texture || a_stage > 1)
@@ -151,7 +152,7 @@ namespace DCLF::Features::OcclusionMaps
 
 	void RegisterParity(Api::InstallContext& a_context)
 	{
-		// Where Core's were listed: the parity's after the capture point's, its dump directory after the table start's.
+		// Registered where Core's switches were, to keep the order.
 		const auto parity = a_context.RegisterSwitch({ .name = "CS_DCLF_SKYLIGHT_PARITY", .kind = Api::SwitchKind::Parity,
 			.description = "1: DCLF's Skylighting occlusion map against the engine's, texel by texel", .after = "CS_DCLF_CAPTURE_POINT_PARITY" });
 		dumpDir = a_context.RegisterSwitch({ .name = "CS_DCLF_SKYLIGHT_DUMP_DIR", .kind = Api::SwitchKind::Diagnostic,

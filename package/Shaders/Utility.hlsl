@@ -1,3 +1,105 @@
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG builds of the engine's Utility draws, drawn by Drawcall Limit Fix's engine draw families:
+// - the shadow masks (Features/DrawcallLimitFix/Features/ShadowMask): each shadow-casting light's pass over the screen quad into
+//   kSHADOW_MASK, RENDER_SHADOWMASK* with RENDER_DEPTH;
+// - the menu scenes' draws (Features/DrawcallLimitFix/Features/MenuViews, UTILITY_ORG_SCENE): the local map's base textures
+//   (RENDER_BASE_TEXTURE) and fog of war (LOCALMAP_FOGOFWAR) into kLOCAL_MAP_SWAP, and a menu model's depth (RENDER_DEPTH) and its
+//   menu lights' shadow maps (RENDER_SHADOWMAP*), skinned or not.
+// A draw's engine constants, its textures' and samplers' heap indices and its geometry are one latch region. FrameBuffer and
+// SharedData are the shared constants, written at the anchor's run right after the engine's batch, so they hold the camera the
+// engine's draw would have read (the menu's in a menu scene, the local map's in the local map).
+#	if defined(RENDER_DEPTH) && (defined(RENDER_SHADOWMASK) || defined(RENDER_SHADOWMASKSPOT) || defined(RENDER_SHADOWMASKPB) || defined(RENDER_SHADOWMASKDPB))
+#	elif defined(RENDER_BASE_TEXTURE) || defined(LOCALMAP_FOGOFWAR) || defined(RENDER_DEPTH) || defined(RENDER_SHADOWMAP) || defined(RENDER_SHADOWMAP_PB)
+#		define UTILITY_ORG_SCENE
+#		define ORG_LATCHED_BONES
+#	else
+#		error "Utility.hlsl's ORG build draws the shadow masks, the local map, depth and the shadow maps only"
+#	endif
+#	define UTILITY_ORG
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgResources.hlsli"
+
+#	if defined(UTILITY_ORG_SCENE)
+// A menu scene draw's latched values (UtilitySceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the
+// rows of the engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them. World is row_major in the
+// D3D11 shader, so its rows are the registers. A skinned draw's palettes are the Bones latch (Common/Skinned.hlsli, OrgBoneRow).
+struct UtilityOrgSceneDraw
+{
+	float4 VSTechnique[2];  // VS b0: HighDetailRange, ParabolaParam
+	float4 VSMaterial[1];   // VS b1: TexcoordOffset
+	float4 VSGeometry[8];   // VS b2: ShadowFadeParam, World (c1-c4), EyePos, WaterParams, TreeParams
+	float4 PSMaterial[2];   // PS b1: RefractionPower, BaseColor
+	float4 PSGeometry[4];   // PS b2: DebugColor, PropertyColor, AlphaTestRef, ShadowLightParam
+	float AlphaTestRefRS;   // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint Padding;
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+
+// The draw's palettes (Common/Skinned.hlsli): previous frame's 240 rows, then this frame's. Read by row, never loaded whole.
+struct UtilityOrgBones
+{
+	float4 Rows[480];
+};
+
+#		define UTILITY_ORG_RESOURCES(X)                  			X(SHARED, ConstantBuffer, Shared, 0)          			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2) 			X(EXTERN_LATCH, UtilityOrgBones, Bones, 9) X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)
+#	else
+// A shadow mask draw's latched values (DrawConstants in Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h). The engine's
+// rows as its constant buffers hold them: a matrix is its column registers (column_major packing), rebuilt below.
+struct UtilityOrgShadowMaskDraw
+{
+	float4 PSTechnique[5];  // PS b0: VPOSOffset, ShadowSampleParam, EndSplitDistances, StartSplitDistances, FocusShadowFadeParam
+	float4 PSGeometry[28];  // PS b2: DebugColor, PropertyColor, AlphaTestRef, ShadowLightParam, FocusShadowMapProj (c4-c15), ShadowMapProj (c16-)
+	float AlphaTestRefRS;   // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint Padding;
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+#		define UTILITY_ORG_RESOURCES(X)         			X(SHARED, ConstantBuffer, Shared, 0) 			X(LATCH, UtilityOrgShadowMaskDraw, ShadowMaskDraw, 2)
+#	endif
+ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
+UTILITY_ORG_RESOURCES(ORG_RESOURCE)
+#	if defined(UTILITY_ORG_SCENE)
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
+// ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#	define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
+#	endif
+#	if defined(UTILITY_ORG_SCENE)
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+#	endif
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/LodLandscape.hlsli"
@@ -40,6 +142,9 @@ static const uint kDCLFRefractionClamp = 1u << 4;
 static const uint kDCLFRefractionNoNormals = 1u << 5;
 static const uint kDCLFRefractionVertexColors = 1u << 6;
 static const uint kDCLFRefractionTwoSided = 1u << 7;
+// A leaf under an NiBillboardNode (LightingConstants.h, kRecordRefractionBillboard): turned to the camera here, with the face mode its
+// placement row holds in PreviousWorld[1].w (BillboardRow.h).
+static const uint kDCLFRefractionBillboard = 1u << 8;
 #endif
 
 #if defined(VSHADER)
@@ -123,7 +228,18 @@ struct VS_OUTPUT
 #endif
 };
 
-#ifdef VSHADER
+#if defined(VSHADER) && (!defined(UTILITY_ORG) || defined(UTILITY_ORG_SCENE))
+#	if defined(UTILITY_ORG_SCENE)
+// The ORG build's constants, from the draw's latch (UtilityOrgSceneDraw).
+static float4 HighDetailRange = SceneDraw.VSTechnique[0];
+static float2 ParabolaParam = SceneDraw.VSTechnique[1].xy;
+static float4 TexcoordOffset = SceneDraw.VSMaterial[0];
+static float4 ShadowFadeParam = SceneDraw.VSGeometry[0];
+static row_major float4x4 World = float4x4(SceneDraw.VSGeometry[1], SceneDraw.VSGeometry[2], SceneDraw.VSGeometry[3], SceneDraw.VSGeometry[4]);
+static float4 EyePos = SceneDraw.VSGeometry[5];
+static float4 WaterParams = SceneDraw.VSGeometry[6];
+static float4 TreeParams = SceneDraw.VSGeometry[7];
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
@@ -161,6 +277,7 @@ cbuffer PerGeometry : register(b2)
 	float4 TreeParams : packoffset(c7);
 #	endif
 };
+#	endif  // UTILITY_ORG_SCENE
 
 #if defined(DCLF_PULLED)
 // Set by main from the draw's object (DCLF_PULLED, below), as the DCLF_BINDLESS build's statics.
@@ -190,6 +307,8 @@ float2 SmoothSaturate(float2 value)
 
 #	if defined(DCLF_PULLED)
 VS_OUTPUT DCLFShade(VS_INPUT input)
+#	elif defined(UTILITY_ORG_SCENE)
+VS_OUTPUT UtilityOrgSceneShade(VS_INPUT input)
 #	else
 VS_OUTPUT main(VS_INPUT input)
 #	endif
@@ -373,56 +492,56 @@ VS_OUTPUT main(VS_INPUT input)
 
 VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceShadowRows(sequence);  // the draw's key slot's vertex layout, the material row's address
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceShadowRows(sequence);  // the draw's key slot's vertex layout, the material row's ref
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	// The draw's own (BuildDrawsCS: a shadow view's slot layouts), so a bucket draws casters of every layout; the call's pushed one
 	// for a slot the latch's table did not hold yet.
 	DCLFDrawVertexLayout = any(rows.xy != 0) ? rows.xy : DCLFVertexLayout;
 	// The draw's caster technique (bit 31: present; BuildDrawsCS's slot table), which decides what the canonical build's SKINNED and
 	// VC take per draw; absent, the build's defines.
-	const uint drawTechnique = vk::RawBufferLoad<uint>(sequence);
+	const uint drawTechnique = DeviceLoad(uint, sequence);
 	const bool known = (drawTechnique & 0x80000000u) != 0;
 	DCLFDrawSkinned = !known || (drawTechnique & 0x4u) != 0;
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
-	const uint64_t materialRow = DCLFAddress(rows.zw);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
+	const DeviceRef materialRow = rows.zw;
 
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	DCLFStreamsAt(index, first, second);
 
 	VS_INPUT input;
 #		if defined(STENCIL_ABOVE_WATER)
-	input.PositionMS = asfloat(vk::RawBufferLoad<uint4>(DCLFAttribute(0, first, second)));
+	input.PositionMS = asfloat(DeviceLoad(uint4, DCLFAttribute(0, first, second)));
 #		else
 	// Only xyz is read (DCLFShade makes w 1).
-	input.PositionMS = float4(asfloat(vk::RawBufferLoad<uint3>(DCLFAttribute(0, first, second))), 1);
+	input.PositionMS = float4(asfloat(DeviceLoad(uint3, DCLFAttribute(0, first, second))), 1);
 #		endif
 #		if defined(TEXTURE)
-	input.TexCoord = DCLFHalf2(vk::RawBufferLoad<uint>(DCLFAttribute(1, first, second)));
+	input.TexCoord = DCLFHalf2(DeviceLoad(uint, DCLFAttribute(1, first, second)));
 #		endif
 #		if defined(NORMALS)
-	input.Normal = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(3, first, second)));
-	input.Bitangent = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(4, first, second)));
+	input.Normal = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(3, first, second)));
+	input.Bitangent = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(4, first, second)));
 #		endif
 #		if defined(VC)
 	// A draw without vertex colours: alpha 1, which the alpha test's multiply leaves as it is.
 	input.Color = float4(1, 1, 1, 1);
 	[branch] if (!known || (drawTechnique & 0x1u) != 0)
-		input.Color = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(5, first, second)));
+		input.Color = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(5, first, second)));
 #		endif
 #		if defined(SKINNED)
 	input.BoneWeights = 0;
 	input.BoneIndices = 0;
 	[branch] if (DCLFDrawSkinned) {
-		const uint64_t skinning = DCLFAttribute(6, first, second);
-		const uint2 weights = vk::RawBufferLoad<uint2>(skinning);
+		const DeviceRef skinning = DCLFAttribute(6, first, second);
+		const uint2 weights = DeviceLoad(uint2, skinning);
 		input.BoneWeights = float4(DCLFHalf2(weights.x), DCLFHalf2(weights.y));
-		input.BoneIndices = DCLFUnorm4(vk::RawBufferLoad<uint>(skinning + 8));
+		input.BoneIndices = DCLFUnorm4(DeviceLoad(uint, DeviceRefAdd(skinning, 8)));
 	}
 #		endif
 
@@ -433,7 +552,7 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 		DCLFPlacements[DCLFObjectIndex].World[2] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.z),
 		float4(0, 0, 0, 1));
 	TreeParams = DCLFTreeParamsOf(DCLFObjectIndex);
-	TexcoordOffset = asfloat(vk::RawBufferLoad<uint4>(materialRow));
+	TexcoordOffset = asfloat(DeviceLoad(uint4, materialRow));
 
 	VS_OUTPUT vsout = DCLFShade(input);
 	// The viewport's depth transform, here: z' = min * w + z * (max - min) under a [0, 1] viewport is the window depth the view's
@@ -451,7 +570,7 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 #		if defined(DCLF_EMPTY_PIXEL)
 	vsout.DCLFDraw = uint2(0, 0);
 #		else
-	vsout.DCLFDraw = uint2(vk::RawBufferLoad<uint>(materialRow + 16), DCLFObjectWord);
+	vsout.DCLFDraw = uint2(DeviceLoad(uint, DeviceRefAdd(materialRow, 16)), DCLFObjectWord);
 #			if defined(DCLF_SHADOW_ALPHA)
 	vsout.DCLFAlphaRef = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
 #			endif
@@ -463,6 +582,9 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 // active lane's draw and the lanes of that draw, so the loads are the draw's, not each lane's (one pass unless a wave mixes draws).
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
+#	if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#	endif
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
@@ -485,22 +607,22 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 // camera as the Lighting draws compute their envmap fade (Lighting.hlsl, DCLFLodMetric); with RENDER_NORMAL_FALLOFF, EyePos.xyz is the
 // camera in the geometry's model space (BSUtilityShader::SetupGeometry: its world transform inverted). RefractionPower, a pixel
 // constant multiplying TexCoord0.w, is folded into TexCoord0.w here.
-float DCLFRefractionFloat(uint64_t a_frame, uint a_float) { return asfloat(vk::RawBufferLoad<uint>(a_frame + 4u * a_float, 4)); }
+float DCLFRefractionFloat(DeviceRef a_frame, uint a_float) { return asfloat(DeviceLoad(uint, DeviceRefAdd(a_frame, 4u * a_float), 4)); }
 
 VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's address, the material row's
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
-	DCLFPipelineRowAddress = DCLFAddress(rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(rows.zw);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();  // the draw's slot's (one pipeline draws every layout)
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	DCLFStreamsAt(index, first, second);
 
@@ -511,7 +633,13 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 
 	// The refraction LOD fade (EyePos.w): FUN_14147c470 at the fade node's metric, while the node's LOD fades apply (LodFadeNodeOf);
 	// else the property's, as it holds it (the shading row's MaterialData.x). Past the end the engine registers no pass: no draw.
-	const uint64_t lodFrame = DCLFAddress(DCLFMaterialRowsAddress);  // LodFadeFrame (LightingDescriptors.h)
+	// LodFadeFrame (LightingDescriptors.h), in the frame constants: the push word is the layout's device address on Vulkan, and its
+	// ref on D3D12, where no layout reads it (RefractionDrawPass).
+#		if defined(__spirv__)
+	const DeviceRef lodFrame = DCLFRefFromBacking(kDCLFBackingFrameConstants, DCLFMaterialRowsAddress);
+#		else
+	const DeviceRef lodFrame = DCLFMaterialRowsAddress;
+#		endif
 	const float4 fadeNode = DCLFPlacements[object].LodFadeNode;
 	float fade = DCLFShading[object].MaterialData.x;
 	const float3 eye = float3(DCLFRefractionFloat(lodFrame, 0), DCLFRefractionFloat(lodFrame, 1), DCLFRefractionFloat(lodFrame, 2));
@@ -531,19 +659,27 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 		fade = metric <= start ? 1 : saturate((metric - end) / (start - end));
 	}
 
-	precise float4 positionMS = float4(asfloat(vk::RawBufferLoad<uint3>(DCLFAttribute(0, first, second))), 1.0);
-	const float2 texCoord = DCLFHalf2(vk::RawBufferLoad<uint>(DCLFAttribute(1, first, second)));
+	precise float4 positionMS = float4(asfloat(DeviceLoad(uint3, DCLFAttribute(0, first, second))), 1.0);
+	const float2 texCoord = DCLFHalf2(DeviceLoad(uint, DCLFAttribute(1, first, second)));
 	// Normals unless model-space normals (the technique's Normals | BinormalTangent), whose stage reads (1, 1, 1).
 	float3 normalMS = float3(1, 1, 1);
 	if ((flags & kDCLFRefractionNoNormals) == 0)
-		normalMS = DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(3, first, second))).xyz * 2 - 1;
-	const float vertexAlpha = (flags & kDCLFRefractionVertexColors) != 0 ? DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(5, first, second))).w : 1;
+		normalMS = DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(3, first, second))).xyz * 2 - 1;
+	const float vertexAlpha = (flags & kDCLFRefractionVertexColors) != 0 ? DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(5, first, second))).w : 1;
 
 	World = float4x4(
 		DCLFPlacements[object].World[0] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.x),
 		DCLFPlacements[object].World[1] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.y),
 		DCLFPlacements[object].World[2] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.z),
 		float4(0, 0, 0, 1));
+	// A billboard leaf turned to this camera, as NiBillboardNode::OnVisible turns its node for the culling camera: the camera's axes are
+	// CameraView's rows (right, up, forward), its eye the posAdjust the world is made relative to (Effect.hlsl does the same).
+	if ((flags & kDCLFRefractionBillboard) != 0) {
+		const uint mode = (uint)DCLFPlacements[object].PreviousWorld[1].w & 7u;
+		const float3x4 turned = DCLFBillboardWorldOfMode(object, mode, FrameBuffer::CameraView[2].xyz, FrameBuffer::CameraView[1].xyz, FrameBuffer::CameraView[0].xyz,
+			FrameBuffer::CameraPosAdjust.xyz);
+		World = float4x4(turned[0], turned[1], turned[2], float4(0, 0, 0, 1));
+	}
 	// EyePos.xyz with RENDER_NORMAL_FALLOFF: the camera in model space (the world transform's inverse; NiTransform's scale is uniform).
 	const float3x3 rotateScale = (float3x3)World;
 	const float3 eyeRelative = eye - FrameBuffer::CameraPosAdjust.xyz - float3(World[0].w, World[1].w, World[2].w);
@@ -553,10 +689,10 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 	float3 normalVS;
 	float falloff = 1;
 	if (DCLFObjects[object].DCLFBoneRows != 0) {
-		const uint64_t skinning = DCLFAttribute(6, first, second);
-		const uint2 weightWords = vk::RawBufferLoad<uint2>(skinning);
+		const DeviceRef skinning = DCLFAttribute(6, first, second);
+		const uint2 weightWords = DeviceLoad(uint2, skinning);
 		const float4 boneWeights = float4(DCLFHalf2(weightWords.x), DCLFHalf2(weightWords.y));
-		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(vk::RawBufferLoad<uint>(skinning + 8));
+		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(DeviceLoad(uint, DeviceRefAdd(skinning, 8)));
 		const uint boneOffset = DCLFObjects[object].DCLFBoneOffset;
 		// The rows are absolute: the pivot is the camera's posAdjust.
 		float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(boneOffset, boneIndices, FrameBuffer::CameraPosAdjust.xyz, boneWeights);
@@ -590,6 +726,9 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 // Keyed on a wave-uniform instance, as the shadow views' main is.
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
+#	if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#	endif
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
@@ -603,6 +742,61 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 #	endif
 #endif
 
+#if defined(VSHADER) && defined(UTILITY_ORG_SCENE)
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+
+// The scene build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its
+// attributes as the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (UtilityOrgSceneShade).
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	DCLFDrawVertexLayout = SceneDraw.VertexLayout;
+	const uint indexNumber = SceneDraw.FirstIndex + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(SceneDraw.IndexAddress, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { SceneDraw.VertexAddress, SceneDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
+	DCLFStreamsAt(index, first, second);
+	VS_INPUT input;
+	input.PositionMS = float4(DCLFPullPosition(first, second).xyz, 1);
+#	if defined(TEXTURE)
+	input.TexCoord = DCLFPullHalf2(1, first, second);
+#	endif
+#	if defined(NORMALS)
+	input.Normal = DCLFPullUnorm4(3, 0, first, second);
+	input.Bitangent = DCLFPullUnorm4(4, 0, first, second);
+#	endif
+#	if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, first, second);
+#	endif
+#	if defined(SKINNED)
+	input.BoneWeights = DCLFPullHalf4(6, first, second);
+	input.BoneIndices = DCLFPullUnorm4(6, 8, first, second);
+#	endif
+	return UtilityOrgSceneShade(input);
+}
+#elif defined(VSHADER) && defined(UTILITY_ORG)
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+
+// The ORG build's vertex stage: the engine's screen quad (ImageSpaceManager's, which every shadow mask pass draws), its vertex pulled as
+// the input assembler reads it (its 16-bit index, then its position), placed as the D3D11 stage places it. The depth the D3D11 stage
+// writes is not read: the pass has no depth target.
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	DCLFDrawVertexLayout = ShadowMaskDraw.VertexLayout;
+	const uint indexNumber = ShadowMaskDraw.FirstIndex + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(ShadowMaskDraw.IndexAddress, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { ShadowMaskDraw.VertexAddress, ShadowMaskDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
+	DCLFStreamsAt(index, first, second);
+	VS_OUTPUT vsout;
+	vsout.PositionCS = float4(DCLFPullPosition(first, second).xy, 0, 1);
+	return vsout;
+}
+#endif
+
 typedef VS_OUTPUT PS_INPUT;
 
 struct PS_OUTPUT
@@ -612,6 +806,75 @@ struct PS_OUTPUT
 
 #ifdef PSHADER
 
+#	if defined(UTILITY_ORG_SCENE)
+// The local map build's resources, from the draw's latch: the slots' heap indices and the engine's constant rows.
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[SceneDraw.Samplers[0].x];
+static SamplerState SampNormalSampler = SamplerDescriptorHeap[SceneDraw.Samplers[0].y];
+static SamplerState SampGrayscaleSampler = SamplerDescriptorHeap[SceneDraw.Samplers[1].w];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[SceneDraw.Textures[0].x];
+static Texture2D<float4> TexNormalSampler = ResourceDescriptorHeap[SceneDraw.Textures[0].y];
+static Texture2D<float4> TexGrayscaleSampler = ResourceDescriptorHeap[SceneDraw.Textures[1].w];
+
+static float RefractionPower = SceneDraw.PSMaterial[0].x;
+static float4 BaseColor = SceneDraw.PSMaterial[1];
+
+static float4 DebugColor = SceneDraw.PSGeometry[0];
+static float4 PropertyColor = SceneDraw.PSGeometry[1];
+static float4 AlphaTestRef = SceneDraw.PSGeometry[2];
+static float4 ShadowLightParam = SceneDraw.PSGeometry[3];
+
+static float AlphaTestRefRS = SceneDraw.AlphaTestRefRS;
+#	elif defined(UTILITY_ORG)
+// The ORG build's resources, from the draw's latch: the slots' heap indices and the engine's constant rows.
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].x];
+static SamplerState SampDepthSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].z];
+static SamplerState SampShadowMapSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].w];
+static SamplerComparisonState SampShadowMapSamplerComp = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[1].x];
+static SamplerComparisonState SampFocusShadowMapSamplerComp = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[1].z];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].x];
+static Texture2D<float4> TexDepthUtilitySampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[0].z];
+// The filter-0 path's plain view (t3) is the same shadow map as the comparison view (t4): read through t4's index. Latched from t3,
+// the sun's masks read a null view (ShadowMask.h, SlotRead).
+static Texture2DArray<float4> TexShadowMapSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].x];
+static Texture2DArray<float4> TexShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].x];
+static Texture2D<uint4> TexStencilSampler = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].y];
+static Texture2DArray<float4> TexFocusShadowMapSamplerComp = ResourceDescriptorHeap[ShadowMaskDraw.Textures[1].z];
+
+static float4 VPOSOffset = ShadowMaskDraw.PSTechnique[0];
+static float4 ShadowSampleParam = ShadowMaskDraw.PSTechnique[1];
+static float4 EndSplitDistances = ShadowMaskDraw.PSTechnique[2];
+static float4 StartSplitDistances = ShadowMaskDraw.PSTechnique[3];
+static float4 FocusShadowFadeParam = ShadowMaskDraw.PSTechnique[4];
+
+static float4 DebugColor = ShadowMaskDraw.PSGeometry[0];
+static float4 PropertyColor = ShadowMaskDraw.PSGeometry[1];
+static float4 AlphaTestRef = ShadowMaskDraw.PSGeometry[2];
+static float4 ShadowLightParam = ShadowMaskDraw.PSGeometry[3];
+
+/** @brief A column_major float4x3 of the latched PerGeometry rows: its three column registers from a_row. */
+float4x3 UtilityOrgMatrix4x3(uint a_row)
+{
+	return transpose(float3x4(ShadowMaskDraw.PSGeometry[a_row], ShadowMaskDraw.PSGeometry[a_row + 1], ShadowMaskDraw.PSGeometry[a_row + 2]));
+}
+
+/** @brief A column_major float4x4 of the latched PerGeometry rows: its four column registers from a_row. */
+float4x4 UtilityOrgMatrix4x4(uint a_row)
+{
+	return transpose(float4x4(ShadowMaskDraw.PSGeometry[a_row], ShadowMaskDraw.PSGeometry[a_row + 1], ShadowMaskDraw.PSGeometry[a_row + 2],
+		ShadowMaskDraw.PSGeometry[a_row + 3]));
+}
+
+static float4x3 FocusShadowMapProj[4] = { UtilityOrgMatrix4x3(4), UtilityOrgMatrix4x3(7), UtilityOrgMatrix4x3(10), UtilityOrgMatrix4x3(13) };
+#		if defined(RENDER_SHADOWMASK)
+static float4x3 ShadowMapProj[3] = { UtilityOrgMatrix4x3(16), UtilityOrgMatrix4x3(19), UtilityOrgMatrix4x3(22) };
+#		else
+static float4x4 ShadowMapProj[3] = { UtilityOrgMatrix4x4(16), UtilityOrgMatrix4x4(20), UtilityOrgMatrix4x4(24) };
+#		endif
+
+static float AlphaTestRefRS = ShadowMaskDraw.AlphaTestRefRS;
+#	else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampNormalSampler : register(s1);
 SamplerState SampDepthSampler : register(s2);
@@ -676,6 +939,7 @@ cbuffer AlphaTestRefCB : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#	endif
 
 #	if SHADOWFILTER == 8
 static const uint ShadowPCFSampleCount = 16;
@@ -893,7 +1157,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 	shadowMapDepth = depth;
 
-#			if defined(FOCUS_SHADOW)
+	// The ORG build keeps stencilValue 0. The engine's draw reads the stencil view's red component, which DXVK's
+	// X24_TYPELESS_G8_UINT view returns as 0 (the stencil is in green), so it never takes the focus shadows' branch either.
+	// BasicRHI has no stencil view of a depth-stencil image (shadow-mask.md, "The focus shadows' stencil").
+#			if defined(FOCUS_SHADOW) && !defined(UTILITY_ORG)
 	uint3 stencilDimensions;
 	TexStencilSampler.GetDimensions(0, stencilDimensions.x, stencilDimensions.y, stencilDimensions.z);
 	stencilValue = TexStencilSampler.Load(float3(stencilDimensions.xy * depthUv, 0)).x;

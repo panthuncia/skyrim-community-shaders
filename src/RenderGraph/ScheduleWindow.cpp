@@ -26,7 +26,7 @@ namespace RenderGraphSchedule
 		bool g_windowOpen = false;  // UI thread
 		org::debugui::ScheduleInspectorState g_inspector;  // UI thread
 
-		// A resource as a pass left it (the inspector's capture). The readback completes on the render thread.
+		// A resource as a pass left it. The readback completes on the render thread.
 		struct Capture
 		{
 			std::string pass, resource;
@@ -34,7 +34,7 @@ namespace RenderGraphSchedule
 		};
 		std::mutex g_captureMutex;
 		std::shared_ptr<Capture> g_capture;  // guarded by g_captureMutex
-		int g_captureView = 0;               // UI thread: 0 bytes, 1 u32, 2 f32
+		int g_captureView = 0;               // UI thread. 0 bytes, 1 u32, 2 f32
 
 		org::RenderGraph* Graph()
 		{
@@ -47,8 +47,7 @@ namespace RenderGraphSchedule
 			return g_windowWants.load(std::memory_order_acquire) || g_devBenchWants.load(std::memory_order_acquire);
 		}
 
-		// The graphs' switch to what the requesters want (every epoch's graph, and those built later); again whenever they read, so a
-		// graph made again (a device reset) follows. The inspector shows the first epoch's graph.
+		// Applied again on every read, so a graph made again after a device reset follows. The inspector shows the first epoch's graph.
 		org::RenderGraph* Apply()
 		{
 			auto* host = RenderGraphRuntime::Get().Host();

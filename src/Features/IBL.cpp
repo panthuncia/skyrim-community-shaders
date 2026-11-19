@@ -1,4 +1,5 @@
 #include "IBL.h"
+#include "IBL/ORGIBL.h"
 
 #include "Deferred.h"
 #include "DynamicCubemaps.h"
@@ -8,6 +9,7 @@
 #include "Effects11.h"
 #include "Effects11/SettingManager.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "../I18n/I18n.h"
 #include <DDSTextureLoader.h>
@@ -178,8 +180,8 @@ void IBL::ReflectionsPrepass()
 		// Set PS shader resource
 		{
 			std::array<ID3D11ShaderResourceView*, 4> srvs = {
-				sceneDisabled ? nullptr : envIBLTexture->srv.get(),
-				sceneDisabled ? nullptr : skyIBLTexture->srv.get(),
+				sceneDisabled ? nullptr : EnvIBLSRV(),
+				sceneDisabled ? nullptr : SkyIBLSRV(),
 				staticDiffuseIBLTexture ? staticDiffuseIBLTexture->srv.get() : nullptr,
 				staticSpecularIBLTexture ? staticSpecularIBLTexture->srv.get() : nullptr
 			};
@@ -194,6 +196,15 @@ void IBL::Prepass()
 		return;
 
 	auto context = globals::d3d::context;
+
+	auto& orgIBL = ORGIBL::Get();
+
+	// The render graph projects the SH at the Prepass anchor, right after this (CS_ORG_IBL=1): bind its textures for the main pass.
+	if (orgIBL.Prepass(settings.DALCMode < 2)) {
+		ID3D11ShaderResourceView* views[2]{ EnvIBLSRV(), SkyIBLSRV() };
+		context->PSSetShaderResources(76, 2, views);
+		return;
+	}
 
 	auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 
@@ -230,7 +241,8 @@ void IBL::Prepass()
 	{
 		auto renderer = globals::game::renderer;
 		auto& reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
-		srvs.at(0) = reflections.SRV;
+		// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
+		srvs.at(0) = RenderGraph::Engine::Tripwire::Unwrap(reflections.SRV);
 		uavs.at(0) = skyIBLTexture->uav.get();
 
 		context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
@@ -259,8 +271,29 @@ void IBL::Prepass()
 	}
 }
 
-void IBL::SetupResources()
+void IBL::PostPostLoad()
 {
+	ORGIBL::Reserve();
+}
+
+ID3D11ShaderResourceView* IBL::EnvIBLSRV() const
+{
+	if (auto* view = ORGIBL::Get().EnvSRV())
+		return view;
+	return envIBLTexture ? envIBLTexture->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* IBL::SkyIBLSRV() const
+{
+	if (auto* view = ORGIBL::Get().SkySRV())
+		return view;
+	return skyIBLTexture ? skyIBLTexture->srv.get() : nullptr;
+}
+
+void IBL::CreateSHTextures()
+{
+	if (envIBLTexture)
+		return;
 	GetDiffuseIBLCS();
 
 	{
@@ -289,13 +322,20 @@ void IBL::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		envIBLTexture = new Texture2D(texDesc, "IBL::EnvIBL");
+		envIBLTexture = new Texture2D(texDesc, ORGIBL::kEnvId.data());
 		envIBLTexture->CreateSRV(srvDesc);
 		envIBLTexture->CreateUAV(uavDesc);
-		skyIBLTexture = new Texture2D(texDesc, "IBL::SkyIBL");
+		skyIBLTexture = new Texture2D(texDesc, ORGIBL::kSkyId.data());
 		skyIBLTexture->CreateSRV(srvDesc);
 		skyIBLTexture->CreateUAV(uavDesc);
 	}
+}
+
+void IBL::SetupResources()
+{
+	// The render graph's SH textures replace the D3D11 ones; if the runtime stops later the D3D11 path makes its own.
+	if (!ORGIBL::Get().Setup([this] { CreateSHTextures(); }))
+		CreateSHTextures();
 
 	auto device = globals::d3d::device;
 

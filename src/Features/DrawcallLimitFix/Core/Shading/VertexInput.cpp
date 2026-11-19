@@ -23,7 +23,7 @@ namespace DCLF
 
 		constexpr std::uint32_t kNoSlot = ~0u;
 
-		// Stream 0 when the attribute's flag is set there (bit 44 + a), else stream 1 (bit 54 + a).
+		// Stream 0 when the attribute's flag is set there at bit 44 + a, else stream 1 at bit 54 + a.
 		std::uint32_t SlotOf(std::uint64_t a_key, std::uint32_t a_attribute)
 		{
 			if (a_key & (1ull << (44 + a_attribute)))
@@ -52,7 +52,7 @@ namespace DCLF
 		};
 		auto attribute = [&](std::uint32_t a_attribute) { return SlotOf(a_key, a_attribute); };
 
-		// The position element is always present (slot ~0 when the key has no position).
+		// The position element is always present, with slot ~0 when the key has no position.
 		add("POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, attribute(kPosition), 0);
 		if (const auto slot = attribute(kTexcoord0); slot != kNoSlot)
 			add("TEXCOORD", 0, DXGI_FORMAT_R16G16_FLOAT, slot, OffsetOf(a_key, kTexcoord0));

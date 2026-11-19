@@ -23,6 +23,7 @@
 #include "Features/DynamicCubemaps.h"
 #include "Features/RenderDoc.h"
 #include "Features/DrawcallLimitFix.h"
+#include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include "Plugin.h"
@@ -105,6 +106,42 @@ namespace SIE
 		static std::wstring GetShaderPath(const std::string_view& name)
 		{
 			return std::format(L"Data/Shaders/{}.hlsl", std::wstring(name.begin(), name.end()));
+		}
+
+		/**
+		 * @brief Whether an image-space shader is BSLensFlare, the lens flare sprite.
+		 *
+		 * Tells it by name (+0x120, set by every image-space constructor; SE and AE). Its constructor never sets
+		 * originalShaderName (+0x128), so that field holds whatever the allocation held: never read it for this shader.
+		 */
+		static bool IsLensFlareSprite(const RE::BSImagespaceShader& a_shader)
+		{
+			return a_shader.name != nullptr && std::string_view(a_shader.name) == "BSLensFlare";
+		}
+
+		/**
+		 * @brief The source file (under Data/Shaders, without .hlsl) an image-space shader builds from.
+		 *
+		 * This is the engine's originalShaderName, except for two engine quirks: BSLensFlare has none (the field is left
+		 * uninitialized), and the three lighting composites carry the misspelling "ISLigthingComposite".
+		 */
+		static const char* GetImagespaceSourceName(const RE::BSImagespaceShader& a_shader)
+		{
+			if (IsLensFlareSprite(a_shader))
+				return "ISLensFlare";
+			if (a_shader.originalShaderName == nullptr)
+				return "ImageSpace";
+			if (std::string_view(a_shader.originalShaderName) == "ISLigthingComposite")
+				return "ISLightingComposite";
+			return a_shader.originalShaderName;
+		}
+
+		/** @brief The source file a shader builds from: GetImagespaceSourceName for image-space shaders, else the fxp name. */
+		static const char* GetSourceName(const RE::BSShader& a_shader)
+		{
+			return a_shader.shaderType == RE::BSShader::Type::ImageSpace ?
+			           GetImagespaceSourceName(static_cast<const RE::BSImagespaceShader&>(a_shader)) :
+			           a_shader.fxpFilename;
 		}
 
 		static const char* GetShaderProfile(ShaderClass shaderClass)
@@ -1342,7 +1379,11 @@ namespace SIE
 
 		static std::string GetShaderString(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor, bool hashkey)
 		{
-			auto sourceShaderFile = shader.fxpFilename;
+			// BSLensFlare's fxp name is "LensFlare", which says nothing of its source and does not start with "IS" as
+			// GetTypeFromShaderString expects, so its key uses its source file name. A null fxp name falls back the same way.
+			const bool lensFlareSprite = shader.shaderType == RE::BSShader::Type::ImageSpace &&
+			                             IsLensFlareSprite(static_cast<const RE::BSImagespaceShader&>(shader));
+			const char* sourceShaderFile = shader.fxpFilename && !lensFlareSprite ? shader.fxpFilename : GetSourceName(shader);
 			std::array<D3D_SHADER_MACRO, 64> defines{};
 			SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
 			std::string result;
@@ -1425,10 +1466,7 @@ namespace SIE
 			defines[lastIndex] = { nullptr, nullptr };  // do final entry
 			GetShaderDefines(shader, descriptor, std::span{ defines }.subspan(lastIndex));
 
-			const std::wstring path = GetShaderPath(
-				shader.shaderType == RE::BSShader::Type::ImageSpace ?
-					static_cast<const RE::BSImagespaceShader&>(shader).originalShaderName :
-					shader.fxpFilename);
+			const std::wstring path = GetShaderPath(GetSourceName(shader));
 			logger::debug("Building {} {}:{}:{:X} from {}", Util::WStringToString(path), magic_enum::enum_name(type), magic_enum::enum_name(shaderClass), descriptor, MergeDefinesString(defines));
 
 			// Debug builds stay on FXC, whose debug flags the DXC path does not have.
@@ -1618,49 +1656,122 @@ namespace SIE
 			return newShader;
 		}
 
+		/** @brief An image-space shader whose CS source was checked against vanilla's DXBC. */
+		struct CheckedImagespaceShader
+		{
+			std::string_view engineName;                         ///< BSImagespaceShader::name
+			RE::ImageSpaceManager::ImageSpaceEffectEnum effect;  ///< its ImageSpaceManager slot
+			bool enabled;                                        ///< false: vanilla's DXBC runs (the source differs on purpose)
+		};
+
+		/**
+		 * @brief Every image-space shader whose CS source was checked against the vanilla DXBC (docs/development/p5/imagespace-shaders.md:
+		 * the same instructions under FXC, or the same outputs on the GPU). Each enabled one builds from CS's HLSL, as the shaders
+		 * in GetImagespaceShaderDescriptor's map do. The three left disabled differ from vanilla on purpose; the comment says why.
+		 */
+		static std::span<const CheckedImagespaceShader> CheckedImagespaceShaders()
+		{
+			using enum RE::ImageSpaceManager::ImageSpaceEffectEnum;
+			static const CheckedImagespaceShader entries[] = {
+				{ "BSImagespaceShaderFXAA", ISFXAA, true },
+				{ "BSImagespaceShaderCopy", ISCopy, true },
+				{ "BSImagespaceShaderCopyDynamicFetchDisabled", ISCopyDynamicFetchDisabled, true },
+				{ "BSImagespaceShaderCopyScaleBias", ISCopyScaleBias, true },
+				{ "BSImagespaceShaderCopyCustomViewport", ISCopyCustomViewport, true },
+				{ "BSImagespaceShaderGreyScale", ISCopyGrayScale, true },
+				{ "BSImagespaceShaderTextureMask", ISCopyTextureMask, true },
+				// Vanilla's ISMap vertex shader writes POSITION, not SV_Position, so its draw has no position (inferred:
+				// nothing rasterizes) and CS's would draw.
+				{ "BSImagespaceShaderMap", ISMap, false },
+				{ "BSImagespaceShaderWorldMap", ISWorldMap, true },
+				{ "BSImagespaceShaderWorldMapNoSkyBlur", ISWorldMapNoSkyBlur, true },
+				{ "BSImagespaceShaderBlur3", ISBlur3, true },
+				{ "BSImagespaceShaderBlur5", ISBlur5, true },
+				{ "BSImagespaceShaderBlur7", ISBlur7, true },
+				{ "BSImagespaceShaderBlur9", ISBlur9, true },
+				{ "BSImagespaceShaderBlur11", ISBlur11, true },
+				{ "BSImagespaceShaderBlur13", ISBlur13, true },
+				{ "BSImagespaceShaderBlur15", ISBlur15, true },
+				{ "BSImageSpaceShaderNonHDRBlur3", ISNonHDRBlur3, true },
+				{ "BSImageSpaceShaderNonHDRBlur5", ISNonHDRBlur5, true },
+				{ "BSImageSpaceShaderNonHDRBlur7", ISNonHDRBlur7, true },
+				{ "BSImageSpaceShaderNonHDRBlur9", ISNonHDRBlur9, true },
+				{ "BSImageSpaceShaderNonHDRBlur11", ISNonHDRBlur11, true },
+				{ "BSImageSpaceShaderNonHDRBlur13", ISNonHDRBlur13, true },
+				{ "BSImageSpaceShaderNonHDRBlur15", ISNonHDRBlur15, true },
+				{ "BSImagespaceShaderBrightPassBlur3", ISBrightPassBlur3, true },
+				{ "BSImagespaceShaderBrightPassBlur5", ISBrightPassBlur5, true },
+				{ "BSImagespaceShaderBrightPassBlur7", ISBrightPassBlur7, true },
+				{ "BSImagespaceShaderBrightPassBlur9", ISBrightPassBlur9, true },
+				{ "BSImagespaceShaderBrightPassBlur11", ISBrightPassBlur11, true },
+				{ "BSImagespaceShaderBrightPassBlur13", ISBrightPassBlur13, true },
+				{ "BSImagespaceShaderBrightPassBlur15", ISBrightPassBlur15, true },
+				{ "BSISWaterDisplacementClearSimulation", ISWaterDisplacementClearSimulation, true },
+				{ "BSISWaterDisplacementTexOffset", ISWaterDisplacementTexOffset, true },
+				{ "BSISWaterDisplacementWadingRipple", ISWaterDisplacementWadingRipple, true },
+				{ "BSISWaterDisplacementRainRipple", ISWaterDisplacementRainRipple, true },
+				{ "BSISWaterWadingHeightmap", ISWaterWadingHeightmap, true },
+				{ "BSISWaterRainHeightmap", ISWaterRainHeightmap, true },
+				{ "BSISWaterBlendHeightmaps", ISWaterBlendHeightmaps, true },
+				{ "BSISWaterSmoothHeightmap", ISWaterSmoothHeightmap, true },
+				{ "BSISWaterDisplacementNormals", ISWaterDisplacementNormals, true },
+				{ "BSImagespaceShaderNoiseScrollAndBlend", ISNoiseScrollAndBlend, true },
+				{ "BSImagespaceShaderNoiseNormalmap", ISNoiseNormalmap, true },
+				{ "BSImagespaceShaderLocalMap", ISLocalMap, true },
+				{ "BSImagespaceShaderAlphaBlend", ISAlphaBlend, true },
+				{ "BSLensFlare", ISLensFlare, true },
+				{ "BSImagespaceShaderApplyReflections", ISApplyReflections, true },
+				{ "BSImagespaceShaderISBasicCopy", ISBasicCopy, true },
+				{ "BSImagespaceShaderISBlur", ISBlur, true },
+				{ "BSImagespaceShaderISVolumetricLightingBlurHCS", ISVolumetricLightingBlurHCS, true },
+				{ "BSImagespaceShaderISVolumetricLightingBlurVCS", ISVolumetricLightingBlurVCS, true },
+				{ "BSImagespaceShaderISParallaxMaskBlurHCS", ISParallaxMaskBlurHCS, true },
+				{ "BSImagespaceShaderISParallaxMaskBlurVCS", ISParallaxMaskBlurVCS, true },
+				{ "BSImagespaceShaderISDepthOfFieldBlurHCS", ISDepthOfFieldBlurHCS, true },
+				{ "BSImagespaceShaderISDepthOfFieldBlurVCS", ISDepthOfFieldBlurVCS, true },
+				{ "BSImagespaceShaderISCopySubRegionCS", ISCopySubRegionCS, true },
+				{ "BSImagespaceShaderISDebugSnow", ISDebugSnow, true },
+				{ "BSImagespaceShaderISDownsampleCS", ISDownsampleCS, true },
+				{ "BSImagespaceShaderISDownsampleIgnoreBrightestCS", ISDownsampleIgnoreBrightestCS, true },
+				{ "BSImagespaceShaderISExp", ISExp, true },
+				{ "BSImagespaceShaderISIBLensFlares", ISIBLensFlares, true },
+				{ "BSImagespaceShaderISLightingComposite", ISLightingComposite, true },
+				{ "BSImagespaceShaderISLightingCompositeNoDirectionalLight", ISLightingCompositeNoDirectionalLight, true },
+				{ "BSImagespaceShaderISLightingCompositeMenu", ISLightingCompositeMenu, true },
+				{ "BSImagespaceShaderISPerlinNoiseCS", ISPerlinNoiseCS, true },
+				{ "BSImagespaceShaderISPerlinNoise2DCS", ISPerlinNoise2DCS, true },
+				{ "BSImagespaceShaderReflectionsDebugSpecMask", ISReflectionsDebugSpecMask, true },
+				{ "BSImagespaceShaderISSAOBlurH", ISSAOBlurH, true },
+				{ "BSImagespaceShaderISSAOBlurV", ISSAOBlurV, true },
+				{ "BSImagespaceShaderISSAOBlurHCS", ISSAOBlurHCS, true },
+				{ "BSImagespaceShaderISSAOBlurVCS", ISSAOBlurVCS, true },
+				{ "BSImagespaceShaderISSAOCameraZ", ISSAOCameraZ, true },
+				{ "BSImagespaceShaderISSAOCameraZAndMipsCS", ISSAOCameraZAndMipsCS, true },
+				{ "BSImagespaceShaderISSAORawAO", ISSAORawAO, true },
+				{ "BSImagespaceShaderISSAORawAONoTemporal", ISSAORawAONoTemporal, true },
+				{ "BSImagespaceShaderISSAORawAOCS", ISSAORawAOCS, true },
+				{ "BSImagespaceShaderISSILComposite", ISSILComposite, true },
+				{ "BSImagespaceShaderISSILRawInd", ISSILRawInd, true },
+				{ "BSImagespaceShaderISSimpleColor", ISSimpleColor, true },
+				{ "BSImagespaceShaderISDisplayDepth", ISDisplayDepth, true },
+				{ "BSImagespaceShaderISSnowSSS", ISSnowSSS, true },
+				// CS's ISTemporalAA.hlsl is its own rewrite, with neither the UI nor the water path.
+				{ "BSImagespaceShaderISTemporalAA_UI", ISTemporalAA_UI, false },
+				{ "BSImagespaceShaderISTemporalAA_Water", ISTemporalAA_Water, false },
+				{ "BSImagespaceShaderISUpsampleDynamicResolution", ISUpsampleDynamicResolution, true },
+				{ "BSImagespaceShaderISUnderwaterMask", ISUnderwaterMask, true },
+				{ "BSImagespaceShaderWaterFlow", ISWaterFlow, true },
+			};
+			return entries;
+		}
+
 		static bool GetImagespaceShaderDescriptor(const RE::BSImagespaceShader& imagespaceShader, uint32_t& descriptor)
 		{
 			using enum RE::ImageSpaceManager::ImageSpaceEffectEnum;
 
+			// The shaders CS has run from the start. The ones checked against vanilla later are CheckedImagespaceShaders.
 			static const ankerl::unordered_dense::map<std::string_view, uint32_t> descriptors{
-				// { "BSImagespaceShaderISBlur", RE::ImageSpaceManager::GetCurrentIndex(ISBlur) },
-				// { "BSImagespaceShaderBlur3", RE::ImageSpaceManager::GetCurrentIndex(ISBlur3) },
-				// { "BSImagespaceShaderBlur5", RE::ImageSpaceManager::GetCurrentIndex(ISBlur5) },
-				// { "BSImagespaceShaderBlur7", RE::ImageSpaceManager::GetCurrentIndex(ISBlur7) },
-				// { "BSImagespaceShaderBlur9", RE::ImageSpaceManager::GetCurrentIndex(ISBlur9) },
-				// { "BSImagespaceShaderBlur11", RE::ImageSpaceManager::GetCurrentIndex(ISBlur11) },
-				// { "BSImagespaceShaderBlur13", RE::ImageSpaceManager::GetCurrentIndex(ISBlur13) },
-				// { "BSImagespaceShaderBlur15", RE::ImageSpaceManager::GetCurrentIndex(ISBlur15) },
-				// { "BSImagespaceShaderBrightPassBlur3", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur3) },
-				// { "BSImagespaceShaderBrightPassBlur5", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur5) },
-				// { "BSImagespaceShaderBrightPassBlur7", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur7) },
-				// { "BSImagespaceShaderBrightPassBlur9", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur9) },
-				// { "BSImagespaceShaderBrightPassBlur11", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur11) },
-				// { "BSImagespaceShaderBrightPassBlur13", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur13) },
-				// { "BSImagespaceShaderBrightPassBlur15", RE::ImageSpaceManager::GetCurrentIndex(ISBrightPassBlur15) },
-				// { "BSImagespaceShaderNonHDRBlur3", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur3) },
-				// { "BSImagespaceShaderNonHDRBlur5", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur5) },
-				// { "BSImagespaceShaderNonHDRBlur7", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur7) },
-				// { "BSImagespaceShaderNonHDRBlur9", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur9) },
-				// { "BSImagespaceShaderNonHDRBlur11", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur11) },
-				// { "BSImagespaceShaderNonHDRBlur13", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur13) },
-				// { "BSImagespaceShaderNonHDRBlur15", RE::ImageSpaceManager::GetCurrentIndex(ISNonHDRBlur15) },
-				// { "BSImagespaceShaderISBasicCopy", RE::ImageSpaceManager::GetCurrentIndex(ISBasicCopy) },
-				// { "BSImagespaceShaderISSimpleColor", RE::ImageSpaceManager::GetCurrentIndex(ISSimpleColor) },
-				// { "BSImagespaceShaderApplyReflections", RE::ImageSpaceManager::GetCurrentIndex(ISApplyReflections) },
-				// { "BSImagespaceShaderISExp", RE::ImageSpaceManager::GetCurrentIndex(ISExp) },
-				// { "BSImagespaceShaderISDisplayDepth", RE::ImageSpaceManager::GetCurrentIndex(ISDisplayDepth) },
-				// { "BSImagespaceShaderAlphaBlend", RE::ImageSpaceManager::GetCurrentIndex(ISAlphaBlend) },
-				// { "BSImagespaceShaderWaterFlow", RE::ImageSpaceManager::GetCurrentIndex(ISWaterFlow) },
 				{ "BSImagespaceShaderISWaterBlend", RE::ImageSpaceManager::GetCurrentIndex(ISWaterBlend) },
-				// { "BSImagespaceShaderGreyScale", RE::ImageSpaceManager::GetCurrentIndex(ISCopyGrayScale) },
-				// { "BSImagespaceShaderCopy", RE::ImageSpaceManager::GetCurrentIndex(ISCopy) },
-				// { "BSImagespaceShaderCopyScaleBias", RE::ImageSpaceManager::GetCurrentIndex(ISCopyScaleBias) },
-				// { "BSImagespaceShaderCopyCustomViewport",
-				//  RE::ImageSpaceManager::GetCurrentIndex(ISCopyCustomViewport) },
-				// { "BSImagespaceShaderCopyTextureMask", RE::ImageSpaceManager::GetCurrentIndex(ISCopyTextureMask) },
-				// { "BSImagespaceShaderCopyDynamicFetchDisabled",
-				//  RE::ImageSpaceManager::GetCurrentIndex(ISCopyDynamicFetchDisabled) },
 				{ "BSImagespaceShaderISCompositeVolumetricLighting",
 					RE::ImageSpaceManager::GetCurrentIndex(ISCompositeVolumetricLighting) },
 				{ "BSImagespaceShaderISCompositeLensFlare",
@@ -1668,7 +1779,6 @@ namespace SIE
 				{ "BSImagespaceShaderISCompositeLensFlareVolumetricLighting",
 					RE::ImageSpaceManager::GetCurrentIndex(ISCompositeLensFlareVolumetricLighting) },
 				{ "BGSLensFlareVisibilityPass", RE::ImageSpaceManager::GetCurrentIndex(ISLensFlareVisibility) },
-				// { "BSImagespaceShaderISDebugSnow", RE::ImageSpaceManager::GetCurrentIndex(ISDebugSnow) },
 				{ "BSImagespaceShaderDepthOfField", RE::ImageSpaceManager::GetCurrentIndex(ISDepthOfField) },
 				{ "BSImagespaceShaderDepthOfFieldFogged",
 					RE::ImageSpaceManager::GetCurrentIndex(ISDepthOfFieldFogged) },
@@ -1683,8 +1793,6 @@ namespace SIE
 				{ "BSImagespaceShaderISDownsample", RE::ImageSpaceManager::GetCurrentIndex(ISDownsample) },
 				{ "BSImagespaceShaderISDownsampleIgnoreBrightest",
 					RE::ImageSpaceManager::GetCurrentIndex(ISDownsampleIgnoreBrightest) },
-				// { "BSImagespaceShaderISUpsampleDynamicResolution",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISUpsampleDynamicResolution) },
 				{ "BSImageSpaceShaderVolumetricLighting",
 					RE::ImageSpaceManager::GetCurrentIndex(ISVolumetricLighting) },
 				{ "BSImagespaceShaderHDRDownSample4", RE::ImageSpaceManager::GetCurrentIndex(ISHDRDownSample4) },
@@ -1705,40 +1813,9 @@ namespace SIE
 					RE::ImageSpaceManager::GetCurrentIndex(ISHDRTonemapBlendCinematic) },
 				{ "BSImagespaceShaderHDRTonemapBlendCinematicFade",
 					RE::ImageSpaceManager::GetCurrentIndex(ISHDRTonemapBlendCinematicFade) },
-				// { "BSImagespaceShaderISIBLensFlares", RE::ImageSpaceManager::GetCurrentIndex(ISIBLensFlares) },
 
-				// Those cause issue because of typo in shader name in vanilla code but at the same time they are not used by vanilla game.
-				// { "BSImagespaceShaderISLightingComposite",
-				//  RE::ImageSpaceManager::GetCurrentIndex(ISLightingComposite) },
-				// { "BSImagespaceShaderISLightingCompositeMenu",
-				//  RE::ImageSpaceManager::GetCurrentIndex(ISLightingCompositeMenu) },
-				// { "BSImagespaceShaderISLightingCompositeNoDirectionalLight",
-				//  RE::ImageSpaceManager::GetCurrentIndex(ISLightingCompositeNoDirectionalLight) },
-
-				// { "BSImagespaceShaderLocalMap", RE::ImageSpaceManager::GetCurrentIndex(ISLocalMap) },
-				// { "BSISWaterBlendHeightmaps", RE::ImageSpaceManager::GetCurrentIndex(ISWaterBlendHeightmaps) },
-				// { "BSISWaterDisplacementClearSimulation",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISWaterDisplacementClearSimulation) },
-				// { "BSISWaterDisplacementNormals",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISWaterDisplacementNormals) },
-				// { "BSISWaterDisplacementRainRipple",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISWaterDisplacementRainRipple) },
-				// { "BSISWaterDisplacementTexOffset",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISWaterDisplacementTexOffset) },
-				// { "BSISWaterWadingHeightmap", RE::ImageSpaceManager::GetCurrentIndex(ISWaterWadingHeightmap) },
-				// { "BSISWaterRainHeightmap", RE::ImageSpaceManager::GetCurrentIndex(ISWaterRainHeightmap) },
-				// { "BSISWaterSmoothHeightmap", RE::ImageSpaceManager::GetCurrentIndex(ISWaterSmoothHeightmap) },
-				// { "BSISWaterWadingHeightmap", RE::ImageSpaceManager::GetCurrentIndex(ISWaterWadingHeightmap) },
-				// { "BSImagespaceShaderMap", RE::ImageSpaceManager::GetCurrentIndex(ISMap) },
-				// { "BSImagespaceShaderMap", RE::ImageSpaceManager::GetCurrentIndex(ISMap) },
-				// { "BSImagespaceShaderWorldMap", RE::ImageSpaceManager::GetCurrentIndex(ISWorldMap) },
-				// { "BSImagespaceShaderWorldMapNoSkyBlur",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISWorldMapNoSkyBlur) },
 				{ "BSImagespaceShaderISMinify", RE::ImageSpaceManager::GetCurrentIndex(ISMinify) },
 				{ "BSImagespaceShaderISMinifyContrast", RE::ImageSpaceManager::GetCurrentIndex(ISMinifyContrast) },
-				// { "BSImagespaceShaderNoiseNormalmap", RE::ImageSpaceManager::GetCurrentIndex(ISNoiseNormalmap) },
-				// { "BSImagespaceShaderNoiseScrollAndBlend",
-				// 	RE::ImageSpaceManager::GetCurrentIndex(ISNoiseScrollAndBlend) },
 				{ "BSImagespaceShaderRadialBlur", RE::ImageSpaceManager::GetCurrentIndex(ISRadialBlur) },
 				{ "BSImagespaceShaderRadialBlurHigh", RE::ImageSpaceManager::GetCurrentIndex(ISRadialBlurHigh) },
 				{ "BSImagespaceShaderRadialBlurMedium", RE::ImageSpaceManager::GetCurrentIndex(ISRadialBlurMedium) },
@@ -1746,15 +1823,8 @@ namespace SIE
 				{ "BSImagespaceShaderISSAOCompositeSAO", RE::ImageSpaceManager::GetCurrentIndex(ISSAOCompositeSAO) },
 				{ "BSImagespaceShaderISSAOCompositeFog", RE::ImageSpaceManager::GetCurrentIndex(ISSAOCompositeFog) },
 				{ "BSImagespaceShaderISSAOCompositeSAOFog", RE::ImageSpaceManager::GetCurrentIndex(ISSAOCompositeSAOFog) },
-				// { "BSImagespaceShaderISSAOCameraZ", RE::ImageSpaceManager::GetCurrentIndex(ISSAOCameraZ) },
-				// { "BSImagespaceShaderISSILComposite", RE::ImageSpaceManager::GetCurrentIndex(ISSILComposite) },
-				// { "BSImagespaceShaderISSnowSSS", RE::ImageSpaceManager::GetCurrentIndex(ISSnowSSS) },
-				// { "BSImagespaceShaderISSAOBlurH", RE::ImageSpaceManager::GetCurrentIndex(ISSAOBlurH) },
-				// { "BSImagespaceShaderISSAOBlurV", RE::ImageSpaceManager::GetCurrentIndex(ISSAOBlurV) },
-				// { "BSImagespaceShaderISUnderwaterMask", RE::ImageSpaceManager::GetCurrentIndex(ISUnderwaterMask) },
 				{ "BSImagespaceShaderISApplyVolumetricLighting", RE::ImageSpaceManager::GetCurrentIndex(ISApplyVolumetricLighting) },
 				{ "BSImagespaceShaderReflectionsRayTracing", RE::ImageSpaceManager::GetCurrentIndex(ISReflectionsRayTracing) },
-				//{ "BSImagespaceShaderReflectionsDebugSpecMask", RE::ImageSpaceManager::GetCurrentIndex(ISReflectionsDebugSpecMask) },
 				{ "BSImagespaceShaderISTemporalAA", RE::ImageSpaceManager::GetCurrentIndex(ISTemporalAA) },
 				{ "BSImagespaceShaderVolumetricLightingRaymarchCS", 256 },
 				{ "BSImagespaceShaderVolumetricLightingGenerateCS", 257 },
@@ -1777,11 +1847,21 @@ namespace SIE
 			};
 
 			auto it = descriptors.find(imagespaceShader.name);
-			if (it == descriptors.cend()) {
-				return false;
+			if (it != descriptors.cend()) {
+				descriptor = it->second;
+				return true;
 			}
-			descriptor = it->second;
-			return true;
+			if (imagespaceShader.name == nullptr)
+				return false;
+			for (const auto& entry : CheckedImagespaceShaders()) {
+				if (entry.engineName == imagespaceShader.name) {
+					if (!entry.enabled)
+						return false;
+					descriptor = RE::ImageSpaceManager::GetCurrentIndex(entry.effect);
+					return true;
+				}
+			}
+			return false;
 		}
 
 		static bool ResolveImageSpaceDescriptor(const RE::BSShader& shader, uint32_t& descriptor)
@@ -2162,10 +2242,7 @@ namespace SIE
 			shaderMap.insert_or_assign(key, ShaderCacheResult{ std::move(shared), status, system_clock::now(), fromDisk });
 		}
 		mapCV.notify_all();  // wake threads waiting on a Pending→Completed/Failed transition
-		const std::wstring path = SIE::SShaderCache::GetShaderPath(
-			shader.shaderType == RE::BSShader::Type::ImageSpace ?
-				static_cast<const RE::BSImagespaceShader&>(shader).originalShaderName :
-				shader.fxpFilename);
+		const std::wstring path = SIE::SShaderCache::GetShaderPath(SIE::SShaderCache::GetSourceName(shader));
 		auto pathString = Util::WStringToString(path);
 		// Always create or update an hlsl->shader record so failing compiles are
 		// trackable and can be invalidated by the file watcher. This allows
@@ -2734,6 +2811,29 @@ namespace SIE
 		}
 	}
 
+	namespace
+	{
+		// CS_ORG_ENGINE_SHADERS=1: the source of a shader this cache built, added to the description the device recorded (P4.6).
+		void RecordEngineShaderSource(void* a_object, const RE::BSShader& a_shader, ShaderClass a_class, uint32_t a_descriptor)
+		{
+#if defined(CS_HAS_RENDER_GRAPH)
+			if (!a_object || !RenderGraph::Engine::Pipeline::Enabled())
+				return;
+			RenderGraph::Engine::Pipeline::ShaderSource source;
+			source.shaderType = static_cast<uint32_t>(a_shader.shaderType.get());
+			source.descriptor = a_descriptor;
+			source.path = SShaderCache::GetShaderPath(SShaderCache::GetSourceName(a_shader));
+			source.defines = ShaderCache::GetCompileDefines(a_shader, a_class, a_descriptor);
+			RenderGraph::Engine::Pipeline::RecordShaderSource(static_cast<IUnknown*>(a_object), std::move(source));
+#else
+			(void)a_object;
+			(void)a_shader;
+			(void)a_class;
+			(void)a_descriptor;
+#endif
+		}
+	}
+
 	RE::BSGraphics::VertexShader* ShaderCache::MakeAndAddVertexShader(const RE::BSShader& shader,
 		uint32_t descriptor)
 	{
@@ -2755,6 +2855,7 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Vertex, descriptor);
 				std::lock_guard lockGuard(vertexShadersMutex);
 				auto& entry = vertexShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2792,6 +2893,7 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Pixel, descriptor);
 				std::lock_guard lockGuard(pixelShadersMutex);
 				auto& entry = pixelShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2829,6 +2931,7 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
+				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Compute, descriptor);
 				std::lock_guard lockGuard(computeShadersMutex);
 				auto& entry = computeShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)

@@ -1,7 +1,6 @@
 #pragma once
 
-// The engine addresses Fades alone reads or calls (Engine::Offset: Address Library ids); those Core or another feature also reads stay
-// in Core/Engine/EngineAccess.h (Engine::Address). Included by the feature's sources only.
+// Address Library ids that only Fades uses. Addresses shared with Core or other features stay in Core/Engine/EngineAccess.h.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 
@@ -16,15 +15,14 @@ namespace DCLF::Features::Fades::Address
 	inline constexpr DCLF::Engine::Offset kFadeStepTime{ { 390954 }, { 513214 } };  // float: the frame time the fades step by
 	inline constexpr DCLF::Engine::Offset kFloatOne{ { 186482 }, { 228662 } };  // float 1.0
 	inline constexpr DCLF::Engine::Offset kFadeOnVisible{ { 105485 }, { 98848 } };  // BSFadeNode::OnVisible
-	inline constexpr DCLF::Engine::Offset kLeafOnVisible{ { 105588 }, { 98937 } };  // BSLeafAnimNode::OnVisible (its leaf LOD step, then BSFadeNode's)
-	inline constexpr DCLF::Engine::Offset kFadeDistance{ { 105506 }, { 98862 } };  // FUN_14147b110(node, camera, out): the distance and LOD level
-	// BSFadeNode's fade and LOD globals (FadeState's frame inputs).
+	inline constexpr DCLF::Engine::Offset kLeafOnVisible{ { 105588 }, { 98937 } };  // BSLeafAnimNode::OnVisible, which steps the leaf LOD and then calls BSFadeNode's
+	inline constexpr DCLF::Engine::Offset kFadeDistance{ { 105506 }, { 98862 } };  // FUN_14147b110(node, camera, out), returns the distance and LOD level
+	// BSFadeNode's fade and LOD globals.
 	inline constexpr DCLF::Engine::Offset kFadeOutTime{ { 390878 }, { 513154 } };
 	inline constexpr DCLF::Engine::Offset kFadeInAbove{ { 390879 }, { 513155 } };
 	inline constexpr DCLF::Engine::Offset kFadeBlendTime{ { 390881 }, { 513157 } };
 	inline constexpr DCLF::Engine::Offset kFadeAmountTime{ { 414542 }, { 527615 } };
-	// The LOD fade thresholds, far and near, for a fade node and a tree. AE reads four floats; SE (the thresholds' function, out of line
-	// there: FUN_141290590) indexes two float arrays by the node's kind, 1 for a fade node and 4 for a tree.
+	// AE reads four separate threshold floats. SE's FUN_141290590 indexes two float arrays by node kind, 1 for a fade node and 4 for a tree.
 	inline constexpr std::uint64_t kSeLodFadeFarArray = 527618, kSeLodFadeNearArray = 527624;  // 0x1431d0d30, 0x1431d0d60
 	inline constexpr std::uint32_t kSeLodKindFade = 1, kSeLodKindTree = 4;
 	inline constexpr DCLF::Engine::Offset kLodFadeFar{ { 414546 }, { kSeLodFadeFarArray, 4 * kSeLodKindFade } };
@@ -35,8 +33,7 @@ namespace DCLF::Features::Fades::Address
 	inline constexpr DCLF::Engine::Offset kFadeAmountSnapAbove{ { 196368 }, { 242717 } };
 	inline constexpr DCLF::Engine::Offset kFadeAmountSnapOffset{ { 186632 }, { 228898 } };
 	inline constexpr DCLF::Engine::Offset kFadeSnapRadiusLimit{ { 470092 }, { 230694 } };
-	// BSTreeNode::OnVisible (AE 0x14147d3c0): the height test (the frame start's capture, TreeOnVisible's test). The switch byte is on
-	// the culling process (a field offset); the rest are engine globals.
+	// The height test in BSTreeNode::OnVisible (AE 0x14147d3c0). The switch byte is a field on the culling process, the rest are globals.
 	inline constexpr std::size_t kProcessTreeHeightTest = 0x121;  // byte on the culling process
 	inline constexpr DCLF::Engine::Offset kTreeHeightTestOn{ { 390930 }, { 513192 } };  // byte
 	inline constexpr DCLF::Engine::Offset kTreeHeightBase{ { 414568 }, { 527639 } };  // float

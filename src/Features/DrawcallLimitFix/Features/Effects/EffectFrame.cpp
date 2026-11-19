@@ -1,11 +1,12 @@
-// The Effect port's frame inputs: its three frame constant rows (Api::FrameConstantRow: the camera's planes, the Lighting variant's light
-// colour, Blood's globals; PS b13 c17-c19) and the soft effects' depth (Api::FrameTexture, t118). Sampled on the render thread by each
-// main commit (the rows) and each colour commit (the depth).
+// The Effect port's per-frame inputs. Four constant rows (camera planes, sun colour, blood globals, cloud light colour) and the soft
+// effects' depth. Sampled on the render thread by each commit.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Globals.h"
+
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
 
 #include <array>
 #include <cstddef>
@@ -15,10 +16,7 @@ namespace DCLF::Features::Effects
 {
 	namespace
 	{
-		/**
-		 * @brief The camera planes BSEffectShader::SetupTechnique (0x1414ea2c0) takes for a Soft pass (camera at 0x14332a328: near +0x160,
-		 * far +0x164): far, near, far - near (CameraDataEffect.yz), 0. PS b13 c17 (DCLFEffectCamera); zero without a camera.
-		 */
+		/** @brief Far, near and far - near, as SetupTechnique (0x1414ea2c0) passes them for a Soft pass. Zero without a camera. */
 		std::array<float, 4> SampleEffectCamera()
 		{
 			static const REL::Relocation<const std::byte* const*> camera{ REL::Offset(Address::kEffectCamera) };
@@ -31,11 +29,7 @@ namespace DCLF::Features::Effects
 			return { farPlane, nearPlane, farPlane - nearPlane, 0.0f };
 		}
 
-		/**
-		 * @brief Blood (kWeaponBlood): PS AlphaTestRef.yz as SetupGeometry (0x1414eab10) writes them: globals 0x1433dccf0 and 0x1433dccf4,
-		 * written only by FUN_1414ec2a0 from BSTempEffectWeaponBlood's Update and start (game settings DAT_14200fbe8, DAT_14200fc00); x 0
-		 * (the record's threshold), w 0. PS b13 c19 (DCLFEffectBlood).
-		 */
+		/** @brief Weapon blood's AlphaTestRef.yz globals (0x1433dccf0, 0x1433dccf4), written only by BSTempEffectWeaponBlood. */
 		std::array<float, 4> SampleEffectBlood()
 		{
 			static const REL::Relocation<const float*> globals{ REL::Offset(Address::kEffectBlood) };
@@ -44,21 +38,18 @@ namespace DCLF::Features::Effects
 		}
 
 		/**
-		 * @brief The Lighting variant: PS DLightColor as BSEffectShader::SetupGeometry (0x1414eab10) writes it: light 0 (FUN_1414fcf80: the
-		 * sun, ShadowSceneNode[0] +0x200, without kCloudLOD), its NiLight fade (+0x134) times the HDR multiplier (ImageSpaceManager +0xe0)
-		 * times each channel of NiDirectionalLight +0x14c (the weather's effect lighting); w 0. PS b13 c18 (DCLFEffectDLightColor); zero
-		 * without a sun light.
+		 * @brief DLightColor as SetupGeometry (0x1414eab10) writes it from light 0. Fade (+0x134) times HDR multiplier times NiLight +0x14c.
+		 * A kCloudLOD property uses the cloud light (ShadowSceneNode +0x208) instead of the sun (+0x200).
 		 */
-		std::array<float, 4> SampleEffectLight()
+		std::array<float, 4> SampleLightZero(bool a_cloud)
 		{
-			// SetupGeometry (0x1414eab10), the Lighting bit: PS DLightColor = (ImageSpaceManager +0xe0) x (NiLight +0x134), then that times each
-			// of the light's +0x14c, +0x150, +0x154 (the multiplier first, as the engine's mulss order). Light 0 is BSLight +0x48's NiLight.
+			// Multiply in the engine's mulss order, HDR multiplier first. Light 0 is BSLight +0x48's NiLight.
 			static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
 			auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
-			const RE::BSLight* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
+			const RE::BSLight* lightZero = sceneNode ? (a_cloud ? sceneNode->GetRuntimeData().cloudLight : sceneNode->GetRuntimeData().sunLight) : nullptr;
 			const std::byte* light = nullptr;
-			if (sun)
-				std::memcpy(&light, reinterpret_cast<const std::byte*>(sun) + 0x48, sizeof(light));
+			if (lightZero)
+				std::memcpy(&light, reinterpret_cast<const std::byte*>(lightZero) + 0x48, sizeof(light));
 			const std::byte* manager = *imageSpace.get();
 			if (!light || !manager)
 				return {};
@@ -71,6 +62,10 @@ namespace DCLF::Features::Effects
 			return { scale * read(light, 0x14c), scale * read(light, 0x150), scale * read(light, 0x154), 0.0f };
 		}
 
+		std::array<float, 4> SampleEffectLight() { return SampleLightZero(false); }
+
+		std::array<float, 4> SampleEffectCloudLight() { return SampleLightZero(true); }
+
 		template <std::array<float, 4> (*Sample)()>
 		void SampleRow(float (&a_out)[4])
 		{
@@ -79,8 +74,7 @@ namespace DCLF::Features::Effects
 			std::memcpy(a_out, value.data(), sizeof(a_out));
 		}
 
-		// Soft effects' depth: the kPOST_ZPREPASS_COPY SetupTechnique binds for a Soft pass, which CS fills from the main depth after the
-		// deferred pass, before the forward epoch.
+		// The depth copy SetupTechnique binds for a Soft pass. With Terrain Blending's ORG path, the published blended depth is read instead.
 		void* SoftDepthView()
 		{
 			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
@@ -90,11 +84,12 @@ namespace DCLF::Features::Effects
 
 	void RegisterFrame(Api::InstallContext& a_context)
 	{
-		// The camera planes soft effects read (DCLFEffectCamera), the sun's effect colour (DCLFEffectDLightColor), and Blood's
-		// AlphaTestRef.yz: the weapon blood's two globals (DCLFEffectBlood). Latched in row order whatever the registration's.
+		// Latched in row order regardless of registration order.
 		a_context.RegisterFrameConstantRow({ "effect camera", kEffectCameraFrameRow, &SampleRow<&SampleEffectCamera> });
 		a_context.RegisterFrameConstantRow({ "effect light", kEffectLightFrameRow, &SampleRow<&SampleEffectLight> });
 		a_context.RegisterFrameConstantRow({ "effect blood", kEffectBloodFrameRow, &SampleRow<&SampleEffectBlood> });
-		a_context.RegisterFrameTexture({ "effect soft depth", kSoftDepthRegister, &SoftDepthView });
+		a_context.RegisterFrameConstantRow({ "effect cloud light", kEffectCloudLightFrameRow, &SampleRow<&SampleEffectCloudLight> });
+		a_context.RegisterFrameTexture({ .name = "effect soft depth", .textureRegister = kSoftDepthRegister, .view = &SoftDepthView,
+			.graphResources = { ORGTerrainBlending::kBlendedDepthId } });
 	}
 }

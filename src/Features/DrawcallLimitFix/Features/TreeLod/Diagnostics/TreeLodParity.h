@@ -1,7 +1,6 @@
 #pragma once
 
-// CS_DCLF_PERSISTENT_PARITY: tree LOD's mirror against the LOD trees root (TreeLodParity.cpp), reported with the mirror's line
-// (TreeLodReport.cpp). Included by the feature's sources only.
+// CS_DCLF_PERSISTENT_PARITY: tree LOD's mirror against the LOD trees root. Included by the feature's sources only.
 
 #include <cstdint>
 #include <string>

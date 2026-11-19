@@ -113,15 +113,15 @@ float4 SSSSBlurCS(
 	float depthM = DepthTexture.SampleLevel(PointSampler, texcoord, 0).r;
 	depthM = SharedData::GetScreenDepth(depthM);
 
-	float2 profile = humanProfile ? HumanProfile.xy : BaseProfile.xy;
+	float2 profile = humanProfile ? PerFrameSSS.HumanProfile.xy : PerFrameSSS.BaseProfile.xy;
 	uint kernelOffset = humanProfile ? SSSS_N_SAMPLES : 0;
 
 	// Accumulate center sample, multiplying it with its gaussian weight:
 	float4 colorBlurred = colorM;
-	colorBlurred.rgb *= Kernels[kernelOffset].rgb;
+	colorBlurred.rgb *= SSSKernel(kernelOffset).rgb;
 
 	// World-space width
-	float distanceToProjectionWindow = 1.0 / tan(0.5 * radians(SSSS_FOVY));
+	float distanceToProjectionWindow = 1.0 / tan(0.5 * radians(PerFrameSSS.SSSS_FOVY));
 	float scale = distanceToProjectionWindow / depthM;
 
 	// Calculate the final step to fetch the surrounding pixels:
@@ -137,7 +137,7 @@ float4 SSSSBlurCS(
 
 	// Accumulate the other samples:
 	for (uint i = kernelOffset + 1; i < kernelOffset + SSSS_N_SAMPLES; i++) {
-		float2 offset = Kernels[i].a * finalStep;
+		float2 offset = SSSKernel(i).a * finalStep;
 
 		// Apply randomized rotation
 		offset = mul(offset, rotationMatrix);
@@ -157,7 +157,7 @@ float4 SSSSBlurCS(
 		color = lerp(color, colorM.rgb, s * s);
 
 		// Accumulate:
-		colorBlurred.rgb += Kernels[i].rgb * color.rgb;
+		colorBlurred.rgb += SSSKernel(i).rgb * color.rgb;
 	}
 
 	return colorBlurred;

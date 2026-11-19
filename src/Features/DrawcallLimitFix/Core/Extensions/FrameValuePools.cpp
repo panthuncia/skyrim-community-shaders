@@ -1,4 +1,4 @@
-// The frame-value pool contract's Core side (see the header): what a pool reads of the frame's engine globals and of its backing.
+// What a pool reads of the frame's engine globals and of its backing.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameValuePools.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"

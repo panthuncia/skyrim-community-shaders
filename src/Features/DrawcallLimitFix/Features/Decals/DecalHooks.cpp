@@ -1,6 +1,5 @@
-// The decal nodes' arrays: the engine's edits of a BGSDecalNode's decal array, hooked at the feature's early hooks (where Core's scene
-// events installed them, which share no site with them), each pushing the node's update on the editing thread; and the node capture
-// contribution that records the array with the node (and again on each update), on the capturing thread inside the engine-read window.
+// Mirrors each BGSDecalNode's decal array. Edits push a node update on the editing thread. The capture
+// re-records the array on the capturing thread, inside the engine-read window.
 
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
 
@@ -11,17 +10,14 @@ namespace DCLF::Features::Decals
 {
 	namespace
 	{
-		// A BGSDecalNode's decal array edits (SWF_HOOK_DECAL_ARRAY_EDIT, AE 1.6.1170): append (FUN_1401fdfb0, from
-		// BSTempEffectGeometryDecal::Attach and simple decals' attach); erases: a decal's or reference's decals (FUN_1401fdc80 via
-		// FUN_1401fe020, from the decal manager), the geometry decal's update (FUN_1401fdcb0), erase-and-detach (FUN_1401fdd50,
-		// FUN_1401fde40). The node is the first argument; its decals after the call.
+		// Covers append (FUN_1401fdfb0) and the erase paths (FUN_1401fdc80, FUN_1401fdcb0, FUN_1401fdd50, FUN_1401fde40).
+		// Runs after the call, so the node already holds its new decals.
 		void OnDecalArrayEdit(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			Extensions::PushNodeUpdate(SceneWriter::Arg<RE::NiAVObject*>(a_event, 0), Api::kNodeFieldCaptured);
 		}
 
-		// A decal node's decals' 3D (BSTempEffect::Get3D, null for none) in array order; OnVisible culls them last to first, not its
-		// children.
+		// Array order. OnVisible culls these last to first instead of the node's children.
 		void CaptureDecals(const void* a_node, std::vector<const void*>& a_out)
 		{
 			for (const auto& decal : static_cast<const RE::BGSDecalNode*>(a_node)->GetRuntimeData().decals)
@@ -37,7 +33,6 @@ namespace DCLF::Features::Decals
 
 	void InstallDecalHooks()
 	{
-		// A decal node's array edits: SceneWriterFramework's decal calls, which DrawcallLimitFix::PostPostLoad required.
 		if (!SceneWriter::SubscribeCall(SWF_HOOK_DECAL_ARRAY_EDIT, &OnDecalArrayEdit, SWF_PHASE_POST))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the decal array edits after reporting them installed");
 	}

@@ -1,6 +1,76 @@
 // SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
 // Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (Drawcall Limit Fix's sky family, Features/DrawcallLimitFix/Features/Sky). One push block serves both stages. The
+// shared constants and the headers' resources (the scene depth t17, Cloud Shadows' t25 and t26, IBL's t76 and t77 and Dynamic
+// Cubemaps' t30 and t31, which the Exponential Height Fog header includes) come from the heap. The fog's froxel volumes
+// (t19, t22), which its header declares, are never read here: UNREAD entries.
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	include "Common/OrgResources.hlsli"
+
+// A draw's geometry: the engine's static vertex and index buffers by buffer view ref, which the vertex stage pulls (ORG draws have
+// no input assembly). VertexLayout is the engine's input layout key (the vertex shader's mask and the geometry's VertexDesc).
+struct SkyOrgGeometry
+{
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint VertexStride;
+	uint FirstIndex;
+};
+
+// A draw's values, latched by the family: the vertex stage's PerGeometry as the engine's SetupGeometry wrote it (c0 to c16.xy), the
+// pixel stage's PParams, the alpha test reference (PS b11), CS's extra descriptor for the draw, the geometry, and the heap indices of
+// t0-t2 with their samplers. Textures.w is Cloud Shadows' self-shadowing input (t26) for the draw: a cloud layer's occlusion in the
+// main pass, or SKY_ORG_OCCLUSION for the occlusion cubemap (t25). The matrices are rows: a latch is loaded with Load<T>, which does
+// not keep row_major. Everything per draw is here, so a recording is kept while only these change.
+struct SkyOrgDraw
+{
+	float4 WorldViewProjRows[4];
+	float4 WorldRows[4];
+	float4 PreviousWorldRows[4];
+	float3 EyePosition;
+	float VParams;
+	float4 BlendColor[3];
+	float2 TexCoordOff;
+	float2 PParams;
+	float AlphaTestRef;
+	uint ExtraShaderDescriptor;
+	uint2 Padding;
+	SkyOrgGeometry Geometry;
+	uint4 Textures;
+	uint4 Samplers;
+};
+
+#	define SKY_ORG_OCCLUSION 0xFFFFFFFF
+
+#	define SKY_ORG_RESOURCES(X)                                                           \
+		X(SHARED, ConstantBuffer, Shared, 0)                                               \
+		X(SRV, Texture2D<float>, TexDepthSampler, 17)                                      \
+		X(EXTERN, Texture2D<float4>, DepthTexture, 17)                                     \
+		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                             \
+		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       \
+		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       \
+		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30)                          \
+		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     \
+		X(UNREAD, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    \
+		X(UNREAD, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) \
+		X(LATCH, SkyOrgDraw, SkyDraw, 2)
+ORG_PUSH_BLOCK(SKY_ORG_RESOURCES(ORG_HANDLE))
+SKY_ORG_RESOURCES(ORG_RESOURCE)
+static SkyOrgGeometry SkyGeometry = SkyDraw.Geometry;
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[SkyDraw.Textures.x];
+static Texture2D<float4> TexBlendSampler = ResourceDescriptorHeap[SkyDraw.Textures.y];
+static Texture2D<float4> TexNoiseGradSampler = ResourceDescriptorHeap[SkyDraw.Textures.z];
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[SkyDraw.Samplers.x];
+static SamplerState SampBlendSampler = SamplerDescriptorHeap[SkyDraw.Samplers.y];
+static SamplerState SampNoiseGradSampler = SamplerDescriptorHeap[SkyDraw.Samplers.z];
+// Cloud Shadows' header reads CloudSelfShadowTexture through this handle.
+static uint OrgHandle_CloudSelfShadowTexture = SkyDraw.Textures.w != SKY_ORG_OCCLUSION ? SkyDraw.Textures.w : OrgHandle_CloudShadowsTexture;
+#endif
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/FlareOcclusion.hlsli"
 #include "Common/FrameBuffer.hlsli"
@@ -8,6 +78,13 @@
 #include "Common/Permutation.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
+
+// CS's extra descriptor of the draw (IsSun, IsMoon, InReflection): the Permutation buffer on D3D11, the draw's latch on ORG.
+#if defined(CS_ORG_BINDLESS)
+#	define SKY_EXTRA_DESCRIPTOR SkyDraw.ExtraShaderDescriptor
+#else
+#	define SKY_EXTRA_DESCRIPTOR Permutation::ExtraShaderDescriptor
+#endif
 
 #if defined(VSHADER)
 struct VS_INPUT
@@ -57,6 +134,15 @@ struct VS_OUTPUT
 };
 
 #ifdef VSHADER
+#	if defined(CS_ORG_BINDLESS)
+static float4x4 WorldViewProj = float4x4(SkyDraw.WorldViewProjRows[0], SkyDraw.WorldViewProjRows[1], SkyDraw.WorldViewProjRows[2], SkyDraw.WorldViewProjRows[3]);
+static float4x4 World = float4x4(SkyDraw.WorldRows[0], SkyDraw.WorldRows[1], SkyDraw.WorldRows[2], SkyDraw.WorldRows[3]);
+static float4x4 PreviousWorld = float4x4(SkyDraw.PreviousWorldRows[0], SkyDraw.PreviousWorldRows[1], SkyDraw.PreviousWorldRows[2], SkyDraw.PreviousWorldRows[3]);
+static float3 EyePosition = SkyDraw.EyePosition;
+static float VParams = SkyDraw.VParams;
+static float4 BlendColor[3] = SkyDraw.BlendColor;
+static float2 TexCoordOff = SkyDraw.TexCoordOff;
+#	else
 cbuffer PerGeometry : register(b2)
 {
 	row_major float4x4 WorldViewProj : packoffset(c0);
@@ -67,13 +153,14 @@ cbuffer PerGeometry : register(b2)
 	float4 BlendColor[3] : packoffset(c13);
 	float2 TexCoordOff : packoffset(c16);
 };
+#	endif
 
 #	if defined(DITHER) && defined(TEX)
 /** @brief Fraction of the sun's neighbourhood showing sky, since the vanilla sun query quad sees gaps between distant ridges. */
 float GetSunGlareVisibility()
 {
 	// Scene depth belongs to the main view, not the reflection camera
-	if (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection)
+	if (SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::InReflection)
 		return 1.0;
 
 	float4 sunPositionCS = mul(FrameBuffer::CameraViewProj, float4(SharedData::SunDirection.xyz, 0.0));
@@ -91,7 +178,11 @@ float GetSunGlareVisibility()
 }
 #	endif
 
+#	if defined(CS_ORG_BINDLESS)
+VS_OUTPUT SkyVertex(VS_INPUT input)
+#	else
 VS_OUTPUT main(VS_INPUT input)
+#	endif
 {
 	VS_OUTPUT vsout;
 
@@ -159,21 +250,62 @@ VS_OUTPUT main(VS_INPUT input)
 
 	return vsout;
 }
+
+#	if defined(CS_ORG_BINDLESS)
+#		define DCLF_PULLED_VERTICES
+#		include "Common/DCLFVertexPull.hlsli"
+
+/** @brief The draw's vertex a_vertexID, pulled as the input assembler reads it: its 16-bit index, then its attributes. */
+VS_INPUT SkyPullVertex(uint a_vertexID)
+{
+	DCLFDrawVertexLayout = SkyGeometry.VertexLayout;
+	const uint indexNumber = SkyGeometry.FirstIndex + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(SkyGeometry.IndexAddress, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { SkyGeometry.VertexAddress, SkyGeometry.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
+	DCLFStreamsAt(index, first, second);
+
+	VS_INPUT input;
+	input.Position = DCLFPullPosition(first, second);
+#		if defined(TEX) || defined(HORIZFADE)
+	input.TexCoord = DCLFPullHalf2(1, first, second);
+#		endif
+	input.Color = DCLFPullUnorm4(5, 0, first, second);
+	return input;
+}
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	return SkyVertex(SkyPullVertex(a_vertexID));
+}
+#	endif
 #endif
 
 typedef VS_OUTPUT PS_INPUT;
 
+// SKY_ORG_FACES: the ORG build for the reflection faces, which bind the face alone, and Cloud Shadows' occlusion after it.
 struct PS_OUTPUT
 {
 	float4 Color: SV_Target0;
+#if defined(SKY_ORG_FACES)
+#	if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
+	float4 CloudShadows: SV_Target1;
+#	endif
+#else
 	float4 MotionVectors: SV_Target1;
 	float4 Normal: SV_Target2;
-#if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
+#	if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
 	float4 CloudShadows: SV_Target3;
+#	endif
 #endif
 };
 
 #ifdef PSHADER
+#	if defined(CS_ORG_BINDLESS)
+static float2 PParams = SkyDraw.PParams;
+static float AlphaTestRefRS = SkyDraw.AlphaTestRef;
+#	else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampBlendSampler : register(s1);
 SamplerState SampNoiseGradSampler : register(s2);
@@ -191,6 +323,7 @@ cbuffer AlphaTestRefCB : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#	endif
 
 #	include "Common/MotionBlur.hlsli"
 #	include "Common/SharedData.hlsli"
@@ -230,7 +363,9 @@ cbuffer AlphaTestRefCB : register(b11)
 #		include "HDRDisplay/HDRSun.hlsli"
 #	endif
 
+#	if !defined(CS_ORG_BINDLESS)
 Texture2D<float> TexDepthSampler : register(t17);
+#	endif
 
 #	if defined(EFFECTS11) && defined(HORIZFADE)
 /** Stars: StarsCurve and StarsIntensity, plus optional per-star twinkle on isolated bright texels. */
@@ -321,7 +456,7 @@ PS_OUTPUT main(PS_INPUT input)
 	[branch] if (SharedData::enbSettings.Enable)
 		baseColor.xyz = ShadeStars(baseColor, input.TexCoord0.xy);
 #			elif defined(EFFECTS11) && defined(TEX) && !defined(DITHER) && !defined(CLOUDS) && !defined(MOONMASK)
-	[branch] if (SharedData::enbSettings.Enable && (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsMoon))
+	[branch] if (SharedData::enbSettings.Enable && (SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::IsMoon))
 	{
 		float2 edge = abs(input.TexCoord0.xy * 2.0 - 1.0);
 		baseColor.xyz = pow(max(baseColor.xyz, 0.0), SharedData::enbSettings.MoonCurve);
@@ -345,7 +480,7 @@ PS_OUTPUT main(PS_INPUT input)
 #		endif
 
 #		if defined(EFFECTS11_PROCEDURAL_SUN)
-	bool proceduralSunActive = SharedData::enbSettings.EnableProceduralSun && (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsSun);
+	bool proceduralSunActive = SharedData::enbSettings.EnableProceduralSun && (SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::IsSun);
 	[branch] if (proceduralSunActive)
 	{
 		float3 viewDirection = normalize(input.WorldPosition.xyz);
@@ -455,7 +590,7 @@ PS_OUTPUT main(PS_INPUT input)
 			float3 cloudColor = pow(max(input.Color.xyz * baseColor.xyz, 0.0), SharedData::enbSettings.CloudsCurve);
 			cloudColor = lerp(cloudColor, dot(cloudColor, 1.0 / 3.0), SharedData::enbSettings.CloudsDesaturation) * SharedData::enbSettings.CloudsIntensity * SharedData::enbSettings.CloudsColorFilter;
 
-			bool cloudScattering = SharedData::enbSettings.EnableCloudsScattering && !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::NoSkyScattering);
+			bool cloudScattering = SharedData::enbSettings.EnableCloudsScattering && !(SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::NoSkyScattering);
 			psout.Color.xyz = SkyScattering::ShadeCloud(cloudColor, cloudTextureAlpha, cloudTextureGray, viewDirection, cloudScattering, SampBaseSampler) + skyScale * min(SharedData::enbSettings.CloudsIntensity, 1.0);
 
 #				if defined(EFFECTS11_CLOUD_SUN)
@@ -500,7 +635,7 @@ PS_OUTPUT main(PS_INPUT input)
 #		endif
 
 #		if defined(EFFECTS11_CELESTIAL_EXTINCTION)
-	[branch] if (SharedData::enbSettings.EnableCloudsScattering && !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsSun))
+	[branch] if (SharedData::enbSettings.EnableCloudsScattering && !(SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::IsSun))
 		psout.Color *= SkyScattering::GetCelestialExtinction(normalize(input.WorldPosition.xyz));
 #		endif
 
@@ -508,7 +643,7 @@ PS_OUTPUT main(PS_INPUT input)
 	psout.Color = float4(0, 0, 0, 1.0);
 #	endif  // OCCLUSION
 
-	const bool inReflection = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection) != 0;
+	const bool inReflection = (SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::InReflection) != 0;
 
 #	if defined(EXP_HEIGHT_FOG)
 	if (inReflection && SharedData::exponentialHeightFogSettings.enabled) {
@@ -525,8 +660,10 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float2 screenMotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition);
 
+#	if !defined(SKY_ORG_FACES)
 	psout.MotionVectors = float4(screenMotionVector, 0, psout.Color.w * alphaTransmittance);
 	psout.Normal = float4(0.5, 0.5, 0, psout.Color.w * alphaTransmittance);
+#	endif
 
 #	if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
 	// A broadcast alpha would square coverage under SRC_ALPHA blending.
@@ -541,7 +678,7 @@ PS_OUTPUT main(PS_INPUT input)
 	// Even without cloud shadows enabled, sun disc should be occluded by scene depth (clouds, terrain, etc.)
 	// The sun glare pass (DITHER + TEX) is skipped: it fades by depth coverage in the VS instead,
 	// and the per-pixel reject made the glare disappear. Reflections skip it: t17 does not hold the reflection face's depth.
-	[branch] if ((Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsSun) && !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection) && psout.Color.w > 0.0)
+	[branch] if ((SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::IsSun) && !(SKY_EXTRA_DESCRIPTOR & Permutation::ExtraFlags::InReflection) && psout.Color.w > 0.0)
 	{
 		float depth = TexDepthSampler.Load(int3(input.Position.xy, 0));
 		if (depth < input.Position.z)

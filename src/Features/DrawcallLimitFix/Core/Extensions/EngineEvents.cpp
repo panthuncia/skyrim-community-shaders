@@ -1,4 +1,4 @@
-// The engine side's calls to the registered stand-in observers (see the header).
+// The engine side's calls to the registered stand-in observers.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -9,12 +9,11 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written once on the main thread at PostPostLoad (PrimaryCull::Install, before InstallFeatures reads it).
+		// Written once on the main thread by PrimaryCull::Install, before InstallFeatures reads it.
 		bool standInInstalled = false;
-		// Written once on the main thread at PostPostLoad (the hidden-node source's install, before InstallFeatures reads it).
+		// Written once on the main thread by the hidden-node source's install, before InstallFeatures reads it.
 		std::uint32_t hiddenSourceSites = 0;
-		// By need slot: its channel's index (~0u: unbound). Written only by BindEngineChannelNeeds (the end of InstallFeatures, before
-		// DCLF's threads exist), read-only after.
+		// Per need slot, its channel's index, or ~0u when unbound. Written only at the end of InstallFeatures.
 		std::array<std::uint32_t, kEngineChannelNeedSlots> boundChannelNeeds = [] {
 			std::array<std::uint32_t, kEngineChannelNeedSlots> bound;
 			bound.fill(~0u);

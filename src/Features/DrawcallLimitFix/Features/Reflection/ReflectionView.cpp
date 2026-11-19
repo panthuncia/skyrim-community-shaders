@@ -1,6 +1,5 @@
-// The water reflection's faces' capture and frame start: a face's camera and targets once the engine oriented it (FaceOriented), the face
-// drawn for the observers (FaceDrawn), the faces' targets, the LOD slots' forward pipelines and the view's resources after tree LOD's
-// decision (Prepare), its coverage (Covered), and the nodes its update hides (CullHiddenByUpdate). Render thread.
+// The water reflection faces' capture and frame start: each face's camera and targets, the faces' pipelines and resources after
+// tree LOD's decision, coverage, and the nodes the update hides. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionView.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
@@ -56,12 +55,10 @@ namespace DCLF::Features::Reflection
 			return;
 		auto& reflection = FrameState();
 		reflection.orientedFace = a_face;
-		// The face for this update's epoch (Execute): only a plain face render's, whose LOD the registrations withhold or whose LOD roots
-		// were not added (IndirectDraws::ViewLodRootsOwned).
+		// Only a plain face render is DCLF's.
 		if (!ReflectionFaces::Plain() || a_face >= kFaces)
 			return;
-		// The face's colour target, the engine's reflection cube target's face a_face; its depth DCLF's own, cleared each face, at the
-		// engine's precision (D24S8, the faces' depth target's R24G8).
+		// The colour target is the engine's cube face. The depth is DCLF's own, cleared each face, at the engine's D24S8 precision.
 		auto* renderer = globals::game::renderer;
 		auto target = TargetOf(renderer ? renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].cubeSideRTV[a_face] : nullptr);
 		const ForwardTargets targets{ target.format, DXGI_FORMAT_D24_UNORM_S8_UINT };
@@ -76,8 +73,7 @@ namespace DCLF::Features::Reflection
 			++reflection.lateFaces;
 		auto& face = reflection.faces[a_face];
 		face = {};
-		// VS_PerFrame for the face's camera over the frame's registers as the renderer last uploaded them (as the engine uploads it for
-		// a face: no jitter, no previous camera).
+		// VS_PerFrame for the face's camera, with no jitter and no previous camera, as the engine uploads it for a face.
 		ShadowCameras::Camera view;
 		ShadowCameras::CameraMatrices(a_camera, view);
 		Draws::PerFrameBlock(view, Draws::FrameBlockNow(), false, nullptr, face.perFrame.data());
@@ -93,42 +89,34 @@ namespace DCLF::Features::Reflection
 
 	void FaceDrawn()
 	{
-		// The face the engine has just drawn, for the observers (its camera against DCLF's: FaceOriented).
 		Diagnostics::Notify(Diagnostics::ReflectionFaceDrawn{});
 	}
 
 	void Prepare(const Api::ViewPointContext& a_context)
 	{
-		// The forward pipelines of every LOD pipeline slot the frame's objects use, and tree LOD's, for the faces' targets: asked of the
-		// pipeline lane here (each key once, the targets a frame input) and read from the frame's catalog, ready a few
-		// frames later. The slots whose pipeline is ready are the reflection phase's readiness (PhaseReady): a change of them is a
-		// readiness event for the set. A slot without one is no reflection-phase member meanwhile (the engine draws it in the faces).
+		// Request the forward pipelines of every LOD slot the frame uses, for the faces' targets. They are ready a few frames later.
+		// A slot without a ready pipeline is drawn by the engine in the faces meanwhile.
 		auto& draws = IndirectDraws::Get();
 		const auto* state = draws.ViewState(kView);
 		if (!state)
 			return;
 		auto& reflection = FrameState();
-		// The faces' targets, known before any face is drawn: the engine's reflection cube target's face views (a face's capture
-		// checks them), so the reflection phase is the set's from the start rather than from the first face.
+		// The faces' targets are known before any face is drawn, so the reflection phase is the set's from the start.
 		if (state->targets.colour == DXGI_FORMAT_UNKNOWN)
 			if (auto* renderer = globals::game::renderer)
 				if (auto* face = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].cubeSideRTV[0]) {
 					draws.SetViewTargets(kView, { TargetOf(face).format, DXGI_FORMAT_D24_UNORM_S8_UINT });
-					// A revision input: the targets the faces' pipelines are resolved for (from a revision's request's catalog).
 					draws.PostViewInputs();
 				}
 		const bool on = state->targets.colour != DXGI_FORMAT_UNKNOWN && Extensions::ViewOn(ActiveToggles(), kView) && !a_context.failed;
 		auto& drawPipelines = DrawPipelines::Get();
 		if (on)
 			drawPipelines.SetViewForwardTargets(kView, state->targets);
-		// Every slot with a key of the view's (a LOD Lighting technique's), with their programs counted and whether one is still to come.
 		IndirectDraws::ViewPipelineCounts pipelines;
 		if (on)
 			pipelines = draws.ResolveViewPipelines(kView, *a_context.tables, a_context.catalog, {}, true);
 		else
 			draws.DropViewPipelines(kView);
-		// The faces' draw families' forward pipelines (tree LOD's program is built of the DistantTree shader the TreeInstances family's
-		// decision posts): the view engine's, under each family (tree LOD's class).
 		const bool facesWaited = draws.ResolveViewFaces(kView, on, a_context.catalog);
 		drawPipelines.NoteForwardWait(pipelines.waited || facesWaited);
 		reflection.lodSlots = pipelines.slots;
@@ -136,20 +124,16 @@ namespace DCLF::Features::Reflection
 		reflection.pipelinesReady = pipelines.ready;
 		if (on)
 			draws.SetUpView(kView);
-		// The faces' draw families (tree LOD): each DCLF's while the main view's is (DecideDrawFamilies, before this), the last depth commit
-		// uploaded the tables the faces draw from, and the faces are drawn.
 		draws.DecideViewFaces(kView);
 	}
 
 	void CullHiddenByUpdate(Api::CullHiddenNodes& a_nodes)
 	{
-		// The third-person skeleton as it is now. TESWaterReflections::Update (AE 0x140520570), on the frames a cube-map
-		// reflection updates, hides the player's 3D while it renders the faces and then restores it; Main::Draw calls it
-		// between the main cull jobs' Begin and Finish.
+		// TESWaterReflections::Update (AE 0x140520570) hides the player's 3D while it renders the faces, then restores it.
+		// Main::Draw calls it between the main cull jobs' Begin and Finish.
 		if (auto* player = RE::PlayerCharacter::GetSingleton())
 			a_nodes.Add(player->Get3D(false));
-		// The water objects' shapes as they are now: TESWaterReflections::Update hides them around the cube map's faces too, and
-		// restores them after.
+		// It hides the water objects' shapes around the faces too.
 		if (auto* water = RE::TESWaterSystem::GetSingleton())
 			for (const auto& object : water->waterObjects)
 				if (object && object->shape)
@@ -158,12 +142,8 @@ namespace DCLF::Features::Reflection
 
 	bool Covered(const Api::ViewCoverage& a_coverage)
 	{
-		// The faces' withholding (PassCapture), before the engine renders them: the claims stand, the faces' passes are in the revision's
-		// recordings (the depth epoch's, which hosts them: epochsCovered) and the cube they draw into is in the graph as built (its import, at
-		// the depth commit, is built at the next build point). The faces
-		// are a snapshot component of this frame (Execute): the frame's scene list with this frame's depth commit, and frame constants of
-		// their own that their commit writes from this frame's sources, so no earlier commit has to be held. Whatever the toggle: off, the
-		// set has no reflection members to withhold.
+		// The faces are a snapshot component of this frame with their own frame constants, so no earlier commit has to be held.
+		// With the toggle off, the set has no reflection members to withhold.
 		const auto& c = a_coverage;
 		return c.main && c.epochsCovered && c.targetImported && !c.rebuildRequested;
 	}

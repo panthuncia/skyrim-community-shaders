@@ -1,15 +1,11 @@
 #ifndef DYNAMIC_CUBEMAPS_CAPTURE_COMMON_HLSLI
 #define DYNAMIC_CUBEMAPS_CAPTURE_COMMON_HLSLI
 
-#include "Common/Color.hlsli"
-#include "Common/ColorManagement.hlsli"
-#include "Common/FrameBuffer.hlsli"
-#include "Common/SharedData.hlsli"
-#include "DynamicCubemaps/CubemapCommon.hlsli"
-
-RWTexture2DArray<float4> DynamicCubemap : register(u0);
-RWTexture2DArray<float4> DynamicCubemapRaw : register(u1);
-RWTexture2DArray<float4> DynamicCubemapPosition : register(u2);
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS) and the capture constants are the frame's latch region. D3D11 reads them
+// from the cbuffer at b0.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
 
 struct CaptureLightingState
 {
@@ -19,20 +15,34 @@ struct CaptureLightingState
 	uint Initialized;
 };
 
-RWStructuredBuffer<CaptureLightingState> LightingState : register(u3);
-
-Texture2D<float> DepthTexture : register(t0);
-Texture2D<float4> ColorTexture : register(t1);
-SamplerState LinearSampler : register(s0);
-
-cbuffer UpdateData : register(b0)
+struct UpdateCubemapConstants
 {
 	float3 CameraPreviousPosAdjust2;
 	uint CaptureIndex;
 	float CaptureDeltaTime;
 	uint ResetCapture;
 	uint2 UpdatePadding;
-}
+};
+
+#define CAPTURE_RESOURCES(X)                                            \
+	X(SHARED, ConstantBuffer, Shared, 0)                                \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemap, 0)                 \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemapRaw, 1)              \
+	X(UAV, RWTexture2DArray<float4>, DynamicCubemapPosition, 2)         \
+	X(UAV, RWStructuredBuffer<CaptureLightingState>, LightingState, 3) \
+	X(SRV, Texture2D<float>, DepthTexture, 0)                           \
+	X(SRV, Texture2D<float4>, ColorTexture, 1)                          \
+	X(SAMPLER, SamplerState, LinearSampler, 0)                          \
+	X(LATCH, UpdateCubemapConstants, UpdateData, 0)
+ORG_PUSH_BLOCK(CAPTURE_RESOURCES(ORG_HANDLE))
+
+#include "Common/Color.hlsli"
+#include "Common/ColorManagement.hlsli"
+#include "Common/FrameBuffer.hlsli"
+#include "Common/SharedData.hlsli"
+#include "DynamicCubemaps/CubemapCommon.hlsli"
+
+CAPTURE_RESOURCES(ORG_RESOURCE)
 
 static const float CaptureHistoryLifetime = 30.0;
 
@@ -43,7 +53,7 @@ float GetCaptureTime()
 
 bool CaptureHistoryExpired(float lastSeen)
 {
-	return CaptureDeltaTime >= CaptureHistoryLifetime || fmod(GetCaptureTime() - lastSeen + 64.0, 64.0) >= CaptureHistoryLifetime;
+	return UpdateData.CaptureDeltaTime >= CaptureHistoryLifetime || fmod(GetCaptureTime() - lastSeen + 64.0, 64.0) >= CaptureHistoryLifetime;
 }
 
 float3 GetSamplingVector(uint3 texel)
@@ -88,7 +98,7 @@ bool SampleCapture(uint3 texel, out float3 position, out float3 color, out float
 
 float3 AdjustCapturePosition(float3 position)
 {
-	return position + (CameraPreviousPosAdjust2 - FrameBuffer::CameraPosAdjust.xyz) * 0.001;
+	return position + (UpdateData.CameraPreviousPosAdjust2 - FrameBuffer::CameraPosAdjust.xyz) * 0.001;
 }
 
 bool CaptureGeometryMatches(float3 previousPosition, float3 position)

@@ -1,6 +1,6 @@
 #pragma once
 
-// The index pool's copy pass (IndexPoolCS.hlsl), made for the main and shadow epochs (CorePasses.cpp: core.z.index-pool; Passes/Shadow.cpp MakeShadowIndexPoolPass: shadows.index-pool, registered by Features/Shadows/Engine).
+// The index pool's copy pass, made for the main and shadow epochs.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -20,11 +20,11 @@ namespace DCLF::Draws
 		IndexPoolConstants constants{};
 	};
 
-	/** @brief Copies this frame's new index pool ranges (IndexPoolCS.hlsl) before draws read the pool; dispatched from the latch. */
+	/** @brief Copies this frame's new index pool ranges before draws read the pool. Dispatched from the latch. */
 	class IndexPoolPass final : public org::TypedRenderGraphPass<IndexPoolPass, IndexPoolPrepared, IndexPoolBindings>
 	{
 	public:
-		// The latch holding the pool's dispatch, from the shape the epoch runs (shadow or depth: whichever commit gave out ranges).
+		// The latch holding the pool's dispatch, from whichever commit gave out ranges.
 		struct LatchOf
 		{
 			std::shared_ptr<const org::LatchBlock> latch;
@@ -42,7 +42,6 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The latch's shape and the pool's versions are the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		IndexPoolPrepared Prepare(const IndexPoolBindings&, const org::PassPrepareContext& a_preparation) const
@@ -54,11 +53,9 @@ namespace DCLF::Draws
 			prepared.pool = pool;
 			prepared.latch = latch.latch;
 			prepared.poolOffset = latch.poolOffset;
-			prepared.constants.latchIndex = latch.latch->SrvIndex();
 			return prepared;
 		}
 
-		// The dispatch, from the latch's region of the frame slot.
 		static void Record(const IndexPoolBindings& a_bindings, const IndexPoolPrepared& a_prepared, org::PassRecordContext& a_recording)
 		{
 			if (!a_prepared.pool || !a_prepared.latch)
@@ -66,15 +63,16 @@ namespace DCLF::Draws
 			auto constants = a_prepared.constants;
 			constants.copiesIndex = a_recording.Index(a_bindings.copies);
 			constants.poolIndex = a_recording.Index(a_bindings.indices);
-			const auto& layout = a_prepared.latch;
-			const std::uint64_t offset = layout->Offset(a_recording.FrameSlot()) + a_prepared.poolOffset;
+			const auto region = a_prepared.latch->At(a_recording.Run());
+			const std::uint64_t offset = region.offset + a_prepared.poolOffset;
+			constants.latchIndex = region.srvIndex;
 			constants.latchOffset = static_cast<std::uint32_t>(offset);
 			auto& commands = a_recording.Commands();
 			const auto& program = *a_prepared.pool->program;
 			commands.BindLayout(program.layout->GetHandle());
 			commands.BindPipeline(program.Pipeline());
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kIndexPoolConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
-			commands.ExecuteIndirect(a_prepared.pool->dispatchSignature->GetHandle(), layout->Resource()->GetAPIResource().GetHandle(), offset, {}, 0, 1);
+			commands.ExecuteIndirect(a_prepared.pool->dispatchSignature->GetHandle(), region.buffer->GetAPIResource().GetHandle(), offset, {}, 0, 1);
 		}
 
 	private:

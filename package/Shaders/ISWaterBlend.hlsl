@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t4 and s0-s4 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISWATERBLEND_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, sourceTex, 0) X(SRV, Texture2D<float4>, waterHistoryTex, 1) X(SRV, Texture2D<float4>, motionBufferTex, 2) X(SRV, Texture2D<float4>, depthBufferTex, 3) X(SRV, Texture2D<float4>, waterMaskTex, 4) X(SAMPLER, SamplerState, sourceSampler, 0) X(SAMPLER, SamplerState, waterHistorySampler, 1) X(SAMPLER, SamplerState, motionBufferSampler, 2) X(SAMPLER, SamplerState, depthBufferSampler, 3) X(SAMPLER, SamplerState, waterMaskSampler, 4) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISWATERBLEND_ORG_RESOURCES(ORG_HANDLE))
+ISWATERBLEND_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Math.hlsli"
@@ -11,6 +24,9 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 NearFar_Menu_DistanceFactor = OrgEngineRow(PerGeometryAt, 0);
+#	else
 SamplerState sourceSampler : register(s0);
 SamplerState waterHistorySampler : register(s1);
 SamplerState motionBufferSampler : register(s2);
@@ -27,6 +43,7 @@ cbuffer PerGeometry : register(b2)
 {
 	float4 NearFar_Menu_DistanceFactor : packoffset(c0);
 };
+#	endif
 
 namespace WaterBlend
 {

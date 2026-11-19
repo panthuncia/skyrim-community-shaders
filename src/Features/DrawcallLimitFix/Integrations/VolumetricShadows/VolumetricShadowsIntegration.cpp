@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 
 #include "Features/VolumetricShadows.h"
+#include "Features/VolumetricShadows/ORGVolumetricShadows.h"
 
 namespace DCLF::Integrations::VolumetricShadows
 {
@@ -11,18 +12,18 @@ namespace DCLF::Integrations::VolumetricShadows
 	{
 		static_assert(::VolumetricShadows::kSharedShadowMapShaderSlot == kSharedShadowMapRegister);
 
-		// The view CopyShadowLightData last bound at t18 (SetSharedShadowMapSRV, the only PS binding there): its downsampled copy with
-		// directional shadows, a persistent texture made at its first copy (last frame's shadows at the faces' commit, which precedes this
-		// frame's shadow mask), else null. Null: the captured view, also null.
+		// The view CopyShadowLightData last bound at t18: a persistent downsampled copy made at its first copy.
+		// At the faces' commit it still holds last frame's shadows, since it precedes this frame's shadow mask. Null otherwise.
 		void* SharedShadowMapView()
 		{
 			return globals::features::volumetricShadows.loaded ? ::VolumetricShadows::boundSharedShadowMap : nullptr;
 		}
 
+		// On the ORG path the bound view is the graph texture's export, so commits read it ordered after the blurs at the EarlyPrepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "volumetric shadows shadow map", .textureRegister = kSharedShadowMapRegister,
-				.view = &SharedShadowMapView, .capturedWhenNull = true });
+				.view = &SharedShadowMapView, .capturedWhenNull = true, .graphResources = { ORGVolumetricShadows::kShadowCopyId } });
 		}
 	}
 

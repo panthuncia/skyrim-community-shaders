@@ -1,7 +1,6 @@
-// The culling's own counters (always on): the colour epoch's count words, copied to the host each execution (CounterReadback) and
-// sampled every 120th epoch, read when the sample's frame slot comes round, with the CPU's side of the sun test and, under
-// CS_DCLF_SET_PARITY, of the terrain near test (a task on DCLF's executor) and the forward and refraction registrations. Under
-// CS_DCLF_FRAME_TRACE every colour commit also logs its slot's last counts (FrameTrace.cpp).
+// The culling's own counters, always on. The colour epoch's count words are copied to the host every execution and sampled
+// every 120th epoch, then compared with the CPU's side of the sun test. Set parity adds the terrain near test and the forward
+// and refraction registrations.
 
 #include "DrawsState.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -20,21 +19,19 @@ namespace DCLF::Diagnostics
 	namespace
 	{
 		/**
-		 * @brief The CPU's side of a sample, over the sampled frame's colour inputs and planes, run by a task on DCLF's executor.
-		 * Its inputs are immutable or its own; it reads the geometries' bounds under a lease each (the engine-read window), and lets
-		 * go of the tables through EngineReleases. The render thread reads the results once `done` is set.
+		 * @brief The CPU's side of a sample, run as a task on DCLF's executor. It reads geometry bounds under a lease each and releases
+		 * the tables through EngineReleases. The render thread reads the results once `done` is set.
 		 */
 		struct CpuSide
 		{
-			decltype(KeptView<Draws::DrawInput>::elements) resident;  // the payload's resident region (immutable)
+			decltype(KeptView<Draws::DrawInput>::elements) resident;  // immutable
 			std::vector<Draws::DrawInput> inputs;                           // its input list, copied
-			std::shared_ptr<const SceneTables> tables;                      // the frame's (the geometries' owners)
+			std::shared_ptr<const SceneTables> tables;                      // the frame's, owning the geometries
 			std::vector<Draws::GpuCascade> cascades;
 			bool sunOn = false, terrain = false;
 			std::array<float, 4> terrainNear{};
-			// Results.
 			std::uint32_t sunTested = 0, sunMissed = 0, terrainTested = 0, terrainNearCount = 0;
-			bool complete = true;  // false: the window closed first (the sample is dropped)
+			bool complete = true;  // false when the window closed first, and the sample is dropped
 			std::atomic<bool> done{ false };
 
 			void Run()
@@ -42,10 +39,9 @@ namespace DCLF::Diagnostics
 				DCLF_ZONE("CS.DCLF.CullCounters.CpuSide");
 				const RE::NiPoint3 eye{ terrainNear[0], terrainNear[1], terrainNear[2] };
 				const auto test = [&](const Draws::DrawInput& a_input) {
-					// The sun test: the colour segment's inputs of the one main list (its view bits, as BuildDrawsCS tests them first).
+					// The sun test covers the main list's colour inputs, checked first as BuildDrawsCS does.
 					const bool sun = sunOn && (a_input.view.mask & Draws::kColourViewBits) && (a_input.flags & kObjectSunTest);
-					// CS_DCLF_SET_PARITY (<- TB NEAR): Terrain Blending's near test over the depth segment's first phase's terrain group
-					// 1 inputs, with the eye and distance its latch had, as TerrainBlending.cpp tests a pass.
+					// Terrain Blending's near test over terrain group 1 depth inputs, with the latch's eye and distance.
 					const bool nearTest = terrain && (a_input.view.mask & Draws::kDepthViewBits) && ObjectTerrainGroup(a_input.flags) == 1;
 					if (!sun && !nearTest)
 						return true;
@@ -77,7 +73,7 @@ namespace DCLF::Diagnostics
 					for (const auto& input : inputs)
 						if (!(complete = test(input)))
 							break;
-				// What holds engine references is let go of on the render thread.
+				// Engine references are released on the render thread.
 				EngineReleases::PushOwner(std::shared_ptr<void>(std::const_pointer_cast<SceneTables>(std::move(tables))));
 				resident.reset();
 				inputs = {};
@@ -85,10 +81,10 @@ namespace DCLF::Diagnostics
 			}
 		};
 
-		/** @brief A colour sample: armed on the readback after its epoch, its words read at its slot's next colour commit. */
+		/** @brief A colour sample, armed after its epoch and read at its slot's next colour commit. */
 		struct ColourSample
 		{
-			std::weak_ptr<Draws::CounterReadback> on;  // the readback it was armed on (a graph build makes another)
+			std::weak_ptr<Draws::CounterReadback> on;  // a graph build makes another
 			std::shared_ptr<CpuSide> cpu;
 			std::uint32_t forwardEngine = 0, refractionEngine = 0;
 			bool forwardObserved = false, refractionObserved = false, terrainCpu = false;
@@ -96,10 +92,10 @@ namespace DCLF::Diagnostics
 			std::array<std::uint32_t, Draws::kCountWords> words{};
 		};
 
-		/** @brief Render thread. Never destroyed: nothing in it is let go of at exit. */
+		/** @brief Render thread. Never destroyed, so nothing is released at exit. */
 		struct CullCounterState
 		{
-			// The colour commit's frame slot and culling stamp (NoteCullLatch), for the epoch's arm after it.
+			// The colour commit's readback range and culling stamp, for the epoch's arm after it.
 			std::uint32_t colourSlot = 0, colourStamp = 0;
 			bool colourNoted = false;
 			std::optional<ColourSample> sample;
@@ -126,7 +122,7 @@ namespace DCLF::Diagnostics
 			}
 			return out;
 		});
-		// On the graphics queue, after the draws it counts: on the copy queue its wait on them would split DXVK's command list.
+		// Graphics queue, after the draws it counts. On the copy queue its wait would split DXVK's command list.
 		a_passes.out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.cull-counters", std::move(pass))
 				.PreferQueue(org::QueueKind::Graphics)
 				.Epoch(a_passes.epoch));
@@ -140,25 +136,25 @@ namespace DCLF::Diagnostics
 			return;
 		}
 		state.sunUpload = a_written.latch;
-		// Inside the colour commit: the host has waited for the slot's last execution and not yet submitted this one. A sample
-		// armed in this slot is read now (its stamp names the execution the words are of).
+		// Inside the colour commit the lease has retired, so this range's last execution is done and this one is not yet submitted.
+		// A sample armed in this range is read now.
 		auto& counters = State();
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		counters.colourSlot = host->CurrentFrameSlot();
+		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
+		counters.colourSlot = readback ? readback->ranges.Of(host->CurrentRun()) : Draws::RunRanges::kNone;
 		counters.colourStamp = a_written.latch.visibilityStamp;
 		counters.colourNoted = true;
-		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
-		// CS_DCLF_FRAME_TRACE: the slot's last colour execution's counts, every frame.
+		// The slot's last colour counts, every frame.
 		if (Diagnostics::Observe().frameTrace && readback)
 			TraceColourCounts(*readback, counters.colourSlot);
 		auto& sample = counters.sample;
-		if (!readback || !readback->armed.armed || readback->armed.frameSlot != counters.colourSlot || !sample || sample->read || sample->on.lock() != readback)
+		if (!readback || !readback->armed.armed || readback->armed.range != counters.colourSlot || !sample || sample->read || sample->on.lock() != readback)
 			return;
 		auto& armed = readback->armed;
 		armed.armed = false;
-		sample->read = readback->Read(armed.frameSlot, armed.source, armed.stamp, [&](const std::uint32_t* a_words) { std::copy_n(a_words, Draws::kCountWords, sample->words.begin()); });
+		sample->read = readback->Read(armed.range, armed.source, armed.stamp, [&](const std::uint32_t* a_words) { std::copy_n(a_words, Draws::kCountWords, sample->words.begin()); });
 		++(sample->read ? readback->harvested : readback->missed);
 		if (!sample->read)
 			sample.reset();
@@ -173,13 +169,13 @@ namespace DCLF::Diagnostics
 		const auto& impl = DrawsView::Get();
 		auto& counters = State();
 		const bool noted = std::exchange(counters.colourNoted, false);
-		// This frame's engine blended registrations of members (taken every colour epoch, so each sample has its own frame's).
+		// The engine's blended member registrations, taken every colour epoch so each sample has its own frame's.
 		const std::uint32_t forwardEngine = Registrations::TakeForward();
-		const std::uint32_t refractionEngine = Registrations::TakeRefraction();  // the refraction's, likewise
+		const std::uint32_t refractionEngine = Registrations::TakeRefraction();  // likewise for refraction
 		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
 		if (auto& sample = counters.sample) {
 			if (!sample->read) {
-				// Waiting for its slot's next colour commit; dropped when its readback is gone (a graph build).
+				// Waits for its slot's next colour commit. Dropped when a graph build replaced its readback.
 				if (!readback || sample->on.lock() != readback || !readback->armed.armed)
 					sample.reset();
 				return;
@@ -246,9 +242,9 @@ namespace DCLF::Diagnostics
 			sample.reset();
 			return;
 		}
-		if ((counters.epochs++ % 120) != 0 || !readback || !noted)
+		if ((counters.epochs++ % 120) != 0 || !readback || !noted || counters.colourSlot == Draws::RunRanges::kNone)
 			return;
-		// Armed on this execution's slot and stamp; its copy is part of every colour execution.
+		// Armed on this execution's range and stamp.
 		readback->armed = { true, counters.colourSlot, 0, counters.colourStamp, 0, 0, {} };
 		auto& sample = counters.sample.emplace();
 		sample.on = readback;
@@ -259,8 +255,7 @@ namespace DCLF::Diagnostics
 		                            Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction);
 		const auto& terrainNearUpload = DrawsState::Get().terrainNearUpload;
 		sample.terrainCpu = Diagnostics::Observe().claims && terrainNearUpload[3] > 0.0f;
-		// The CPU's side over the same frame's colour inputs and the same planes, off the render thread (the window is open until
-		// Present; a task that finds it closed drops the sample).
+		// The CPU side, off the render thread. The window stays open until Present, and a task that finds it closed drops the sample.
 		auto cpu = std::make_shared<CpuSide>();
 		cpu->resident = a_payload.resident.elements;
 		cpu->inputs = a_payload.body->inputList;

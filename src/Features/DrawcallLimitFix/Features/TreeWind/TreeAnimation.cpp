@@ -1,5 +1,5 @@
-// TreeAnimation: the tree manager's animation list without DCLF's trees (render thread syncs; the engine's add, remove and clear,
-// SceneWriterFramework's tree animation calls, on any thread), and the tree list's multibound results around its loop (main thread). TreeAnimation.h describes it.
+// The tree manager's animation list without DCLF's trees, and the tree list's multibound results around its loop.
+// TreeAnimation.h describes it.
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeAnimation.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeList.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWalk.h"
@@ -24,12 +24,9 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 	{
 		using namespace Engine;
 
-		// AE 1.6.1170. The animation list's writers are SWF_HOOK_TREE_ANIM_*: the add (FUN_1404376f0(manager, node): a BSLeafAnimNode
-		// onto the animation list), the remove (FUN_140437840(manager, node): off the animation list, a BSTreeNode off the tree list) and
-		// the clear (FUN_140437ae0(manager): both lists emptied, by TES and the manager's teardown).
+		// AE 1.6.1170. The list's writers are SWF_HOOK_TREE_ANIM_*: add FUN_1404376f0, remove FUN_140437840, clear FUN_140437ae0.
 		constexpr std::size_t kAnimationList = 0x50;  // BSTArray<NiAVObject*> (a reference each, taken by hand)
 		constexpr std::size_t kLock = 0x18;           // BSSpinLock (owner, count), the animation list's
-		// The tree list (skyrim-engine-notes.md, "Tree manager list").
 		constexpr std::size_t kTreeList = 0x20;         // BSTArray<BSTreeNode*>
 		constexpr std::size_t kTreeLock = 0x10;         // BSSpinLock of the tree list
 		constexpr std::size_t kMultiBound = 0x128;      // BSMultiBoundNode's BSMultiBound
@@ -44,19 +41,15 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 
 		bool installed = false;
 		bool enabled = false;
-		// The roots the list should not hold (render thread).
 		ankerl::unordered_dense::set<const RE::NiAVObject*> owned;
-		// The nodes DCLF took off the list, each holding the list's reference: under the manager's lock, from any thread.
-		// Never destroyed (nothing may release engine objects while the process is torn down).
+		// Nodes DCLF took off the list, each holding the list's reference. Changed under the manager's lock from any thread.
+		// Never destroyed, because nothing may release engine objects while the process is torn down.
 		auto& detached = *new ankerl::unordered_dense::map<const RE::NiAVObject*, RE::NiAVObject*>();
 		// Nodes the engine added (FUN_1404376f0), for the render thread to take off again if owned. Identity only.
 		auto& added = *new EventQueue<const RE::NiAVObject*>();
-		// detached.size(), for the report, which takes no lock.
 		std::atomic<std::uint32_t> held{ 0 };
 
-		// The tree list (main thread): the stood-in BSTreeNodes, each held while stood in (so BeforeListLoop visits them alone, not the
-		// whole list; let go through EngineReleases), whether DCLF runs this frame, and the results written for the loop now running
-		// (each tree held, its shape and the engine's value to put back).
+		// The stood-in tree nodes, each held while stood in, and the results written for the running loop.
 		ankerl::unordered_dense::map<const RE::NiAVObject*, RE::NiPointer<RE::NiAVObject>> ownedTrees;
 		void ReleaseTree(RE::NiPointer<RE::NiAVObject>& a_tree)
 		{
@@ -76,20 +69,14 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		{
 			std::atomic<std::uint64_t> engineAdds{ 0 }, engineRemoves{ 0 }, clears{ 0 };
 			std::uint64_t syncs = 0, takenOff = 0, putBack = 0, takenOffAgain = 0;
-			// The tree list: loops written around, the trees written in view / out of view, the engine's value they replaced (0 stale, 1 in,
-			// 2 out), and stood-in trees found without a multibound (the loop never visits them, as for the engine).
 			std::uint64_t treeLoops = 0, treesIn = 0, treesOut = 0, noMultiBound = 0;
 			std::array<std::uint64_t, 3> replaced{};
-			// Every other BSTreeNode on the list, under CS_DCLF_TREE_LIST_ALL: written in view / out of view (and the
-			// engine's value they replaced), and DCLF's result against the engine's before the write (same, DCLF in and the engine out, DCLF
-			// out and the engine in, the engine's stale). Aside: no DCLF verdict (not listed, or not yet written), no multibound.
 			std::uint64_t wideIn = 0, wideOut = 0, wideNoVerdict = 0, wideNoMultiBound = 0;
 			std::array<std::uint64_t, 3> wideReplaced{};
 			std::uint64_t drySame = 0, dryInOut = 0, dryOutIn = 0, dryStale = 0;
 		};
 		Stats stats;
 
-		// Under the lock: every node in a_take taken off the list (one pass), each keeping the list's reference. Returns how many.
 		std::uint32_t TakeOff(List& a_list, const ankerl::unordered_dense::set<const RE::NiAVObject*>& a_take)
 		{
 			std::uint32_t kept = 0, taken = 0;
@@ -119,8 +106,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 				}
 			}
 
-			// The remove's filter: a node DCLF holds off the list is the engine's to drop, forgotten with the list's reference, and the
-			// engine's remove vetoed (it would find nothing; the caller gets 0, as from the engine).
+			// A node DCLF holds off the list is forgotten with its reference, and the engine's remove is vetoed. The caller gets 0 as it would from the engine.
 			static std::int32_t Remove(const SWF_EventHeader* a_event, void*)
 			{
 				auto* manager = SceneWriter::Arg<std::byte*>(a_event, 0);
@@ -143,7 +129,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 				return 1;
 			}
 
-			// After the clear: the nodes held off the list let go with it.
 			static void Clear(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 			{
 				auto* manager = SceneWriter::Arg<std::byte*>(a_event, 0);
@@ -163,7 +148,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 			}
 		};
 
-		// The engine's adds since the last call, taken off again where owned.
 		void DrainAdds(std::byte* a_manager)
 		{
 			ankerl::unordered_dense::set<const RE::NiAVObject*> take;
@@ -184,7 +168,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 	{
 		if (installed)
 			return;
-		// The animation list's lock and array, as the add takes them: `lea rcx, [rdi + 0x18]` before the lock, the array at +0x50.
+		// The add takes the lock at +0x18 (`lea rcx, [rdi + 0x18]`) and the array at +0x50.
 		if (!SceneWriter::Has(SWF_CAP_TREE_ANIM_CALLS)) {
 			logger::warn("[DCLF] tree animation list: the scene writer framework has no tree animation calls; owned trees stay on the list");
 			return;
@@ -224,7 +208,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		auto& lock = Lock(manager);
 		lock.Lock();
 		auto& list = AnimationList(manager);
-		// Back on the list, with the reference DCLF held: the roots no longer owned.
 		for (auto it = detached.begin(); it != detached.end();) {
 			if (next.contains(it->first)) {
 				++it;
@@ -245,13 +228,13 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 	{
 		if (!installed)
 			return;
-		// The trees among them: a leaving root by key alone (only a tree joined ownedTrees), a joining one by its class.
+		// A leaving root is matched by key alone. A joining one is checked by its class.
 		for (const auto* root : a_left)
 			if (const auto it = ownedTrees.find(root); it != ownedTrees.end()) {
 				ReleaseTree(it->second);
 				ownedTrees.erase(it);
 			}
-		// A joining root is alive: the cut's snapshot holds it.
+		// A joining root is alive because the cut's snapshot holds it.
 		for (const auto* root : a_joined)
 			if (Engine::RttiIs(root, "BSTreeNode"))
 				ownedTrees.try_emplace(root, RE::NiPointer<RE::NiAVObject>(const_cast<RE::NiAVObject*>(root)));
@@ -260,7 +243,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		for (const auto* root : a_joined)
 			owned.insert(root);
 		auto* manager = Manager();
-		// The engine's adds since, judged by the owned set as it is now.
 		DrainAdds(manager);
 		++stats.syncs;
 		if (!manager)
@@ -270,7 +252,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		auto& lock = Lock(manager);
 		lock.Lock();
 		auto& list = AnimationList(manager);
-		// Back on the list, with the reference DCLF held: the roots no longer owned.
 		for (const auto* root : a_left)
 			if (const auto it = owned.contains(root) ? detached.end() : detached.find(root); it != detached.end()) {
 				list.push_back(it->second);
@@ -291,15 +272,12 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 
 	void BeforeListLoop(std::byte* a_manager)
 	{
-		// CS_DCLF_TREE_LIST_ALL gives the loop DCLF's verdict for every BSTreeNode DCLF lists (Extensions::ListedVerdictOf: the root's
-		// kAccumulated as written at Main::Update's entry).
 		static const bool all = ListAll();
 		if (!installed || !running || !a_manager || !written.empty() || (ownedTrees.empty() && !all))
 			return;
 		using FirstMultiBound = std::byte* (*)(const void*);
 		static const auto firstMultiBound = reinterpret_cast<FirstMultiBound>(REL::Module::get().base() + TreeWind::Address::kTreeFirstMultiBound);
-		// The list holds each tree: a stood-in one on it is alive while the lock is held, and the reference taken keeps it so until
-		// AfterListLoop, whatever another thread removes meanwhile.
+		// A stood-in tree on the list is alive while the lock is held. The reference taken keeps it alive until AfterListLoop.
 		auto& lock = Lock(a_manager, kTreeLock);
 		lock.Lock();
 		const auto write = [&](RE::NiAVObject* a_tree, bool a_stoodIn) {
@@ -319,8 +297,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 			}
 			auto* result = &At<std::int32_t>(shape, kShapeResult);
 			if (!a_stoodIn) {
-				// The comparison before the write: the engine's result is the last scene frame's cull, DCLF's the conservative rule's (a
-				// frame or more behind it).
+				// The engine's result is the last scene frame's cull. DCLF's is the conservative rule's, a frame or more behind.
 				const std::int32_t engine = *result;
 				++(engine == 0 ? stats.dryStale : (engine == 1) == visible ? stats.drySame :
 											  visible                      ? stats.dryInOut :
@@ -335,8 +312,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 			*result = visible ? 1 : 2;
 		};
 		if (!all) {
-			// The stood-in trees alone, held (a tree the engine took off the list meanwhile is not visited by the loop: its write is
-			// put back unread).
+			// A tree the engine took off the list meanwhile is not visited, so its write is put back unread.
 			for (const auto& [tree, reference] : ownedTrees)
 				if (reference)
 					write(reference.get(), true);
@@ -352,8 +328,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 
 	void AfterListLoop()
 	{
-		// The engine's values back (the loop has made its stores; nothing else read DCLF's), and the references let go here, on the main
-		// thread.
+		// Put the engine's values back and release the references here, on the main thread.
 		for (auto& entry : written)
 			*entry.result = entry.engine;
 		written.clear();
@@ -379,7 +354,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 	{
 		Counters c;
 		auto* manager = Manager();
-		// Read without the lock: a count and a time, for the report.
+		// Read without the lock. These are only a count and a time, for the report.
 		if (manager) {
 			c.updateMs = At<float>(manager, 0x7C);  // the manager's own measure of its last update (FUN_140437d40)
 			c.listed = std::atomic_ref<std::uint32_t>(At<std::uint32_t>(manager, kAnimationList + 0x10)).load(std::memory_order_relaxed);
@@ -408,8 +383,6 @@ namespace DCLF::Features::TreeWind
 {
 	namespace
 	{
-		// The primary cull's stand-in, as it moves (Api::StandInObserver): the roots off the animation list, the trees whose loop DCLF
-		// answers, and whether DCLF runs this frame.
 		void RootsChanged(const Api::StandInRootsChange& a_change)
 		{
 			TreeAnimation::UpdateOwned(a_change.left, a_change.joined);
@@ -423,12 +396,9 @@ namespace DCLF::Features::TreeWind
 
 	void RegisterAnimation(Api::InstallContext& a_context)
 	{
-		// The animation list's hooks follow the primary cull (installed with it); the tree list's loop is detoured always.
 		if (a_context.RegisterStandInObserver({ .changed = &RootsChanged, .cleared = &RootsCleared, .updateEntry = &TreeAnimation::AtUpdateEntry }))
 			TreeAnimation::Install();
-		// The tree manager's list loop: the stood-in trees' multibound results from DCLF's verdicts (TreeAnimation).
 		TreeList::Install();
-		// The tree manager walk's update pass as a move writer (the walked trees' sun entries, palettes and bounds: TreeWalk.h).
 		TreeWalk::Install(a_context);
 	}
 }

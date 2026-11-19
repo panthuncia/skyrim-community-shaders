@@ -19,44 +19,40 @@ namespace RE
 
 namespace DCLF::Diagnostics
 {
-	/**
-	 * @brief The engine area's hook points (Hooks.h: Notify, Armed, Subscribe). Each event names where the main path announces it, on
-	 * which thread; the observers subscribe in Diagnostics/Engine/EngineInstall.cpp.
-	 */
 
-	/** @brief The engine area's points that carry nothing (On<EnginePoint::...>, Hooks.h); render thread unless said. */
+	/** @brief Engine points that carry no data. Render thread unless noted. */
 	enum class EnginePoint : std::uint8_t
 	{
-		PrimaryCullInstalled,   // PrimaryCull::Install, its call sites patched (PostPostLoad): the observers' own engine hooks go in here
-		CutSynced,              // PrimaryCull::PrepareFrame: the cut followed the frame's snapshot (before the switch selections and admission)
-		FullFrustumDone,        // PrimaryCull::AfterFullFrustum, after the frame's preparation (the fade roots' nodes stand until the list jobs)
-		ListJobsDone,           // PrimaryCull::AfterListJobs, after the list jobs' Finish (the animated batch taken): the cull is done
-		ListJobsMerged,         // ... the stand-in ran this frame: the jobs' outputs gathered
-		SceneListsPublishing,   // PrimaryCull::PublishListFilter, first thing: this frame's scene lists are decided next
-		EngineSceneListsBuilt,  // DrawWorld_BuildSceneLists' job: the engine built the lists (ListMode::Engine), before DCLF's filter
-		PortalWalkBuilt,        // PortalViews::Build, right after Main::Update's walk: this frame's programs built (before they are encoded)
-		LightSelectionBegin,    // LightSelection's detour of CalculateActiveShadowCasterLights: before the engine's function runs
-		LightSelectionMade,     // ... after the engine's function and DCLF's selection (LightSelection::Select)
-		SunAccumulateBegin,     // the sun's Accumulate, before the engine's (its cascades captured from DCLF's views)
-		SunViewsUpdated,        // SunViews::Update made the sun's views from the cameras UpdateCamera set up
-		LightViewsFrame,        // LightViews::Update, the first light of a new frame, when the last frame had local views
-		FocusViewsFrame,        // FocusViews::Update, the first host of a new frame, when the last frame had focus hosts
+		PrimaryCullInstalled,   // call sites patched at PostPostLoad, observers install their own engine hooks here
+		CutSynced,              // the cut followed the frame's snapshot, before switch selections and admission
+		FullFrustumDone,        // the fade roots' nodes stand until the list jobs
+		ListJobsDone,           // the list jobs finished, the cull is done
+		ListJobsMerged,         // ... the stand-in ran and the jobs' outputs were gathered
+		SceneListsPublishing,   // this frame's scene lists are decided next
+		EngineSceneListsBuilt,  // the engine built the lists, before DCLF's filter
+		PortalWalkBuilt,        // right after Main::Update's walk, before the programs are encoded
+		LightSelectionBegin,    // before the engine's CalculateActiveShadowCasterLights runs
+		LightSelectionMade,     // ... after it and DCLF's selection
+		SunAccumulateBegin,     // before the engine's, cascades captured from DCLF's views
+		SunViewsUpdated,        // the sun's views made from the cameras UpdateCamera set up
+		LightViewsFrame,        // first light of a new frame, when the last frame had local views
+		FocusViewsFrame,        // first host of a new frame, when the last frame had focus hosts
 	};
 
-	/** @brief PrimaryCull::PrepareFrame, render thread, after the full-frustum cull: the frame's list processes (before the stand-in's preconditions). */
+	/** @brief The frame's list processes, after the full-frustum cull. Render thread. */
 	struct CutFrameBegin
 	{
 		RE::NiCullingProcess* const* processes;
 		std::uint32_t count;
 	};
 
-	/** @brief PrimaryCull::PrepareFrame, render thread: the list jobs' outputs reset for this frame's `count` processes. */
+	/** @brief The list jobs' outputs were reset for `count` processes. Render thread. */
 	struct CutSlotsReset
 	{
 		std::uint32_t count;
 	};
 
-	/** @brief A list job (its slot's thread) reached eligible entry `entry`, its root `root`, before the stand-in's verdict. */
+	/** @brief A list job reached an eligible entry, before the stand-in's verdict. Runs on the job's thread. */
 	struct StandInEntry
 	{
 		int slot;
@@ -64,7 +60,7 @@ namespace DCLF::Diagnostics
 		const RE::NiAVObject* root;
 	};
 
-	/** @brief A list job's stand-in handed member `member` (`geometry`) of entry `entry` to the engine's registration. */
+	/** @brief A list job's stand-in handed a member to the engine's registration. */
 	struct StandInHandedOver
 	{
 		int slot;
@@ -73,10 +69,7 @@ namespace DCLF::Diagnostics
 		const RE::BSGeometry* geometry;
 	};
 
-	/**
-	 * @brief ... a frame the engine builds its lists whole (Policy::FilterSceneLists false): the roots the filter would have left out
-	 * (`roots`, held by `hold`; null: no filter), and whether the build is the object root's exterior branch (`keepable`).
-	 */
+	/** @brief The engine builds its lists whole this frame. `roots` are what the filter would have left out, or null for no filter. */
 	struct SceneListsWhole
 	{
 		std::shared_ptr<const void> hold;
@@ -84,30 +77,27 @@ namespace DCLF::Diagnostics
 		bool keepable;
 	};
 
-	/** @brief PrimaryCull::AtUpdateEntry, main thread at Main::Update's entry, after the visibility and fade writes. */
+	/** @brief Main thread at Main::Update's entry, after the visibility and fade writes. */
 	struct UpdateEntry
 	{
 		bool running;
 	};
 
-	// The sun's accumulation (Features/Shadows/Sun's SunAccumulation hooks; render thread unless said).
+	// Sun accumulation. Render thread unless noted.
 
-	/**
-	 * @brief ExcludeEntries applied this frame's exclusion: `skipExcluded` is the Sun feature's ExcludeSun answer
-	 * (Features/Shadows/Sun/SunAccumulation.cpp; false: the cascades skip nothing).
-	 */
+	/** @brief This frame's exclusion was applied. `skipExcluded` is false when the cascades skip nothing. */
 	struct SunExclusionApplied
 	{
 		bool skipExcluded;
 	};
 
-	/** @brief The sun's cascade bits (every cascade's activeLightMask bit): after its Accumulate, and 0 where the frame's are reset. */
+	/** @brief The sun's cascade bits after its Accumulate, or 0 where the frame's are reset. */
 	struct SunBitsSet
 	{
 		std::uint32_t bits;
 	};
 
-	/** @brief A cascade of the sun's Accumulate without DCLF's view (the Sun board has none for its descriptor this frame). */
+	/** @brief A cascade of the sun's Accumulate with no DCLF view this frame. */
 	struct SunCascadeMissing
 	{
 		std::uint32_t frame;
@@ -120,7 +110,7 @@ namespace DCLF::Diagnostics
 		const RE::BSGeometry* geometry;
 	};
 
-	/** @brief A cascade cull returned (FUN_140e305c0): its process has the cascade's planes; `cascade` indexes the Accumulate's cascades. */
+	/** @brief A cascade cull (FUN_140e305c0) returned. Its process holds the cascade's planes. */
 	struct SunCascadeCulled
 	{
 		const void* fullProcess;
@@ -128,15 +118,15 @@ namespace DCLF::Diagnostics
 		std::uint32_t cascade;
 	};
 
-	// The point lights' culls (LocalLightCull's hooks).
+	// Point light culls.
 
-	/** @brief LocalLightCull::SelectFrame, render thread: this frame's exclusion selected; `whole`: the culls skip nothing (Policy::FilterLightCulls). */
+	/** @brief This frame's exclusion was selected. `whole` means the culls skip nothing. Render thread. */
 	struct LightCullsSelected
 	{
 		bool whole;
 	};
 
-	/** @brief PassCapture's registration hooks (any registration thread): a pass handed to a batch renderer, withheld or not (`source`: the insertion's hint, 0 RegisterPass). */
+	/** @brief A pass handed to a batch renderer, withheld or not. `source` is the insertion's hint, 0 for RegisterPass. Any registration thread. */
 	struct PointLightPass
 	{
 		const RE::BSBatchRenderer* batch;
@@ -146,10 +136,8 @@ namespace DCLF::Diagnostics
 	};
 
 	/**
-	 * @brief LocalLightCull::NoteMainRegistration on a frame the culls keep whole (any registration thread): a geometry's main
-	 * registration with the bits DCLF would give it (`entry`: its excluded entry, ~0u none; `reach`: the lights by reach kind) and the
-	 * point lights' bits the engine's culls left in its mask (`engine`); `first`: the geometry's first clearing main registration of the
-	 * frame, when `sphere` holds the bits an empty cull of every light would give it.
+	 * @brief On a frame the culls keep whole, a geometry's main registration with the bits DCLF would give it and the bits the
+	 * engine's culls left. Any registration thread.
 	 */
 	struct PointLightBits
 	{
@@ -162,30 +150,30 @@ namespace DCLF::Diagnostics
 		std::uint32_t sphere;
 	};
 
-	// The shadow lights' views (render thread).
+	// Shadow light views, render thread.
 
-	/** @brief PassCapture's registration hook (any registration thread): a pass into a covered focus view's renderer. */
+	/** @brief A pass into a covered focus view's renderer. Any registration thread. */
 	struct FocusRegistration
 	{
 		std::uint32_t descriptor;
 		const void* geometry;
 	};
 
-	// The registrations (PassCapture's hooks, on whatever thread the engine registers).
+	// Registrations, on whatever thread the engine registers.
 
-	/** @brief The main modes' hint 1 list insertion withheld a member's pass from the main camera's views. */
+	/** @brief The hint 1 list insertion withheld a member's pass from the main views. */
 	struct MemberListPassWithheld
 	{
 		const RE::BSRenderPass* pass;
 	};
 
-	/** @brief The main modes' insertion into geometry group 5 withheld a member's pass from the main camera's views. */
+	/** @brief The geometry group 5 insertion withheld a member's pass from the main views. */
 	struct MemberGroup5PassWithheld
 	{
 		const RE::BSRenderPass* pass;
 	};
 
-	/** @brief A registration hook handed a pass on to the engine's batch renderer (`face`: the reflection faces withhold now). */
+	/** @brief A registration hook passed a pass on to the engine's batch renderer. */
 	struct PassKept
 	{
 		const RE::BSBatchRenderer* batch;

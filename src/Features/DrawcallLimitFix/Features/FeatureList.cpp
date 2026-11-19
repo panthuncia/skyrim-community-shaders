@@ -1,10 +1,11 @@
-// The one ordered list of DCLF's features (see the header). A feature's place is the order its registrations run in beside the others':
-// its pools after the earlier features' pools, its passes' setups after theirs, its products after theirs
-// (where its passes run is the schedule's: Schedule/Frame.cpp).
+// The one ordered list of DCLF's features. A feature's place sets the order its registrations run in beside the others'.
+// Where its passes run is the schedule's (Schedule/Frame.cpp).
 
 #include "Features/DrawcallLimitFix/Features/FeatureList.h"
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
+#include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
+#include "Features/DrawcallLimitFix/Features/DecalOcclusion/DecalOcclusion.h"
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Features/Fades/Fades.h"
@@ -21,16 +22,21 @@
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
+#include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
+#include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
+#include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/Sun.h"
 #include "Features/DrawcallLimitFix/Features/Skins/Skins.h"
+#include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 #include "Features/DrawcallLimitFix/Features/SwitchNodes/SwitchNodes.h"
 #include "Features/DrawcallLimitFix/Features/TextureStreaming/TextureStreaming.h"
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
+#include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include <array>
 
@@ -50,6 +56,11 @@ namespace DCLF::Features
 		// - Skins and Actors come before First person, for the same reason. Skins also comes before Effects, which reads skins.
 		// - Tree LOD's table uploads run after tree wind's, and Grass's scene resources and commit hook run after Tree LOD's.
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
+		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
+		//   Decal occlusion is the same kind, listed after it.
+		// - Menu views registers only report lines (its probe's hooks are its own), so its place sets no order either; it is before Fades.
+		// - Water, Blood splatter, Precipitation and Shadow mask are the same kind (the EngineDraws anchor's clients); they are listed after
+		//   Menu views.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
 		//   other feature's. Its channels are the last BeforeStructural ones.
 		//
@@ -82,6 +93,13 @@ namespace DCLF::Features
 			Streaming::Feature(),
 			Faces::Feature(),
 			FirstPerson::Feature(),
+			Sky::Feature(),
+			DecalOcclusion::Feature(),
+			MenuViews::Feature(),
+			Water::Feature(),
+			BloodSplatter::Feature(),
+			Precipitation::Feature(),
+			ShadowMask::Feature(),
 			Fades::Feature(),
 		};
 		return kFeatures;

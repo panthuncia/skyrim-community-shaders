@@ -1,9 +1,7 @@
 #pragma once
 
-// The engine-independent half of PortalViews: BSCompoundFrustum's token stream and its builders (Emit, Finalize, ReopenAsOr,
-// CompactEmptyGroups, Merge, the masked copy), the programs' encoding (PortalPrograms.h) and its CPU evaluation (PortalPrograms.hlsli's
-// PortalTestAt). PortalViews builds the frame's programs with these from the engine's shapes; the CPU tests and the portal bench
-// (tests/DclfPortalBench) build synthetic ones with the same code, and evaluate any encoding as the oracle.
+// The engine-independent half of PortalViews: BSCompoundFrustum's token stream and builders, the programs' encoding
+// (PortalPrograms.h) and its CPU evaluation. The CPU tests and tests/DclfPortalBench use the same code as the oracle.
 
 #include "Features/DrawcallLimitFix/Features/Portals/PortalBytecode.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
@@ -77,7 +75,6 @@ namespace DCLF::PortalModel
 		std::array<float, 3> eye{};  // the camera's position (Reset)
 	};
 
-	// ---- BSCompoundFrustum's builders ----
 
 	/** @brief FUN_140e32580: the counts and flags; the arrays' contents stay. */
 	inline void Reset(Program& a_program, const std::array<float, 3>& a_eye)
@@ -127,7 +124,7 @@ namespace DCLF::PortalModel
 		ops[n].word = 1;
 		ops[n + 1].word = 2;
 		ops[n + 2].word = 3;
-		// Pass 1: each group's closing index (groups numbered from 1 in opener order; group 0 is the top level).
+		// Pass 1: each group's closing index. Groups are numbered from 1 in opener order, and group 0 is the top level.
 		std::vector<std::uint32_t> closeIndex(n + 2, 0), ids(n + 2, 0);
 		std::uint32_t depth = 0, nextId = 1;
 		for (std::uint32_t i = 0; i <= n; ++i) {
@@ -216,8 +213,8 @@ namespace DCLF::PortalModel
 	}
 
 	/**
-	 * @brief FUN_140e334c0: a stream that is one OR group drops its close; any other is wrapped in a new, unclosed OR. The scan does not
-	 * skip the set-index words (an index of 4, 5 or 6 reads as a token), as the engine's.
+	 * @brief FUN_140e334c0: drops a single OR group's close, or wraps any other stream in a new unclosed OR.
+	 * Like the engine's, the scan does not skip set-index words, so an index of 4, 5 or 6 reads as a token.
 	 */
 	inline void ReopenAsOr(Program& a_program)
 	{
@@ -306,10 +303,7 @@ namespace DCLF::PortalModel
 		d.freePlane += a_source.freePlane;
 	}
 
-	/**
-	 * @brief FUN_140e33740 (after Clear, FUN_140e32040): the parent's stream for a child room, each set a_turnOff(set) names (the
-	 * portal lies wholly inside its planes with no edge clipped) turned off (mask 0) for it.
-	 */
+	/** @brief FUN_140e33740: the parent's stream for a child room, with each set a_turnOff names turned off. */
 	template <class TurnOff>
 	void CopyMasked(Program& a_out, const Program& a_parent, TurnOff&& a_turnOff)
 	{
@@ -328,7 +322,7 @@ namespace DCLF::PortalModel
 				const std::uint32_t s = a_parent.ops[i + 1].word;
 				const PlaneSet& set = s < a_parent.sets.size() ? a_parent.sets[s] : PlaneSet{};
 				const bool off = a_turnOff(set);
-				// The set keeps its index (in a builder's stream the tests' sets ascend, so it is the running count too).
+				// In a builder's stream the tests' sets ascend, so the kept index is also the running count.
 				t.ops[i + 1].word = t.freePlane;
 				Grow(t, std::max(s, t.freePlane));
 				t.sets[s] = set;
@@ -342,9 +336,8 @@ namespace DCLF::PortalModel
 		CompactEmptyGroups(t);
 	}
 
-	// ---- The encoding (PortalPrograms.h) ----
 
-	/** @brief One directory entry's source: a program (null: not reached), its room's cull mode, and whether it is a room's. */
+	/** @brief One directory entry's source: a program (null when not reached), its room's cull mode, and whether it is a room's. */
 	struct EncodeEntry
 	{
 		const Program* program = nullptr;
@@ -352,17 +345,14 @@ namespace DCLF::PortalModel
 		bool room = false;  // a room's program (1 + index); unbound space's (program 0) drops skipViewFrustum
 	};
 
-	/** @brief What the lowering of an entry did (Encode's report): a stream it rejected is encoded as a single ACCEPT. */
+	/** @brief What lowering an entry did. A rejected stream is encoded as a single ACCEPT. */
 	struct EncodeError
 	{
 		std::uint32_t program = 0;
 		const char* what = nullptr;
 	};
 
-	/**
-	 * @brief PortalPrograms.h's words: the view planes, the header, a directory entry per program (a_entries; none: a header of no
-	 * programs), the compact records, then the sets. a_onError (optional) is told of each stream the lowering rejected.
-	 */
+	/** @brief Writes PortalPrograms.h's words. a_onError, if given, hears of each stream the lowering rejected. */
 	template <class OnError>
 	void Encode(const PlaneSet& a_view, std::span<const EncodeEntry> a_entries, std::vector<std::uint32_t>& a_words, OnError&& a_onError)
 	{
@@ -386,8 +376,7 @@ namespace DCLF::PortalModel
 			entry[0] = kPortalReached | (source.room && program->skipView ? kPortalSkipView : 0u);
 			const std::uint32_t ops = program->freeOp && program->finalized ? std::min<std::uint32_t>(program->freeOp + 3, static_cast<std::uint32_t>(program->ops.size())) : 0u;
 			const std::uint32_t planes = ops ? std::min<std::uint32_t>(program->freePlane, static_cast<std::uint32_t>(program->sets.size())) : 0u;
-			// A stream the lowering rejects must not throw: it accepts the bound, as the previous interpreter did on a malformed
-			// stream (the view test still applies).
+			// A rejected stream must not throw. It accepts the bound, and the view test still applies.
 			if (ops) {
 				try {
 					compiled[p] = PortalBytecode::Lower<Op>(std::span(program->ops).first(ops), program->firstOp, planes);
@@ -424,7 +413,6 @@ namespace DCLF::PortalModel
 		a_words.insert(a_words.end(), setWords.begin(), setWords.end());
 	}
 
-	// ---- The CPU evaluation (PortalPrograms.hlsli's PortalTestAt) ----
 
 	/** @brief What decided a Visible verdict (PortalViews::Visible names it). */
 	enum class Reason : std::uint8_t
@@ -448,8 +436,8 @@ namespace DCLF::PortalModel
 	};
 
 	/**
-	 * @brief PortalTestAt on the CPU over a_words (the encoding at word offset 0): a_nodeFlags' always-draw bit 11, preprocessed 12,
-	 * preprocess-hidden 20. Throws on an encoding the producer's invariants exclude (the GPU rejects the bound there).
+	 * @brief PortalTestAt on the CPU. a_nodeFlags bits: always-draw 11, preprocessed 12, preprocess-hidden 20.
+	 * Throws on an encoding the producer's invariants exclude, where the GPU rejects the bound.
 	 */
 	inline Verdict Visible(std::span<const std::uint32_t> a_words, std::uint32_t a_program, const float a_centre[3], float a_radius, std::uint32_t a_nodeFlags)
 	{

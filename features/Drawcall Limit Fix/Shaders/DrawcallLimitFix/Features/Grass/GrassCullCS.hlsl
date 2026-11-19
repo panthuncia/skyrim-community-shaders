@@ -1,18 +1,10 @@
-// Drawcall Limit Fix: grass's instances culled for the main camera, in the depth segment's two phases like every other object
-// (dclf-architecture.md, "Grass: the draws"; Features/Grass/Grass.h, GrassLayout.h).
+// Drawcall Limit Fix. Culls grass instances for the main camera in the depth segment's two phases, like every other object.
 //
-// Phase 1 (before the Z-prepass's draw): one thread per instance slot. A slot no shape owns (owners ~0u), or past the draw row's
-// instance slots (0: grass does not draw this frame), draws nothing. The rest take Grass Optimizations' tests
-// (GrassOptimizations/GrassCullingCS.hlsl): the distance, the frustum (on the instance's bound), the pixel size (by camera depth),
-// the LOD tier, whose mesh cost biases the distance and the pixel sizes, the density thinning (ramped in with distance), the edge,
-// distance, spawn and invisible fades; then the instance's frame values for the vertex stage (its wind scalars, fade and flags) before
-// the occlusion verdict. Then the HZB the previous frame left (HzbTest.hlsli): one
-// occluded goes on the retest list; one in view is appended to its bucket tier's visible range (draw slot bucket * 3 + tier).
-//
-// Phase 2 (after the HZB is rebuilt from this frame's depth): one thread per retest entry, tested again against the rebuilt HZB. One it
-// brings back is appended to its draw slot's range after phase 1's (GrassArgsCS's phase 2 draws start at phase 1's count).
-//
-// The depth commit zeroes the header; GrassArgsCS's colour mode zeroes the counts after it has read them.
+// Phase 1 runs one thread per instance slot. Free slots and slots past the draw row's count draw nothing. The rest take Grass
+// Optimizations' tests, write the instance's frame values for the vertex stage, then test last frame's HZB. Occluded instances
+// go on the retest list. Visible ones are appended to their bucket tier's range, draw slot bucket * 3 + tier.
+// Phase 2 retests each list entry against the rebuilt HZB and appends survivors after phase 1's draws.
+// The depth commit zeroes the header. GrassArgsCS's colour mode zeroes the counts after reading them.
 #include "DrawcallLimitFix/CullEye.hlsli"
 #include "DrawcallLimitFix/HzbTest.hlsli"
 
@@ -21,17 +13,17 @@ cbuffer GrassCullConstants : register(b0)
 {
 	uint DrawIndex;       // ByteAddressBuffer: GrassInstances::DrawRow
 	uint InstancesIndex;  // ByteAddressBuffer: GrassInstances::Instance per instance slot
-	uint OwnersIndex;     // ByteAddressBuffer: the slot's shape slot (~0u: free)
+	uint OwnersIndex;     // ByteAddressBuffer, the slot's shape slot, ~0u when free
 	uint ShapesIndex;     // ByteAddressBuffer: GrassInstances::ShapeRow per shape slot
 	uint BucketsIndex;    // ByteAddressBuffer: GrassInstances::BucketRow per bucket slot
 	uint FrameIndex;      // RWByteAddressBuffer: GrassInstances::InstanceFrame per instance slot
 	uint VisibleIndex;    // RWByteAddressBuffer: the visible entries, then the retest list
-	uint DrawsIndex;      // RWByteAddressBuffer: the draws buffer (DrawsHeader, the counts, the arguments' arrays)
-	uint LatchIndex;      // ByteAddressBuffer: the depth segment's BuildDrawsLatch (its view-projection, its HZB's UV scale)
+	uint DrawsIndex;      // RWByteAddressBuffer, the draws buffer
+	uint LatchIndex;      // ByteAddressBuffer, the depth segment's BuildDrawsLatch
 	uint LatchOffset;
 	uint Phase;           // 1 or 2
-	uint RetestOffset;    // bytes: the retest list's first entry
-	uint HzbIndex;        // Texture2D<float>: 0 when there is no HZB to test against
+	uint RetestOffset;    // bytes to the retest list's first entry
+	uint HzbIndex;        // Texture2D<float>, 0 when there is no HZB
 	uint HzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
 	uint HzbMips;
 	uint Padding0;
@@ -41,7 +33,7 @@ cbuffer GrassCullConstants : register(b0)
 static const uint kInstanceBytes = 32;
 static const uint kShapeRowBytes = 32;
 static const uint kBucketRowBytes = 224;
-static const uint kFrameBytes = 8;  // GrassInstances::InstanceFrame: the wind halfs, then the fade (unorm16) and flags (high 16)
+static const uint kFrameBytes = 8;  // GrassInstances::InstanceFrame, the wind halfs, then fade unorm16 and flags in the high 16
 static const uint kTiers = 3;
 static const uint kBucketTierOne = 4;
 static const uint kBucketTierTwo = 8;
@@ -70,7 +62,7 @@ static const uint kRowCull = 256;
 static const float kPi = 3.1415926535897932;
 static const float kTau = 6.2831853071795864;
 
-// The depth segment's camera-relative view-projection, as BuildDrawsCS's. A world position projects less the latch's eye.
+// The depth segment's camera-relative view-projection. A world position projects less the latch's eye.
 float4x4 LatchViewProj()
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -78,8 +70,7 @@ float4x4 LatchViewProj()
 		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
 }
 
-// The cull's sphere test against the main camera's frustum, as TreeLodCullCS's InView: its planes normalised, the centre relative to
-// the latch's eye; NoNearPlane (the latch's cull flags, bit 9) drops the near plane.
+// The sphere test against the main camera's frustum, as TreeLodCullCS's InView. NoNearPlane drops the near plane.
 bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -99,11 +90,12 @@ bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 	return true;
 }
 
-// The HZB the phase tests against: the latch's cull mode 2 (frustum then the HZB), an HZB bound and Grass Optimizations' occlusion on.
+// Tests the HZB only in cull mode 2, with an HZB bound and Grass Optimizations' occlusion on.
 bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullFlags)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	if ((latch.Load(LatchOffset + 16) & 0xFu) < 2 || (a_cullFlags & kCullOcclusion) == 0)
+	const uint hzbState = (a_cullFlags & kCullOcclusion) != 0 ? (latch.Load(LatchOffset + 16) & 0xFu) : 0u;
+	if (hzbState < 2)
 		return false;
 	HzbView view;
 	view.ViewProj = a_viewProj;
@@ -115,7 +107,7 @@ bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullF
 	return HzbTest(view, a_centre, a_radius).Occluded;
 }
 
-// Common/Random.hlsli's pcg2d: the density and LOD dither, by the global instance slot (stable while the shape lives).
+// Common/Random.hlsli's pcg2d, seeded by the global instance slot so it is stable while the shape lives.
 uint2 Pcg2d(uint2 v)
 {
 	v = v * 1664525u + 1013904223u;
@@ -213,8 +205,7 @@ bool Owner(uint a_index, out float3 a_origin, out float a_spawnStart, out uint a
 	return true;
 }
 
-// The instance's bound (Grass Optimizations' occlusion sphere): the model bound's centre turned by the instance's rotation and grown
-// by its scale variance, its radius the model's grown likewise.
+// Grass Optimizations' occlusion sphere. The model bound turned by the instance's rotation and grown by its scale variance.
 void Bound(uint4 a_raw0, uint4 a_raw1, float3 a_world, float3 a_boundCenter, float a_modelRadius, out float3 a_centre, out float a_radius)
 {
 	const float sizeVariance = f16tof32(a_raw1.z >> 16);
@@ -226,8 +217,7 @@ void Bound(uint4 a_raw0, uint4 a_raw1, float3 a_world, float3 a_boundCenter, flo
 	a_radius = a_modelRadius * (1.0 + max(sizeVariance, 0.0)) + length(a_boundCenter) * abs(sizeVariance);
 }
 
-// The draw slot's count and the instance's entry in its bucket tier's visible range: tiers 0 and 1 up from their base, tier 2 down from
-// its (the end of the range it shares with tier 1).
+// Counts the draw and writes the visible entry. Tiers 0 and 1 grow up from their base, tier 2 down from the end it shares with tier 1.
 void Append(RWByteAddressBuffer a_draws, uint a_index, uint a_bucket, uint a_tier, uint a_counter)
 {
 	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
@@ -240,7 +230,7 @@ void Append(RWByteAddressBuffer a_draws, uint a_index, uint a_bucket, uint a_tie
 	visible.Store((a_tier == 2 ? base - 1 - at : base + at) * 4, a_index);
 }
 
-// Phase 2: a retest entry's instance against the rebuilt HZB, appended after phase 1's when it is in view now.
+// Phase 2. Retests an entry against the rebuilt HZB and appends it after phase 1's when it is in view now.
 void Retest(uint a_id, RWByteAddressBuffer a_draws, Cull a_cull)
 {
 	RWByteAddressBuffer visible = ResourceDescriptorHeap[VisibleIndex];
@@ -268,7 +258,7 @@ void Retest(uint a_id, RWByteAddressBuffer a_draws, Cull a_cull)
 	Append(a_draws, index, bucket, tier, kPhaseTwoInstances);
 }
 
-// The LOD tier (Grass Optimizations' dither of both transitions by one value), clamped to the tiers the bucket has a mesh for.
+// The LOD tier, dithering both transitions by one value, clamped to the tiers the bucket has a mesh for.
 uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 {
 	const float halfBand = a_cull.LodBandPx * 0.5;
@@ -303,7 +293,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
 	const uint bucketBase = bucket * kBucketRowBytes;
 	if (buckets.Load(bucketBase + 28) == 0)
-		return;  // not drawable yet (no mesh or texture)
+		return;  // not drawable yet, no mesh or texture
 	uint scratch;
 	draws.InterlockedAdd(kStatLive, 1u, scratch);
 
@@ -314,7 +304,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 	const float3 local = float3(localXY, f16tof32(raw0.y & 0xFFFF));
 	const float3 world = origin + local;
 	const float3 eye = asfloat(draw.Load3(kRowEye));
-	// The eye comes off the origin first, so the distance skips the rounding of the absolute position.
+	// Subtract the eye from the origin first, so the distance skips the absolute position's rounding.
 	const float3 dv = (origin - eye) + local;
 	const float distSq = dot(dv, dv);
 	const float dist = sqrt(distSq);
@@ -332,7 +322,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 		return;
 	}
 
-	// The pixel size by camera depth (clip w over the projection's w row), so it stays consistent across the view.
+	// Pixel size by camera depth, so it stays consistent across the view.
 	const float sizeVariance = f16tof32(raw1.z >> 16);
 	const float instanceRadius = asfloat(buckets.Load(bucketBase + 60)) * (1.0 + max(sizeVariance, 0.0));
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -340,8 +330,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 	const float4 clip = mul(viewProj, float4(worldRelative, 1.0));
 	const float projPx = (instanceRadius * length(viewProj[3].xyz) / max(clip.w, 1e-4)) * cull.ProjScale;
 
-	// The tier first (dithered by the global slot: stable while the shape lives), then its mesh's cost bias, ramped in past its start
-	// distance: a costlier mesh is drawn less far and must be larger.
+	// The tier first, then its mesh's cost bias ramped in past its start distance. A costlier mesh is drawn less far and must be larger.
 	const uint2 rand = Pcg2d(uint2(index, 0u));
 	const uint tier = Tier(cull, projPx, RandFloat(rand.y), buckets.Load(bucketBase + 12));
 	const float meshCost = asfloat(buckets.Load(bucketBase + (tier == 0 ? 72 : 152 + (tier - 1) * 4)));
@@ -373,7 +362,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 		return;
 	}
 
-	// The fades: the edge of the (cost-biased) distance, the engine's distance fade, the spawn fade-in.
+	// The edge of the cost-biased distance, the engine's distance fade, and the spawn fade-in.
 	const float maxDist = sqrt(effMaxDistSq);
 	const float edgeStart = maxDist * cull.EdgeFadeStart;
 	const float edgeFade = saturate((maxDist - dist) / max(maxDist - edgeStart, 1e-4));
@@ -386,7 +375,7 @@ uint Tier(Cull a_cull, float a_projPx, float a_dither, uint a_bucketFlags)
 		return;
 	}
 
-	// The instance's frame values, for the vertex stage, whatever the occlusion says (phase 2 reads its tier).
+	// Frame values for the vertex stage, whatever occlusion says, since phase 2 reads the tier.
 	const float wavePeriod = asfloat(buckets.Load(bucketBase + 64));
 	const float basis = (localXY.x + localXY.y) * -0.0078125;
 	uint flags = tier;

@@ -1,6 +1,6 @@
-// The shadow epoch (render thread): its commit (the installed payload, the index pool, the views' latches, the occlusion maps' among them,
-// the arena and the latched CS blocks), its inputs, the occlusion maps' readiness and the culling counters' readback. Submitted where
-// Features/Shadows/Engine's handler calls it (ExecuteShadowFrame: Api/ShadowEpochs.h), in its epoch's segment (its traits).
+// The shadow epoch, on the render thread. Each frame it commits the installed shadow payload, writes a culling latch
+// per shadow view and occlusion map, uploads the arena, and submits the recorded work.
+// Also here: the shadow inputs, the occlusion maps' readiness check and the culling counter readback.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -20,11 +20,7 @@ namespace DCLF
 {
 	namespace Draws
 	{
-		/**
-		 * @brief A shadow view's common latch: a single phase over every input (no engine-visibility gate), the eye-folded
-		 * view-projection and the frame's stamp. Culling flags and planes are the caller's. a_seedsIndex: the root states' seeds (the cull
-		 * binding RootSeeds).
-		 */
+		/** @brief The latch fields every shadow view shares. The caller sets the culling flags and planes. */
 		BuildDrawsLatch ShadowViewLatch(const PendingView& a_view, std::uint32_t a_inputs, std::uint32_t a_frame, std::uint32_t a_seedsIndex)
 		{
 			BuildDrawsLatch latch{};
@@ -32,7 +28,7 @@ namespace DCLF
 			latch.dispatch[1] = 1;
 			latch.dispatch[2] = 1;
 			latch.drawCount = a_inputs;
-			latch.visibilityStamp = a_frame & 0x0FFFFFFFu;  // 28 bits: BuildDrawsCS keeps flags below it
+			latch.visibilityStamp = a_frame & 0x0FFFFFFFu;  // 28 bits, BuildDrawsCS keeps flags in the top bits
 			latch.placementsIndex = FrameValues::Get().PlacementsIndex();
 			latch.fadeSeedsIndex = a_seedsIndex;
 			LatchCullCamera(latch, a_view.viewProj, a_view.eye);
@@ -42,11 +38,8 @@ namespace DCLF
 		namespace
 		{
 			/**
-			 * @brief A sun view's least caster radius in world units for a_minTexels (kCullMinTexels; 0: no test). A cascade's projection is
-			 * orthographic (row 3 is (0, 0, 0, 1): clip w 1), so a sphere of radius r spans r * |row 0's xyz| of NDC either side of its centre,
-			 * and NDC's 2 units span the viewport's width: r * |row 0's xyz| * width / 2 texels, row 1 and the height likewise. The radius is
-			 * the threshold over the larger axis' texels per world unit (a caster either axis resolves is kept). The eye only ever moves the
-			 * rows' w. A projection that is not orthographic has no one texel size: not tested.
+			 * @brief The smallest caster radius in world units that covers a_minTexels in a sun view, or 0 for no test.
+			 * Only orthographic projections have one texel size, so others are not tested.
 			 */
 			float SunCasterMinRadius(const float (&a_viewProj)[16], std::uint32_t a_width, std::uint32_t a_height, float a_minTexels)
 			{
@@ -63,18 +56,14 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief Points a_latch at a view's bucket table in its slot's latch region, writing the table when a_write (the region does not
-		 * hold this revision's yet: LatchRegionsHeld).
-		 */
-		void WriteBucketTable(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, std::uint32_t a_latchSlot, std::uint32_t a_slot,
+		/** @brief Points the latch at the view's bucket table, and writes the table when a_write is set. */
+		void WriteBucketTable(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const org::RunRef& a_latchRun, std::uint32_t a_slot,
 			std::span<const ShadowBucket> a_buckets, bool a_write, BuildDrawsLatch& a_latch)
 		{
-			// At most a bucket per key slot, which the layout reserves (ReserveShadowLatch).
 			if (a_buckets.size() > a_layout.keySlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} shadow buckets past the latch's {} key slots", a_buckets.size(), a_layout.keySlots));
 			const std::uint32_t offset = a_layout.BucketOffset(a_slot);
-			a_latch.bucketTableOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchSlot)) + offset;
+			a_latch.bucketTableOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + offset;
 			if (!a_write || a_buckets.empty())
 				return;
 			std::vector<std::uint32_t> table;
@@ -83,124 +72,116 @@ namespace DCLF
 				table.push_back(bucket.first);
 				table.push_back(bucket.capacity);
 			}
-			LatchWrite(a_latchBlock, "shadow bucket tables", a_latchSlot, offset, std::as_bytes(std::span(table)));
+			LatchWrite(a_latchBlock, "shadow bucket tables", a_latchRun, offset, std::as_bytes(std::span(table)));
 		}
 
-		// The shadow latch's regions the shadow commits wrote their revision's bucket tables and map rows into (render thread).
-		// Parts: 2 * view slot (its bucket table), 2 * map row + 1 (the row). The occlusion maps' views have slots and modes of their own.
+		// Which latch regions already hold this revision's tables. Render thread only.
+		// Part ids are 2 * view slot for a bucket table and 2 * map row + 1 for a map row.
 		LatchRegionsHeld shadowLatchRegions;
-		// What the shadow constants buffer holds of the arena past the frame record, as staged (render thread): the build it was last
-		// brought up to, and its bytes. Only these commits write that part of the buffer.
+		// The arena bytes past the frame record that the constants buffer holds now. Render thread only.
 		struct ShadowArenaHeld
 		{
 			std::weak_ptr<const void> target;
 			std::uint64_t serial = 0;
-			std::vector<std::byte> bytes;  // from the record's end
+			std::vector<std::byte> bytes;
 		} shadowArenaHeld;
-		// A new build's arena mostly repeats the last one's: it is compared in chunks of this many bytes, and only differing runs staged.
+		// A new arena mostly repeats the last one, so it is compared in chunks and only differing runs are staged.
 		constexpr std::size_t kArenaChunk = 256;
 
 		/**
-		 * @brief Points a_latch at its rasterizer state's pipeline-map row (each key slot's bucket), writing the row when a_write
-		 * (once per state and frame). The offset is into the whole latch block, so it includes the frame slot's base.
+		 * @brief Points the latch at its rasterizer state's pipeline-map row, and writes the row when a_write is set.
+		 * The offset is into the whole latch block, so it includes the frame slot's base.
 		 */
-		void UseShadowMapRow(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const RowBuckets& a_buckets, std::uint32_t a_latchSlot,
+		void UseShadowMapRow(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const RowBuckets& a_buckets, const org::RunRef& a_latchRun,
 			std::uint32_t a_mode, std::uint32_t a_rasterState, bool a_write, BuildDrawsLatch& a_latch)
 		{
 			const auto& layout = a_layout;
-			// ReserveShadowLatch gives every registered state a row in every mode: past it is a defect of that reserve.
+			// ReserveShadowLatch gives every registered state a row in every mode.
 			if (a_rasterState == 0 || a_rasterState > layout.rasterStates || a_mode >= kShadowModeCount)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: shadow view rasterizer state {} of mode {} past the latch's {} rows", a_rasterState, a_mode,
 					layout.rasterStates));
 			const std::uint32_t mapRowOffset = layout.MapOffset() + layout.MapRowOf(a_mode, a_rasterState) * layout.MapRowBytes();
-			a_latch.pipelineMapOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchSlot)) + mapRowOffset;
+			a_latch.pipelineMapOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + mapRowOffset;
 			if (!a_write)
 				return;
-			// ReserveShadowLatch sized the row for every key slot.
 			const auto& row = a_buckets.bucketOfSlot;
 			if (row.size() > layout.keySlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} shadow key slots past the latch's {}", row.size(), layout.keySlots));
 			if (!row.empty())
-				LatchWrite(a_latchBlock, "shadow map rows", a_latchSlot, mapRowOffset, std::as_bytes(std::span(row)));
+				LatchWrite(a_latchBlock, "shadow map rows", a_latchRun, mapRowOffset, std::as_bytes(std::span(row)));
 		}
 
 		/**
-		 * @brief Points a_latch at the key slots' vertex layouts, writing them when a_write (once per frame slot and shape). Slots past the
-		 * shape's table (or the latch's) stay zero: their draws take the bucket's pushed layout (Utility.hlsl, DCLFShadowVertex).
+		 * @brief Points the latch at the key slots' vertex layouts, and writes them when a_write is set.
+		 * Slots past the table stay zero, so their draws use the bucket's pushed layout.
 		 */
-		void UseSlotLayouts(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const ShadowFrame& a_frame, std::uint32_t a_latchSlot,
+		void UseSlotLayouts(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const ShadowFrame& a_frame, const org::RunRef& a_latchRun,
 			bool a_write, BuildDrawsLatch& a_latch)
 		{
-			a_latch.slotLayoutsOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchSlot)) + a_layout.SlotLayoutsOffset();
+			a_latch.slotLayoutsOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + a_layout.SlotLayoutsOffset();
 			if (!a_write || !a_frame.slotLayouts || a_frame.slotLayouts->empty())
 				return;
 			const auto& layouts = *a_frame.slotLayouts;
 			const std::size_t count = std::min<std::size_t>(layouts.size(), a_layout.keySlots);
-			LatchWrite(a_latchBlock, "shadow slot layouts", a_latchSlot, a_layout.SlotLayoutsOffset(), std::as_bytes(std::span(layouts.data(), count)));
+			LatchWrite(a_latchBlock, "shadow slot layouts", a_latchRun, a_layout.SlotLayoutsOffset(), std::as_bytes(std::span(layouts.data(), count)));
 		}
 
-		/** @brief Writes the sun's full-frustum processes into the frame slot's latch region; returns their offset into the block. */
-		std::uint32_t WriteSunEntryRegion(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, std::uint32_t a_latchSlot,
+		/** @brief Writes the sun's full-frustum processes into the latch. Returns their offset into the block. */
+		std::uint32_t WriteSunEntryRegion(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const org::RunRef& a_latchRun,
 			std::span<const SunEntryProcess> a_processes)
 		{
 			const auto& layout = a_layout;
-			// ReserveShadowLatch sized the region for every process.
 			if (a_processes.size() > layout.sunProcesses)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} sun full-frustum processes past the latch's {}", a_processes.size(), layout.sunProcesses));
 			const std::uint32_t header[4] = { static_cast<std::uint32_t>(a_processes.size()), 0, 0, 0 };
-			LatchWrite(a_latchBlock, "shadow sun processes", a_latchSlot, layout.SunEntryOffset(), std::as_bytes(std::span(header)));
+			LatchWrite(a_latchBlock, "shadow sun processes", a_latchRun, layout.SunEntryOffset(), std::as_bytes(std::span(header)));
 			if (!a_processes.empty())
-				LatchWrite(a_latchBlock, "shadow sun processes", a_latchSlot, layout.SunEntryOffset() + kSunRegionHeader, std::as_bytes(a_processes));
-			return static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchSlot)) + layout.SunEntryOffset();
+				LatchWrite(a_latchBlock, "shadow sun processes", a_latchRun, layout.SunEntryOffset() + kSunRegionHeader, std::as_bytes(a_processes));
+			return static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + layout.SunEntryOffset();
 		}
 
-		/** @brief Writes a view's view and per-frame blocks into its latch region, for ShadowLatchedCopiesPass to copy. */
-		void WriteViewBlocks(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, std::uint32_t a_latchSlot, std::uint32_t a_slot,
+		/** @brief Writes a view's constant blocks into its latch region, for ShadowLatchedCopiesPass to copy. */
+		void WriteViewBlocks(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const org::RunRef& a_latchRun, std::uint32_t a_slot,
 			const PendingView& a_view)
 		{
 			const std::uint32_t offset = a_layout.ViewBlockOffset(a_slot);
-			LatchWrite(a_latchBlock, "shadow view blocks", a_latchSlot, offset, std::as_bytes(std::span(a_view.viewBlock)));
-			// PerTechnique c3, DCLFDepthRange (Utility.hlsl): the draws apply the depth range under a [0, 1] viewport, so a change
-			// in it changes no recording.
+			LatchWrite(a_latchBlock, "shadow view blocks", a_latchRun, offset, std::as_bytes(std::span(a_view.viewBlock)));
+			// DCLFDepthRange in PerTechnique c3. The shader applies the depth range under a [0, 1] viewport,
+			// so a depth range change needs no new recording.
 			const float depthRange[4] = { a_view.minDepth, a_view.maxDepth - a_view.minDepth, 0.0f, 0.0f };
-			LatchWrite(a_latchBlock, "shadow view blocks", a_latchSlot, offset + static_cast<std::uint32_t>(sizeof(a_view.viewBlock)), std::as_bytes(std::span(depthRange)));
-			LatchWrite(a_latchBlock, "shadow per-frame view data", a_latchSlot, offset + static_cast<std::uint32_t>(kShadowPerFrameOffset), std::span(a_view.perFrame.data(), a_view.perFrameBytes));
+			LatchWrite(a_latchBlock, "shadow view blocks", a_latchRun, offset + static_cast<std::uint32_t>(sizeof(a_view.viewBlock)), std::as_bytes(std::span(depthRange)));
+			LatchWrite(a_latchBlock, "shadow per-frame view data", a_latchRun, offset + static_cast<std::uint32_t>(kShadowPerFrameOffset), std::span(a_view.perFrame.data(), a_view.perFrameBytes));
 		}
 
 		/**
-		 * @brief Writes the epoch's one culling dispatch (ShadowBuildDrawsPass: every view in one, the occlusion maps' among them,
-		 * BuildDrawsCS's ShadowViews) into the frame slot's latch region: x the groups of a_inputs, the whole list every view culls
-		 * (ShadowViewLatch's; a view's own drawCount bounds it), y a group row per view of a_shape, the variant submitted (ShadowBuildRows:
-		 * its table's rows, or more, which the shader idles).
+		 * @brief Writes the epoch's single culling dispatch, which covers every view. X spans the whole input list
+		 * and Y has one group row per view of the submitted variant.
 		 */
-		void WriteBuildDispatch(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, std::uint32_t a_latchSlot, std::uint32_t a_inputs,
+		void WriteBuildDispatch(const org::LatchBlock& a_latchBlock, const ShadowLatchLayout& a_layout, const org::RunRef& a_latchRun, std::uint32_t a_inputs,
 			std::uint32_t a_inputsIndex, const ShadowFrame& a_shape)
 		{
 			const std::uint32_t dispatch[4] = { (a_inputs + 63) / 64, ShadowBuildRows(a_shape), 1, 0 };
-			LatchWrite(a_latchBlock, "shadow culling dispatch", a_latchSlot, a_layout.BuildDispatchOffset(), std::as_bytes(std::span(dispatch)));
-			// The caster rows' dispatch, over the list: what they hand out before the culling reads them.
+			LatchWrite(a_latchBlock, "shadow culling dispatch", a_latchRun, a_layout.BuildDispatchOffset(), std::as_bytes(std::span(dispatch)));
+			// The caster rows pass runs over the list before the culling reads its output.
 			const std::uint32_t rowsDispatch[4] = { (a_inputs + 63) / 64, 1, 1, 0 };
-			LatchWrite(a_latchBlock, "shadow caster rows dispatch", a_latchSlot, a_layout.RowsDispatchOffset(), std::as_bytes(std::span(rowsDispatch)));
+			LatchWrite(a_latchBlock, "shadow caster rows dispatch", a_latchRun, a_layout.RowsDispatchOffset(), std::as_bytes(std::span(rowsDispatch)));
 			const std::uint32_t list[4] = { a_inputsIndex, a_inputs, 0, 0 };
-			LatchWrite(a_latchBlock, "shadow caster rows list", a_latchSlot, a_layout.RowsInputsOffset(), std::as_bytes(std::span(list)));
+			LatchWrite(a_latchBlock, "shadow caster rows list", a_latchRun, a_layout.RowsInputsOffset(), std::as_bytes(std::span(list)));
 		}
 	}
 
 	bool IndirectDraws::OcclusionReady(std::uint32_t a_view) const
 	{
-		// At the shadow maps, before the engine draws them: ready when the frame's shadow epoch can draw the map, its target imported and
-		// the selected revision's shadow shape holding its view at the layout last set up (OcclusionView, the last frame's: this frame's
-		// comes right after this, the same but for a resize or a toggle), the epoch covered with the installed publication's shadow payload,
-		// which carries the occluders (NoteShadowViewModes). The epoch's commit trusts it, but for a layout set up otherwise this frame
-		// (LatchOcclusionViews); a map it does not draw the engine renders whole at its own point.
+		// Called before the engine draws the map. This frame's view layout is not set up yet, so the check uses last frame's.
+		// If the layout changes anyway, LatchOcclusionViews skips the map and the engine renders it.
 		const auto& engine = *impl->shadowEngine;
 		const auto toggles = ActiveToggles();
 		if (a_view >= kOcclusionViews || failed || !toggles.shadows || !Extensions::OcclusionOn(toggles, a_view) || !engine.shadow ||
 			!engine.shadow->depth[OcclusionDepthTarget(a_view)])
 			return false;
-		// Not while the built graph lacks the map's import.
+		// The built graph may lack the map's import while a rebuild is pending.
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || host->RebuildRequested())
+		if (!host || RenderGraphRuntime::Get().RebuildRequestedUnstaged())
 			return false;
 		std::optional<ShadowViewLayout> predicted;
 		for (const auto& layout : engine.PredictedOcclusion(&toggles))
@@ -225,7 +206,7 @@ namespace DCLF
 	{
 		namespace
 		{
-			/** @brief ExecuteShadowFrame's epoch body's shared locals: the committed payload and what its stages write it with. */
+			/** @brief State shared by the stages of the shadow commit. */
 			struct ShadowCommit
 			{
 				ShadowResources& resources;
@@ -240,7 +221,7 @@ namespace DCLF
 				IndirectDraws::ShadowStats& stats;
 			};
 
-			/** @brief The commit's shared uploads (vertex streams, the commit hooks) and the payload's counts into the stats. */
+			/** @brief Uploads the vertex streams, runs the commit hooks and copies the payload's counts into the stats. */
 			void CommitShadowShared(const ShadowCommit& a_commit, const std::array<bool, kShadowModeCount>& a_modeUsed,
 				std::vector<std::shared_ptr<const void>>& a_frameOwners)
 			{
@@ -265,12 +246,10 @@ namespace DCLF
 			}
 
 			/**
-			 * @brief The index pool, then every pending view's blocks and culling latch (with the revision's bucket tables and map rows
-			 * where the frame slot's region does not hold them yet), and a zero latch for each placement without a view. Returns the
-			 * placements drawn (ShadowFrame::activeViews' bits: a placement's view is its index in the shape's views). a_direct (the CPU
-			 * pipeline's): each latched view, for the shadow site's culls (Direct/ShadowSite.h).
+			 * @brief Writes each pending view's blocks and culling latch, and a zero latch for placements with no view this frame.
+			 * Returns the drawn views as bits by index into the shape's views.
 			 */
-			std::uint64_t LatchShadowViews(const ShadowCommit& a_commit, std::uint32_t a_latchSlot, const std::shared_ptr<const ShadowFrame>& a_revisionShape,
+			std::uint64_t LatchShadowViews(const ShadowCommit& a_commit, const org::RunRef& a_latchRun, const std::shared_ptr<const ShadowFrame>& a_revisionShape,
 				const std::vector<ShadowViewLayout>& a_layouts, std::vector<Direct::ShadowSiteView>* a_direct)
 			{
 				auto& resources = a_commit.resources;
@@ -279,32 +258,28 @@ namespace DCLF
 				const auto& adopted = a_commit.adopted;
 				const auto& target = a_commit.target;
 				const std::uint32_t frameNumber = a_commit.frameNumber;
-				const std::uint32_t latchSlot = a_latchSlot;
+				const org::RunRef latchRun = a_latchRun;
 				const auto& layouts = a_layouts;
 				auto& scene = *resources.scene;
 				resources.labels.clear();
 				const auto& latchBlock = *target.latch;
 				const auto& latchLayout = target.latchLayout;
-				// The index pool the shadow views and the occlusion maps draw from.
 				{
 					DCLF_ZONE("CS.DCLF.ShadowInputs.IndexPool");
-					UpdateIndexPool(adopted, *resources.pool, Scene::FrameView::Get().GetTables(), Scene::FrameView::Get().GetTablesGeneration(), latchBlock, latchSlot,
+					UpdateIndexPool(adopted, *resources.pool, Scene::FrameView::Get().GetTables(), Scene::FrameView::Get().GetTablesGeneration(), latchBlock, latchRun,
 						latchLayout.PoolOffset(), a_commit.uploads);
 				}
-				// The revision's bucket tables and map rows: written into this frame slot's region only where it does not hold them yet.
-				auto& held = Draws::shadowLatchRegions.Of(latchSlot, target.latch, a_revisionShape, 0);
-				std::uint32_t sunEntryOffset = 0;  // the slot's sun entry region, once written
+				// Bucket tables and map rows are written only where this frame slot's region does not hold them yet.
+				auto& held = Draws::shadowLatchRegions.Of(latchRun, target.latch, a_revisionShape, 0);
+				std::uint32_t sunEntryOffset = 0;
 				std::vector<bool> slotDrawn(layouts.size());
 				std::uint64_t active = 0;
-				// The root states' seeds, the states the frame's cull reads (the cull bindings RootSeeds, RootStates) and the listed roots (a
-				// focus view's target), once for every view.
 				const std::uint32_t seedsIndex = CullBindingIndex(Api::CullBindingSlot::RootSeeds, scene, frameNumber, adopted);
 				const std::uint32_t statesIndex = CullBindingIndex(Api::CullBindingSlot::RootStates, scene, frameNumber, adopted);
 				const auto roots = Extensions::RootListOf(Scene::FrameView::Get().GetTables());
-				// A portal-strict light's casters (point or spot) pass its strict gates (the frame's atlas and gates; 0: none, nothing gated).
+				// Casters of a portal-strict light must pass its gates. An index of 0 means nothing is gated.
 				const std::uint32_t contextsIndex = CullBindingIndex(Api::CullBindingSlot::LightContexts, scene, frameNumber, adopted);
 				const std::uint32_t gatesIndex = CullBindingIndex(Api::CullBindingSlot::StrictGates, scene, frameNumber, adopted);
-				// The sun views' contribution cull's threshold (live: a latch value, read once a commit).
 				const float minTexels = shadowMinTexels.load(std::memory_order_relaxed);
 				for (const auto& view : a_commit.pending) {
 					DCLF_ZONE("CS.DCLF.ShadowInputs.View");
@@ -312,16 +287,15 @@ namespace DCLF
 					const std::uint32_t index = slot - kFirstShadowViewSlot;
 					slotDrawn[index] = true;
 					active |= index < 64 ? 1ull << index : 0ull;
-					WriteViewBlocks(latchBlock, latchLayout, latchSlot, slot, view);
-					// The whole shadow list: the view bits select the mode's inputs.
+					WriteViewBlocks(latchBlock, latchLayout, latchRun, slot, view);
+					// Every view culls the whole shadow list. Its view bits pick out its mode's inputs.
 					const auto inputCount = static_cast<std::uint32_t>(payload.Inputs());
-					// Frustum culling, no engine-visibility gate. Only class-split modes test the caster class (not the paraboloids).
+					// Point-light views do not test the caster class.
 					auto latch = ShadowViewLatch(view, inputCount, frameNumber, seedsIndex);
 					const std::uint32_t classFlags = view.casterClass ? kCullVolumetricOnly : view.modeIndex == kParabolicShadowMode ? 0u : kCullCastersOnly;
 					latch.cullFlags = (view.hasViewProj ? (1u | (view.renderMode == 0xE ? kCullNoNearPlane : 0u)) : 0u) | classFlags |
 					                  (view.sunView ? kCullSunEntry : 0u) | KeyWordOf(view.modeIndex);
-					// A sun view's casters below the size threshold (cascades and their volumetric copies; local lights and the occlusion
-					// maps never: the maps keep their minRadius).
+					// Only sun views drop casters below the texel threshold. Occlusion maps use their own minRadius.
 					if (view.sunView && view.hasViewProj)
 						if (const float radius = SunCasterMinRadius(latch.viewProj, view.width, view.height, minTexels); radius > 0.0f) {
 							latch.cullFlags |= kCullMinTexels;
@@ -330,15 +304,15 @@ namespace DCLF
 					if (view.sunView && shadowSizeProbe.load(std::memory_order_relaxed) >= 0)
 						latch.cullFlags |= kCullSizeProbe;
 					latch.viewBits = ShadowViewBits(view.modeIndex, view.sunView);
-					// A focus view draws its target's members alone (root slot + 1; an unlisted target draws nothing).
+					// A focus view draws only its target's members. The latch stores root + 1, and an unlisted target draws nothing.
 					if (view.focus) {
 						const auto root = view.focusTarget ? roots.Find(view.focusTarget) : kNoFadeRoot;
 						latch.focusRoot = root != kNoFadeRoot ? root + 1 : kFocusRootNone;
 					}
 					latch.cullPlaneMask = view.cullPlaneMask;
 					std::memcpy(latch.cullPlanes, view.cullPlanes, sizeof(latch.cullPlanes));
-					// A point light's hemisphere culls as its process does (the light's sphere and plane, in the first two plane slots), not by
-					// its camera's frustum, which bounds nothing the paraboloid draws.
+					// A paraboloid culls by the light's sphere and hemisphere plane in the first two plane slots.
+					// Its camera frustum bounds nothing the paraboloid draws.
 					if (view.parabolic) {
 						latch.cullFlags |= kCullParabolic | (view.parabolicBack ? kCullParabolicBack : 0u) | (view.parabolicBothSides ? kCullParabolicBothSides : 0u);
 						latch.cullPlaneMask = 0;
@@ -352,59 +326,52 @@ namespace DCLF
 						latch.strictContext = view.portalContext;
 					}
 					ShadowPayloadLatch(a_commit.parts, latch);
-					// Sun entry rule: BuildDraws tests each input's entry sphere against the full-frustum processes (written once per frame).
+					// BuildDraws tests each input's entry sphere against the sun's full-frustum processes, written once per frame.
 					if (view.sunView) {
 						if (!sunEntryOffset)
-							sunEntryOffset = WriteSunEntryRegion(latchBlock, latchLayout, latchSlot, payload.inputs.sunEntryProcesses);
+							sunEntryOffset = WriteSunEntryRegion(latchBlock, latchLayout, latchRun, payload.inputs.sunEntryProcesses);
 						latch.sunEntryOffset = sunEntryOffset;
 					}
 					const std::uint32_t mapRow = view.rasterState ? latchLayout.MapRowOf(view.modeIndex, view.rasterState) : ~0u;
 					const bool rowHeld = mapRow < latchLayout.MapRows() && Draws::LatchRegionsHeld::Hold(held, std::size_t(mapRow) * 2 + 1);
-					UseShadowMapRow(latchBlock, latchLayout, (*target.rows)[index], latchSlot, view.modeIndex, view.rasterState, !rowHeld, latch);
-					UseSlotLayouts(latchBlock, latchLayout, target, latchSlot, !Draws::LatchRegionsHeld::Hold(held, std::size_t(latchLayout.MapRows()) * 2 + 1), latch);
-					WriteBucketTable(latchBlock, latchLayout, latchSlot, slot, target.views[index].buckets, !Draws::LatchRegionsHeld::Hold(held, std::size_t(slot) * 2), latch);
-					LatchWriteValue(latchBlock, "shadow culling latches", latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
-					// Its list as ShadowViewBits selects the inputs: the paraboloids' the point casters, a clamped mode's the sun's or the spots'.
+					UseShadowMapRow(latchBlock, latchLayout, (*target.rows)[index], latchRun, view.modeIndex, view.rasterState, !rowHeld, latch);
+					UseSlotLayouts(latchBlock, latchLayout, target, latchRun, !Draws::LatchRegionsHeld::Hold(held, std::size_t(latchLayout.MapRows()) * 2 + 1), latch);
+					WriteBucketTable(latchBlock, latchLayout, latchRun, slot, target.views[index].buckets, !Draws::LatchRegionsHeld::Hold(held, std::size_t(slot) * 2), latch);
+					LatchWriteValue(latchBlock, "shadow culling latches", latchRun, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
 					if (a_direct)
 						a_direct->push_back({ view.modeIndex == kParabolicShadowMode ? Direct::ViewType::Point : view.sunView ? Direct::ViewType::Sun : Direct::ViewType::Spot,
 							slot, index, latch });
 					Diagnostics::Notify(Diagnostics::ShadowViewLatched{ view, latch, frameNumber, payload, shadowStats });
 					resources.labels.push_back({ view.viewId, view.renderMode, slot });
 				}
-				// Placements without a view this frame: a zero latch, no work.
+				// Placements without a view this frame get a zero latch, so they do no work.
 				for (std::size_t index = 0; index < layouts.size(); ++index) {
 					if (slotDrawn[index])
 						continue;
-					LatchWriteValue(latchBlock, "shadow culling latches", latchSlot, layouts[index].slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), BuildDrawsLatch{});
+					LatchWriteValue(latchBlock, "shadow culling latches", latchRun, layouts[index].slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), BuildDrawsLatch{});
 					++shadowStats.retainedViews;
 				}
 				return active;
 			}
 
 			/**
-			 * @brief The occlusion maps in a_maps (taken at the shadow maps, their views set up since: OcclusionView) into their views of the
-			 * shape (after the placements): each map's blocks and culling latch where the shape has its view at the layout set up, with the
-			 * revision's bucket table and map row where the frame slot's region does not hold them yet, and a zero latch for every other
-			 * map view of the shape (no work: a map not drawn this frame, interiors' and a toggled-off map's frames included). Returns the
-			 * maps latched; their views' bits (by index into the shape's views) into a_active, and each latched map's view into a_direct (the
-			 * CPU pipeline's, as LatchShadowViews).
+			 * @brief Latches each occlusion map whose view in the shape matches the layout set up this frame. Every other map view
+			 * gets a zero latch. Returns the maps latched and adds their view bits to a_active.
 			 */
-			std::uint32_t LatchOcclusionViews(const ShadowCommit& a_commit, std::uint32_t a_latchSlot, const std::shared_ptr<const ShadowFrame>& a_revisionShape,
+			std::uint32_t LatchOcclusionViews(const ShadowCommit& a_commit, const org::RunRef& a_latchRun, const std::shared_ptr<const ShadowFrame>& a_revisionShape,
 				const std::array<ShadowEngine::OcclusionState, kOcclusionViews>& a_occlusion, std::uint32_t a_maps, std::uint64_t& a_active,
 				std::vector<Direct::ShadowSiteView>* a_direct)
 			{
 				const auto& target = a_commit.target;
 				const std::uint32_t frameNumber = a_commit.frameNumber;
-				const std::uint32_t latchSlot = a_latchSlot;
+				const org::RunRef latchRun = a_latchRun;
 				const auto& latchBlock = *target.latch;
 				const auto& latchLayout = target.latchLayout;
 				auto& scene = *a_commit.resources.scene;
-				auto& held = Draws::shadowLatchRegions.Of(latchSlot, target.latch, a_revisionShape, 0);
-				// The root states' seeds and the states the frame's cull reads (the cull bindings RootSeeds, RootStates), once for every map.
+				auto& held = Draws::shadowLatchRegions.Of(latchRun, target.latch, a_revisionShape, 0);
 				const std::uint32_t seedsIndex = CullBindingIndex(Api::CullBindingSlot::RootSeeds, scene, frameNumber, a_commit.adopted);
 				const std::uint32_t statesIndex = CullBindingIndex(Api::CullBindingSlot::RootStates, scene, frameNumber, a_commit.adopted);
 				static const REL::Relocation<const std::uint8_t*> fadesOn{ REL::Offset(Engine::Address::kFadesOn) };
-				// The whole shadow list: the view bits select the map's occluders (the installed payload's, as the shadow views').
 				const auto inputCount = static_cast<std::uint32_t>(a_commit.payload.Inputs());
 				const auto layouts = LayoutOf(target);
 				std::uint32_t latched = 0;
@@ -415,18 +382,15 @@ namespace DCLF
 					const std::uint32_t v = OcclusionOfMode(shapeView.modeIndex), slot = shapeView.slot, mode = shapeView.modeIndex;
 					const auto& view = a_occlusion[v].view;
 					if (!((a_maps >> v) & 1) || layouts[index] != LayoutOf(view, OcclusionSlot(v), mode, OcclusionDepthTarget(v))) {
-						LatchWriteValue(latchBlock, "shadow culling latches", latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), BuildDrawsLatch{});
+						LatchWriteValue(latchBlock, "shadow culling latches", latchRun, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), BuildDrawsLatch{});
 						continue;
 					}
-					WriteViewBlocks(latchBlock, latchLayout, latchSlot, slot, view);
-					// Frustum culling (near plane included), the map's size test while its entry asks (minRadius: Skylighting::
-					// OcclusionTechnique's, bound radius above 32; both maps' do), and fade roots as the engine's cull leaves them
-					// (kCullFadeOnVisible): never a root the main camera faded out or has not seen yet.
+					WriteViewBlocks(latchBlock, latchLayout, latchRun, slot, view);
+					// Match the engine's occlusion cull. Never draw a root the main camera faded out or has not seen yet.
 					auto latch = ShadowViewLatch(view, inputCount, frameNumber, seedsIndex);
 					const auto& map = Extensions::OcclusionMapOf(v);
 					latch.cullFlags = 1u | (map.minRadius ? kCullMinRadius : 0u) | (*fadesOn.get() ? kCullFadeOnVisible : 0u) | KeyWordOf(mode);
-					// The map's floor (Skylighting's probe grid test): a cull plane facing up, its height as of this commit. An occlusion
-					// view leaves its cull planes otherwise unused (its frustum is the view-projection's).
+					// Skylighting's probe grid floor, as an upward-facing cull plane at this commit's height.
 					if (map.floorHeight) {
 						latch.cullPlanes[0][0] = 0.0f;
 						latch.cullPlanes[0][1] = 0.0f;
@@ -439,12 +403,11 @@ namespace DCLF
 					ShadowPayloadLatch(a_commit.parts, latch);
 					const std::uint32_t mapRow = latchLayout.MapRowOf(mode, view.rasterState);
 					const bool rowHeld = mapRow < latchLayout.MapRows() && Draws::LatchRegionsHeld::Hold(held, std::size_t(mapRow) * 2 + 1);
-					UseShadowMapRow(latchBlock, latchLayout, (*target.rows)[index], latchSlot, mode, view.rasterState, !rowHeld, latch);
-					UseSlotLayouts(latchBlock, latchLayout, target, latchSlot, !Draws::LatchRegionsHeld::Hold(held, std::size_t(latchLayout.MapRows()) * 2 + 1), latch);
-					WriteBucketTable(latchBlock, latchLayout, latchSlot, slot, shapeView.buckets, !Draws::LatchRegionsHeld::Hold(held, std::size_t(slot) * 2), latch);
-					LatchWriteValue(latchBlock, "shadow culling latches", latchSlot, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
-					// Its list by its entry's view bit, as the view batches make them (ViewBatches.cpp: 1u << 5 the sky occluder's, 1u << 6 the
-					// precipitation mask's).
+					UseShadowMapRow(latchBlock, latchLayout, (*target.rows)[index], latchRun, mode, view.rasterState, !rowHeld, latch);
+					UseSlotLayouts(latchBlock, latchLayout, target, latchRun, !Draws::LatchRegionsHeld::Hold(held, std::size_t(latchLayout.MapRows()) * 2 + 1), latch);
+					WriteBucketTable(latchBlock, latchLayout, latchRun, slot, shapeView.buckets, !Draws::LatchRegionsHeld::Hold(held, std::size_t(slot) * 2), latch);
+					LatchWriteValue(latchBlock, "shadow culling latches", latchRun, slot * static_cast<std::uint32_t>(sizeof(BuildDrawsLatch)), latch);
+					// Bits 5 and 6 are the sky occluder and precipitation mask, as ViewBatches.cpp assigns them.
 					if (a_direct && (map.viewBit == (1u << 5) || map.viewBit == (1u << 6)))
 						a_direct->push_back({ map.viewBit == (1u << 5) ? Direct::ViewType::SkyOccluder : Direct::ViewType::PrecipOccluder, slot,
 							static_cast<std::uint32_t>(index), latch });
@@ -457,9 +420,8 @@ namespace DCLF
 			}
 
 			/**
-			 * @brief The arena around the frame record, staged only when the buffer does not hold this build's; returns the record, patched
-			 * to this frame's per-frame buffers (the build ahead has another frame's), which LatchShadowCsBlocks latches (none: no arena).
-			 * Staged around the record, not over it: the latched copies run after the staged ones, in the epoch's own list.
+			 * @brief Stages the arena around the frame record and returns the record patched for this frame.
+			 * The record itself goes through the latched copies, which run after the staged ones.
 			 */
 			std::optional<DrawBindings> UploadShadowArena(const ShadowCommit& a_commit)
 			{
@@ -473,13 +435,13 @@ namespace DCLF
 					DrawBindings record = payload.frameRecord;
 					WriteRecordBuffers(record, parts, { in.addresses.placementsIndex, in.addresses.palettesIndex, in.addresses.shadingIndex }, a_commit.adopted,
 						*resources.scene, a_commit.frameNumber);
+					WriteRecordBackings(record, resources.constantsRef, resources.constantsAddress, resources.constants->GetBufferSize(), parts);
 					constexpr std::size_t recordEnd = kShadowFrameRecordOffset + sizeof(DrawBindings);
 					static_assert(recordEnd <= kShadowArenaBlocksOffset, "the frame record overlaps the arena's blocks");
 					if (bytes.size() < recordEnd)
 						stl::report_and_fail("Drawcall Limit Fix: a shadow arena without its frame record");
-					// The arena around the record is the build's: nothing is staged while the buffer holds this build's (a kept publication
-					// commits the same build every frame), and of a new build only the chunks that differ from what the buffer holds. The
-					// record is the frame's.
+					// A kept publication commits the same build every frame, so stage nothing then.
+					// For a new build, stage only the chunks that differ.
 					auto& staged = Draws::shadowArenaHeld;
 					const std::shared_ptr<const void> arenaTarget = resources.constants;
 					const bool sameTarget = Draws::LatchRegionsHeld::Same(staged.target, arenaTarget);
@@ -491,7 +453,7 @@ namespace DCLF
 						if (!sameTarget)
 							staged.bytes.clear();
 						const std::size_t compared = std::min(staged.bytes.size(), tail.size());
-						std::size_t run = 0;  // the first differing chunk's start, while in a run
+						std::size_t run = 0;
 						bool inRun = false;
 						for (std::size_t at = 0; at < tail.size(); at += Draws::kArenaChunk) {
 							const std::size_t size = std::min(Draws::kArenaChunk, tail.size() - at);
@@ -516,18 +478,16 @@ namespace DCLF
 			}
 
 			/**
-			 * @brief CS's SharedData and FeatureData as of now (the water reflection prepasses refreshed them after the build), latched:
-			 * the epoch's first pass copies them after the arena, with the frame record (a_record: UploadShadowArena's). Returns the
-			 * latched values' misses.
+			 * @brief Latches CS's SharedData and FeatureData as they are now, with the frame record. The water reflection
+			 * prepasses refresh them after the build. Returns the latch misses.
 			 */
-			std::uint32_t LatchShadowCsBlocks(const ShadowCommit& a_commit, std::uint32_t a_latchSlot, const std::optional<DrawBindings>& a_record)
+			std::uint32_t LatchShadowCsBlocks(const ShadowCommit& a_commit, const org::RunRef& a_latchRun, const std::optional<DrawBindings>& a_record)
 			{
 				auto& resources = a_commit.resources;
 				const auto& in = a_commit.in;
-				auto latched = LatchedUploads(a_commit.target.latched[ShadowFrame::kCommitList], a_commit.uploads, a_latchSlot);
+				auto latched = LatchedUploads(a_commit.target.latched[ShadowFrame::kCommitList], a_commit.uploads, a_latchRun);
 				if (a_record)
 					latched(resources.constants, &*a_record, sizeof(DrawBindings), kShadowFrameRecordOffset);
-				// At their fixed places (ShadowArenaBlocksOf); a size mismatch with CS's block is a contract violation.
 				const auto blocks = ShadowArenaBlocksOf();
 				const auto writeBlock = [&](std::uint64_t a_offset, std::uint32_t a_size, const std::vector<std::byte>& a_bytes) {
 					if (!a_size)
@@ -542,12 +502,10 @@ namespace DCLF
 				return latched.Misses();
 			}
 
-			/**
-			 * @brief What the frame's execution holds of its commit (a_owners, retired with it): the payload's binding owners (copied: a
-			 * frame that keeps the publication commits the payload again), the adopted snapshot and the cleared geometry slots' buffers.
-			 */
+			/** @brief Collects what the frame's execution must keep alive until it retires. */
 			void HoldShadowCommit(const ShadowPayload& a_payload, const std::shared_ptr<const void>& a_snapshot, std::vector<std::shared_ptr<const void>>& a_owners)
 			{
+				// Copied, because a frame that keeps the publication commits this payload again.
 				a_owners = a_payload.bindingOwners;
 				if (a_snapshot)
 					a_owners.push_back(a_snapshot);
@@ -556,8 +514,8 @@ namespace DCLF
 			}
 
 			/**
-			 * @brief The narrowest of a_variants whose views cover a_active, the frame's (the full one, 0, always does): the others' indirect
-			 * draws would only fetch zero counts, and an unused occlusion map's target its load and store.
+			 * @brief The narrowest variant that covers the active views. Variant 0 always does. Wider ones would
+			 * only fetch zero draw counts and load and store unused targets.
 			 */
 			std::size_t NarrowestShadowVariant(const std::vector<std::shared_ptr<const ShadowFrame>>& a_variants, std::uint64_t a_active,
 				IndirectDraws::ShadowStats& a_stats)
@@ -573,20 +531,17 @@ namespace DCLF
 				return variant;
 			}
 
-			/**
-			 * @brief The GPU path's variant of the commit's views: the narrowest covering a_active, with the epoch's one culling dispatch over the
-			 * whole shadow list (each view's latch bounds its own), a group row per view of it. Its recording is the one to submit.
-			 */
-			std::size_t ShadowVariantToSubmit(const ShadowCommit& a_commit, std::uint32_t a_latchSlot, const std::vector<std::shared_ptr<const ShadowFrame>>& a_variants,
+			/** @brief Picks the variant to submit and writes its culling dispatch. */
+			std::size_t ShadowVariantToSubmit(const ShadowCommit& a_commit, const org::RunRef& a_latchRun, const std::vector<std::shared_ptr<const ShadowFrame>>& a_variants,
 				std::uint64_t a_active)
 			{
 				const std::size_t variant = NarrowestShadowVariant(a_variants, a_active, a_commit.stats);
-				WriteBuildDispatch(*a_commit.target.latch, a_commit.target.latchLayout, a_latchSlot, static_cast<std::uint32_t>(a_commit.payload.Inputs()),
+				WriteBuildDispatch(*a_commit.target.latch, a_commit.target.latchLayout, a_latchRun, static_cast<std::uint32_t>(a_commit.payload.Inputs()),
 					a_commit.parts[PayloadPart::Inputs].srvIndex, *a_variants[variant]);
 				return variant;
 			}
 
-			/** @brief The shadow epoch's periodic log line (one in 600). */
+			/** @brief Logs the shadow epoch once every 600 calls. */
 			void LogShadowEpoch(const ShadowCommit& a_commit)
 			{
 				const auto& target = a_commit.target;
@@ -613,16 +568,14 @@ namespace DCLF
 		auto& engine = *impl->shadowEngine;
 		auto& pending = engine.pendingViews;
 		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
-		// The occlusion maps taken at the shadow maps whose views were set up this frame (OcclusionView); one the epoch does not draw the
-		// engine renders whole at its own point, counted here.
+		// The engine renders any occlusion map this epoch does not draw. Those are counted here.
 		const std::uint32_t maps = engine.OcclusionSetUp(a_maps, frameNumber);
 		auto mapsNotDrawn = [&](std::uint32_t a_drawn) {
 			for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
 				shadowStats.occlusionNotReady[v] += ((a_maps & ~a_drawn) >> v) & 1;
 			return a_drawn;
 		};
-		// The CPU pipeline's graph: the shadow site draws the views and the maps from this commit (Direct/ShadowSite.h) while it is live; until
-		// then its epoch is not covered (DecideEpochCoverage), and the engine draws them.
+		// On the CPU pipeline the engine draws shadows until the shadow site is live.
 		if (!ActiveToggles().shadows || failed || (pending.empty() && !maps) || (Direct::CpuFrame() && !Direct::ShadowSiteLive())) {
 			pending.clear();
 			return mapsNotDrawn(0);
@@ -657,9 +610,7 @@ namespace DCLF
 		std::uint32_t mapsDrawn = 0;
 
 		ShadowInputs in = engine.PrepareShadowInputs(*resources, modeUsed, modeRasterStates);
-		// The revision's shape and recording and the installed payload: trusted, nothing is checked here. The epoch covers every
-		// placement and the occlusion maps last set up; a slot without a view does no work (zero latch, counters zeroed, its render pass
-		// loads and stores the engine's).
+		// The revision's shape and recording and the installed payload are trusted here without checks.
 		const std::vector<ShadowViewLayout>& layouts = engine.shadowPlacements;
 		const std::uint32_t epoch = EpochOfShape(ShapeKind::Shadow, kShadowShape);
 		const auto revision = impl->RevisionOf(epoch);
@@ -671,7 +622,7 @@ namespace DCLF
 		}
 		const auto revisionShape = revision.shape->Value<ShadowVariants>()->shapes.front();
 		const ShadowFrame& target = *revisionShape;
-		// Clamped to the latch the producer sized (ReserveShadowLatch).
+		// Clamp to what the latch was sized for.
 		if (in.sunEntryProcesses.size() > target.latchLayout.sunProcesses) {
 			++impl->revisions.latchClamped[epoch];
 			in.sunEntryProcesses.resize(target.latchLayout.sunProcesses);
@@ -679,26 +630,23 @@ namespace DCLF
 		auto owners = ExecutionOwners::Make();
 		if (!owners)
 			return mapsNotDrawn(0);
-		// The CPU pipeline's graph runs the commit here and the shadow site draws (Direct::ExecuteEpoch; the commit opens the site).
 		const bool ok = Direct::ExecuteEpoch(EpochTraitsOf(epoch).segment, [&] {
 			DCLF_ZONE("CS.DCLF.ShadowInputs");
 			const auto bodyStart = std::chrono::steady_clock::now();
 			TracyCZoneN(shadowPrepareZone, "CS.DCLF.ShadowInputs.Prepare", true);
 			const auto prepareStart = std::chrono::steady_clock::now();
 			++stats.async[kAsyncShadow].used;
-			// The publication was built before the frame's full-frustum cull.
+			// The publication was built before this frame's full-frustum cull, so take the current processes.
 			ahead->inputs.sunEntryProcesses = in.sunEntryProcesses;
 			engine.committedShadow = ahead;
 			ShadowPayload& payload = *ahead;
-			// The payload's buffers are the installed publication's (a covered frame has a ready one, with its shadow parts); only the
-			// arena is uploaded here. The occlusion maps' views draw from it too.
+			// The payload's buffers are already uploaded. Only the arena is uploaded here.
 			const PayloadVersions& parts = *impl->InstalledPayload();
 			Draws::HoldShadowCommit(payload, impl->adoptedSnapshot, owners.List());
 			engine.shadowExecutionOwner = owners.Handle();
 			prepareMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
 			TracyCZoneEnd(shadowPrepareZone);
 
-			// The adopted set: the versions the commit writes into, and the SRV indices it writes.
 			const auto& adopted = impl->Adopted();
 			CommitUploads uploads(impl->commitStagedPool, adopted, impl->scene ? &impl->scene->content : nullptr);
 			const Draws::ShadowCommit commit{ *resources, payload, parts, adopted, uploads, target, in, pending, frameNumber, shadowStats };
@@ -710,19 +658,17 @@ namespace DCLF
 
 			TracyCZoneN(shadowViewsZone, "CS.DCLF.ShadowInputs.BuildViews", true);
 			const auto blocksStart = std::chrono::steady_clock::now();
-			const std::uint32_t latchSlot = RenderGraphRuntime::Get().Host()->CurrentFrameSlot();
-			// The views the frame draws (its placements' views, then the occlusion maps': ShadowFrame::activeViews), posted for the
-			// revisions to record a variant of, and the narrowest variant covering them submitted.
-			// The CPU pipeline's (EpochRevision::direct): every latched view, for the shadow site's culls.
+			const org::RunRef latchRun = RenderGraphRuntime::Get().Host()->CurrentRun();
+			// On the CPU pipeline, the shadow site culls from the latched views collected here.
 			std::vector<Direct::ShadowSiteView> directViews;
-			std::uint64_t active = Draws::LatchShadowViews(commit, latchSlot, revisionShape, layouts, revision.direct ? &directViews : nullptr);
+			std::uint64_t active = Draws::LatchShadowViews(commit, latchRun, revisionShape, layouts, revision.direct ? &directViews : nullptr);
 			const auto occlusionStart = std::chrono::steady_clock::now();
-			mapsDrawn = Draws::LatchOcclusionViews(commit, latchSlot, revisionShape, engine.occlusion, maps, active, revision.direct ? &directViews : nullptr);
+			mapsDrawn = Draws::LatchOcclusionViews(commit, latchRun, revisionShape, engine.occlusion, maps, active, revision.direct ? &directViews : nullptr);
 			occlusionMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - occlusionStart).count();
 			const auto record = Draws::UploadShadowArena(commit);
-			impl->revisions.latchedMisses += Draws::LatchShadowCsBlocks(commit, latchSlot, record);
+			impl->revisions.latchedMisses += Draws::LatchShadowCsBlocks(commit, latchRun, record);
 			engine.lastActiveViews = active;
-			// Views that share draw arguments (ShareDrawArgs) must not draw in one frame: their draws would overwrite each other's.
+			// Views that share draw arguments must not draw in the same frame, or they overwrite each other's draws.
 			if (revisionShape) {
 				std::uint64_t ownersSeen = 0;
 				const auto& views = revisionShape->views;
@@ -736,16 +682,14 @@ namespace DCLF
 					ownersSeen |= bit;
 				}
 			}
-			// The CPU pipeline's graph: no recording; the shadow site culls and draws the latched views from this commit (its pre-work the
-			// shape's latched copies and index pool copies).
+			// On the CPU pipeline the shadow site culls and draws. The recording holds only the latched and index pool copies.
 			if (revision.direct) {
-				// Its recording of the shape's latched copies and index pool copies too (the site executes it first).
 				if (revision.recordings && !revision.recordings->recordings.empty())
 					impl->SubmitRevisionRecording(epoch, *revision.recordings,
-						Draws::ShadowVariantToSubmit(commit, latchSlot, revision.shape->Value<ShadowVariants>()->shapes, active));
-				Direct::ShadowCommitted({ revisionShape, resources, &adopted, directViews, payload.inputs.sunEntryProcesses, latchSlot });
+						Draws::ShadowVariantToSubmit(commit, latchRun, revision.shape->Value<ShadowVariants>()->shapes, active));
+				Direct::ShadowCommitted({ revisionShape, resources, &adopted, directViews, payload.inputs.sunEntryProcesses, latchRun });
 			} else
-				impl->SubmitRevisionRecording(epoch, *revision.recordings, Draws::ShadowVariantToSubmit(commit, latchSlot, revision.shape->Value<ShadowVariants>()->shapes, active));
+				impl->SubmitRevisionRecording(epoch, *revision.recordings, Draws::ShadowVariantToSubmit(commit, latchRun, revision.shape->Value<ShadowVariants>()->shapes, active));
 			owners.Seal(impl->scene.get());
 			blocksMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - blocksStart).count();
 			Draws::LogShadowEpoch(commit);
@@ -756,14 +700,13 @@ namespace DCLF
 		shadowStats.prepareMs += prepareMs;
 		shadowStats.inputsMs += inputsMs;
 		shadowStats.blocksMs += blocksMs;
-		shadowStats.executeMs += totalMs - bodyMs;  // the graph's own compile, prepare and record
+		shadowStats.executeMs += totalMs - bodyMs;  // the graph's own overhead
 		shadowStats.cpuMs += totalMs;
 		if (!ok) {
 			logger::error("[DCLF] the shadow epoch failed; the render graph is disabled");
 			return notReady(ShadowNotReady::Epoch);
 		}
 		engine.NoteShadowEpochDrawn(*ahead, modeUsed, frameNumber, mapsDrawn, occlusionMs, shadowStats);
-		// The revision report's "occlusion ... (in the shadow epoch)".
 		impl->revisions.occlusionSubmitted += mapsDrawn != 0;
 		return mapsNotDrawn(mapsDrawn);
 	}
@@ -771,9 +714,8 @@ namespace DCLF
 	void ShadowEngine::NoteShadowViewModes(std::array<bool, kShadowModeCount>& a_modeUsed, std::array<ModeRasterStates, kShadowModeCount>& a_modeRasterStates)
 	{
 		auto& modeUsed = a_modeUsed;
-		// Inputs and pipelines cover every catalog state per mode (UpdateShadowCapability), so which views a frame draws (cascades
-		// alternate depth-bias states, point-light views come and go) changes nothing the build reads. An unforeseen mode or state
-		// is a defect, added to the catalog now.
+		// Inputs and pipelines cover every catalog state per mode, so the views a frame draws do not change the build.
+		// A mode or state missing from the catalog is a defect, and it is added now.
 		for (const auto& view : pendingViews) {
 			modeUsed[view.modeIndex] = true;
 			if (!readyModes[view.modeIndex]) {
@@ -785,14 +727,14 @@ namespace DCLF
 				NoteCapability(shadowCatalogBuilt, fmt::format("view {} (mode {:#x}) draws with rasterizer state {}, not in the catalog", view.viewId, view.renderMode, view.rasterState));
 			}
 		}
-		// The occlusion maps' views draw from this build too, whether or not the frame took the map: its occluders stay in the payload.
+		// Keep occluders in the payload even on frames that do not draw the map.
 		for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
 			if (Extensions::OcclusionOn(ActiveToggles(), v) && readyModes[OcclusionModeOf(v)] && occlusion[v].dsvFormat != DXGI_FORMAT_UNKNOWN)
 				modeUsed[OcclusionModeOf(v)] = true;
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
 			if (modeUsed[m])
 				a_modeRasterStates[m] = readyStates[m];
-		// One pipeline set per shadow map format: every engine target is D16 (an epoch of occlusion maps alone keeps the last one's).
+		// One pipeline set per shadow map format. Every engine target is D16.
 		const DXGI_FORMAT dsvFormat = pendingViews.empty() ? shadowTargetFormat : pendingViews.front().dsvFormat;
 		if (dsvFormat != shadowTargetFormat) {
 			shadowTargetFormat = dsvFormat;
@@ -808,7 +750,6 @@ namespace DCLF
 		auto& epochStats = a_stats;
 		++epochStats.epochs;
 		epochStats.viewsDrawn += static_cast<std::uint32_t>(pendingViews.size());
-		// The occlusion maps' occluders this commit uploaded, and the maps it drew (the maps' report line).
 		for (std::uint32_t v = 0; v < kOcclusionViews; ++v) {
 			if (modeUsed[OcclusionModeOf(v)])
 				occlusion[v].inputs = static_cast<std::uint32_t>(payload.ModeInputs(OcclusionModeOf(v)));
@@ -827,11 +768,9 @@ namespace DCLF
 			epochStats.setWaitingFirst = payload.setWaitingFirst;
 		if (PassCapture::ShadowWithholdingEnabled()) {
 			// The cascades' casters decide which sun entries the next frame's cascade culls may skip.
-			// Handed back to the exclusion contribution (Features/Shadows/Local's slots).
 			if (modeUsed[kSunShadowMode])
 				Extensions::PublishShadowExclusion(Api::ShadowSource::Sun, payload.sunExclusion);
-			// Likewise the paraboloids for point-light culls (none when no point light drew: a new light is the engine's), while the Point
-			// source's culls are in to take it.
+			// Same for point lights. Publish null when none drew, so a new light falls back to the engine.
 			if (Extensions::SourceCullsInstalled(Api::ShadowSource::Point))
 				Extensions::PublishShadowExclusion(Api::ShadowSource::Point, modeUsed[kParabolicShadowMode] ? payload.parabolicExclusion : nullptr);
 		}
@@ -846,15 +785,13 @@ namespace DCLF
 		in.frameNumber = Scene::FrameView::Get().GetFrame();
 		in.modeUsed = a_modeUsed;
 		in.modeRasterStates = a_modeRasterStates;
-		// The sun's full-frustum planes (kCullSunEntry), DCLF's as UpdateCamera set up each process (Api::SunVolumeContribution: Features/
-		// Shadows/Sun's Sun board): this frame's at the shadow epoch, last frame's for the build ahead (posted before this frame's
-		// UpdateCamera), as the engine held them there.
+		// The sun's full-frustum planes. At the shadow epoch these are this frame's. For the build ahead they are last frame's,
+		// because it is posted before this frame's UpdateCamera.
 		Api::SunEntryPlanesSink entryPlanes(in.sunEntryProcesses);
 		const bool entryPlanesTaken = Extensions::SampleSunEntryPlanes(entryPlanes, in.frameNumber);
 		Diagnostics::Notify(Diagnostics::SunEntryPlanesTaken{ in.frameNumber, entryPlanesTaken });
 		in.sunCandidates = Scene::FrameView::Get().GetSunCandidates();
 		in.lightCandidates = Scene::FrameView::Get().GetLightCandidates();
-		// The versioned buffers' addresses and SRV indices are the sealed set's (BuildSnapshotDraws: AddressesOf).
 		in.addresses.constants = a_resources.constantsAddress;
 		in.addresses.placementsIndex = FrameValues::Get().PlacementsIndex();
 		in.addresses.palettesIndex = FrameValues::Get().PalettesIndex();
@@ -875,7 +812,7 @@ namespace DCLF
 
 	std::shared_ptr<ShadowPayload> ShadowEngine::AcquireShadowPayload()
 	{
-		// Idle payloads are reset so they hold nothing, as AcquirePayload does.
+		// Reset idle payloads so they keep nothing alive.
 		std::shared_ptr<ShadowPayload> free;
 		for (auto& payload : shadowPayloadPool)
 			if (payload.use_count() == 1) {
@@ -888,20 +825,21 @@ namespace DCLF
 
 	void ShadowEngine::ReadShadowCullCounters(std::uint32_t a_frame, IndirectDraws::ShadowStats& a_stats)
 	{
-		// Right after the epoch's submission: its counters are copied each execution into the frame slot's host buffer
-		// (CounterReadback, the cs.dclf.shadow.cull-counters pass). A sample is read once its execution's GPU point is reached,
-		// provided no later shadow execution took its slot: every execution passes here, its slot still the host's current one.
+		// Each execution copies its counters into the host range of its run. A sample is read once its GPU point is reached,
+		// unless a later execution already reused that range. Must run right after submission, while the run is still current.
 		auto* host = RenderGraphRuntime::Get().Host();
 		const auto readback = CullCounterReadback(CullCounterView::kShadow);
 		if (!host || !readback)
 			return;
 		auto& armed = readback->armed;
-		const std::uint32_t frameSlot = host->CurrentFrameSlot();
+		const std::uint32_t frameSlot = readback->ranges.Of(host->CurrentRun());
+		if (frameSlot == Draws::RunRanges::kNone)
+			return;
 		const auto epoch = shadowCullEpochs++;
 		bool lost = false;
 		if (armed.armed) {
-			if (frameSlot == armed.frameSlot) {
-				// This execution writes the slot the sample was in before it was read: lost, and sampled again now.
+			if (frameSlot == armed.range) {
+				// This execution overwrites the unread sample, so it is lost. Take a new one now.
 				armed.armed = false;
 				++readback->missed;
 				lost = true;
@@ -909,7 +847,7 @@ namespace DCLF
 				return;
 			} else {
 				armed.armed = false;
-				const bool read = readback->Read(armed.frameSlot, armed.source, armed.stamp, [&](const std::uint32_t* a_words) {
+				const bool read = readback->Read(armed.range, armed.source, armed.stamp, [&](const std::uint32_t* a_words) {
 					a_stats.cullDrawn = a_words[0];
 					a_stats.cullRejected = a_words[1];
 					a_stats.cullTested = a_words[2];
@@ -930,7 +868,7 @@ namespace DCLF
 				return;
 			}
 		}
-		// One epoch in 127 (or the one after a lost sample), cycling through the views.
+		// Sample one epoch in 127, or the one after a lost sample, cycling through the views.
 		const int probe = shadowSizeProbe.load(std::memory_order_relaxed);
 		if (((epoch % 127) != 0 && !lost && probe < 0) || !shadow || shadow->labels.empty())
 			return;

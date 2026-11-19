@@ -1,10 +1,9 @@
 #pragma once
 
-// A main segment's shape (PassFrame), the frame buffers, the sorts' constants and programs, the DGC preprocess state lists.
-// Made by the commits and the shape producer, recorded against on the render thread. Self-contained (features include it); Internal.h
-// includes it in its order.
+// A main segment's shape (PassFrame), the frame buffers, the sorts and the DGC preprocess state lists.
+// The commits and the shape producer make them, and the render thread records against them. Self-contained so features can include it.
 
-// volk must precede every Vulkan header in this translation unit.
+// volk must come before every Vulkan header.
 #include <rhi_interop_vulkan.h>
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
@@ -34,9 +33,8 @@ namespace DCLF::Draws
 	struct ZBucketPlan;
 	struct SetClassPlan;
 	/**
-	 * @brief A state class's sub-ranges of the colour segment's ranges (GpuLayouts.h, kClassRangeMain; SetClassPlan): per range its first
-	 * sequence slot and capacity (0: the class draws nothing there, and no call is made), and its sort keys (its first, and its size: the
-	 * pipelines the revision's set version holds of it).
+	 * @brief A state class's sub-range of each colour range, and its sort keys. A capacity of 0 means the class draws
+	 * nothing there and no call is made.
 	 */
 	struct SetClassRanges
 	{
@@ -50,49 +48,36 @@ namespace DCLF::Draws
 		bool operator==(const SetClassRanges&) const = default;
 	};
 	/**
-	 * @brief What one segment's passes record against: everything their recorded commands depend on,
-	 * and nothing that changes every frame. The frame's own values (the counts, the view-projection, the
-	 * culling stamp) are in the segment's BuildDrawsLatch, and the draw counts on the GPU. Published by
-	 * the commit before the epoch prepares and replaced only when it changes, so its identity is what
-	 * the revision's recording of the passes is prepared for.
+	 * @brief What one segment's passes record against, and nothing that changes every frame. Per-frame values live in the
+	 * latch. Replaced only when it changes, so its identity is what a recording is prepared for.
 	 */
 	struct PassFrame
 	{
-		// The colour segment's state classes' sub-ranges (SetClassPlan), by class in creation order: what its calls draw, each with its
-		// class's signature, and their max counts. None in the depth segment (its draws are bucketed plain draws).
+		// The colour segment's state class sub-ranges, in creation order. Empty in the depth segment, whose draws are bucketed.
 		std::vector<SetClassRanges> classes;
-		// Each terrain group's range (the colour segment's; MainLayout::terrainCapacity), group 1 from phase 2's base, group 2 after it,
-		// holding its classes' sub-ranges.
 		std::array<std::uint32_t, kTerrainGroups> terrainCapacity{};
-		// Each half of the forward range in all (the colour segment's and the forward epoch's; MainLayout::forwardCapacity), after the
-		// terrain groups' ranges: per class a staging half BuildDraws appends to, then a sorted half the forward epoch draws.
+		// Each half of the forward range. BuildDraws appends to the staging half, the forward epoch draws the sorted half.
 		std::uint32_t forwardCapacity = 0;
-		// The refraction range (the colour segment's and the forward epoch's; MainLayout::refractionCapacity), after the
-		// forward halves (RefractionSlot).
 		std::uint32_t refractionCapacity = 0;
-		// The sequence buffer's ranges as the epoch sized it (MainLayout::sequenceDraws, sequenceDecals): its layout.
 		std::uint32_t sequenceDraws = 0, sequenceDecals = 0;
 		std::uint32_t cullMode = 0;
-		std::uint32_t width = 0, height = 0;  // render area: the main pass viewport
-		float minDepth = 0.0f, maxDepth = 1.0f;  // its depth range (the engine uses [0, 0.999998])
+		std::uint32_t width = 0, height = 0;  // the main pass viewport
+		float minDepth = 0.0f, maxDepth = 1.0f;  // the engine uses [0, 0.999998]
 		rhi::DescriptorHeapHandle resourceHeap{};
 		rhi::DescriptorHeapHandle samplerHeap{};
 		IndirectState indirect{};
-		// The draw families' pipelines as the revision's catalog has them (RevisionMake::familyPipelines; null: the family is not drawn in this
-		// revision). The main passes record a family's draws from these alone, so an epoch's recording is its revision's whatever the render
-		// thread has published since; the frame owns a family only while its adopted revision draws it (IndirectDraws::AdoptedFamilyPipelines).
+		// The revision's draw family pipelines, null when a family is not drawn. Recording reads only these, so an epoch's
+		// recording stays its revision's whatever the render thread has published since.
 		std::array<std::shared_ptr<const FamilyPipelines>, Extensions::kDrawFamilies> families{};
-		// The latch block the epoch wrote (the one the revision's set names): a layout grown (ReserveMainLatch) is a new block of the
-		// next set, and a frame in flight keeps reading its own.
+		// A grown layout gets a new latch block in the next set, so a frame in flight keeps reading its own.
 		std::shared_ptr<const org::LatchBlock> latch;
-		// The Z-prepass's plain draws (MainOpaquePass): a call per bucket, a group of pipeline slots sharing a depth pipeline. Phase
-		// 2's ranges are the same past sequenceDraws.
+		// One Z-prepass call per bucket. Phase 2's ranges are the same, offset by sequenceDraws.
 		struct ZCall
 		{
 			std::uint32_t bucket = 0, first = 0, capacity = 0;
 			rhi::PipelineHandle pipeline{};
-			// A terrain group 1 bucket's twin, its near blocks (kBucketTerrainPair): drawn into the main depth with Terrain
-			// Blending's depth offset (kZDrawPushOffsetDepth), then into its terrain depth without (Resources::terrainDepth).
+			// A terrain group 1 bucket's near twin. Drawn into main depth with Terrain Blending's depth offset, then into its
+			// terrain depth without.
 			bool terrainNear = false;
 			bool operator==(const ZCall& o) const
 			{
@@ -100,11 +85,8 @@ namespace DCLF::Draws
 			}
 		};
 		std::vector<ZCall> zCalls;
-		// The commit's per-frame values the epoch's first pass copies from the latch (LatchedCopiesPass).
 		LatchedList latched;
-		// Not compared (the latch block's layout, and the bucket plan zCalls are the calls of, the class plan classes are the sub-ranges
-		// of): what a commit writing its values into this shape writes them against - a scene revision's shape, which that commit did not
-		// make.
+		// Not compared. What a commit writes its values against, which is a revision's shape that this commit did not make.
 		MainLatchLayout latchLayout;
 		std::shared_ptr<const ZBucketPlan> zPlan;
 		std::shared_ptr<const SetClassPlan> classPlan;
@@ -122,8 +104,7 @@ namespace DCLF::Draws
 	};
 
 
-	// A CPU-written buffer the main pass reads as a structured buffer SRV (t16 and up): the graph reads a
-	// copy, refilled every epoch from the buffer's CPU mirror.
+	// A CPU-written buffer the main pass reads as an SRV at t16 and up. The graph reads a copy, refilled every epoch from the CPU mirror.
 	struct FrameBuffer
 	{
 		std::uint32_t textureRegister = 0;
@@ -138,10 +119,7 @@ namespace DCLF::Draws
 		}
 	};
 
-	/**
-	 * @brief A content epoch per kept table (ObjectRecordStore, ExtrasStore, GeometryStore): what a build trims each one's
-	 * journal to (PayloadPools::OldestContentEpoch of its part).
-	 */
+	/** @brief A content epoch per kept table, which a build trims that table's journal to. */
 	struct TablesContentEpochs
 	{
 		std::uint64_t objects = 0, extras = 0, geometries = 0;
@@ -155,56 +133,51 @@ namespace DCLF::Draws
 		std::uint32_t offsetsIndex;
 		std::uint32_t countIndex;
 		std::uint32_t sequencesIndex;
-		std::uint32_t sequenceStride;  // bytes (sizeof(DrawSequence))
-		std::uint32_t drawLimit;       // the draws' range (BuildDrawsConstants::phaseTwoBase)
+		std::uint32_t sequenceStride;  // bytes
+		std::uint32_t drawLimit;
 		std::uint32_t padding;
 	};
 	constexpr std::uint32_t kSortSequencesConstantWords = sizeof(SortSequencesConstants) / 4;
 	/**
-	 * @brief ForwardSortCS.hlsl's push constants: a state class's forward staging half (BuildDraws appended its visible forward draws
-	 * there, each with its view depth in its firstInstance word) and its sorted half, which the forward epoch draws.
+	 * @brief ForwardSortCS.hlsl's push constants. BuildDraws appends visible forward draws to the staging half with their view
+	 * depth in firstInstance, and the sort writes the sorted half the forward epoch draws.
 	 */
 	struct ForwardSortConstants
 	{
-		std::uint32_t sequencesIndex;  // RWByteAddressBuffer: the main sequences (or a view's)
-		std::uint32_t countIndex;      // ByteAddressBuffer: the count words (the classCounts words, a view's bucket counts)
-		std::uint32_t stagingBase;     // the staging half's first slot
-		std::uint32_t capacity;        // each half's slots (the class's forward sub-range's)
-		std::uint32_t sequenceStride;  // bytes (sizeof(DrawSequence))
-		// With kCountOffset in options, the count is the word at countOffset bytes (the class's: ClassCountWord, a view's forward entry).
+		std::uint32_t sequencesIndex;  // the main sequences, or a view's
+		std::uint32_t countIndex;
+		std::uint32_t stagingBase;
+		std::uint32_t capacity;  // slots per half
+		std::uint32_t sequenceStride;  // bytes
+		// With kCountOffset in options, the count is the word at countOffset bytes.
 		std::uint32_t countOffset = 0;
 		std::uint32_t options = 0;
 		std::uint32_t padding = 0;
 		static constexpr std::uint32_t kCountOffset = 1;
-		// The sorted draw's firstInstance is its rank: a forward bucket's plain draw finds its sequence by its instance (DCLF_PULLED).
+		// The sorted draw's firstInstance is its rank, so a forward bucket's plain draw finds its sequence by its instance.
 		static constexpr std::uint32_t kRankInstance = 2;
 	};
 	constexpr std::uint32_t kForwardSortConstantWords = sizeof(ForwardSortConstants) / 4;
-	constexpr std::uint32_t kForwardSortGroup = 64;  // ForwardSortCS.hlsl's
-	/** @brief The forward range's first slot in a colour shape's sequences (after phase 2's terrain ranges): its first class's staging half. */
+	constexpr std::uint32_t kForwardSortGroup = 64;  // must match ForwardSortCS.hlsl
+	/** @brief The forward range's first slot in a colour shape's sequences, after phase 2's terrain ranges. */
 	inline std::uint64_t ForwardStagingSlot(const PassFrame& a_frame)
 	{
 		return std::uint64_t(a_frame.sequenceDraws) + a_frame.terrainCapacity[0] + a_frame.terrainCapacity[1];
 	}
-	/** @brief The refraction range's first slot in a colour shape's sequences (after the forward range's two halves). */
+	/** @brief The refraction range's first slot in a colour shape's sequences, after both forward halves. */
 	inline std::uint64_t RefractionSlot(const PassFrame& a_frame)
 	{
 		return ForwardStagingSlot(a_frame) + 2ull * a_frame.forwardCapacity;
 	}
-	constexpr std::uint32_t kSortSequencesGroup = 64;  // SortSequencesCS.hlsl's
-	// A sort's rank word holds the sort key in its top 12 bits and the rank below (BuildDrawsCS.hlsl, kSortRankBits): a
-	// draw range past this is a hard failure until the ranks get a word of their own.
+	constexpr std::uint32_t kSortSequencesGroup = 64;  // must match SortSequencesCS.hlsl
+	// The rank word holds the sort key in its top 12 bits and the rank below. A draw range past this is a hard failure
+	// until ranks get a word of their own.
 	constexpr std::uint32_t kSortRankLimit = 1u << 20;
 	static_assert(DrawPipelines::kMaxPipelines <= (1u << 12));
 
 	/**
-	 * @brief The sort by pipeline (DrawSort) of the colour segment's sequences. BuildDraws stages the sequences and counts them per
-	 * sort key (a state class's keys contiguous: its first key plus the pipeline's index in it), PrefixSum turns the counts into each
-	 * key's first slot, and SortSequencesPass (SortSequencesCS.hlsl) writes each class's sequences grouped by pipeline into its main
-	 * sub-range. The counts are zeroed once, by the first commit (countsZeroed), and after that by the scan that reads them.
-	 *
-	 * Not the shadow views': sorting them (a part of these buffers per view slot, one scan over all of them) gained no measurable
-	 * draw time, and the scan over every view's counts costs more than it saves.
+	 * @brief Sorts the colour segment's sequences by pipeline. BuildDraws counts per sort key, PrefixSum turns counts into first
+	 * slots, and SortSequencesPass writes each class's sequences grouped by pipeline. Shadow views are not sorted because it gained nothing.
 	 */
 	struct DrawSort
 	{
@@ -216,7 +189,7 @@ namespace DCLF::Draws
 
 		static constexpr std::uint32_t kKeys = DrawPipelines::kMaxPipelines;
 
-		/** @brief Null, logged, when either program could not be created. Staging and ranks for a_draws (they grow with the sequences). */
+		/** @brief Null, logged, when either program could not be created. Staging and ranks are sized for a_draws. */
 		static std::shared_ptr<DrawSort> Create(rhi::Device a_device, std::uint32_t a_draws)
 		{
 			auto sort = std::make_shared<DrawSort>();
@@ -229,7 +202,7 @@ namespace DCLF::Draws
 			sort->counts = CreateWords(kKeys, true, "cs.dclf.sort-counts");
 			sort->offsets = CreateWords(kKeys, true, "cs.dclf.sort-offsets");
 			sort->blockSums = CreateWords(PrefixSum::Blocks(kKeys), true, "cs.dclf.sort-block-sums");
-			// Sized to the main layout's draws exactly (its ranges grow by doubling: Impl::RequireMain).
+			// Sized exactly, since the main layout already grows by doubling.
 			sort->staging = MakeVersioned(CreateWords(std::uint64_t(a_draws) * sizeof(DrawSequence) / 4, true, "cs.dclf.sort-staging"),
 				{ .extent = { 0, sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Headroom(0) });
 			sort->ranks = MakeVersioned(CreateWords(a_draws, true, "cs.dclf.sort-ranks"), { .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Headroom(0) });
@@ -238,15 +211,14 @@ namespace DCLF::Draws
 
 		void Register(org::RenderGraph& a_graph) const
 		{
-			// Not the staging or the ranks: versioned, their passes declare them (Register, Passes/MainExtension.cpp).
+			// Staging and ranks are versioned and their passes declare them.
 			for (const auto& buffer : { counts, offsets, blockSums })
 				a_graph.RegisterResource(org::ResourceIdentifier(buffer->GetName()), buffer);
 		}
 
 		/**
-		 * @brief The scan, which runs in every execution of its epoch it is active in (a_active; null: every one), so the counts it clears
-		 * stay zero whether or not a build ran. An inactive execution must follow one whose counts nothing raised since (the last scan
-		 * cleared them).
+		 * @brief The scan pass, which also clears the counts so they stay zero whether or not a build ran. An inactive execution
+		 * must follow one whose counts nothing raised since.
 		 */
 		std::shared_ptr<org::RenderPass> ScanPass(std::function<bool(const org::PassPrepareContext&)> a_active = {}) const
 		{
@@ -275,46 +247,57 @@ namespace DCLF::Draws
 	struct PassStats;
 
 	/**
-	 * @brief The state lists of one recording site's explicit DGC preprocesses (DrawPipelines.h), one per frame slot:
-	 * graphics lists that are never submitted. vkCmdPreprocessGeneratedCommandsEXT is recorded outside any pass but
-	 * generates for the state of another list, render pass included, which the execution must then match exactly; so
-	 * a site begins each of its passes on its slot's list and sets it up as the execution will (heaps, layout, topology,
-	 * push data) before preprocessing that pass's calls against it. A site of its own for every pass that can record at
-	 * the same time as another.
+	 * @brief Graphics lists, never submitted, that one site's explicit DGC preprocesses run against, one per run lease index.
+	 * The preprocess must see exactly the state the execution will have, so each pass is set up on this list first.
 	 */
 	class PreprocessStates
 	{
 	public:
-		static std::shared_ptr<PreprocessStates> Create(rhi::Device a_device, std::uint32_t a_frameSlots, const char* a_site)
+		static std::shared_ptr<PreprocessStates> Create(rhi::Device a_device, const char* a_site)
 		{
 			auto states = std::make_shared<PreprocessStates>();
-			states->slots.resize(std::max<std::uint32_t>(a_frameSlots, 1u));
-			for (auto& slot : states->slots) {
-				if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator ||
-					rhi::Failed(a_device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list)) || !slot.list) {
-					logger::error("[DCLF] DGC preprocess: no state list for {}; its draws cannot execute", a_site);
-					return nullptr;
-				}
+			states->device = a_device;
+			states->site = a_site ? a_site : "a site";
+			// One allocator for the site's lists, since a command pool costs the driver about 2 MB. A site records on one thread at a time.
+			if (rhi::Failed(a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, states->allocator)) || !states->allocator) {
+				logger::error("[DCLF] DGC preprocess: no state allocator for {}; its draws cannot execute", states->site);
+				return nullptr;
 			}
+			// D3D12 cannot hold several open lists on one allocator, so each list keeps its own there.
+			states->shared = states->allocator->SupportsSharedLists();
 			return states;
 		}
 
-		// The frame slot's list, reset and recording.
-		rhi::CommandList& Begin(std::uint32_t a_frameSlot)
+		// The run's list, reset and recording. Throws when it cannot be made, which fails the epoch.
+		rhi::CommandList& Begin(const org::RunRef& a_run)
 		{
 			DCLF_ZONE("CS.DCLF.Record.RecyclePreprocessState");
-			auto& slot = slots[a_frameSlot % slots.size()];
-			slot.list->Recycle(slot.allocator.Get());
+			if (slots.size() <= a_run.lease)
+				slots.resize(static_cast<std::size_t>(a_run.lease) + 1);
+			auto& slot = slots[a_run.lease];
+			if (!slot.list) {
+				if (!shared && (rhi::Failed(device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator)) || !slot.allocator))
+					throw std::runtime_error(fmt::format("DGC preprocess: no state allocator for {}", site));
+				auto& owner = shared ? allocator : slot.allocator;
+				if (rhi::Failed(device.CreateCommandList(rhi::QueueKind::Graphics, owner.Get(), slot.list)) || !slot.list)
+					throw std::runtime_error(fmt::format("DGC preprocess: no state list for {}", site));
+			}
+			slot.list->Recycle(slot.allocator ? slot.allocator.Get() : allocator.Get());
 			return slot.list.Get();
 		}
 
 	private:
 		struct Slot
 		{
-			rhi::CommandAllocatorPtr allocator;
+			rhi::CommandAllocatorPtr allocator;  // D3D12 only
 			rhi::CommandListPtr list;
 		};
-		std::vector<Slot> slots;
+		rhi::Device device;
+		std::string site;
+		bool shared = true;
+		// Declared before the lists so it outlives them.
+		rhi::CommandAllocatorPtr allocator;
+		std::vector<Slot> slots;  // by lease index
 	};
 
 	struct IndexPool;

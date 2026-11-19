@@ -1,24 +1,48 @@
-// What the passes and the graph extensions share (PassHelpers.h): the eye fold, DXVK image import, scene buffer registration,
-// the latched copies pass, frame buffer declaration and the preprocessed indirect draw.
+// Shared pass helpers: the eye fold, DXVK image import, scene buffer registration, the latched copies pass, frame
+// buffer declaration and the preprocessed indirect draw.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/BufferRefs.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Switches.h"
+
+#include <Resources/ExternalTextureResource.h>
 
 namespace DCLF::Draws
 {
+	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? host->Device().GetBufferDeviceAddress({ a_buffer, 0 }) : 0;
+	}
+
+	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? RenderGraph::MakeBufferRef(host->Device(), a_recording.Resolve(a_binding).GetHandle(), 0, std::source_location::current()) :
+		              RenderGraph::BufferRef{};
+	}
+
 	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
 	{
 		const float eye[3]{ a_eye.x, a_eye.y, a_eye.z };
 		FoldCullEye(a_viewProj.data(), eye, a_out);
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name)
 	{
+		// Share the image's one graph resource with every other importer, so the graph orders all uses and one tracker follows
+		// its layout. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own import, as a bisecting aid.
+		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
+		if (shareOwned)
+			return FrameAnchors::ShareImage(a_texture, a_image, a_desc, a_name ? a_name : "DCLF image");
 		a_desc.imageDimensions.clear();
 		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
 		// ORG builds a DSV per slice for arrays, so a shadow view attaches its own slice.
@@ -34,8 +58,7 @@ namespace DCLF::Draws
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.pool-firsts"), a_scene.pool->firsts);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.pool-copies"), a_scene.pool->copies);
 		}
-		// The features' scene resources (Api::SceneResources::registerGraph: the vertex stream's first, Features/Faces' face positions).
-		// The root states' buffers are among them (Features/Fades'). The visibility readback is made only with their rows.
+		// The features' scene resources, the root state buffers among them. The visibility readback is made only with their rows.
 		Extensions::RegisterSceneResources(a_graph, a_scene.sceneResources);
 		if (a_scene.visibilityEvents) {
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility-events"), a_scene.visibilityEvents);
@@ -47,16 +70,14 @@ namespace DCLF::Draws
 	namespace
 	{
 		/**
-		 * @brief The latched copies a_source names, as LatchedCopiesPass records them: the epoch's own lists, then each hosted shape's
-		 * (none in a recording without that view's work), each copy from frame slot a_frameSlot's latch region (a fixed list's one) to
-		 * the buffer a_target resolves its target to (a null handle: a target not declared, skipped). a_withZeros false: the fixed lists
-		 * (the zeroed draw and bucket counts) are left out.
+		 * @brief Records the latched copies a_source names, the epoch's own lists then each hosted shape's. A target that is not
+		 * declared resolves to a null handle and is skipped. a_withZeros false leaves out the zeroed count lists.
 		 */
 		template <class TargetOf>
-		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, std::uint32_t a_frameSlot, const TargetOf& a_target,
+		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, const org::RunRef& a_run, const TargetOf& a_target,
 			bool a_withZeros = true)
 		{
-			// A copy continuing the one before it (the same latch and target, both ranges adjacent) joins it: the copies are one command.
+			// A copy adjacent to the one before it, with the same latch and target, joins it into one command.
 			struct Run
 			{
 				rhi::ResourceHandle target, latch;
@@ -73,8 +94,9 @@ namespace DCLF::Draws
 				for (const auto& list : a_lists) {
 					if (!list.latch || (list.fixed && !a_withZeros))
 						continue;
-					const auto latch = list.latch->Resource()->GetAPIResource().GetHandle();
-					const std::uint64_t region = list.fixed ? 0 : list.latch->Offset(a_frameSlot);
+					const auto at = list.latch->At(a_run);
+					const auto latch = at.buffer->GetAPIResource().GetHandle();
+					const std::uint64_t region = at.offset;
 					for (const auto& copy : list.copies) {
 						const auto target = a_target(copy.target);
 						if (!target.valid())
@@ -121,7 +143,6 @@ namespace DCLF::Draws
 				return bindings;
 			}
 
-			// The source's (and its hosted views') shapes are the revision's (the ticket's host data).
 			void Revision(std::vector<std::uint64_t>&) const {}
 
 			LatchedSource Prepare(const LatchedCopiesBindings&, const org::PassPrepareContext& a_preparation) const
@@ -135,7 +156,7 @@ namespace DCLF::Draws
 			{
 				if (LatchedRecordCut())
 					return;
-				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.FrameSlot(), [&](const void* a_key) {
+				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.Run(), [&](const void* a_key) {
 					const auto target = std::find_if(a_bindings.targets.begin(), a_bindings.targets.end(), [&](const auto& a_target) { return a_target.first == a_key; });
 					return target != a_bindings.targets.end() ? a_recording.Resolve(target->second).GetHandle() : rhi::ResourceHandle{};
 				}, a_prepared.zeros);
@@ -145,7 +166,7 @@ namespace DCLF::Draws
 			std::function<std::vector<LatchedTarget>()> targets;
 			std::function<LatchedSource(const org::PassPrepareContext&)> source;
 			std::atomic<std::shared_ptr<const std::vector<const void*>>>* declared = nullptr;
-			bool zeros = true;  // the graph's conditions at its build: a CPU pipeline's graph's pass copies no zeroed lists
+			bool zeros = true;  // a CPU pipeline graph's pass copies no zeroed lists
 		};
 	}
 
@@ -155,17 +176,34 @@ namespace DCLF::Draws
 		return std::make_shared<LatchedCopiesPass>(std::move(a_targets), std::move(a_source), a_declared);
 	}
 
-	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
 	{
 		const std::span<const org::SrvView> noViews{};
 		for (const auto& frameBuffer : a_resources.frameBuffers)
 			a_builder.ShaderResource(frameBuffer.copy, noViews);
-		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's lights, light index list and grid).
+		// The frame graph buffers on the graph, such as Light Limit Fix's lights, light list and grid, each with the view
+		// whose index the commit latches.
 		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
+		Extensions::DeclaredReads reads;
 		for (std::size_t b = 0; a_lights && b < graphBuffers.size(); ++b)
 			if ((a_resources.graphBuffers >> b) & 1)
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
-					a_builder.ShaderResource(org::ResourceIdentifier(graphBuffers[b].resources[r].c_str()), noViews);
+					Extensions::DeclarePublishedRead(a_builder, graphBuffers[b].resources[r], reads);
+		// Declare the frame textures' published ids so the graph orders these reads after the producers' writes.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
+		// The character light's noise, whichever HDR downsample level the engine names this frame.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
+		// Wetness Effects' precipitation occlusion (t70), the engine's depth target once published.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::PrecipitationOcclusionGraphTextureIds(), reads);
+		// Every caller draws with the frame record bound, whose shaders read t117 and t121-t123 and the payload's rows.
+		FrameValues::Get().DeclareReads(a_builder);
+		DeclarePayloadReads(a_builder);
+		return reads;
+	}
+
+	void DeclarePayloadReads(org::PassBuilder& a_builder)
+	{
+		PayloadPools::DeclareReads(a_builder);
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,
@@ -185,8 +223,8 @@ namespace DCLF::Draws
 		};
 		if (std::ranges::none_of(a_calls, CallDrawable))
 			return;
-		// Every call preprocessed before the pass, with the execution's exact state (as MainOpaquePass), then executed in order.
-		auto& state = a_preprocess.Begin(a_recording.FrameSlot());
+		// Preprocess every call before the pass with the execution's exact state, then execute them in order.
+		auto& state = a_preprocess.Begin(a_recording.Run());
 		beginDrawPass(state);
 		const bool preprocessRange = nvCommands && a_preprocessRange && GpuCounters::PushCommandBufferRange(nvCommands, a_preprocessRange);
 		for (const auto& call : a_calls) {

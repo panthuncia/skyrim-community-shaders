@@ -1,6 +1,4 @@
-// Object LOD's segment writers (LodSegments.h, SceneWriterFramework's LOD segment calls): after each write, the shape is named on the
-// feature's engine channel (its queue, drained by the coordinator's passes: LodSegmentChannel.cpp) and the mirror's update pushed (Core's
-// channel: Extensions::PushRangesUpdate). Subscribed on the render thread, at the feature's early hooks.
+// Hooks the engine's LOD segment writers. After each write the shape is queued for the coordinator and its mirror update is pushed.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
@@ -11,12 +9,10 @@ namespace DCLF::Features::Lod
 {
 	namespace
 	{
-		// BSSubIndexTriShapes a segment write touched, as keys, pushed after the write. No wake: written as the camera moves, mostly
-		// unchanged ranges; the next pass takes them.
+		// No wake. Writes happen constantly as the camera moves and mostly leave the ranges unchanged, so the next pass takes them.
 		EventQueue<const void*> segmentEvents;
 		bool segmentHooksInstalled = false;
 
-		// Show, hide and show-all (SWF_HOOK_LOD_SEGMENT_*): the shape is the first argument.
 		void OnSegmentWrite(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			auto* shape = SceneWriter::Arg<RE::BSGeometry*>(a_event, 0);
@@ -26,7 +22,7 @@ namespace DCLF::Features::Lod
 
 		bool SubscribeSegmentWriters()
 		{
-			// SceneWriterFramework's LOD segment calls: every call of the three writers (AE 1.6.1170), at its call sites. All or none.
+			// All three writers or none.
 			if (!SceneWriter::Has(SWF_CAP_LOD_SEGMENT_CALLS)) {
 				logger::warn("[DCLF] object LOD: the scene writer framework has no LOD segment calls (a call site differs); object LOD stays native");
 				return false;

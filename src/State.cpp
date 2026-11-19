@@ -37,9 +37,19 @@
 #include "Features/Upscaling.h"
 #include "Features/VolumetricShadows.h"
 #include "Menu.h"
+#include "Menu/ImGuiRenderer.h"
+#include "ORGDeferredClears.h"
+#include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/GpuLoadPass.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
 #include "Utils/FileSystem.h"
@@ -52,6 +62,43 @@
 static thread_local std::vector<TracyCZoneCtx> s_tracyPerfZones;
 #endif
 static thread_local std::vector<bool> s_perfEventEmitted;
+
+namespace
+{
+	/**
+	 * @brief Whether CS_DISABLE_FEATURES (a comma-separated list of short names, for test runs) names a_featureName. Such a feature is
+	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed. Read from the environment alone (a
+	 * run's own setting: the switches file outlives the run).
+	 */
+	bool DisabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = Switches::List("CS_DISABLE_FEATURES");
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+
+	/**
+	 * @brief Whether CS_ENABLE_FEATURES (short names, for test runs) names a_featureName. Such a feature loads at boot for this run
+	 * even when the saved "Disable at Boot" settings disable it, and the settings stay as they are.
+	 */
+	bool EnabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = Switches::List("CS_ENABLE_FEATURES");
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+
+	/**
+	 * @brief Shaders compile on demand when a run turns a feature with shader defines on or off, because its startup precompile of a
+	 * cold cache would hold the main menu far longer than a test run. A feature without defines keeps the precompile.
+	 */
+	void CompileOnDemandForRunFeatureSet(Feature* a_feature, const char* a_switch)
+	{
+		const bool changesDefines = !a_feature->GetShaderDefineName().empty() || !a_feature->GetCommonShaderDefines().empty();
+		if (changesDefines && !globals::shaderCache->backgroundCompilation) {
+			globals::shaderCache->SetBackgroundCompilation(true);
+			logger::info("{}: shaders compile in the background, on demand (no startup precompile)", a_switch);
+		}
+	}
+}
 
 void State::UpdateLightingShaderPermutation(RE::BSRenderPass* a_pass)
 {
@@ -117,6 +164,16 @@ void State::UpdateEffectShaderPermutation(RE::BSRenderPass* a_pass)
 	}
 }
 
+void State::OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap)
+{
+	if (globals::features::volumetricShadows.loaded)
+		globals::features::volumetricShadows.CopyShadowLightData(a_shadowMap);
+	if (globals::features::exponentialHeightFog.loaded)
+		globals::features::exponentialHeightFog.CaptureDirectionalShadowMap(a_shadowMap);
+	if (globals::features::skylighting.loaded)
+		globals::features::skylighting.CaptureShadowCascadeSRV(a_shadowMap);
+}
+
 void State::Draw()
 {
 	ZoneScoped;
@@ -130,8 +187,6 @@ void State::Draw()
 	auto& skin = globals::features::skin;
 	auto& truePBR = globals::features::truePBR;
 	auto context = globals::d3d::context;
-	auto& volumetricShadows = globals::features::volumetricShadows;
-	auto& skylighting = globals::features::skylighting;
 
 	if (shaderCache->IsEnabled()) {
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
@@ -172,12 +227,9 @@ void State::Draw()
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
 				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
-					if (volumetricShadows.loaded)
-						volumetricShadows.CopyShadowLightData();
-					if (globals::features::exponentialHeightFog.loaded)
-						globals::features::exponentialHeightFog.CaptureDirectionalShadowMap();
-					if (skylighting.loaded)
-						skylighting.CaptureShadowCascadeSRV();
+					// The sun's shadow cascades, from the engine's shadow state: the flush has just applied it (the same view as PS t4),
+					// and under the flush latch (P5.13) it bound nothing. DXVK's view, as ShadowMaskCapture gives it.
+					OnShadowMaskDraw(RenderGraph::Engine::Tripwire::Unwrap(globals::game::shadowState->GetRuntimeData().PSTexture[4]));
 				}
 			}
 		}
@@ -270,6 +322,19 @@ State::TonemapOwner State::GetTonemapOwner()
 	return *tonemapOwner;
 }
 
+State::TonemapOwner State::PeekTonemapOwner() const
+{
+	if (tonemapOwner)
+		return *tonemapOwner;
+	auto& effects11 = globals::features::effects11;
+	auto& postProcessing = globals::features::postProcessing;
+	if (effects11.loaded && !IsMainOrLoadingMenuOpen() && effects11.WantsTonemapOwnership())
+		return TonemapOwner::kEffects11;
+	if (postProcessing.loaded && postProcessing.WantsTonemapOwnership())
+		return TonemapOwner::kPostProcessing;
+	return TonemapOwner::kVanilla;
+}
+
 bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
 {
 	if (GetTonemapOwner() != TonemapOwner::kEffects11)
@@ -279,8 +344,9 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 		return false;
 
 	auto renderer = globals::game::renderer;
-	auto& outputRT = renderer->GetRuntimeData().renderTargets[a_output];
-	globals::d3d::context->OMSetRenderTargets(1, &outputRT.RTV, nullptr);
+	// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
+	auto* outputRTV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRuntimeData().renderTargets[a_output].RTV);
+	globals::d3d::context->OMSetRenderTargets(1, &outputRTV, nullptr);
 
 	auto shadowState = globals::game::shadowState;
 	auto& stateData = shadowState->GetRuntimeData();
@@ -382,7 +448,15 @@ void State::Setup()
 
 	// Adopt DXVK's Vulkan device for the render graph before features create
 	// resources; features fall back to their D3D11 paths when it stays inactive.
+	GpuLoadPass::ReserveAnchor();
+	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
+	ORGDeferredComposite::Reserve();
+	ORGDeferredClears::Reserve();
+	ImGuiRenderer::ReserveAnchor();
+	RenderGraph::Engine::Reserve();
 	RenderGraphRuntime::Get().Initialize();
+	// The engine's targets move to ORG, then the engine subsystems that use them set up, before any feature reads them.
+	RenderGraph::Engine::Setup();
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	{
@@ -390,6 +464,8 @@ void State::Setup()
 		globals::deferred->SetupResources();
 	}
 	Feature::ForEachLoadedFeature("PostSetupResources", [](Feature* feature) { feature->PostSetupResources(); });
+	// The engine subsystems that read features' resources, then the setup's graph build: the primary-path clients join here.
+	RenderGraph::Engine::PostSetup();
 	PostProcessingMode::ApplyPending();
 	tonemapOwner.reset();
 }
@@ -610,6 +686,15 @@ void State::Load(bool a_allowReload)
 					logger::info("Feature '{}' is disabled by default", featureName);
 				}
 				bool isDisabled = !feature->IsAlwaysEnabled() && disabledFeatures.contains(featureName) && disabledFeatures[featureName];
+				if (!isDisabled && !feature->IsAlwaysEnabled() && DisabledByEnvironment(featureName)) {
+					isDisabled = true;
+					logger::info("Feature '{}' is disabled at boot by CS_DISABLE_FEATURES (this run only)", featureName);
+					CompileOnDemandForRunFeatureSet(feature, "CS_DISABLE_FEATURES");
+				} else if (isDisabled && feature->installed && !DisabledByEnvironment(featureName) && EnabledByEnvironment(featureName)) {
+					isDisabled = false;
+					logger::info("Feature '{}' is enabled at boot by CS_ENABLE_FEATURES (this run only)", featureName);
+					CompileOnDemandForRunFeatureSet(feature, "CS_ENABLE_FEATURES");
+				}
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);
 

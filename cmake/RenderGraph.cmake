@@ -2,7 +2,8 @@
 #
 # BasicRHI adopts the VkDevice DXVK creates for the game, and OpenRenderGraph runs its
 # passes on it in persistent execution. The libraries are built from source with the
-# Vulkan backend only, from the extern/ submodules (BasicRHI, BasicTelemetry,
+# Vulkan backend, and the D3D12 one with CS_ORG_D3D12 (the native mode's
+# CS_ORG_BACKEND=d3d12), from the extern/ submodules (BasicRHI, BasicTelemetry,
 # OpenRenderGraph, volk). To build against local changes to those libraries, point
 # CS_ORG_ROOT at another directory with the same side-by-side layout.
 #
@@ -10,6 +11,9 @@
 # keeps its D3D11 path.
 
 option(CS_RENDER_GRAPH "Build the OpenRenderGraph runtime that adopts DXVK's Vulkan device" ON)
+# BasicRHI's D3D12 backend too, for the native mode's CS_ORG_BACKEND=d3d12 (src/RenderGraph/Engine/D3D12Device.cpp).
+# Off builds the Vulkan backend alone; CS_ORG_BACKEND=d3d12 then fails at startup with that reason.
+option(CS_ORG_D3D12 "Build BasicRHI's D3D12 backend for CS_ORG_BACKEND=d3d12" ON)
 set(CS_ORG_ROOT "${CMAKE_SOURCE_DIR}/extern" CACHE PATH
     "Directory holding BasicRHI, BasicTelemetry, OpenRenderGraph and volk side by side")
 
@@ -29,11 +33,14 @@ if(CS_RENDER_GRAPH)
     if(_cs_org_missing)
         message(WARNING "CS_RENDER_GRAPH: ${_cs_org_missing} not found under CS_ORG_ROOT=${CS_ORG_ROOT}; building without the render graph")
     else()
-        # Vulkan backend only: CS reaches the GPU through DXVK, never through D3D12.
-        # Streamline, PIX and Tracy GPU zones belong to the host (CS owns Streamline).
-        set(BASICRHI_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+        # The Vulkan backend always: CS reaches the GPU through DXVK by default. The D3D12 backend with CS_ORG_D3D12, for the
+        # native mode's CS_ORG_BACKEND=d3d12. PIX and Tracy GPU zones belong to the host. Streamline: CS owns slInit and the
+        # evaluates; native mode's device comes up through BasicRHI's Streamline support (DeviceCreateInfo::streamlineHost), on the
+        # fork's headers. BasicRHI's direct Streamline calls resolve to CS's forwarders (Features/Upscaling/StreamlineImports.cpp).
+        set(BASICRHI_ENABLE_D3D12 ${CS_ORG_D3D12} CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
-        set(BASICRHI_ENABLE_STREAMLINE OFF CACHE BOOL "" FORCE)
+        set(BASICRHI_ENABLE_STREAMLINE ON CACHE BOOL "" FORCE)
+        set(BASICRHI_STREAMLINE_HEADERS_DIR "${CMAKE_SOURCE_DIR}/extern/Streamline/include" CACHE PATH "" FORCE)
         set(BASICRHI_ENABLE_PIX OFF CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_RESHAPE OFF CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_TRACY_GPU_PROFILING OFF CACHE BOOL "" FORCE)
@@ -59,6 +66,15 @@ if(CS_RENDER_GRAPH)
         # Nsight Perf for OpenRenderGraph's Telemetry/NvPerfCapture (NvPerf's Vulkan backend): ORG_ENABLE_NVPERF and the
         # NVPerf::Host target come from CMakeLists.txt's NVPERF_SUPPORT block, which also delay-loads and installs the DLL.
         add_subdirectory("${CS_ORG_ROOT}/OpenRenderGraph" "${CMAKE_BINARY_DIR}/extern/OpenRenderGraph" EXCLUDE_FROM_ALL)
+
+        # ORG's built-in passes' shaders (GenerateMips.hlsl and its include), which CS compiles at runtime with ComputeProgram
+        # from Data/Shaders/OpenRenderGraph (org::kBuiltinShaderPrefix). Copied into package/Shaders at configure time, so every
+        # path that ships package/Shaders ships them; the copies are generated (.gitignore) and follow the ORG checkout.
+        if(OPENRENDERGRAPH_SHADER_DIR)
+            file(GLOB _org_builtin_shaders "${OPENRENDERGRAPH_SHADER_DIR}/*.hlsl" "${OPENRENDERGRAPH_SHADER_DIR}/*.hlsli")
+            file(COPY ${_org_builtin_shaders} DESTINATION "${CMAKE_SOURCE_DIR}/package/Shaders/OpenRenderGraph")
+            set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_org_builtin_shaders})
+        endif()
 
         # Runtime SPIR-V compilation (every render-graph shader): ORGModuleServices' content-addressed DXC service.
         # Optional; without it the render-graph features stay on their D3D11 paths.
@@ -90,6 +106,19 @@ if(CS_RENDER_GRAPH)
         endif()
         target_link_libraries(${PROJECT_NAME} PRIVATE TBB::tbb)
         target_compile_definitions(${PROJECT_NAME} PRIVATE CS_HAS_RENDER_GRAPH=1)
+        if(CS_ORG_D3D12)
+            # d3d12.h and the DXGI headers of the DirectX-Headers package come with BasicRHI (Microsoft::DirectX-Headers).
+            target_compile_definitions(${PROJECT_NAME} PRIVATE CS_ORG_HAS_D3D12=1)
+            target_link_libraries(${PROJECT_NAME} PRIVATE d3d12 dxgi)
+        endif()
+        # Debug info in the render-graph libraries, so hang and crash dumps name their frames and locals (they build without it).
+        if(MSVC)
+            foreach(_org_target IN ITEMS OpenRenderGraph BasicRHI)
+                if(TARGET ${_org_target})
+                    target_compile_options(${_org_target} PRIVATE /Z7)
+                endif()
+            endforeach()
+        endif()
 
         set(CS_HAS_RENDER_GRAPH ON)
         message(STATUS "CS_RENDER_GRAPH: OpenRenderGraph from ${CS_ORG_ROOT}")

@@ -68,4 +68,7 @@ struct LUT : PostProcessFeature
 	static std::string ValidateLutFile(const std::filesystem::path& resolvedPath);
 
 	virtual void Draw(TextureInfo&) override;
+
+	/** @brief The constants of the loaded LUT. Shared by the D3D11 draw and the ORG chain. */
+	LUTCB Constants() const;
 };

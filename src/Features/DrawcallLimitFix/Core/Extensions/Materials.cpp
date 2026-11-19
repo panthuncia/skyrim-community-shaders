@@ -1,4 +1,4 @@
-// The material contributors' table, sample, capture and chain calls (see the header).
+// The material contributors' table, sample, capture and chain calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
@@ -14,25 +14,25 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		// Written only by ResolveMaterialContributors (InstallFeatures, before DCLF's threads exist), read-only after.
-		MaterialContributorTable& Table()
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
+		MaterialContributorTable& ContributorTable()
 		{
 			static MaterialContributorTable table;
 			return table;
 		}
 
-		/** @brief Class a_class's entry (its contributor's), or null for kNoMaterialClass and past the classes. */
+		/** @brief Class a_class's contributor entry, or null. */
 		const MaterialContributorEntry* ClassEntry(std::uint8_t a_class)
 		{
-			const auto& table = Table();
+			const auto& table = ContributorTable();
 			return a_class != kNoMaterialClass && a_class <= table.count ? &table.entries[a_class - 1] : nullptr;
 		}
 	}
 
 	void ResolveMaterialContributors(std::span<const MaterialContributorEntry> a_registered)
 	{
-		auto& table = Table();
-		// Stage, then order, then registration (the stable sort keeps registration order among equals).
+		auto& table = ContributorTable();
+		// Stage, then order, then registration. The stable sort keeps registration order among equals.
 		std::array<std::size_t, kMaterialContributorSlots> order{};
 		const std::size_t count = std::min(a_registered.size(), order.size());
 		for (std::size_t i = 0; i < count; ++i)
@@ -54,8 +54,7 @@ namespace DCLF::Extensions
 		}
 		table.count = count;
 		table.witnessWords = words;
-		// The slots: every register in ascending order from slot 0 (the registry refused overlapping ranges, so each contributor's are
-		// consecutive slots from its first register's).
+		// Every register in ascending order from slot 0. Ranges cannot overlap, so each contributor's slots are consecutive.
 		std::uint32_t slots = 0;
 		for (std::size_t c = 0; c < count; ++c)
 			for (const std::uint32_t r : table.entries[c].registers)
@@ -69,11 +68,11 @@ namespace DCLF::Extensions
 		}
 	}
 
-	const MaterialContributorTable& MaterialContributors() { return Table(); }
+	const MaterialContributorTable& MaterialContributors() { return ContributorTable(); }
 
 	std::uint8_t MaterialClassOf(const void* a_vtable)
 	{
-		if (!Table().classes)
+		if (!ContributorTable().classes)
 			return kNoMaterialClass;
 		for (const auto& entry : MaterialContributorList())
 			if (entry.classIndex != kNoMaterialClass && entry.materialClass.owns(a_vtable))
@@ -144,7 +143,7 @@ namespace DCLF::Extensions
 
 	void EvaluateAfter(const MaterialContributorInputs& a_inputs, MaterialRecord& a_out)
 	{
-		// An inactive one is skipped: its writes would be nulls into entries the covered record's reset already cleared.
+		// Skip inactive ones. Their writes would only put nulls into entries the reset already cleared.
 		const auto contributors = MaterialContributorList();
 		for (std::size_t c = 0; c < contributors.size(); ++c) {
 			const auto& entry = contributors[c];
@@ -182,7 +181,6 @@ namespace DCLF::Api
 
 	void MaterialContributorEvaluation::ResetRecord()
 	{
-		// A record with nothing written: unwritten constants, no textures, unwritten filter modes.
 		out->vs.Reset();
 		out->ps.Reset();
 		out->textures = {};

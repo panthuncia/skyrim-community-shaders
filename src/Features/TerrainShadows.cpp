@@ -9,6 +9,7 @@
 
 #include "I18n/I18n.h"
 #include "State.h"
+#include "TerrainShadows/ORGTerrainShadows.h"
 #include "Util.h"
 
 #define I18N_KEY_PREFIX "feature.terrain_shadows."
@@ -132,6 +133,19 @@ namespace
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	// t60: the shadow height map, for the pixel and compute shaders.
+	void BindShadowHeight(ID3D11ShaderResourceView* a_srv)
+	{
+		auto context = globals::d3d::context;
+		context->PSSetShaderResources(60, 1, &a_srv);
+		context->CSSetShaderResources(60, 1, &a_srv);
+	}
+
+	void UnbindShadowHeight()
+	{
+		BindShadowHeight(nullptr);
+	}
+
 	// Heightmaps are keyed by the worldspace that provides the land data.
 	RE::TESWorldSpace* GetLandWorldspace()
 	{
@@ -151,6 +165,7 @@ void TerrainShadows::PostPostLoad()
 {
 	ConsoleCommandHook::Install();
 	PapyrusSetGlobalValueHook::Install();
+	ORGTerrainShadows::Reserve();
 }
 
 void TerrainShadows::DataLoaded()
@@ -324,6 +339,15 @@ void TerrainShadows::SetupResources()
 	}
 
 	CompileComputeShaders();
+
+	// The render graph's update, when requested and a heightmap is installed. Each heightmap gets textures of its own size there.
+	// If a heightmap switch fails, EarlyPrepass loads the heightmap again on D3D11.
+	if (ORGTerrainShadows::Requested()) {
+		if (heightmaps.empty())
+			logger::info("[ORG] Terrain Shadows: no heightmap is installed; it stays on D3D11");
+		else
+			ORGTerrainShadows::Get().Setup([] { UnbindShadowHeight(); });
+	}
 }
 
 void TerrainShadows::CompileComputeShaders()
@@ -346,8 +370,9 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 {
 	bool isHeightmapReady = IsHeightMapReady();
 
+	// On the render graph, the shadow height map is not the heightmap's until its first refresh ran there.
 	PerFrame data = {
-		.EnableTerrainShadow = settings.EnableTerrainShadow && isHeightmapReady,
+		.EnableTerrainShadow = settings.EnableTerrainShadow && isHeightmapReady && !ORGTerrainShadows::Get().NeedsRefresh(),
 	};
 
 	if (isHeightmapReady) {
@@ -356,8 +381,10 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 		auto invScale = cachedHeightmap->pos1 - cachedHeightmap->pos0;
 		data.Scale = float3(1.f, 1.f, 1.f) / invScale;
 		// Texel centres lie on terrain vertices anchored at the south-west corner.
-		const float2 halfTexel = { 0.5f / texHeightMap->desc.Width, -0.5f / texHeightMap->desc.Height };
+		const float2 halfTexel = { 0.5f / heightMapWidth, -0.5f / heightMapHeight };
 		data.Offset = float2(-cachedHeightmap->pos0 * float2{ data.Scale.x, data.Scale.y }) + halfTexel;
+		// Both paths make the shadow height map at the heightmap's size.
+		data.UVMax = { 1.f, 1.f };
 		data.ZRange = cachedHeightmap->zRange;
 		const float stepDescent = -0.5f * (shadowUpdateCBData.LightDeltaZ.x + shadowUpdateCBData.LightDeltaZ.y) * (data.ZRange.y - data.ZRange.x);
 		data.ZBlur = stepDescent * zBlurSteps;
@@ -396,6 +423,25 @@ void TerrainShadows::LoadHeightmap()
 			return;
 		}
 
+		const auto& metadata = image.GetMetadata();
+		heightMapWidth = static_cast<uint>(metadata.width);
+		heightMapHeight = static_cast<uint>(metadata.height);
+
+		// The ORG path takes the heightmap when it is on: it makes both textures. D3D11 makes them otherwise, or when it fails.
+		auto& orgShadows = ORGTerrainShadows::Get();
+		if (orgShadows.IsActive()) {
+			UnbindShadowHeight();
+			const auto* mip0 = image.GetImage(0, 0, 0);
+			if (mip0 && orgShadows.SetHeightmap(*mip0)) {
+				texHeightMap.reset();
+				texShadowHeight.reset();
+				cachedHeightmap = &heightmaps[worldspace_name];
+				shadowUpdateIdx = 0;
+				needPrecompute = true;
+				return;
+			}
+		}
+
 		ID3D11Resource* pResource = nullptr;
 		try {
 			DX::ThrowIfFailed(CreateTexture(device,
@@ -430,15 +476,16 @@ void TerrainShadows::Precompute()
 	if (!cachedHeightmap)
 		return;
 
+	// The render graph made its shadow height map with the heightmap.
+	if (ORGTerrainShadows::Get().ShadowHeightSRV()) {
+		needPrecompute = false;
+		return;
+	}
+
 	logger::info("Creating shadow texture...");
 	{
-		if (texShadowHeight) {
-			auto context = globals::d3d::context;
-
-			std::array<ID3D11ShaderResourceView*, 1> srvs = { nullptr };
-			context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-			context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-		}
+		if (texShadowHeight)
+			UnbindShadowHeight();
 
 		texShadowHeight.reset();
 
@@ -465,7 +512,7 @@ void TerrainShadows::Precompute()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		texShadowHeight = std::make_unique<Texture2D>(texDesc, "TerrainShadows::ShadowHeight");
+		texShadowHeight = std::make_unique<Texture2D>(texDesc, std::string(ORGTerrainShadows::kShadowHeightId).c_str());
 		texShadowHeight->CreateSRV(srvDesc);
 		texShadowHeight->CreateUAV(uavDesc);
 	}
@@ -485,14 +532,6 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	constexpr uint updateLength = 128u;
 	constexpr uint logUpdateLength = std::bit_width(128u) - 1;  // integer log2, https://stackoverflow.com/questions/994593/how-to-do-an-integer-log2-in-c
 
-	auto context = globals::d3d::context;
-
-	if (texShadowHeight) {
-		std::array<ID3D11ShaderResourceView*, 1> srvs = { nullptr };
-		context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-		context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-	}
-
 	// Runs before the world accumulator is current, which can still be a freed menu (e.g. local map) accumulator.
 	auto shadowSceneNode = globals::game::smState->shadowSceneNode[0];
 	if (!shadowSceneNode)
@@ -500,11 +539,10 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	auto sunLight = skyrim_cast<RE::NiDirectionalLight*>(shadowSceneNode->GetRuntimeData().sunLight->light.get());
 	if (!sunLight)
 		return false;
-	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Occlusion - Update Shadows");
 
 	/* ---- UPDATE CB ---- */
-	uint width = texHeightMap->desc.Width;
-	uint height = texHeightMap->desc.Height;
+	uint width = heightMapWidth;
+	uint height = heightMapHeight;
 
 	// only update direction at the start of each cycle
 	static uint edgePxCoord;
@@ -553,10 +591,38 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 		shadowUpdateCBData.LightDeltaZ = -(stepLength / invScale.z) * float2{ std::tan(upperAngle), std::tan(lowerAngle) };
 	}
 
-	shadowUpdateCBData.PxSize = { 1.f / texHeightMap->desc.Width, 1.f / texHeightMap->desc.Height };
+	shadowUpdateCBData.PxSize = { 1.f / width, 1.f / height };
 	shadowUpdateCBData.PosRange = { cachedHeightmap->pos0.z, cachedHeightmap->pos1.z };
 	shadowUpdateCBData.ZRange = cachedHeightmap->zRange;
 	shadowUpdateCBData.BlendWeight = a_refreshImmediately ? 1.0f : 0.5f;
+
+	const uint updateCount = a_refreshImmediately ? maxUpdates : 1u;
+	const uint groupCount = abs(shadowUpdateCBData.LightPxDir.x) >= abs(shadowUpdateCBData.LightPxDir.y) ? height : width;
+
+	// This frame's stripes, in order. The render graph runs them at the EarlyPrepass anchor when it holds the heightmap.
+	std::vector<ShadowUpdateCB> dispatches;
+	dispatches.reserve(updateCount);
+	for (uint update = 0; update < updateCount; ++update) {
+		shadowUpdateCBData.StartPxCoord = edgePxCoord + signDir * shadowUpdateIdx * updateLength;
+		dispatches.push_back(shadowUpdateCBData);
+		shadowUpdateIdx = (shadowUpdateIdx + 1) % maxUpdates;
+	}
+	if (ORGTerrainShadows::Get().Submit(dispatches, groupCount, a_refreshImmediately))
+		return true;
+	return DispatchShadowUpdate(dispatches, groupCount);
+}
+
+bool TerrainShadows::DispatchShadowUpdate(std::span<const ShadowUpdateCB> a_dispatches, uint a_groups)
+{
+	if (!texHeightMap || !texShadowHeight)
+		return false;
+
+	auto context = globals::d3d::context;
+
+	// The map is bound as a UAV below.
+	UnbindShadowHeight();
+
+	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Occlusion - Update Shadows");
 
 	/* ---- BACKUP ---- */
 	struct ShaderState
@@ -578,12 +644,9 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	context->CSSetConstantBuffers(0, 1, &newer.buffer);
 	context->CSSetShader(shadowUpdateProgram.get(), nullptr, 0);
 	globals::profiler->BeginPass("TerrainShadows::ShadowUpdate");
-	const uint updateCount = a_refreshImmediately ? maxUpdates : 1u;
-	for (uint update = 0; update < updateCount; ++update) {
-		shadowUpdateCBData.StartPxCoord = edgePxCoord + signDir * shadowUpdateIdx * updateLength;
-		shadowUpdateCB->Update(shadowUpdateCBData);
-		context->Dispatch(abs(shadowUpdateCBData.LightPxDir.x) >= abs(shadowUpdateCBData.LightPxDir.y) ? height : width, 1, 1);
-		shadowUpdateIdx = (shadowUpdateIdx + 1) % maxUpdates;
+	for (const auto& dispatch : a_dispatches) {
+		shadowUpdateCB->Update(dispatch);
+		context->Dispatch(a_groups, 1, 1);
 	}
 	globals::profiler->EndPass();
 
@@ -595,19 +658,27 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	return true;
 }
 
+ID3D11ShaderResourceView* TerrainShadows::GetShadowHeightSRV() const
+{
+	if (auto* srv = ORGTerrainShadows::Get().ShadowHeightSRV())
+		return srv;
+	return texShadowHeight ? texShadowHeight->srv.get() : nullptr;
+}
+
 void TerrainShadows::ReflectionsPrepass()
 {
-	if (texShadowHeight) {
-		auto context = globals::d3d::context;
-
-		std::array<ID3D11ShaderResourceView*, 1> srvs = { texShadowHeight->srv.get() };
-		context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-		context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-	}
+	if (auto srv = GetShadowHeightSRV())
+		BindShadowHeight(srv);
 }
 
 void TerrainShadows::EarlyPrepass()
 {
+	// The heightmap's textures went with the render graph: it is loaded again on the D3D11 path.
+	if (cachedHeightmap && !texHeightMap && !ORGTerrainShadows::Get().ShadowHeightSRV()) {
+		UnbindShadowHeight();
+		cachedHeightmap = nullptr;
+	}
+
 	LoadHeightmap();
 
 	const auto requestedRefreshGeneration = Util::GetCompletedCelestialTransitionGeneration();
@@ -615,18 +686,14 @@ void TerrainShadows::EarlyPrepass()
 	if (!settings.EnableTerrainShadow)
 		return;
 
-	const bool refreshImmediately = needPrecompute || timeJumpRefresh;
+	// The render graph asks for refreshes until one ran with the new heightmap's passes (its graphs switch in a few frames later).
+	const bool refreshImmediately = needPrecompute || timeJumpRefresh || ORGTerrainShadows::Get().NeedsRefresh();
 	if (needPrecompute)
 		Precompute();
 
 	if (UpdateShadow(refreshImmediately) && timeJumpRefresh)
 		handledTimeJumpRefreshGeneration = requestedRefreshGeneration;
 
-	if (texShadowHeight) {
-		auto context = globals::d3d::context;
-
-		std::array<ID3D11ShaderResourceView*, 1> srvs = { texShadowHeight->srv.get() };
-		context->PSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-		context->CSSetShaderResources(60, (uint)srvs.size(), srvs.data());
-	}
+	if (auto srv = GetShadowHeightSRV())
+		BindShadowHeight(srv);
 }

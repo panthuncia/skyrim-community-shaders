@@ -1,9 +1,7 @@
 #pragma once
 
-// The shading field contract (Api::InstallContext::RegisterShadingField): a field of the shading rows (BindlessShading) whose value is an
-// owner's, not the object's property's - captured once per owner at the frame's start (the render thread's, where the CS feature keeps its
-// state) and fanned out to the owner's members, the slots of a published entry class (EntryClassContribution::published). Every other slot's
-// field is zero. FrameValues (Core/Gpu) samples the rest of the row and applies the captured values after it.
+// Shading fields: a shading row field whose value belongs to an owner, such as an actor, rather than to the object's property.
+// It is captured once per owner at the frame's start and copied to the owner's members. Every other slot's field is zero.
 
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
 
@@ -16,18 +14,18 @@
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/ShadingFields.h), which the integrations inside DCLF include for them.
+	// Defined in Core/Extensions/ShadingFields.h.
 	class ShadingFieldCapture;
 
-	/** @brief A field of the shading row an owner's value fills (its bytes are Core's: BindlessShading's layout). */
+	/** @brief A shading row field filled from an owner's value. Core owns the byte layout. */
 	enum class ShadingRowField : std::uint8_t
 	{
-		SkinPerGeometry,  // Advanced Skin's SkinPerGeometry (PS b7): float4
-		LandscapeSeams,   // Per-quad weight, data and borrowed layer descriptors (index + 1; zero: inactive).
+		SkinPerGeometry,  // Advanced Skin's SkinPerGeometry (PS b7), a float4
+		LandscapeSeams,   // per-quad weight, data and borrowed layer descriptors stored as index + 1, zero when inactive
 		Count,
 	};
 
-	/** @brief A registered shading field (RegisterShadingField's result). */
+	/** @brief A registered shading field. */
 	struct ShadingFieldId
 	{
 		std::uint32_t index = ~0u;
@@ -35,9 +33,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief One membership write of a published entry class's slot, in the coordinator's order: the slot's owner group (0: not a member)
-	 * and the entry's identity (incarnations included), or the class's members cleared (clear: the slot ignored). resetValue: a member
-	 * whose value is handed out again even when its owner's did not change.
+	 * @brief One membership change for a slot of a published entry class. A group of 0 means the slot is not a member.
+	 * clear drops all members. resetValue hands the value out again even if the owner's did not change.
 	 */
 	struct ClassMemberChange
 	{
@@ -47,37 +44,30 @@ namespace DCLF::Api
 		bool clear = false;
 	};
 
-	/** @brief What a field's membership is handed: one publication's writes of its members' class, in order. */
+	/** @brief One publication's membership changes, in order. */
 	struct ShadingFieldMembership
 	{
 		std::span<const ClassMemberChange> changes;
 	};
 
-	/** @brief The floats a captured value holds (a field's bytes are at most these). */
+	/** @brief Most floats a captured field value holds. */
 	inline constexpr std::size_t kShadingFieldValueFloats = 8;
 
-	/** @brief One member slot's value of a field, as the frame's start captured it. */
+	/** @brief One member slot's captured value. */
 	struct ShadingFieldValue
 	{
 		std::uint32_t slot = ~0u;
 		ShadingRowField field = ShadingRowField::Count;
 		std::array<float, kShadingFieldValueFloats> value{};
-		std::shared_ptr<const void> resources;  // Descriptors referenced by this value, retained through the frame's GPU completion.
+		std::shared_ptr<const void> resources;  // keeps the value's descriptors alive until the frame's GPU work completes
 	};
 
 	/**
-	 * @brief A shading field contribution: the field, and the entry class whose members carry it (published; its registration may be
-	 * another feature's).
+	 * @brief A shading field and the entry class whose members carry it.
 	 *
-	 * - name: what the registration's failures call it.
-	 * - field: the row's field (one contribution's).
-	 * - members: the entry class whose members are the field's slots (Core zeroes a slot's value when it leaves the class).
-	 *   None: the capture tracks geometry through changedObjects and clears its own retired slots; membership is unused.
-	 * - membership: render thread, at the frame's start as it takes each publication's deltas (FrameView::HandOverAtFrameStart), in the
-	 *   publications' order: the class's membership writes, for the feature's own index of owners (none: a publication without writes).
-	 * - capture: render thread, at the frame's start (FrameDriver, before FrameValues::Kick), in registration order: the members' values
-	 *   (ShadingFieldCapture::Put), what changed since the last capture and every member that joined. A value put is the slot's until the
-	 *   next put, or until the slot leaves the class (Core puts zero then, before the capture's values, in membership order).
+	 * - members: None means the capture tracks geometry itself and clears its own retired slots.
+	 * - membership: render thread at the frame's start, once per publication with changes, in publication order.
+	 * - capture: render thread at the frame's start. A value stays until the next put, or until the slot leaves the class.
 	 */
 	struct ShadingFieldContribution
 	{

@@ -1,5 +1,5 @@
-// SceneGraph: the state graph's hooks, the growth producer and the payload parts' producer (preparation pool; their outcomes on the
-// coordinator lane).
+// SceneGraph: the state graph's hooks, the growth producer and the payload parts' producer.
+// Producers run on the preparation pool and their outcomes on the coordinator lane.
 #include <mutex>
 #include <vector>
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneGraph.h"
@@ -24,13 +24,12 @@ namespace DCLF::Runtime
 			hooks.scheduling = SceneExecutor::Layout;
 			hooks.producerDispatch = { org::async::TaskDispatch::Controlled, org::async::TaskDispatch::Cpu, org::async::TaskDispatch::Controlled, org::async::TaskDispatch::Cpu };  // per domain: coordinator, preparation, scene, streaming
 			static_assert(static_cast<std::size_t>(SceneArtifact::Count) <= org::async::DefaultStateGraphTypes::kArtifactKindCount);
-			// The scene's revisions are its events, in order: never one replaced by a later one.
+			// The scene's revisions are its events, in order, so none is replaced by a later one.
 			hooks.artifactPolicies[static_cast<std::size_t>(SceneArtifact::SceneState)].allowCoalescing = false;
-			// Each growth is its own address (PostGrowth): exact, never replaced by another.
+			// Each growth has its own address and is never replaced.
 			hooks.artifactPolicies[static_cast<std::size_t>(SceneArtifact::BufferVersion)].allowCoalescing = false;
-			// Each payload part version likewise (PostPayloadPart): a part's versions are a chain, each built from the one before.
+			// So does each payload part version, since a part's versions form a chain built one from the next.
 			hooks.artifactPolicies[static_cast<std::size_t>(SceneArtifact::PayloadPart)].allowCoalescing = false;
-			// Each gate is its own request's.
 			hooks.artifactPolicies[static_cast<std::size_t>(SceneArtifact::TextureGate)].allowCoalescing = false;
 			return hooks;
 		}
@@ -42,7 +41,7 @@ namespace DCLF::Runtime
 
 		struct TextureWindowInput
 		{
-			std::function<void()> build;
+			std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> build;
 		};
 		struct TextureWindowBuilt
 		{
@@ -57,7 +56,7 @@ namespace DCLF::Runtime
 		};
 	}
 
-	/** @brief The posting thread's payload part waits (as VersionGrowthPosts'), dropped once finished at its next post. */
+	/** @brief The posting thread's payload part waits, dropped once finished at its next post. */
 	struct SceneGraph::PayloadPartPosts
 	{
 		struct Wait
@@ -69,7 +68,7 @@ namespace DCLF::Runtime
 		std::uint64_t ids = 0;
 	};
 
-	/** @brief The gates that ran, whose addresses go at the next post. */
+	/** @brief Gates that ran, whose addresses are released at the next post. */
 	struct SceneGraph::TextureGates
 	{
 		std::atomic<std::uint64_t> ids{ 0 };
@@ -84,14 +83,14 @@ namespace DCLF::Runtime
 		payloadParts(std::make_unique<PayloadPartPosts>()),
 		textureGates(std::make_unique<TextureGates>())
 	{
-		// A window: the file's read and the texture's creation, which block, on the streaming domain. A failed read still completes: its
-		// gate opens on a texture that reads zero rather than wait for ever.
+		// A window does blocking file reads and texture creation on the streaming domain. A failed read still completes, so its gate opens
+		// on a texture that reads zero instead of waiting forever. A window the render graph uploads is GPU ready once its copy pass was submitted.
 		graph->RegisterTypedProducer<TextureWindowInput, TextureWindowBuilt>(kTextureWindow, SceneExecutor::Streaming.lane, SceneExecutor::Streaming.domain, "DCLF texture window",
 			[](const Graph::ArtifactBuildContext&, std::shared_ptr<const TextureWindowInput> a_input) {
-				a_input->build();
-				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()));
+				auto pending = a_input->build();
+				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()), std::move(pending));
 			});
-		// A gate runs its request when its requirement, the base window, is ready: the wake is the graph's.
+		// A gate runs its request once the base window is ready. The graph does the wake.
 		graph->RegisterTypedProducer<TextureGateInput, TextureGateRan>(kTextureGate, SceneExecutor::Preparation.lane, SceneExecutor::Preparation.domain, "DCLF texture gate",
 			[gates = textureGates.get()](const Graph::ArtifactBuildContext& a_context, std::shared_ptr<const TextureGateInput> a_input) {
 				a_input->run();
@@ -101,10 +100,10 @@ namespace DCLF::Runtime
 				}
 				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureGateRan>()));
 			});
-		// Growth: the request's work on the preparation pool, ready with its uploads' completion (the graph waits for it).
+		// Growth runs on the preparation pool and is ready once its uploads complete.
 		org::async::RegisterVersionGrowthProducer(*graph, kBufferVersion, SceneExecutor::Preparation.lane, SceneExecutor::Preparation.domain, "DCLF buffer version");
-		// The payload parts: a version built from its predecessor on the preparation pool (BuildVersionedBuffer's predecessor copy), ready
-		// with its copy's and upload's completion; its tag's `built` runs on the producer's thread before it is frozen.
+		// A payload part version is built from its predecessor on the preparation pool, ready once its copy and upload complete.
+		// Its tag's built runs on the producer's thread before it is frozen.
 		org::services::VersionedBufferProducerHooks<org::async::DefaultStateGraphTypes> hooks;
 		hooks.decorate = [](org::services::PublishedBufferVersion& a_version, const org::services::VersionedBufferBuildInput& a_input) {
 			if (const auto* tag = static_cast<const PayloadPartTag*>(a_input.tag.get()); tag && tag->built)
@@ -115,7 +114,7 @@ namespace DCLF::Runtime
 			SceneExecutor::Preparation.domain, "DCLF payload part", std::move(hooks));
 	}
 
-	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_build)
+	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> a_build)
 	{
 		Graph::ArtifactIntent intent;
 		intent.key = Graph::ArtifactKey{ kTextureWindow, a_texture, 0 };
@@ -142,7 +141,7 @@ namespace DCLF::Runtime
 		Graph::ArtifactIntent intent;
 		intent.key = Graph::ArtifactKey{ kTextureGate, textureGates->ids.fetch_add(1, std::memory_order_relaxed) + 1, 0 };
 		intent.desiredRevision = 1;
-		intent.requirements.push_back(org::async::ReadyGateAtLeast(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 }, a_revision));
+		intent.requirements.push_back(org::async::ReadyGateAtLeast(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 }, a_revision, org::async::ArtifactReadiness::GpuReady));
 		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const TextureGateInput>(TextureGateInput{ std::move(a_run) }));
 		intent.requestFingerprint = intent.key.primaryID;
 		return static_cast<bool>(graph->PostRequest(std::move(intent), false));
@@ -162,12 +161,12 @@ namespace DCLF::Runtime
 		intent.key = key;
 		intent.desiredRevision = 1;
 		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const org::services::VersionedBufferBuildInput>(std::move(a_input)));
-		intent.requestFingerprint = key.primaryID;  // an input needs one: each version is its own
+		intent.requestFingerprint = key.primaryID;  // an input needs one, and each version is its own
 		const auto request = graph->PostRequest(std::move(intent), false);
 		if (!request)
 			return false;
 		auto wait = std::make_shared<PayloadPartPosts::Wait>();
-		// The coordinator lane runs exactly one of these, once; the address is released after (nothing else requests it).
+		// The coordinator lane runs exactly one of these, once. Nothing else requests the address, so it is released after.
 		auto finish = [graph = graph.get(), key, done = std::move(a_done), weak = std::weak_ptr<PayloadPartPosts::Wait>(wait)](
 						  std::shared_ptr<const org::services::PublishedBufferVersion> a_version, std::string a_error) {
 			done(std::move(a_version), std::move(a_error));

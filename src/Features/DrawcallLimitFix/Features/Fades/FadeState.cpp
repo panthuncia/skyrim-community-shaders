@@ -1,5 +1,5 @@
-// FadeState.h's port of the fade roots' OnVisible (pure, any thread), the render thread's node reads and writes, frame sample and
-// frame start capture (the fade test's eye and height test), and the parity check that runs the engine's own functions on a copy of a node.
+// The CPU port of the fade OnVisible. The port itself is pure and runs on any thread.
+// Node reads and writes, frame sampling and the parity check are render thread only.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeState.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
@@ -19,19 +19,17 @@ namespace DCLF::FadeState
 		using Engine::At;
 		using Engine::Global;
 
-		// Engine::Offsets (Address Library ids) (skyrim-engine-notes.md, "Fade state").
 		constexpr Engine::Offset kTreeRtti{ { 414565 }, { 527636 } };  // NiRTTI of BSTreeNode
 		constexpr Engine::Offset kLogf{ { 109730 }, { 102274 } };      // the engine's CRT logf (its jmp [IAT] thunk)
 		constexpr Engine::Offset kPowf{ { 109717 }, { 102262 } };      // ... and powf
 		using Engine::kOnVisibleSlot;
-		// The main camera: the world scene graph's (+0x128), carried by the list processes; FUN_1406452c0 (Main::Draw's camera
-		// setup, before BeginSceneFrame) sets the tree height base from it.
+		// The world scene graph's main camera. The camera setup in Main::Draw takes the tree height base from it.
 		constexpr std::size_t kSceneGraphCamera = 0x128;
 		constexpr std::size_t kCameraLodAdjust = 0x184;
 
-		// Render thread: BeginFrame's capture.
-		std::array<float, 4> fadeEye{};  // FadeEye, captured in BeginFrame
-		std::array<float, 2> treeHeight{ 0.0f, std::numeric_limits<float>::infinity() };  // TreeHeightTest, captured in BeginFrame
+		// Render thread, captured in BeginFrame.
+		std::array<float, 4> fadeEye{};
+		std::array<float, 2> treeHeight{ 0.0f, std::numeric_limits<float>::infinity() };
 
 		/** @brief MINSS a, b: a when a < b, else b (b when either is NaN). */
 		float MinSS(float a_a, float a_b) { return a_a < a_b ? a_a : a_b; }
@@ -42,7 +40,7 @@ namespace DCLF::FadeState
 
 		std::uint32_t TypeOf(const FadeNodeState& a_state) { return (a_state.levels >> 8) & 0xFu; }
 
-		/** @brief The fade frame counter's distance from the last visible frame, as the engine subtracts it (32-bit). */
+		/** @brief Frames since last visible, with the engine's 32-bit wraparound. */
 		std::int32_t SinceVisible(const FadeNodeState& a_state, const FadeFrame& a_frame)
 		{
 			return static_cast<std::int32_t>(static_cast<std::uint32_t>(a_frame.counter) - static_cast<std::uint32_t>(a_state.lastVisible));
@@ -327,7 +325,6 @@ namespace DCLF::FadeState
 		frame.amountSnapAbove = Global<float>(Features::Fades::Address::kFadeAmountSnapAbove);
 		frame.amountSnapOffset = Global<float>(Features::Fades::Address::kFadeAmountSnapOffset);
 		frame.snapRadiusLimit = Global<float>(Features::Fades::Address::kFadeSnapRadiusLimit);
-		// BSTreeNode::OnVisible's height test as the list processes have it this frame (+infinity: off).
 		frame.treeHeightBase = treeHeight[0];
 		frame.treeHeightLimit = treeHeight[1];
 		for (std::uint32_t type = 0; type < 16; ++type)
@@ -339,12 +336,10 @@ namespace DCLF::FadeState
 	{
 		const auto* sceneGraph = Global<const std::byte*>(Engine::Address::kWorldSceneGraph);
 		const auto* camera = sceneGraph ? At<const RE::NiCamera*>(sceneGraph, kSceneGraphCamera) : nullptr;
-		// The fade test's camera.
 		fadeEye = {};
 		if (camera)
 			fadeEye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, At<float>(camera, kCameraLodAdjust) };
-		// BSTreeNode::OnVisible's height test as the list processes have it: their +0x121 is 0 (only the constructors write it;
-		// skyrim-engine-notes.md, "the height-test byte"), the base is the camera height (FUN_1406452c0), the switch and limit globals.
+		// Match the list processes' height test. Their +0x121 byte is only written by constructors, so it is 0.
 		const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 		auto** processes = Global<RE::NiCullingProcess**>(Engine::Address::kListProcesses);
 		const bool heightTest = processes && count && processes[0] && At<std::uint8_t>(processes[0], Features::Fades::Address::kProcessTreeHeightTest) &&
@@ -443,10 +438,9 @@ namespace DCLF::FadeState
 		const std::uint32_t objectFlags = At<std::uint32_t>(&a_node, 0xF4);
 		row.bits |= ((objectFlags & (1u << 11)) ? kFadeRootAlwaysDraw : 0u) | ((objectFlags & (1u << 12)) ? kFadeRootPreprocessed : 0u) |
 		            ((objectFlags & (1u << 20)) ? kFadeRootPreprocessHidden : 0u);
-		// FUN_14147a430's scale, with the engine's own CRT, in its order.
+		// The LOD step's scale. Uses the engine's own CRT logf and powf, in its order, to match bit for bit.
 		row.lodScale = 1.0f;
 		if (flags109 & 2) {
-			// The globals as the frame captured them (FrameGlobals: 0x2032e40, 0x2032e54, 0x2032e44).
 			const auto& g = FrameGlobals::Current();
 			const float exponent = reinterpret_cast<Logf>(base + kLogf)(row.radius / g.lodRadiusBase) * g.lodExponentScale;
 			row.lodScale = reinterpret_cast<Powf>(base + kPowf)(g.lodPowBase, exponent);
@@ -487,8 +481,7 @@ namespace DCLF::FadeState
 		const float centre[3] = { a_node.worldBound.center.x, a_node.worldBound.center.y, a_node.worldBound.center.z };
 		if (plan == kFadeRootTree && centre[2] - frame.treeHeightBase > frame.treeHeightLimit)
 			return;
-		// The engine's functions on a copy: they read and write only the node (the LOD step's type test reads its vtable,
-		// which the copy keeps) and the globals.
+		// The engine functions touch only the node and globals, so they can run on a copy. The copy keeps the vtable they test.
 		const std::size_t size = NodeBytes(plan);
 		alignas(16) std::byte scratch[kMaxNodeBytes];
 		std::memcpy(scratch, &a_node, size);
@@ -501,7 +494,7 @@ namespace DCLF::FadeState
 				reinterpret_cast<LodStepFn>(base + Engine::Address::kLodLevelUpdate)(node, distance);
 				At<std::int32_t>(node, 0x13C) = frame.counter;
 			}
-			// BSFadeNode::OnVisible's body (0x141479f50); its type-6 branch is inline in the engine, so the port's own.
+			// BSFadeNode::OnVisible's body. Its type-6 branch is inlined in the engine, so the port's version is used.
 			const bool settled = !frame.fadesOn || ((At<std::uint32_t>(node, 0xF4) & kFadeFlagSettled) && UnorderedEqual(1.0f, At<float>(node, 0x100)) &&
 																   UnorderedEqual(1.0f, At<float>(node, 0x130)));
 			if (!settled) {

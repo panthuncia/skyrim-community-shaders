@@ -1,6 +1,6 @@
 #pragma once
 
-// The integrations' status lines (Api::Feature::status): whether the CS feature an integration supports is loaded and switched on.
+// The integrations' status lines: whether the CS feature an integration supports is loaded and switched on.
 
 #include "Feature.h"
 #include "State.h"

@@ -19,13 +19,12 @@ cbuffer PortalBatchConstants : register(b0)
 	uint Elements;
 	uint SumsBase;
 	uint ParentBase;
-	// The depth latch (BuildDrawsLatch in this frame slot), whose portalProgramsIndex names the frame's programs when ProgramsIndex
-	// is 0. A context atlas batch binds its publication directly.
+	// The depth latch, whose portalProgramsIndex names the frame's programs when ProgramsIndex is 0. A context atlas batch binds its publication directly.
 	uint LatchIndex;
 	uint LatchOffset;
-	// The portal bench's auxiliary table for an experimental evaluator (PortalEvaluators.hlsli); 0 in production.
+	// The portal bench's auxiliary table, 0 in production.
 	uint AuxIndex;
-	uint TraceFrame;  // CS_DCLF_PORTAL_TRACE: the scene frame the pass prepared for (its low byte goes in the trace)
+	uint TraceFrame;  // CS_DCLF_PORTAL_TRACE, the scene frame the pass prepared for
 	uint Padding;
 }
 
@@ -80,7 +79,7 @@ int QueryVerdict(PortalQuery query, uint bucket)
 		results[query.Destination] = uint2(query.Generation, query.Program);
 		return;
 	}
-	// Programs past the adopted bucket capacity (a growth not yet adopted) are evaluated here, unbatched, with the same verdict.
+	// Programs past the adopted bucket capacity, from a growth not yet adopted, are evaluated here unbatched.
 	if (query.Program >= BucketCount) {
 		results[query.Destination] = uint2(query.Generation, asuint(QueryVerdict(query, query.Program)));
 		return;
@@ -187,9 +186,8 @@ groupshared uint2 ScanValues[256];
 	results[query.Destination] = uint2(query.Generation, asuint(QueryVerdict(query, task.Program)));
 }
 
-// One thread per query, no batching: the verdict against the query's own program (the portal bench's inline variants; Count's
-// past-capacity path is the same evaluation). DCLF_PORTAL_FLOOR writes the program word as the verdict without evaluating it: the
-// dispatch's and the queries' memory cost alone.
+// One thread per query against its own program, for the portal bench's inline variants. DCLF_PORTAL_FLOOR skips evaluation to
+// measure memory cost alone.
 [numthreads(64, 1, 1)] void Inline(uint3 id : SV_DispatchThreadID)
 {
 	if ((id.x + id.y * (64u * 65535u)) >= QueryCount)
@@ -206,7 +204,7 @@ groupshared uint2 ScanValues[256];
 	}
 	results[query.Destination] = uint2(query.Generation, asuint(QueryVerdict(query, query.Program)));
 #	ifdef DCLF_PORTAL_TRACE
-	// The trace (PortalPrograms.hlsli), by query: an inline batch's task buffer holds it (CS_DCLF_PORTAL_TRACE).
+	// The trace goes in an inline batch's task buffer.
 	RWStructuredBuffer<uint4> trace = ResourceDescriptorHeap[TasksIndex];
 	trace[(id.x + id.y * (64u * 65535u))] = uint4(PortalTrace.x | (TraceFrame << 24), PortalTrace.yzw);
 #	endif

@@ -1,7 +1,6 @@
-// Improved Camera, an SKSE plugin (not a CS feature). In first person it hides the player's head and arms, and the weapons on the back,
-// right after the shadow maps are drawn, so the shadows keep the whole body. It does that by shrinking those nodes to almost nothing.
-// DCLF samples the frame's rows once, at the frame's start, so it names the player's third-person root as a late pose (Api/LatePoses.h):
-// the views drawn after the shadows then leave the hidden parts out too.
+// Improved Camera, an SKSE plugin. In first person it hides the player's head, arms and back weapons right after the shadow maps,
+// by shrinking those nodes, so shadows keep the whole body. DCLF samples rows once at the frame's start,
+// so it names the player's third-person root as a late pose, and views drawn after the shadows leave the hidden parts out too.
 
 #include "Features/DrawcallLimitFix/Integrations/ImprovedCamera/ImprovedCamera.h"
 
@@ -20,7 +19,7 @@ namespace DCLF::Integrations::ImprovedCamera
 			return loaded;
 		}
 
-		// Render thread: the player's third-person root while the camera is in first person (Improved Camera hides parts of it then).
+		// Render thread. The player's third-person root while the camera is in first person.
 		const void* Root()
 		{
 			const auto& value = SwitchValue(latePoseSwitch);
@@ -33,7 +32,7 @@ namespace DCLF::Integrations::ImprovedCamera
 			return player->Get3D(false);
 		}
 
-		// Any thread: whether the plugin is loaded and the late pose is looked for.
+		// Any thread. Whether the plugin is loaded, so the late pose is looked for.
 		std::string Status()
 		{
 			const auto& value = SwitchValue(latePoseSwitch);

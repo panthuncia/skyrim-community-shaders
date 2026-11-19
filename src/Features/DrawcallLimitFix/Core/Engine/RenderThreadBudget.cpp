@@ -1,4 +1,4 @@
-// RenderThreadBudget: per-frame render-thread time by bucket and hook site, and its report line. Render thread only.
+// Per-frame render-thread time by bucket and hook site, and its report line. Render thread only.
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -36,7 +36,7 @@ namespace DCLF
 	RenderThreadBudget::Hook::Hook(Site a_site)
 	{
 		auto& b = Get();
-		// The render thread is Main::Draw's: a load screen's Present runs on another thread, which is not the frame's.
+		// A load screen's Present runs on another thread, which is not the frame's.
 		if (a_site == Site::SceneFrame)
 			b.renderThread = ::GetCurrentThreadId();
 		if (!b.OnRenderThread())
@@ -95,7 +95,7 @@ namespace DCLF
 			b.hookPartsUs += us;
 			return;
 		}
-		// Outside any hook: its own time, not a part of one.
+		// Outside any hook, so it is its own time.
 		b.frameUs += us;
 		b.totalUs += us;
 	}
