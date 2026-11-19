@@ -24,6 +24,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "ORGPostEffect.h"
 
 #	include "Features/LinearLighting.h"
+#	include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #	include "RenderGraph/Engine/TonemapAnchor.h"
 #	include "Globals.h"
 #	include "RenderGraph/FrameStaging.h"
@@ -1134,7 +1135,10 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 
 	s.order = std::move(order);
 	s.linear = linear;
-	s.readsMainCopy = !single && (a_refraction || a_targets.input == mainCopyTarget);
+	// CS's ImageSpace steps keep the world scene in kMAIN, so the engine's kMAIN_COPY input or a refraction does not move it.
+	// kMAIN_COPY then holds an older copy of the scene at best, from before the volumetric composite and the upscale.
+	const bool sceneInMain = RenderGraph::Engine::ImageSpace::SceneInMain();
+	s.readsMainCopy = !single && !sceneInMain && (a_refraction || a_targets.input == mainCopyTarget);
 	s.colorGraded = colorGraded;
 	s.exposureResolved = exposureResolved;
 	s.ready = true;

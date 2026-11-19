@@ -23,6 +23,7 @@
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
 #include "Utils/ColorSpace.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Vram/DxvkMemory.h"
 
@@ -817,6 +818,9 @@ bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const
 {
 	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
 	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
+	// When CS's ImageSpace steps draw the world chain, the scene stays in kMAIN: their refraction copies back into it.
+	if (RenderGraph::Engine::ImageSpace::SceneInMain())
+		return false;
 	return isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
 }
 
