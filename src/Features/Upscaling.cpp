@@ -2188,6 +2188,9 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	if (hdrLoaded)
 		globals::features::hdrDisplay.RestoreFramebuffer();
 
+	// kFRAMEBUFFER holds the finished scene, before the UI: the render graph's screenshot copy takes it here.
+	globals::features::screenshotFeature.SnapshotCleanSceneOnGraph();
+
 	if (windowUsable && upscaling.IsFrameGenerationActive()) {
 		const auto& hdr = globals::features::hdrDisplay;
 		const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();

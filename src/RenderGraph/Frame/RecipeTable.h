@@ -278,7 +278,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
 				Placed(Anchor::ImageSpace), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
-				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
+				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless", "cs.screenshot.clean" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
 		// UI, in every frame kind: screen blood, menu scenes, Scaleform displays, clears at three places, the present's clients, overlay and capture.
 		// Ends at a point just before the present, or before HDR output, which keeps its own ticket.
 		{ .id = StageId::Ui,
