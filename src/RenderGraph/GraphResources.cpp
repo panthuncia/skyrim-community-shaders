@@ -942,6 +942,11 @@ namespace GraphResources
 		return true;
 	}
 
+	bool Texture2D::ResizeTo(const Extent& a_extent)
+	{
+		return a_extent[2] == 1 && Resize(a_extent[0], a_extent[1]);
+	}
+
 	void Texture2D::SetExtent(const Extent& a_extent)
 	{
 		desc.Width = a_extent[0];
@@ -972,6 +977,11 @@ namespace GraphResources
 		a_out.bindFlags = desc.BindFlags;
 		a_out.miscFlags = desc.MiscFlags;
 		return true;
+	}
+
+	bool Texture3D::ResizeTo(const Extent& a_extent)
+	{
+		return Resize(a_extent[0], a_extent[1], a_extent[2]);
 	}
 
 	void Texture3D::SetExtent(const Extent& a_extent)
@@ -1298,9 +1308,11 @@ namespace GraphResources
 	Extent Texture2D::CurrentExtent() const { return { desc.Width, desc.Height, 1u }; }
 	bool Texture2D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
 	void Texture2D::SetExtent(const Extent&) {}
+	bool Texture2D::ResizeTo(const Extent&) { return false; }
 	Extent Texture3D::CurrentExtent() const { return { desc.Width, desc.Height, desc.Depth }; }
 	bool Texture3D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
 	void Texture3D::SetExtent(const Extent&) {}
+	bool Texture3D::ResizeTo(const Extent&) { return false; }
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
 	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }
 	void Resource::BumpResizeGeneration(std::string_view) {}

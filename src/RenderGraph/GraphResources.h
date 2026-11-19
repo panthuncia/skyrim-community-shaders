@@ -208,6 +208,10 @@ namespace GraphResources
 		/** @brief The texture's current extent; zeros for a buffer. Render thread. */
 		virtual Extent CurrentExtent() const { return {}; }
 
+		/** @brief Texture2D::Resize or Texture3D::Resize at a_extent, for a holder of the base, such as a taker of size wishes
+		*  serving one that is not Preparable. Only at a frame boundary. False for a buffer or an unchanged size. */
+		virtual bool ResizeTo(const Extent&) { return false; }
+
 		/** @brief Whether Prepare makes a version at a_next: a versioned texture, live, whose shape class holds there
 		*  (format, mip count, slice count). False means today's path: Resize at a frame boundary, a new slot and a build. Any thread. */
 		bool Preparable(const Extent& a_next) const;
@@ -319,6 +323,7 @@ namespace GraphResources
 		void RequestSize(UINT a_width, UINT a_height);
 
 		Extent CurrentExtent() const override;
+		bool ResizeTo(const Extent& a_extent) override;
 
 	protected:
 		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
@@ -348,6 +353,7 @@ namespace GraphResources
 		void RequestSize(UINT a_width, UINT a_height, UINT a_depth);
 
 		Extent CurrentExtent() const override;
+		bool ResizeTo(const Extent& a_extent) override;
 
 	protected:
 		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
