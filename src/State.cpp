@@ -181,8 +181,6 @@ void State::OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap)
 	if (globals::features::volumetricShadows.loaded)
 		globals::features::volumetricShadows.CopyShadowLightData(a_shadowMap);
 	globals::deferred->CaptureDirectionalShadowMap(a_shadowMap);
-	if (globals::features::exponentialHeightFog.loaded)
-		globals::features::exponentialHeightFog.CaptureDirectionalShadowMap(a_shadowMap);
 	if (globals::features::skylighting.loaded)
 		globals::features::skylighting.CaptureShadowCascadeSRV(a_shadowMap);
 }

@@ -44,9 +44,6 @@ public:
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 
-	/** @brief Keeps a_shadowMap, the directional shadow map (the shadow mask's t4), for the render-graph fog path. */
-	void CaptureDirectionalShadowMap(ID3D11ShaderResourceView* a_shadowMap);
-
 	struct alignas(16) Settings
 	{
 		uint enabled = 0;
@@ -197,8 +194,6 @@ private:
 	std::unique_ptr<ConstantBuffer> volumetricFogCB;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
 	winrt::com_ptr<ID3D11SamplerState> shadowSampler;
-	// The render-graph path's directional shadow map (CaptureDirectionalShadowMap). The D3D11 path reads Deferred::GetDirectionalShadowMap.
-	winrt::com_ptr<ID3D11ShaderResourceView> directionalShadowMap;
 	ID3D11ComputeShader* materialSetupCS = nullptr;
 	ID3D11ComputeShader* farMaterialSetupCS = nullptr;
 	ID3D11ComputeShader* conservativeDepthCS = nullptr;
