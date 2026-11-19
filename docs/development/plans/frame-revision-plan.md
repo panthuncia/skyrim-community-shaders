@@ -335,6 +335,11 @@ recording for other named versions is another cache entry.
 
 **Size.** Small. Two agents in parallel (OMS and CS are disjoint), or one. Parallel with step 3.
 
+**As built (2026-11-19, `org-native/rev-step2`).** OMS `rev-step2-named-versions`: `NamedVersions::Textures`, `FindTexture`,
+`Names(const VersionedTexture&)`, `AdoptAll` over textures, `OMS/ComposedVersions.h`, test `ORGNamedVersionsTests`. CS:
+`FrameAnchors.cpp` `RecordVersions`, `SegmentHostData::versions`, `RequestDeclared(..., a_versions)`. Where it differs from the
+scope above, see section 9, "Decided by the agent (step 2)".
+
 ---
 
 ### Step 3. ORG: atomic multi-epoch staged attach, and the closure query
@@ -1105,6 +1110,30 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   end only. Native swap chain replacement runs on the submission thread, so its adoptions are not counted. The back buffer's
   per-present version (`NativeDevice.cpp:NextGraphVersion`) is on the render thread and counts. Physical Sky's handle tables and
   `RunReadback` adopt no versions.
+
+**Decided by the agent (step 2, 2026-11-19), to confirm:**
+- **Misses count only the set's own kind.** A buffer set counts `Find` misses, a texture set `FindTexture` misses. Asking for
+  the other kind is not a miss. DCLF's named parity check (`NamedParity.cpp:CheckNamedResolves`) warns on any growth of a buffer
+  set's `Misses()`, and DCLF's recordings resolve CS textures through the same set, so counting those would raise false warnings.
+- **Texture sets hold textures weakly**, like buffer sets. `AdoptAll` skips an expired one. `Textures` throws on a null texture
+  or version and on a texture named twice. It takes `NamedVersions::TextureEntry` pairs (texture, version).
+- **`ComposedVersions` is a constructor** over up to four `IResourceVersions` (null parts skipped, a fifth throws). It gets its
+  own serial from the sequence `NamedVersions` uses (`src/VersionsSerial.h`), so one cache key space covers both. The lane makes
+  one per revision, so recordings of a revision share it.
+- **The CS argument carries a serial.** `IResourceVersions` has no serial and ORG stays untouched, so `RequestDeclared` takes
+  `RecordVersions { versions, serial }`. Versions without a serial, or a serial without versions, is fatal. Serial 0 is "current
+  versions", today's only caller.
+- **The ORG test moved to OMS, at resolver level.** Step 3 edits ORG at the same time, so ORG is untouched. `ORGNamedVersionsTests`
+  (WARP) resolves through `VersionedResource::SelectVersion` with host data naming a `Make`d texture version, which is the call a
+  recording's preparation makes: the pending version is selected, then the same one after `AdoptAll`.
+  `EpochRecordingVersionsCurrent` compares version numbers per slot whatever the resource kind, and the buffer case is covered by
+  `OpenRenderGraphPersistentVulkanHostTests`. A texture case there (record against a `Make`d texture, not current, current
+  after `Adopt`) is left for after step 3 merges. OMS tests need a parent project with ORG's targets: a two-line CMake project
+  that adds `extern/OpenRenderGraph` and `extern/ORGModuleServices` with CS's ORG cache settings (BasicTelemetry artifacts off,
+  UIs off), `-DORG_MODULE_SERVICES_BUILD_TESTS=ON -DORG_MODULE_SERVICES_ENABLE_DXC=OFF`, and the worktree's
+  `build/Dev-Fast/vcpkg_installed` (`x64-windows-static-md-release`). ORG needs Vulkan and D3D12 both on.
+- **Since the plan was written.** Frame generation (steps 1-8) and Physical Sky's port added no other segment host data. The only
+  other host data naming versions is DCLF's `EpochRevisionData`, which keeps using its buffer `NamedVersions` directly.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
