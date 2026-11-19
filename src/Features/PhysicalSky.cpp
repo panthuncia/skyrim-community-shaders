@@ -1740,9 +1740,14 @@ void PhysicalSky::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		texApShadow = eastl::make_unique<Texture2D>(texDesc);
-		texApShadow->CreateSRV(srvDesc);
-		texApShadow->CreateUAV(uavDesc);
+		// A graph twin in graph mode (ORGPhysicalSky), else a D3D11 texture.
+		if (auto* twin = ORGPhysicalSky::MakeApShadow(texDesc)) {
+			texApShadow.reset(twin);
+		} else {
+			texApShadow = eastl::make_unique<Texture2D>(texDesc, "PhysicalSky::ApShadow");
+			texApShadow->CreateSRV(srvDesc);
+			texApShadow->CreateUAV(uavDesc);
+		}
 	}
 
 	{
@@ -2260,8 +2265,10 @@ void PhysicalSky::Prepass()
 		}
 
 		GenerateSkyTail();
-		if (!globals::features::viewAtmosphere.IsPrepared())
+		// On the render graph the AP shadow runs at the Prepass anchor, and the AP composite after the graph's deferred composite.
+		if (!globals::features::viewAtmosphere.IsPrepared() && !ORGPhysicalSky::Get().AccumShadow(*this))
 			AccumShadow();
+		ORGPhysicalSky::Get().StageComposite(*this);
 
 		// Volumetric clouds
 		if (renderVolumetricClouds && !globals::features::viewAtmosphere.CompositeEnabled()) {

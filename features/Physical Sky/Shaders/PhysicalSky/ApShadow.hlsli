@@ -12,8 +12,6 @@
 
 namespace AtmosphereShadow
 {
-	Texture2DArray<float4> TexDirectShadows : register(AP_DIRECT_SHADOW_REGISTER);
-
 	struct DirectionalShadowLightData
 	{
 		column_major float4x4 ShadowProj[2];
@@ -21,7 +19,49 @@ namespace AtmosphereShadow
 		float2 EndSplitDistances;
 		float2 StartSplitDistances;
 	};
+
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+	// ORG: the pass lists TexDirectShadows (EXTERN) and ApShadowLight (EXTERN_LATCH). The latch holds the light,
+	// then the light count (0 or 1) and a uint the pass may use.
+	static Texture2DArray<float4> TexDirectShadows = ResourceDescriptorHeap[OrgHandle_TexDirectShadows];
+	static ByteAddressBuffer ShadowLightLatch = ResourceDescriptorHeap[OrgHandle_ApShadowLight];
+	static const uint kShadowLightBytes = 272;
+
+	uint ShadowLightCount() { return ShadowLightLatch.Load(OrgOffset_ApShadowLight + kShadowLightBytes); }
+
+	// The bytes are those D3D11's structured buffer holds: each column_major matrix is four columns in a row.
+	float4x4 LoadColumnMajor(uint a_offset)
+	{
+		const float4x4 columns = float4x4(asfloat(ShadowLightLatch.Load4(a_offset)), asfloat(ShadowLightLatch.Load4(a_offset + 16)),
+			asfloat(ShadowLightLatch.Load4(a_offset + 32)), asfloat(ShadowLightLatch.Load4(a_offset + 48)));
+		return transpose(columns);
+	}
+
+	DirectionalShadowLightData ShadowLight()
+	{
+		const uint base = OrgOffset_ApShadowLight;
+		DirectionalShadowLightData light;
+		light.ShadowProj[0] = LoadColumnMajor(base);
+		light.ShadowProj[1] = LoadColumnMajor(base + 64);
+		light.InvShadowProj[0] = LoadColumnMajor(base + 128);
+		light.InvShadowProj[1] = LoadColumnMajor(base + 192);
+		const float4 splits = asfloat(ShadowLightLatch.Load4(base + 256));
+		light.EndSplitDistances = splits.xy;
+		light.StartSplitDistances = splits.zw;
+		return light;
+	}
+#else
+	Texture2DArray<float4> TexDirectShadows : register(AP_DIRECT_SHADOW_REGISTER);
 	StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t98);
+
+	uint ShadowLightCount()
+	{
+		uint lightCount, lightStride;
+		DirectionalShadowLights.GetDimensions(lightCount, lightStride);
+		return lightCount;
+	}
+	DirectionalShadowLightData ShadowLight() { return DirectionalShadowLights[0]; }
+#endif
 
 	const static uint nStep = 30;
 	const static float rcpNStep = rcp(nStep);
@@ -43,13 +83,12 @@ namespace AtmosphereShadow
 
 	ShadowRayData BuildShadowRay(float3 dir)
 	{
-		uint lightCount, lightStride;
-		DirectionalShadowLights.GetDimensions(lightCount, lightStride);
+		const uint lightCount = ShadowLightCount();
 		uint shadowWidth, shadowHeight, shadowLayers;
 		TexDirectShadows.GetDimensions(shadowWidth, shadowHeight, shadowLayers);
 		DirectionalShadowLightData light = (DirectionalShadowLightData)0;
 		if (lightCount > 0u && shadowWidth > 0u && shadowHeight > 0u && shadowLayers >= 2u)
-			light = DirectionalShadowLights[0];
+			light = ShadowLight();
 		ShadowRayData ray;
 		uint terrainWidth, terrainHeight;
 		TerrainShadows::ShadowHeightTexture.GetDimensions(terrainWidth, terrainHeight);
@@ -75,21 +114,25 @@ namespace AtmosphereShadow
 	/** @brief Sun visibility at a camera-relative position from the cascade shadow map, fading to 1 at the cascade end. */
 	float SampleCascadeShadow(float3 posWorldRel)
 	{
-		uint lightCount, lightStride;
-		DirectionalShadowLights.GetDimensions(lightCount, lightStride);
+		const uint lightCount = ShadowLightCount();
 		uint shadowWidth, shadowHeight, shadowLayers;
 		TexDirectShadows.GetDimensions(shadowWidth, shadowHeight, shadowLayers);
-		[branch] if (lightCount == 0u || shadowWidth == 0u || shadowHeight == 0u || shadowLayers < 2u) return 1.0;
-
-		const DirectionalShadowLightData light = DirectionalShadowLights[0];
-		const float4 clipPos = mul(FrameBuffer::CameraViewProj, float4(posWorldRel, 1));
-		const float shadowMapDepth = SharedData::GetScreenDepth(clipPos.z / clipPos.w);
-		[branch] if (light.EndSplitDistances.y <= 0.0 || shadowMapDepth >= light.EndSplitDistances.y) return 1.0;
-
-		const uint cascadeIndex = shadowMapDepth >= light.EndSplitDistances.x ? 1u : 0u;
-		const float3 positionLS = mul(light.ShadowProj[cascadeIndex], float4(posWorldRel + FrameBuffer::CameraPosAdjust.xyz, 1)).xyz;
-		const float edgeFade = pow(saturate(shadowMapDepth / light.EndSplitDistances.y), 16);
-		return lerp(GatherCascadeShadow(cascadeIndex, positionLS), 1.0, edgeFade);
+		// The work sits inside the tests. An early return behind an || of equality tests miscompiles on AMD RDNA2.
+		float visibility = 1.0;
+		[branch] if (min(lightCount, min(shadowWidth, shadowHeight)) > 0u && shadowLayers >= 2u)
+		{
+			const DirectionalShadowLightData light = ShadowLight();
+			const float4 clipPos = mul(FrameBuffer::CameraViewProj, float4(posWorldRel, 1));
+			const float shadowMapDepth = SharedData::GetScreenDepth(clipPos.z / clipPos.w);
+			[branch] if (light.EndSplitDistances.y > 0.0 && shadowMapDepth < light.EndSplitDistances.y)
+			{
+				const uint cascadeIndex = shadowMapDepth >= light.EndSplitDistances.x ? 1u : 0u;
+				const float3 positionLS = mul(light.ShadowProj[cascadeIndex], float4(posWorldRel + FrameBuffer::CameraPosAdjust.xyz, 1)).xyz;
+				const float edgeFade = pow(saturate(shadowMapDepth / light.EndSplitDistances.y), 16);
+				visibility = lerp(GatherCascadeShadow(cascadeIndex, positionLS), 1.0, edgeFade);
+			}
+		}
+		return visibility;
 	}
 
 	float SampleShadow(float3 posWorldRel, float distance, ShadowRayData ray)

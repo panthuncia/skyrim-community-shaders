@@ -197,8 +197,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
 				{ .foreign = Segment::LightCulling },
 				{ .anchor = Anchor::Prepass,
-					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.screen-space-shadows", "cs.skylighting",
-						"cs.view-atmosphere" },
+					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.physical-sky", "cs.screen-space-shadows",
+						"cs.skylighting", "cs.view-atmosphere" },
 					.whole = true },
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
@@ -220,7 +220,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::DeferredPasses,
 					.clients = { "cs.dyncubemaps", "cs.engine.skeleton.depth-copy@deferred-passes", "cs.org.graphres-selftest", "cs.ssgi", "cs.ssgi.reset", "cs.subsurface" },
 					.whole = true },
-				{ .anchor = Anchor::DeferredComposite, .clients = { "cs.deferred" }, .whole = true },
+				// Physical Sky's aerial perspective right after the composite, which is built without it (ORGPhysicalSky).
+				{ .anchor = Anchor::DeferredComposite, .clients = { "cs.deferred", "cs.physical-sky.composite" }, .whole = true },
 				{ .anchor = Anchor::PostComposite, .clients = { "cs.e11-rays" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.world.scopes" } },
@@ -367,12 +368,13 @@ namespace RenderGraph::Frame::Recipes::Table
 	* @brief Resources a stage reads before the stage that writes them, so it reads the previous frame's contents. Checked by hand.
 	* DCLF's stages are exempt, since their graphs declare the whole binding table their shaders may read.
 	*/
-	// Physical Sky's LUTs: the sky's reflection faces draw in the start stage, before the pre-depth stage makes this frame's LUTs.
-	// D3D11 does the same (the faces render before EarlyPrepass), and the LUTs keep their contents across frames (History/Persistent).
-	inline constexpr std::array<std::string_view, 15> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// Physical Sky's LUTs and AP shadow: the sky's reflection faces draw in the start stage, before the pre-depth and pre-main stages
+	// make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their contents across
+	// frames (History/Persistent).
+	inline constexpr std::array<std::string_view, 16> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
 		"Engine::kMAIN_COPY", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
-		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut" };
+		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow" };
 
 	// What is derived from the table.
 

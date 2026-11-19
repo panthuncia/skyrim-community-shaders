@@ -44,6 +44,8 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
+#	include "Features/PhysicalSky.h"
+#	include "Features/PhysicalSky/ORGPhysicalSky.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
@@ -131,11 +133,13 @@ namespace
 		Handle lightScattering;
 		Handle directionalShadowLights;
 		Handle depth, envIBL, skyIBL, probes, shadowHeights, cloudShadows;
+		Handle physSkyTransmittance, physSkyShadowVolume, physSkyShadowMean;  // with PHYSICAL_SKY
 		Handle lights, lightList, lightGrid, localShadows, localShadowMaps;
 		Handle engineShadowMaps;
 		ShaderBindings::Latch engineShadows;
 	};
-	static_assert(sizeof(ScatteringBlock) == 116);
+	// The whole push block: 32 words.
+	static_assert(sizeof(ScatteringBlock) == 128);
 
 	/** @brief One the client holds or imported, or one another client publishes by name. */
 	struct Source
@@ -158,6 +162,9 @@ namespace
 		kProbes,
 		kShadowHeights,
 		kCloudShadows,
+		kPhysSkyTransmittance,
+		kPhysSkyShadowVolume,
+		kPhysSkyShadowMean,
 		kLights,
 		kLightList,
 		kLightGrid,
@@ -434,6 +441,9 @@ namespace
 					block.probes = input(kProbes);
 					block.shadowHeights = input(kShadowHeights);
 					block.cloudShadows = input(kCloudShadows);
+					block.physSkyTransmittance = input(kPhysSkyTransmittance);
+					block.physSkyShadowVolume = input(kPhysSkyShadowVolume);
+					block.physSkyShadowMean = input(kPhysSkyShadowMean);
 					block.lights = input(kLights);
 					block.lightList = input(kLightList);
 					block.lightGrid = input(kLightGrid);
@@ -691,6 +701,9 @@ namespace
 			scatteringDefines.emplace_back("TERRAIN_SHADOWS");
 		if (globals::features::cloudShadows.loaded)
 			scatteringDefines.emplace_back("CLOUD_SHADOWS");
+		// As the D3D11 build. Its LUT and cloud shadow inputs are Physical Sky's published twins (Prepass).
+		if (globals::features::physicalSky.loaded)
+			scatteringDefines.emplace_back("PHYSICAL_SKY");
 		auto groupDefines = volumeDefines;
 		groupDefines.emplace_back("GROUP_REDUCE");
 
@@ -1016,6 +1029,17 @@ bool ORGExponentialHeightFog::Prepass()
 		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, cloudShadows.OcclusionSRV());
 		if (!shape.inputs[kCloudShadows])
 			return fallback("Cloud Shadows' texture is missing or not published");
+	}
+
+	// The scattering reads Physical Sky's transmittance LUT, and with the clouds on their shadow volume and its mean.
+	auto& physicalSky = globals::features::physicalSky;
+	if (physicalSky.loaded && physicalSky.texTrLut) {
+		shape.inputs[kPhysSkyTransmittance] = Published(ORGPhysicalSky::kTransmittanceLutId, physicalSky.texTrLut->srv.get());
+		if (!shape.inputs[kPhysSkyTransmittance])
+			return fallback("Physical Sky's LUTs are on D3D11");
+		// The shader reads them only with the clouds on (enableVolumetricClouds). They are D3D11's until the clouds are ported.
+		if (physicalSky.VolumetricCloudsEnabled() && (physicalSky.texShadowVolume || physicalSky.texCloudShadowMean))
+			return fallback("Physical Sky's cloud shadows are on D3D11");
 	}
 
 	auto& lightLimitFix = globals::features::lightLimitFix;
