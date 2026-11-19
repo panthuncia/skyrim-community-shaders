@@ -132,8 +132,10 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Frame generation in guest** (2026-11-18, RX 6600, FSR-FG): engages, about 2x driver presents, and stays on through the CS menu,
   the pause menu and a loading screen, in the background and the foreground (`fg` config). Its hudless input has no HUD. FSR-FG drops
   to one presented frame for a moment about twice a second (guest 28 to 36 times a run, plain D3D11 3379). Not looked into.
-- **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
-  sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
+- **Frame generation in native**: DLSS-G and FSR-FG stay off in native until the plan's steps 6 to 8
+  (`plans/native-frame-generation-plan.md`). In place since 2026-11-19 (steps 4 and 5): BasicRHI swap chains a presentation
+  layer may wrap, and `Native::RequestPresentation`, which replaces the swap chain on the submission thread with a torn-down
+  step between destroy and create. HDR's colour space switch goes through it, so it no longer drains the render thread.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):

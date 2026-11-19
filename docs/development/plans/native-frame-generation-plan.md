@@ -457,6 +457,13 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 - Tests: BasicRHI unit tests; `native-quick`, `native-d3d12-quick`, `hdr`, `resize`.
 - Acceptance: no behaviour change with the flag off; unit tests cover the flag.
 - Size: M. NVIDIA: no.
+- Done 2026-11-19 (branch `org-native/fg-presentation`, BasicRHI `org-native/presentation-layer`). The device takes the desc
+  at abi 17 (`createSwapchainFromDesc`); `Caps().presentationLayer` reports the flag. With the flag, Vulkan also leaves
+  `VkPresentIdKHR` out of the present and reports no present wait. `BasicRHIPresentationLayerSmoke` covers both backends:
+  on Vulkan the test executable is the host's Streamline interposer and records every swapchain create and destroy; on
+  D3D12 `StreamlineStubs.cpp` gained a pass-through mode whose native swapchain counts `GetBuffer`. Writing it found a
+  D3D12 bug: swapchain destroy and resize waited for the GPU through `Dx12Device::self`, which is never set, so they never
+  waited (a resize after presents raised the debug layer's corruption exception). Fixed in the same commit.
 
 ### Step 5: `NativePresenter` and presentation replacement on the submission thread
 - Purpose: the native backend of step 2; the tactical form of the change-system rule.
@@ -475,6 +482,12 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
   replacement per change.
 - Risks: the loading-screen thread presenting during a replacement (it takes `presentLock`; the entry must take it too).
 - Size: M. NVIDIA: no.
+- Done 2026-11-19 (branch `org-native/fg-presentation`). `Native::RequestPresentation` and `Native::Presentation()` /
+  `FramePresentation()` (the snapshot `Native::OnFrameBegin` takes in `Frame::Driver::OnBegin`); the entry runs under
+  `presentLock` and logs `[ORG native] presentation replaced (request N): ...`. `SetSwapChainColorSpace` is a request.
+  `FrameGen::NativePresenter` implements the step 2 interface; `FramePresenter.h` is written here (see the open question
+  below). `Hooks.cpp` keeps the queued present with frame generation on in native, and `pacedByCS` reads the frame's
+  presentation. The engine's `SetMaximumFrameLatency` now takes `presentLock`, since a replacement swaps the swap chain.
 
 ### Step 6: FSR-FG on native Vulkan
 - Scope:
@@ -561,6 +574,17 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 5 | One long frame when frame generation is toggled is acceptable. |
 | 6 | Guest moves onto the shared interface in the same effort and loses its fault-teardown retries. Faults are fatal in every mode. |
 | 7 | The tactical swap chain replacement (step 5) lands before the frame-revision system and is migrated in step 9. |
+
+**Steps 4 and 5, decided by the agent, to confirm (2026-11-19).**
+
+| # | Decision | Why |
+|---|---|---|
+| 11 | `FramePresenter.h` is written in step 5 as step 2 gives it (plus default member values and a virtual destructor). Only the native backend exists; `ActivePresenter()` is declared, not defined, and the controller does not use the presenter yet. Step 2 adds `DxvkPresenter`, defines `ActivePresenter()` and moves the controller. | Step 2 was not done when step 5 ran; this keeps step 2's scope whole and avoids a stub definition it would have to delete |
+| 12 | Every native colour space change is a full replacement (destroy, create), with or without frame generation. | One path, the one frame generation needs; the cost is one long frame per HDR toggle |
+| 13 | `Native::SetSwapChainColorSpace` returns whether the output takes HDR10 (cached at the last replacement), not whether the change applied. The `[ORG native] presentation replaced` line reports what was made. | The change is asynchronous now |
+| 14 | No HDR mastering metadata is set at a replacement. | As before in native and in guest (HDR Display: "Do NOT set HDR10 static metadata") |
+| 15 | `PresentationConfig::vsync` does not drive the replacement yet; presents still choose vsync per frame. With a presentation layer on Vulkan a vsync change recreates inside `Present` (`ModeChanged`) without the torn-down step. Step 6 must make a vsync change a replacement while frame generation is on. | Nothing wraps the swap chain before step 6 |
+| 16 | The render thread takes the presentation with a direct read at `Frame::Driver::OnBegin` (`Native::OnFrameBegin`), not `AtNextBegin`. | A read of one published value, no work to defer |
 
 **Added 2026-11-19 from the hard ports.** Decided the same day.
 

@@ -8686,3 +8686,27 @@ On DLL `7443b456d89e`, background runs, one launch each. All seven passed: `d3d1
 - No `FailClients` stop, no consecutive-registration warning and no frame tap error. The `[E]`/`[C]` line kinds are unchanged.
 - Shots match the earlier runs in structure. The CS menu shots differ in the menu's layout. The `taa` and live shots of the resize
   run differ by about 22, probably from saved upscaler settings that changed between the runs. That was not confirmed.
+
+## Presentation replacement (2026-11-19)
+
+Steps 4 and 5 of `plans/native-frame-generation-plan.md`.
+
+- **BasicRHI.** `rhi::SwapchainDesc` and `Device::CreateSwapchain(desc)` take the colour space at create and a `presentationLayer`
+  flag: a swap chain a frame generation layer may wrap through Streamline. With the flag, Vulkan has no `pNext` at create or present
+  and no present mode switch, and a rebuild destroys the old swap chain before it makes the new one. D3D12 takes the images from
+  the proxy swap chain and reads the waitable object again after a resize. D3D12 swap chain destroy and resize never waited for
+  the GPU (`Dx12Device::self` is never set). They do now.
+- **Native.** `Native::RequestPresentation(config, tornDown)` queues an entry on the submission thread after the queued presents.
+  Under `presentLock` it waits for the presents, destroys the swap chain, runs `tornDown`, creates the new swap chain from the
+  desc and publishes the request's serial. The latest request wins, and a failure is fatal. `Native::OnFrameBegin` (in
+  `Frame::Driver::OnBegin`) takes the frame's presentation for the render thread. HDR's colour space switch is such a request,
+  so it no longer drains the submission thread from the render thread. Each change logs `[ORG native] presentation request N`
+  on the render thread and `presentation replaced (request N)` on the submission thread.
+- **Presenter.** `Features/Upscaling/FramePresenter.h` is the plan's step 2 interface. `FrameGen::NativePresenter` is its native
+  backend; the DXVK backend and the controller's use of it are step 2.
+- **Checks** (RX 6600, `DXVK_DEBUG=hang`, label `fgc-final`): `native-quick` and `native-d3d12-quick` passed; `native-vulkan+hdr` and
+  `native-d3d12+hdr` passed with one request and one replacement per toggle (Vulkan 77 and 316 ms, D3D12 80 and 74 ms, on the
+  submission thread); `native-vulkan+menu` passed. `resize` stops at its step 3 on this tree (`ExponentialHeightFog` has no
+  `volumetricGridSizeZ` setting any more); a copy without the fog grid steps (the upscaler switches kept) passed on both
+  backends. `BasicRHIPresentationLayerSmoke` passes on both backends.
+
