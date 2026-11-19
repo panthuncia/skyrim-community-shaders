@@ -31,7 +31,7 @@ namespace org
 * Teardown and Resize release the D3D11 side first, then free the graph resource after D3D11's last use.
 * A same-shape Resize of a versioned texture is a new version. Any other Resize triggers a graph rebuild by itself.
 * New versions are published only at a frame boundary, so during a frame use RequestSize. Everything runs on the render thread,
-* except Prepare and Preparable (any thread).
+* except Prepare and Preparable (any thread). Prepare from a plan never touches the twin.
 */
 namespace GraphResources
 {
@@ -143,6 +143,9 @@ namespace GraphResources
 	/** @brief What adoption needs of an exported twin's prepared version. Opaque outside GraphResources.cpp. */
 	struct PreparedExport;
 
+	/** @brief What Prepare reads of a twin, copied by Resource::PlanPrepare. Opaque outside GraphResources.cpp. */
+	struct PreparePlan;
+
 	/**
 	* @brief A versioned twin's next version, made by Resource::Prepare and not yet adopted.
 	* Make the slot's pending version from resource (VersionedTexture::MakeImage), fill it as contents says, adopt it at a
@@ -222,6 +225,15 @@ namespace GraphResources
 		* An exported twin's version is Contents::Undefined: its D3D11 export, made at adoption, zeroes it before any graph use.
 		*/
 		PreparedVersion Prepare(const Extent& a_next) const;
+
+		/**
+		* @brief Render thread: what Prepare needs to make the version at a_next, copied from the twin. Null when not Preparable.
+		* Prepare(plan) then never touches the twin, so a twin destroyed meanwhile is no hazard.
+		*/
+		std::shared_ptr<const PreparePlan> PlanPrepare(const Extent& a_next) const;
+
+		/** @brief Prepare from a plan, on any thread, without the twin. Throws as Prepare does. */
+		static PreparedVersion Prepare(const PreparePlan& a_plan);
 
 		/**
 		* @brief Render thread, at a frame boundary, after the slot adopted a_prepared's version. Makes the D3D11 export and views

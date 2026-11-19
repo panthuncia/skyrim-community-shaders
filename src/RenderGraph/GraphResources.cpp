@@ -137,10 +137,13 @@ namespace GraphResources
 
 		/** @brief A graph-only texture. Transient ones are placed by the graph, others are made now. */
 		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
-			std::optional<std::uint64_t> a_pool = std::nullopt)
+			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false)
 		{
 			auto desc = Describe(a_shape, false);
 			desc.allowAlias = a_aliasable;
+			// The uploader zero-fills a version on its copy queue, which only a concurrent texture allows.
+			if (a_concurrent)
+				desc.queueSharing = rhi::QueueSharing::Concurrent;
 			if (a_aliasable)
 				desc.aliasingPoolID = a_pool;
 			auto texture = a_aliasable ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
@@ -762,31 +765,61 @@ namespace GraphResources
 		return options.versioned && !Aliasable() && slot && graph && (!Exported() || d3d11) && ShapeAt(a_next, shape);
 	}
 
+	/** @brief What Prepare reads of a twin, copied on the render thread. */
+	struct PreparePlan
+	{
+		std::shared_ptr<org::VersionedTexture> slot;
+		std::string name;
+		ExportDesc shape{};
+		std::uint32_t layout = 0;
+		bool exported = false;
+		Lifetime lifetime = Lifetime::Transient;
+		Extent extent{};
+		const void* twin = nullptr;
+	};
+
+	std::shared_ptr<const PreparePlan> Resource::PlanPrepare(const Extent& a_next) const
+	{
+		auto plan = std::make_shared<PreparePlan>();
+		// Only a twin's own adoption changes what is read here, so the lock is held briefly and never while memory is made.
+		std::shared_lock lock(RegisterMutex());
+		if (!options.versioned || Aliasable() || !slot || !graph || (Exported() && !d3d11) || !ShapeAt(a_next, plan->shape))
+			return nullptr;
+		plan->slot = slot;
+		plan->name = name;
+		plan->layout = exportLayout;
+		plan->exported = Exported();
+		plan->lifetime = options.lifetime;
+		plan->extent = a_next;
+		plan->twin = this;
+		return plan;
+	}
+
 	PreparedVersion Resource::Prepare(const Extent& a_next) const
 	{
+		const auto plan = PlanPrepare(a_next);
+		return plan ? Prepare(*plan) : PreparedVersion{};
+	}
+
+	PreparedVersion Resource::Prepare(const PreparePlan& a_plan)
+	{
 		ZoneScopedN("CS.Frame.Revision.Prepare");
-		ExportDesc shape{};
+		const auto& name = a_plan.name;
+		const auto& a_next = a_plan.extent;
 		PreparedVersion prepared;
-		std::uint32_t layout = 0;
-		{
-			// Only a twin's own adoption changes what is read here, so the lock is held briefly and never while memory is made.
-			std::shared_lock lock(RegisterMutex());
-			if (!options.versioned || Aliasable() || !slot || !graph || (Exported() && !d3d11) || !ShapeAt(a_next, shape))
-				return {};
-			prepared.slot = slot;
-			layout = exportLayout;
-		}
+		prepared.slot = a_plan.slot;
 		prepared.extent = a_next;
-		prepared.twin = this;
+		prepared.twin = a_plan.twin;
 		// An exported version is zeroed by its D3D11 wrap at adoption, before any graph use, so nothing may fill it before.
-		prepared.contents = !Exported() && options.lifetime == Lifetime::History ? Contents::Zero : Contents::Undefined;
+		prepared.contents = !a_plan.exported && a_plan.lifetime == Lifetime::History ? Contents::Zero : Contents::Undefined;
 		const auto failure = [&](std::string_view a_why) {
 			return std::runtime_error(fmt::format("{}: no version at {}x{}x{}: {}", name, a_next[0], a_next[1], a_next[2], a_why));
 		};
-		const Shape next = TwinShapeOf(shape);
-		if (!Exported()) {
+		const Shape next = TwinShapeOf(a_plan.shape);
+		if (!a_plan.exported) {
 			try {
-				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(CreateGraphTexture(next, name, false));
+				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
+					CreateGraphTexture(next, name, false, std::nullopt, prepared.contents == Contents::Zero));
 			} catch (const std::exception& e) {
 				throw failure(e.what());
 			}
@@ -794,6 +827,7 @@ namespace GraphResources
 				throw failure("the graph texture could not be made");
 			return prepared;
 		}
+		const std::uint32_t layout = a_plan.layout;
 		TwinExportImage made;
 		try {
 			made = MakeExportImage(TwinExportDescOf(next), name);
@@ -1303,6 +1337,10 @@ namespace GraphResources
 	bool Resource::ShapeAt(const Extent&, ExportDesc&) const { return false; }
 	bool Resource::Preparable(const Extent&) const { return false; }
 	PreparedVersion Resource::Prepare(const Extent&) const { return {}; }
+	struct PreparePlan
+	{};
+	std::shared_ptr<const PreparePlan> Resource::PlanPrepare(const Extent&) const { return nullptr; }
+	PreparedVersion Resource::Prepare(const PreparePlan&) { return {}; }
 	void Resource::AdoptPrepared(const PreparedVersion&) {}
 	void Resource::SetSizeWishHook(SizeWishHook) {}
 	Extent Texture2D::CurrentExtent() const { return { desc.Width, desc.Height, 1u }; }
