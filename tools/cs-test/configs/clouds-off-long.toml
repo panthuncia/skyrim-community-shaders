@@ -1,6 +1,5 @@
-# As clouds-long with the clouds left off: the baseline for comparing modes at the same frame.
-# 900 frames later, exit. The saved settings keep the clouds off. Compose it: guest+clouds, native-vulkan+clouds,
-# native-d3d12+clouds, d3d11+clouds.
+# As clouds-long with the clouds left off: the baseline for comparing modes at the same frames.
+# Compose it: guest+clouds-off-long, d3d11+clouds-off-long.
 extends = ["base"]
 
 [run]

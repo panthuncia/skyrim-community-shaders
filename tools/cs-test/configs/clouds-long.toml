@@ -1,5 +1,5 @@
 # As clouds, with the late shot 6000 frames later: plain D3D11 compiles the 47 cloud programs with FXC first.
-# native-d3d12+clouds, d3d11+clouds.
+# Compose it: guest+clouds-long, native-vulkan+clouds-long, native-d3d12+clouds-long, d3d11+clouds-long.
 extends = ["base"]
 
 [run]
