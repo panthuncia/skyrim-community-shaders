@@ -80,8 +80,10 @@ namespace
 		s.Enabled = option != 0;
 
 		// Custom keeps the current values, so it re-enables without losing tuning.
-		if (option == 0 || option - 1 >= kSSGIPresets.size())
+		if (option == 0 || option - 1 >= kSSGIPresets.size()) {
+			globals::features::screenSpaceGI.SettingsWritten("native menu");
 			return;
+		}
 
 		const auto& preset = kSSGIPresets[option - 1];
 		s.NumSlices = preset.numSlices;
@@ -91,6 +93,7 @@ namespace
 		s.EnableBlur = preset.enableBlur;
 		s.EnableGI = preset.enableGI;
 		globals::features::screenSpaceGI.recompileFlag = true;
+		globals::features::screenSpaceGI.SettingsWritten("native menu");
 	}
 
 	bool __stdcall IsSSGIEditable()

@@ -757,8 +757,12 @@ namespace Testing
 					a_error = "HDR Display is not loaded";
 					return false;
 				}
-				std::lock_guard lock(hdr.settingsMutex);
-				hdr.settings.enableHDR = a_arg == "1";
+				{
+					std::lock_guard lock(hdr.settingsMutex);
+					hdr.settings.enableHDR = a_arg == "1";
+				}
+				// Outside the lock, since the projection takes it.
+				hdr.SettingsWritten("cs-test hdr");
 				return true;
 			});
 #if defined(CS_HAS_DCLF)

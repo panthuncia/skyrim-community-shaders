@@ -27,12 +27,16 @@ namespace
 	void __stdcall SetHDREnabled(float v)
 	{
 		const bool enable = v != 0.0f;
-		std::lock_guard<std::mutex> lock(HDR().settingsMutex);
-		if (HDR().settings.enableHDR == enable)
-			return;
-		HDR().settings.enableHDR = enable;
-		HDR().UpdateHDRData();
-		HDR().UpdateSwapChainColorSpace();
+		{
+			std::lock_guard<std::mutex> lock(HDR().settingsMutex);
+			if (HDR().settings.enableHDR == enable)
+				return;
+			HDR().settings.enableHDR = enable;
+			HDR().UpdateHDRData();
+			HDR().UpdateSwapChainColorSpace();
+		}
+		// Outside the lock, since the projection takes it.
+		HDR().SettingsWritten("native menu");
 	}
 }
 
