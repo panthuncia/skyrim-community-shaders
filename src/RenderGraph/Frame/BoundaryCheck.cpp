@@ -1,0 +1,235 @@
+#include "RenderGraph/Frame/BoundaryCheck.h"
+
+#include <cstdint>
+#include <utility>
+
+namespace RenderGraph::Frame::Boundary
+{
+	namespace
+	{
+		thread_local bool t_inBoundaryScope = false;
+		thread_local std::string_view t_boundaryCaller;
+		thread_local std::uint32_t t_boundaryChanges = 0;
+	}
+
+	// The thread that opens the adoption point is the render thread the census counts.
+	void NoteScopeThread();
+	void NoteLateChange(std::string_view a_what, std::string_view a_caller);
+
+	Scope::Scope() :
+		outer(std::exchange(t_inBoundaryScope, true))
+	{
+		if (!outer)
+			NoteScopeThread();
+	}
+
+	Scope::~Scope()
+	{
+		t_inBoundaryScope = outer;
+	}
+
+	Caller::Caller(std::string_view a_tag) :
+		outer(std::exchange(t_boundaryCaller, a_tag))
+	{}
+
+	Caller::~Caller()
+	{
+		t_boundaryCaller = outer;
+	}
+
+	Change::Change(std::string_view a_what, std::string_view a_caller)
+	{
+		if (t_boundaryChanges++ == 0)
+			NoteLateChange(a_what, a_caller);
+	}
+
+	Change::~Change()
+	{
+		--t_boundaryChanges;
+	}
+
+	void NoteBuildRequest(std::string_view a_reason)
+	{
+		if (t_boundaryChanges == 0)
+			NoteLateChange(a_reason, "build request");
+	}
+}
+
+#if defined(CS_HAS_RENDER_GRAPH) && !defined(CS_RELEASE_PROFILE)
+
+#	include "Testing/Testing.h"
+
+#	include <Resources/Resource.h>
+#	include <Resources/VersionedResource.h>
+
+#	include <algorithm>
+#	include <atomic>
+#	include <cstdint>
+#	include <map>
+#	include <mutex>
+#	include <string>
+#	include <thread>
+#	include <vector>
+
+namespace RenderGraph::Frame::Boundary
+{
+	namespace
+	{
+		// Callers whose adoptions are allowed outside the adoption point for now. Step 10a moves DCLF's adoption into AdoptLatest and deletes this.
+		constexpr std::string_view kAllowedCallers[] = { "dclf" };
+		// Distinct keys kept per window. The rest are counted under one key.
+		constexpr std::size_t kBoundaryKeys = 128;
+		constexpr std::size_t kBoundaryTop = 6;
+
+		struct BoundaryCounts
+		{
+			std::map<std::string, std::uint64_t, std::less<>> byKey;
+			std::uint64_t total = 0;
+
+			void Add(std::string_view a_key)
+			{
+				++total;
+				if (const auto it = byKey.find(a_key); it != byKey.end()) {
+					++it->second;
+					return;
+				}
+				if (byKey.size() < kBoundaryKeys)
+					byKey.emplace(std::string(a_key), 1);
+				else
+					++byKey["(other)"];
+			}
+
+			std::string Top() const
+			{
+				std::vector<std::pair<std::string_view, std::uint64_t>> sorted(byKey.begin(), byKey.end());
+				std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+				std::string line;
+				for (std::size_t i = 0; i < sorted.size() && i < kBoundaryTop; ++i)
+					line += fmt::format("{}{} x {}", line.empty() ? "" : ", ", sorted[i].first, sorted[i].second);
+				if (sorted.size() > kBoundaryTop)
+					line += fmt::format(", {} more", sorted.size() - kBoundaryTop);
+				return line;
+			}
+		};
+
+		struct BoundaryState
+		{
+			std::atomic<std::thread::id> renderThread{};
+			std::mutex mutex;
+			BoundaryCounts versions;  // by resource name
+			BoundaryCounts versionCallers;
+			BoundaryCounts changes;
+			BoundaryCounts attaches;
+			std::uint64_t allowed = 0;
+			std::uint64_t atBegin = 0;
+			std::uint64_t sessionVersions = 0, sessionChanges = 0, sessionAttaches = 0, sessionAllowed = 0;
+		};
+
+		BoundaryState& GetBoundary()
+		{
+			static BoundaryState state;
+			return state;
+		}
+
+		bool OnRenderThread(const BoundaryState& a_state)
+		{
+			return a_state.renderThread.load(std::memory_order_relaxed) == std::this_thread::get_id();
+		}
+
+		std::string_view CallerTag()
+		{
+			return t_boundaryCaller.empty() ? std::string_view("untagged") : t_boundaryCaller;
+		}
+
+		void OnAdoption(const org::VersionedResource&, const org::ResourceVersion& a_version) noexcept
+		{
+			auto& state = GetBoundary();
+			if (!OnRenderThread(state))
+				return;
+			try {
+				const std::lock_guard lock(state.mutex);
+				const auto caller = CallerTag();
+				if (std::ranges::find(kAllowedCallers, caller) != std::end(kAllowedCallers)) {
+					++state.allowed;
+					++state.sessionAllowed;
+					return;
+				}
+				if (t_inBoundaryScope) {
+					++state.atBegin;
+					return;
+				}
+				const auto& name = a_version.resource ? a_version.resource->GetName() : std::string();
+				state.versions.Add(name.empty() ? std::string_view("(unnamed)") : std::string_view(name));
+				state.versionCallers.Add(caller);
+				++state.sessionVersions;
+			} catch (...) {
+				// A census that cannot allocate counts nothing.
+			}
+		}
+	}
+
+	void Install()
+	{
+		org::VersionedResource::SetAdoptionObserver(&OnAdoption);
+		// The statistics window may never close in a short test run, so the run's exit logs the census too.
+		Testing::RegisterExitReport([] { LogStats(); });
+		logger::info("[ORG] boundary: counting version adoptions, rebuild requests and graph attaches outside the frame's adoption point (rule R1)");
+	}
+
+	void NoteLateChange(std::string_view a_what, std::string_view a_caller)
+	{
+		auto& state = GetBoundary();
+		if (t_inBoundaryScope || !OnRenderThread(state))
+			return;
+		const std::lock_guard lock(state.mutex);
+		state.changes.Add(fmt::format("{} {}", a_caller, a_what));
+		++state.sessionChanges;
+	}
+
+	void NoteAttach(std::string_view a_epoch)
+	{
+		auto& state = GetBoundary();
+		if (t_inBoundaryScope || !OnRenderThread(state))
+			return;
+		const std::lock_guard lock(state.mutex);
+		state.attaches.Add(fmt::format("{} at {}", a_epoch, CallerTag()));
+		++state.sessionAttaches;
+	}
+
+	void LogStats()
+	{
+		auto& state = GetBoundary();
+		const std::lock_guard lock(state.mutex);
+		const auto part = [](const BoundaryCounts& a_counts) {
+			return a_counts.total ? fmt::format("{} (top: {})", a_counts.total, a_counts.Top()) : std::string("0");
+		};
+		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; allowed (dclf) adoptions {}, adoptions at Begin {}; "
+					 "session: late versions {}, late changes {}, late attaches {}, allowed adoptions {}",
+			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
+			part(state.attaches), state.allowed, state.atBegin, state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionAllowed);
+		state.versions = {};
+		state.versionCallers = {};
+		state.changes = {};
+		state.attaches = {};
+		state.allowed = 0;
+		state.atBegin = 0;
+	}
+
+	void NoteScopeThread()
+	{
+		GetBoundary().renderThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
+	}
+}
+
+#else
+
+namespace RenderGraph::Frame::Boundary
+{
+	void Install() {}
+	void NoteLateChange(std::string_view, std::string_view) {}
+	void NoteAttach(std::string_view) {}
+	void LogStats() {}
+	void NoteScopeThread() {}
+}
+
+#endif

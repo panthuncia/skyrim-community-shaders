@@ -4,6 +4,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -205,6 +206,7 @@ namespace RenderGraph::Frame::Driver
 	{
 		auto& state = Get();
 		state.installed = true;
+		Boundary::Install();
 		if (!REL::Module::IsVR())
 			stl::write_thunk_call<FreezeTestAtBegin>(REL::RelocationID(35556, 36555).address() + REL::Relocate(0x211, 0x217));
 		// The Bink hooks mark their own ticks. Without them this detour only reads the kind.
@@ -257,6 +259,8 @@ namespace RenderGraph::Frame::Driver
 		auto& state = Get();
 		if (!state.installed)
 			return;
+		// The frame's adoption point. Versions, builds and registrations changed outside it are counted (rule R1).
+		const Boundary::Scope boundary;
 		// Work that waited for a frame boundary runs before the frame's kind and schedules are decided.
 		for (auto& work : std::exchange(state.atNextBegin, {}))
 			work();
@@ -605,5 +609,6 @@ namespace RenderGraph::Frame::Driver
 		state.segments = {};
 		state.errors = {};
 		state.lags = {};
+		Boundary::LogStats();
 	}
 }
