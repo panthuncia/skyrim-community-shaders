@@ -58,6 +58,13 @@ namespace RenderGraph::Engine::ImageSpace
 	/** @brief Native mode, world chain HDR effect only: kMAIN before the tonemap and the final target after. False elsewhere. Render owner. */
 	bool ChainTonemapTargets(TonemapTargets& a_out);
 
+	/**
+	* @brief Whether CS's steps draw the world chain's ImageSpace effects now, inside its RenderEndOfFrameEffects.
+	* Then the scene the HDR tonemap reads is in kMAIN, whatever target the engine names. CS's refraction step copies back into kMAIN,
+	* where the engine's refraction wrote kMAIN_COPY. Render owner.
+	*/
+	bool SceneInMain();
+
 	/** @brief Main thread. */
 	std::string Status();
 }

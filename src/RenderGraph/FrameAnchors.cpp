@@ -3802,6 +3802,33 @@ namespace FrameAnchors
 		return any;
 	}
 
+	bool StagePassed(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		if (IndexOf(a_anchor) >= kAnchors || !state.host || !IsRenderOwner())
+			return false;
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		const auto& frame = Driver::Current();
+		bool any = false;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || !frame.Segment(static_cast<SegmentId>(d)).declared)
+				continue;
+			bool steps = false;
+			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
+				steps = steps || (declaredInfo[d].steps[k].anchor == a_anchor && StepHolds(declaredInfo[d].steps[k], *client->desc));
+			if (!steps)
+				continue;
+			// This stage would take the tap and has not ended yet, so the tap is not past it.
+			if (state.endedFrame[d] != frame.frame)
+				return false;
+			any = true;
+		}
+		return any;
+	}
+
 	bool InStage(std::string_view a_id, Anchor a_anchor)
 	{
 		auto lock = Guard();
@@ -4239,6 +4266,7 @@ namespace FrameAnchors
 	void ClaimRenderOwnership() {}
 	bool Scheduled(std::string_view, Anchor) { return false; }
 	bool ScheduledThisFrame(std::string_view, Anchor) { return false; }
+	bool StagePassed(std::string_view, Anchor) { return false; }
 	bool HeldByStage(Anchor) { return false; }
 	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }

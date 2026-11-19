@@ -2204,6 +2204,12 @@ namespace RenderGraph::Engine::ImageSpace
 		return a_out.input && a_out.output;
 	}
 
+	bool SceneInMain()
+	{
+		const auto& chain = Chain();
+		return chain.on && chain.registered && chain.inEndOfFrame;
+	}
+
 	std::string Status()
 	{
 		const auto& state = IS();
@@ -2229,6 +2235,7 @@ namespace RenderGraph::Engine::ImageSpace
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView*) { return {}; }
 	std::span<const std::string_view> AdaptedLuminanceIds() { return {}; }
 	bool ChainTonemapTargets(TonemapTargets&) { return false; }
+	bool SceneInMain() { return false; }
 	std::string Status() { return "ImageSpace: no render graph in this build"; }
 }
 

@@ -2804,6 +2804,20 @@ family = "org"
 kind = "other"
 description = ""
 
+[key."org.pp_log"]
+env = "CS_ORG_PP_LOG"
+type = "string"
+family = "org"
+kind = "other"
+description = ""
+
+[key."org.pp_probe"]
+env = "CS_ORG_PP_PROBE"
+type = "string"
+family = "org"
+kind = "other"
+description = ""
+
 [key."org.precipitation"]
 env = "CS_ORG_PRECIPITATION"
 type = "bool"

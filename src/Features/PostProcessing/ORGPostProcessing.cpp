@@ -24,6 +24,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "ORGPostEffect.h"
 
 #	include "Features/LinearLighting.h"
+#	include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #	include "RenderGraph/Engine/TonemapAnchor.h"
 #	include "Globals.h"
 #	include "RenderGraph/FrameStaging.h"
@@ -649,6 +650,14 @@ namespace ORGPostChain
 			*a_stamp = state->latestStamps[a_part];
 		return std::exchange(state->latest[a_part], {});
 	}
+
+	bool LogOn()
+	{
+		static const bool s_on = Switches::On("CS_ORG_PP_LOG");
+		return s_on;
+	}
+
+	bool LogFrame() { return LogOn() && globals::state->frameCount % 120 == 0; }
 }
 
 namespace
@@ -732,6 +741,17 @@ namespace
 		}
 	}
 
+	/**
+	* @brief CS_ORG_PP_PROBE=<step or image>, read once. The output copies take the image after that step (input, or a StepName such as
+	* vignette, composite or color-grading), or an image an effect publishes (such as PostProcessing::CODBloom::Bloom), in place of
+	* the chain's last image. It finds the step that turns the image black. Every step still runs.
+	*/
+	const std::string& Probe()
+	{
+		static const std::string s_probe = Switches::Value("CS_ORG_PP_PROBE");
+		return s_probe;
+	}
+
 	// COPY_RESOURCES order.
 	struct CopyBlock
 	{
@@ -775,6 +795,8 @@ struct ORGPostProcessing::Impl
 	bool colorGraded = false;
 	bool exposureResolved = true;
 	std::vector<Index> order;
+	// A tonemap after the post stage was seen and logged.
+	bool passedLogged = false;
 
 	// Empty means on the graph. Logged when it changes.
 	std::optional<std::string> reason;
@@ -858,19 +880,36 @@ struct ORGPostProcessing::Impl
 				.target = image });
 			builder.SetCurrent(image);
 		}
+		// CS_ORG_PP_PROBE: the image the output copies take in place of the chain's last one.
+		const auto& probe = Probe();
+		ORGPostChain::Image probed;
+		if (probe == "input")
+			probed = next->current;
 
 		for (const auto index : a_order) {
 			if (!next->failure.empty() || next->passes->Failed())
 				break;
 			ORGPostChain::Builder builder(*next, programs, a_shape, StepName(index));
 			effects[static_cast<std::size_t>(index)]->Build(builder, *pp.pipeline[static_cast<std::size_t>(index)]);
+			if (probe == StepName(index))
+				probed = next->current;
+		}
+		if (!probe.empty() && !probed) {
+			if (const auto found = next->published.find(probe); found != next->published.end())
+				probed = found->second;
+		}
+		if (!probe.empty()) {
+			if (probed)
+				logger::warn("[ORG] Post Processing: CS_ORG_PP_PROBE={}: the output copies take that image, not the chain's last one", probe);
+			else
+				logger::warn("[ORG] Post Processing: CS_ORG_PP_PROBE={} names no step of this chain and no image it publishes; the probe is off", probe);
 		}
 
 		// As PreProcess's two CopyToRenderTarget, into both main targets. Each is a copy.ps draw rather than a copy,
 		// because a copy has no run gate and would run on frames the chain does not.
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "output");
-			const auto chainOutput = builder.Current();
+			const auto chainOutput = probed ? probed : builder.Current();
 			nextOutput = builder.Latch<CopyLatch>();
 			for (const auto& [target, name] : { std::pair{ &a_main, "main" }, std::pair{ &a_mainCopy, "main-copy" } }) {
 				if (!*target)
@@ -998,6 +1037,16 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 		s.SetSkipped("the render graph is not active");
 		return;
 	}
+	// A second tonemap in the frame can come after the post stage has ended. The loading menu's 3D model draws one in every frame
+	// of DCLF's load hold. No stage takes it, so D3D11 runs the chain for it, as in a frame kind without a post stage.
+	// It is not the world's tonemap, so it leaves the logged state alone. Otherwise the chain would seem to leave and rejoin the graph each frame.
+	if (FrameAnchors::StagePassed(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
+		if (!s.passedLogged) {
+			s.passedLogged = true;
+			logger::info("[ORG] Post Processing: a tonemap after this frame's post stage, such as a menu scene's, runs the chain on D3D11 (logged once)");
+		}
+		return;
+	}
 
 	auto& pp = globals::features::postProcessing;
 	auto* state = globals::state;
@@ -1122,12 +1171,20 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 
 	s.order = std::move(order);
 	s.linear = linear;
-	s.readsMainCopy = !single && (a_refraction || a_targets.input == mainCopyTarget);
+	// CS's ImageSpace steps keep the world scene in kMAIN, so the engine's kMAIN_COPY input or a refraction does not move it.
+	// kMAIN_COPY then holds an older copy of the scene at best, from before the volumetric composite and the upscale.
+	const bool sceneInMain = RenderGraph::Engine::ImageSpace::SceneInMain();
+	s.readsMainCopy = !single && !sceneInMain && (a_refraction || a_targets.input == mainCopyTarget);
 	s.colorGraded = colorGraded;
 	s.exposureResolved = exposureResolved;
 	s.ready = true;
 	s.SetReason({});
 	s.SetMembers(s.order);
+	if (ORGPostChain::LogFrame())
+		logger::info("[ORG] Post Processing log: frame {}: reads {} (one target {}, refraction {}, engine input kMAIN_COPY {}, scene in kMAIN {}); linear {}, "
+					 "exposure resolved {}, pre-exposure {}",
+			globals::state->frameCount, s.readsMainCopy ? "kMAIN_COPY" : "kMAIN", single, a_refraction, a_targets.input == mainCopyTarget && !single, sceneInMain,
+			linear, exposureResolved, state->preExposure);
 
 	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
