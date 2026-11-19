@@ -5,6 +5,11 @@ Code citations are `file:function`. "(inferred)" marks a claim I did not prove f
 `frame-revision-plan.md` did not exist when this was written. The change-system terms used here come from
 `central-resize-events.md` (sections 4.0, 5.1). Re-read that plan when it exists and adjust steps 5 and 9.
 
+Updated 2026-11-19, read-only, against `integ/hard-ports` at `5668ec493`: the post chain gained passes and inputs (pre-exposure
+through the ORG chain and the upscalers, two-pass Camera FX, Physical Lens), the scene gained Physical Sky and ViewAtmosphere
+passes, and the screenshot's clean scene became a graph copy on the FrameGeneration ticket. `frame-revision-plan.md` now exists;
+step 9 follows it. The additions are in 1.2, 2.4, 3.1, 3.6, steps 1, 3, 6 and 9, and open decisions 8 to 10 (section 6).
+
 Short answer to "what is still needed":
 1. A per-backend way to replace the swap chain at a frame boundary without the render thread waiting (native has only `ResizeBuffers` today).
 2. BasicRHI swap chains that a presentation layer (FidelityFX's or DLSS-G's swap chain, through Streamline) may wrap.
@@ -52,6 +57,15 @@ Per frame, on the render thread:
        `eBlockPresentingClientQueue`). Without CS upscaling it first runs an FSR evaluate to make a display-size colour. Then
        `Streamline::TagDLSSGResources`: depth, motion vectors, hudless tagged `eValidUntilPresent` through `cs_SubmitPresentTags`.
      - Depth is kMAIN's depth, or kMAIN_COPY when upscaling is on. Motion vectors are kMOTION_VECTOR.
+   - What the hudless holds by then (2026-11-19). Everything before the post stage is scene colour: Physical Sky's LUT passes
+     (EarlyPrepass), its aerial perspective pass after `cs.deferred` (phase 2, not ported yet), and ViewAtmosphere's post-water
+     composite (EngineDraws, after the water's ImageSpace blend). The post chain then adds, in chain order: DoF, Physical Lens's
+     side outputs (ghosts, starburst, the image mapping that distorts and splits colour), read by Composite, which also divides
+     the pre-exposure out under linear lighting (or the output copy scales by 1 / pre-exposure without Composite, `eb71d2e7f`),
+     then colour grading, LUT, Camera FX's two passes (a lens pass with distortion into a transient image, a finish pass with
+     grain) and Border (`PostProcessing.h:FeaturePipelineIndex`). So the hudless is display-referred, with no pre-exposure
+     left in it, and it includes the lens and camera effects. In graph modes the same FrameGeneration ticket also copies kFRAMEBUFFER into the screenshot's clean scene
+     (`cs.screenshot.clean`, `027887780`) when an SDR capture is pending.
 3. Present hook `Hooks.cpp:IDXGISwapChain_Present::thunk`:
    - DLSS-G forces sync interval 0 when it reports vsync unsupported; `Streamline::QueryDLSSGCapabilities` on the present thread.
    - PCL markers RenderSubmitEnd, TriggerFlash, PresentStart; `FrameAnchors::Run(Anchor::Present)`.
@@ -162,6 +176,14 @@ Per frame, on the render thread:
 - The hudless copy is ORGUpscaling's FrameGeneration client with its own ticket after the post stage. It never runs in native
   (frame generation is off). Moving it and HDR output into the UI stage is plan piece A7 (`docs/development/org-native-frame-graph.md`,
   "Stayed").
+- The screenshot's clean scene (`ORGScreenshot.cpp`) is the second client on that ticket. It already runs in native: a pending
+  SDR capture copies kFRAMEBUFFER into a Persistent graph texture there, and the capture reads it from the graph. So native has
+  a working HUD-free copy at the hudless point today. It registers inside the frame when kFRAMEBUFFER's size or format changes
+  and skips frames until its build is scheduled (`FrameAnchors::Scheduled`).
+- Pre-exposure reaches the upscalers through their SDK options (`Streamline.cpp`: `DLSSOptions::preExposure`, FSR through
+  `FSROptions` version 2, XeSS through `sl.xess`'s exposure multiplier, Streamline `01dcbb1`). The options are set on the render
+  thread from `globals::state->preExposure`, while the native evaluate records later on the submission thread (inferred:
+  `EvaluateXeSS` calls `slXeSSSetOptions` before `cs_EvaluateFeatureCore` queues the pass).
 - The upscalers' evaluate is already a pass recorded at execution, on the recording thread (native: the submission thread), with the
   images described natively (`Streamline.cpp:cs_EvaluateFeatureAsPass`, `ORGUpscaling::QueueEvaluate`, `NativeDevice.cpp:DescribeImages`).
   It refuses a hudless image and takes exactly four images. `cs_EvaluateFeatureCore` sends every native evaluate there, FSR-FG included.
@@ -210,6 +232,11 @@ Per frame, on the render thread:
 | Frame IDs | One prepared frame slot, matched at present by frameID (`fsrGEntry.cpp`) | Native records stages on the submission thread, which also presents, so frame N's prepare comes before present N and frame N+1's after (inferred from `ORGUpscaling.h:QueueEvaluate` and `NativeState::QueuePresent`). Holds as long as recording stays on that thread |
 | Resources the SDK reads after the frame | Hudless read at present; depth and motion vectors read in the prepare | All are persistent textures (engine targets, `GraphResources::Texture2D` for the hudless), never frame-arena transients, and written only on the graphics queue. FFX (game queue, `allowAsyncWorkloads=false`) and DLSS-G (`eBlockPresentingClientQueue`) read them on that queue, so queue order protects them. Keep them out of the alias arena |
 | Hudless layout at present | The plugin records the hudless layout at evaluate and declares it to FFX at present | The inputs pass must declare the hudless in the state it keeps until present (shader read), and nothing may move it in between |
+| Exposure of the inputs | Hudless is taken after the chain's output, so the pre-exposure is already divided out (Composite under linear lighting, or the output copy's 1 / pre-exposure). FSR-FG's prepare and DLSS-G take no exposure. The upscalers take it per frame through their options | Keep the hudless point after the chain's output in A7. Give FG no exposure value. The upscalers' pre-exposure must be the value of the frame whose colour they evaluate: set the options with the frame's value at the evaluate pass, or carry it in the frame's token, not read live on the render thread (inferred race in native, 2.4) |
+| Depth and motion vector extent | Render-size region of kMAIN's depth (or kMAIN_COPY) and kMOTION_VECTOR | With `frame-revision-plan.md` decision 6a, render-size textures are display-size and only the viewport changes. The inputs pass takes the render rect and the dynamic ratio from the adopted revision, not from the textures' size |
+| Screen-space lens effects | The hudless includes Physical Lens's image mapping (distortion, chromatic split), ghosts and starburst, and Camera FX's distortion and grain. The engine's motion vectors describe the undistorted scene, and ghosts move against the light sources, not with the geometry. Guest has the same mismatch today | Decision 8 |
+| Screenshot clean scene at the hudless point | Its own client on the FrameGeneration ticket, an SDR capture only, registered inside the frame on a size or format change | Moves into the UI stage with the hudless copy in A7. One copy or two: decision 9 |
+| Replayed recordings | The FrameGeneration ticket is its own epoch, recorded each run | After A7 the hudless copy, the clean scene copy and the inputs pass are steps of the UI stage, a CS stage whose recordings are replayed (`frame-revision-plan.md` rule R9). The inputs pass is recorded at execution, so its prepared pass must be replayable: no submission or completion callback, no external signal. The frame token and the prepared-frame bookkeeping go through the commit and the latch, not through lifecycle effects. The open post-stage error ("A revision-driven epoch's recording is not replayable ...", being fixed now) is this rule failing in the post stage |
 
 ### 3.2 FSR-FG on native Vulkan
 
@@ -283,6 +310,10 @@ Per frame, on the render thread:
 | Tearing | FFX bakes the present mode | Vsync/tearing is part of the presentation config |
 | D3D12 waitable object | FFX supplies a replacement | BasicRHI reads it again after every create |
 | Device loss on the RX 6600 | Plugin latches `dispatchFaulted` and returns device lost | Native: fatal (report and end), no teardown loop |
+| Replayed UI stage (A7) | The inputs pass carries per-frame state (frame token, prepared frame) into the plugin | Per-frame values through the commit and latch; the pass's packet stays replayable (3.1) |
+| Lens and camera effects in the generated frame | Motion vectors do not describe them | Decision 8 |
+| Upscaler options and frames in flight | Options, pre-exposure included, set on the render thread for an evaluate recorded later | The frame's values travel with the frame (3.1); `frame-revision-plan.md` section 11, 4.3 for the SDK contexts |
+| Fog defects in the graph modes | Guest kMAIN goes non-finite with the fog's volumetric fog on, and native's fog volumes are empty (`dclf-open-defects.md`, "Graph-mode port gaps") | Not frame generation's, but a non-finite hudless corrupts the generated frames. Test FG with the fog's volumetric fog off until fixed, and say so in the run notes |
 
 ---
 
@@ -352,10 +383,17 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
   after Overlay; drop post's `Ticket(Anchor::FrameGeneration, ...)` and the UI stage's `commitBefore` on `AnchorHDROutput`.
   `ORGUpscaling.cpp:RegisterHudless` stops opening its own epoch; `ORGHDRDisplay` likewise. Delete `FrameAnchors::Run`'s own-epoch tail,
   `EpochOf`, the late-epoch hook and the `Placed` epochs once unused (`org-native-frame-graph.md`, "Stayed").
+  The FrameGeneration ticket now holds two clients: the step names `"cs.upscaling.hudless"` and `"cs.screenshot.clean"`, and
+  `ORGScreenshot.cpp`'s clean copy stops opening its own epoch too. Both copies read kFRAMEBUFFER after the chain's output, where
+  the pre-exposure is already divided out; keep that point. The UI stage replays its recordings, so both copies are gated per run
+  from the commit (as the clean copy's `RunGate` already is) and have no lifecycle effects (`frame-revision-plan.md` rule R9).
 - Tests: `guest-quick`, `native-quick`, `native-d3d12-quick`, `hdr` (all four modes), `menu`, guest `fg` (FSR-FG still engages; hudless
-  without HUD). Census: no own-epoch mismatch.
-- Acceptance: no anchor runs an epoch of its own in either graph mode; `fg` shots match the last guest run.
-- Risks: HDR output's order against the overlay and capture (the HDR black-frame note in `parity/status.md`).
+  without HUD). A screenshot in native and in guest, checking the log for the clean scene being used (`HasFreshCleanScene`), not
+  the D3D11 fallback. Census: no own-epoch mismatch, no replay error.
+- Acceptance: no anchor runs an epoch of its own in either graph mode; `fg` shots match the last guest run; screenshots are
+  HUD-free in both graph modes.
+- Risks: HDR output's order against the overlay and capture (the HDR black-frame note in `parity/status.md`). The UI stage's
+  replay (R9): a copy gated per run through a callback would fail it, as the post stage fails today.
 - Size: M. NVIDIA: no.
 
 ### Step 2: `FrameGen::Presenter`, DXVK backend only
@@ -394,11 +432,17 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
   `cs_EvaluateFeatureAsPass`). `Streamline::EvaluateFSRFrameGen` uses it in graph modes; the ring path stays for plain D3D11.
   Plugin contract written in `fsrGEntry.cpp`: a present that finds a prepared frame for another frame ID is a host error, logged as an
   error and fatal in native (inferred safe given 3.1).
+  Inputs: depth and motion vectors with the render rect of the frame (from the adopted revision once `frame-revision-plan.md`
+  step 8 lands; the textures are display-size then); no exposure value. The pass is recorded at execution inside a replayed UI
+  stage, so its prepared pass must be replayable: the frame token and the constants come from the commit (latch), and the plugin
+  learns the frame from the token, not from a submission callback.
 - Tests: guest `fg` (background), `d3d11`+`fg` (ring path unchanged), `guest-quick`.
 - Acceptance: guest FSR-FG presents about 2x as before (`[Streamline] FSR-FG presenting 2 frame(s)`, driver presents from
   `CS_VK_DRIVER_TRACE`); no interop ring command buffer for FG in guest.
 - Risks: the "external Vulkan work after a graph epoch" hazard in guest (`Upscaling::SeparateFromGraphEpochs`); the pass path restores
-  the graph's descriptor heaps, as the upscale evaluate does.
+  the graph's descriptor heaps, as the upscale evaluate does. A pass recorded at execution that is not replayable makes the UI
+  stage's recording unkeepable and stops the game in a revision (the post stage's open error). Check with a `fg` run that the
+  census shows no "not replayable" count for the UI stage.
 - Size: M. NVIDIA: no.
 
 ### Step 4: BasicRHI, swap chains a presentation layer may wrap
@@ -442,7 +486,9 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
     (progress timeline) plus FFX's present give a bounded queue (inferred to be enough; DXVK needed depth 2).
 - Tests: new `native-fg.toml` = `extends = ["native-vulkan", "fg"]` (fix `fg.toml`'s comment), background (FSR-FG generated without focus
   in guest); `native-fg` + `hdr` steps; `--set` PresentMon count (below). Foreground eye check, with the user's say-so: HUD not ghosting,
-  pacing, menu and loading-screen passthrough.
+  pacing, menu and loading-screen passthrough. Also a `native-fg` run with Physical Lens's ghosts and starburst and Camera FX's
+  distortion and grain on, then off, for decision 8. Keep the fog's volumetric fog off in FG runs until the fog defects are fixed
+  (3.6).
 - Acceptance: `[Streamline] FSR-FG presenting 2 frame(s)`; plugin `totalPresentedFrames` about 2x CS's `[Perf] rendered` rate; PresentMon
   presents about 2x; no device loss in a `native-fg` run on the RX 6600 with `DXVK_DEBUG=hang`.
 - Risks: `VK_NOT_READY` from the plugin if anything still overlaps swap chains; queue reservation (check the BasicRHI line); AMD
@@ -476,6 +522,18 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 - When that plan's variables land (its step 5): `PresentationConfig` becomes a variable written from the settings event and from HDR's
   display check. Its member in the prepared set is "the swap chain has this config" (produced on the submission thread by step 5's
   entry) plus the inputs pass's presence. Adoption at Begin replaces step 5's serial read.
+- Mapped onto `frame-revision-plan.md` (written 2026-11-18, extended 2026-11-19):
+  - `PresentationConfig` is a row of its step 5b table, next to `HdrEnabled`, `HdrOutputTarget` and `UpscalerOptions` (its
+    section 11, 4.3). The hudless texture is its migration 6.14 (on `HdrEnabled` and the presenter format). The swap chain
+    colour space switches inside adoption for the revision whose content matches it (its section 11, 4.1). Step 5's replacement
+    is that change for native: the submission thread's entry is the fragment, and the revision seals when it reports the
+    adopted serial.
+  - The hudless copy, the clean scene copy and HDR output are UI-stage steps after this plan's step 1, so they are ordinary
+    revision members, and that plan's 7b shrinks to nothing (its Q10).
+  - Upscaler options (mode, output size, pre-exposure) are read from the adopted revision and the frame's own values, not from
+    live settings and `globals::state` at the render thread's call (3.1).
+  - Its rule R9 and open question Q11 (readbacks against replay) apply to the UI stage and the post stage. The inputs pass must
+    not add a readback.
 - Size: S. NVIDIA: no.
 
 ### Testing generated frames in native
@@ -492,7 +550,7 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 
 ## 6. Open questions
 
-**All seven were decided by the user on 2026-11-18: option (a) for each.** The options are kept below for the record.
+**Questions 1 to 7 were decided by the user on 2026-11-18: option (a) for each.** The options are kept below for the record. Questions 8 to 10 are open.
 
 | # | Decision |
 |---|---|
@@ -503,6 +561,14 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 5 | One long frame when frame generation is toggled is acceptable. |
 | 6 | Guest moves onto the shared interface in the same effort and loses its fault-teardown retries. Faults are fatal in every mode. |
 | 7 | The tactical swap chain replacement (step 5) lands before the frame-revision system and is migrated in step 9. |
+
+**Open, added 2026-11-19 from the hard ports.** Each needs the user's decision.
+
+| # | Question | Options | Recommended |
+|---|---|---|---|
+| 8 | Physical Lens's image mapping, ghosts and starburst, and Camera FX's distortion and grain are in the hudless. The motion vectors describe none of them. How should generated frames treat them? | (a) accept, as guest does today; (b) the inputs pass warps the motion vectors by the lens's image mapping (`ChromaticMapping`), so distortion matches, ghosts and grain stay as they are; (c) draw the lens overlays and grain after the hudless point, so the hudless-difference mode treats them as UI (changes the chain's order and the look) | (a) for the first version, with the step 6 A/B run to see how bad it is; (b) if distortion shows |
+| 9 | The hudless copy and the screenshot's clean scene copy read the same image at the same step. One copy or two? | (a) two copies, as now (the clean copy runs only on frames with a pending SDR capture); (b) one copy when SDR and the formats match, two otherwise | (a): the clean copy is rare and its texture follows kFRAMEBUFFER's format, the hudless follows the presenter's |
+| 10 | Upscaler options (pre-exposure, mode, output size) are set on the render thread while native records the evaluate later (inferred). Fix it in this effort? | (a) yes: the evaluate pass sets the options with the frame's own values when it records; (b) leave it to `frame-revision-plan.md` section 11, 4.3 | (a), after a run confirms the mismatch (log the pre-exposure set and the one recorded, per frame) |
 
 
 1. **Is DLSS-G in native in scope?**

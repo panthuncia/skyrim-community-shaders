@@ -4,6 +4,10 @@ Plan, 2026-11-18. It implements option (c) of `_notes/central-resize-events.md` 
 user's decisions below. It was written read-only against worktree `org-port-worktrees/test-runner`, CS branch `org-native/phases`
 at `8dd3e865e`, ORG `6028568`, OMS `0185120`. Nothing was built or run.
 
+Updated 2026-11-19, read-only, against `integ/hard-ports` at `5668ec493`: upstream sync batch 16, the parity round on
+`org_integration`, and the hard ports (Physical Sky, ViewAtmosphere, Advanced Skin in DCLF, Physical Lens, Tree Wind for object
+LOD). Their sites are in sections 3.2, 5, 6.4, 7.12, 8 and 9. Each port's design note is in `docs/development/plans/`.
+
 Paths are relative to the worktree. `DCLF/` is `src/Features/DrawcallLimitFix/`. `ORG/` is `extern/OpenRenderGraph/`. `OMS/` is
 `extern/ORGModuleServices/include/ORGModuleServices/`. Citations are `file:function`. **(inferred)** marks what was concluded, not read.
 
@@ -27,6 +31,11 @@ revision*. Nothing inside a frame asks "did a size change". Nothing inside a fra
 - At **Begin**, the frame adopts the latest sealed revision whole: its versions become current, its staged graphs attach, every member
   stage's schedule switches, its variable values become the frame's. Or nothing changes and the frame runs the last revision.
 - Late-bound data (DCLF frame values, light contexts, portal programs, latch regions) is outside this. It may change any time, as today.
+  The ports added more of it: frame-value pools (Advanced Skin's material table at t38), per-draw latch handles (the sky and water
+  families' `PhysSkyOrgHandles`), run gates for on-change passes (Physical Sky's disk phase LUT, Physical Lens's caches), GPU
+  argument seeds in a latch block, and readback results (the lens focus, the adaptation). None of them is a revision input.
+- What replays: a CS stage is one revision-driven epoch. Its recordings are made once per description and frame slot and submitted
+  again every frame. So everything a CS stage records must be replayable (rule R9, section 2.2).
 
 **Vocabulary.**
 
@@ -128,6 +137,14 @@ Section 8 is the checklist.
 - **Never touch `extern/dxvk`.**
 - **Bound vs late-bound (R1).** Bound: anything a recording binds (declared versioned textures and buffers, graph structure, programs,
   prepared constants). It changes only by adoption. Late-bound (bindless index or latch, stand-in declaration): may change any time.
+- **Replayable stages (R9).** A CS stage's recording is replayed (`GraphHost.cpp`, "A revision-driven epoch's recording is not
+  replayable (a pass with lifecycle effects, or a late-bound slot)", fatal). A recording is kept only when
+  (`RenderGraphPersistentExecute.cpp`, `keepable`): every packet is replayable (no submission, completion or abandonment callback,
+  no external signal, no dependency lifecycle effect: `PreparedPass::IsReplayable`), every pass recorded at execution is
+  replayable too (the upscaler evaluate is one), the segment has no per-frame resource (a swap chain image) and its admission has
+  no incoming effects. A readback capture (`PreparedPass::WithTrailer`, the `IReadbackService` plans) is never replayable.
+  Per-run work in a replayed recording reads its counts from a latch or a GPU buffer seeded from one, as Physical Lens's indirect
+  work does. Readbacks and versioned uploads stay out of CS stage recordings, or ORG gives them a replayable form (Q11).
 
 ---
 
@@ -164,6 +181,10 @@ A compact map. Mechanisms are described in the investigation; this lists where t
 | Published ids | `src/RenderGraph/PublishedResources.h` (rules), `PublishedResources.cpp:PublishEntry/Store/Withdraw`: a new resource under a known id is `RequestStructuralRebuild` of every graph. |
 | Engine targets | `src/RenderGraph/Engine/Targets/EngineTargets.cpp:BeginSet/EndSet/Settle/Move`, called around the engine's `BSShaderRenderTargets::Create` in `src/Hooks.cpp` (the thunk with `Targets::BeginSet`). `Enabled()` = `Native::GraphMode()`. |
 | Frame transients | `src/RenderGraph/Frame/Transients.cpp:Place` (callers: `Engine/Native/NativeDevice.cpp` engine target groups, `Engine/Scaleform/Passes.cpp` scratch). |
+| Previous-frame reads | `src/RenderGraph/Frame/RecipeTable.h:kPreviousFrame` (15 ids; checked by `Recipe.cpp`): a stage reads a resource before the stage that writes it, so it gets last frame's contents. New: Physical Sky's `TransmittanceLut`, `SkyViewLut`, `ApLut`, `DiskPhaseLut`, read by the sky's reflection faces in the start stage before the pre-depth stage writes them (`4e219be6c`). |
+| Schedule gate | `FrameAnchors.h:Scheduled(id, anchor)`. A client registered inside the frame runs nothing until a build that holds it switches in. Users: ViewAtmosphere's post-water composite (`ORGViewAtmosphere.cpp:CompositeAfterWater`, `5511e835b`), the screenshot's clean scene (`ORGScreenshot.cpp`). |
+| Staged buffers | `ORGPhysicalLens.cpp` `StagedBuffer::Poll`: a new ghost paths version uploads on the uploader's worker path (`WorkerOwnedDestination::PendingVersion`), the render thread polls the ticket each frame, then `AtNextBegin` adopts it and calls `NoteNewVersions`. |
+| Readbacks | `org::runtime::IReadbackService` through readback passes: `ORGPhysicalLens.cpp:FocusReadbackPass` (new), `ORGHistogramAutoExposure.cpp:ReadbackPass` (now feeds the pre-exposure metering, `eb71d2e7f`), the screenshot's readback buffers (Capture anchor), and Physical Sky's lightning ring (planned, `physical-sky-port.md` section 6). |
 
 ### 3.3 DCLF
 
@@ -174,6 +195,9 @@ A compact map. Mechanisms are described in the investigation; this lists where t
 | Build point | `DCLF/Core/Render/Revision/Coverage.cpp:IndirectDraws::BuildPoint` (`RegisterGraphBuilds`, `RefreshGraphConditions`, `BuildIfAsked`); `RenderGraphRuntime.cpp:AttachDclfBuilds`. |
 | Toggles | `DCLF/Core/Settings/Toggles.h/.cpp` (`ToggleSet`, `BeginFrame`, `Adopt`, `Generation`). Conditions: `DCLF/Core/Render/Epochs/GraphConditions.cpp:RefreshGraphConditions`. |
 | Published reads | `DCLF/Core/Extensions/FrameBindings.cpp:DeclareGraphTextures/DeclarePublishedRead/CheckDeclaredReads/GraphTextureIndex`. |
+| Frame textures from ports | `Features/Manifest.cpp:kFrameTextureRegisters`: Physical Sky (t61-t63, t106 LUTs by published id; t64, t66, t67, t69, t105, t109-t115 from the captured D3D11 view in guest, a zero view in native), ViewAtmosphere's medium (t104, t107, t108). Reflection faces will read the reflection medium through per-epoch views (`view-atmosphere-port.md` open question 2). |
+| Frame-value pools from ports | Advanced Skin's `skin-materials` table at t38 (`dclf-skin-per-geometry.md`): rows captured at the frame start in `CaptureShadingFields`, sent in `FrameValues::Kick`, `GpuTextures` replies drained at capture, every member re-put on a `GpuTextures` generation change. `kFrameBindingSlots` 5 to 6. |
+| Feature buffers (planned) | Tree Wind for object LOD (`dclf-tree-wind-object-lod.md`, deferred and flagged for redesign): `Draws::Versioned` `cs.dclf.tree-lod-bend`, grown with the scene buffers and published with a sealed set; regions uploaded by a commit hook against the adopted version's tags. |
 
 ### 3.4 Corrections to the investigation
 
@@ -213,6 +237,14 @@ A compact map. Mechanisms are described in the investigation; this lists where t
    `SceneSettingsManager::SceneLayerGuard` writes scene-controlled features twice around every base read (save, undo capture, dirty
    check), so an event must compare values; cs-test's `setting` step (`Testing/Commands.cpp:SetSetting`) patches top-level keys only;
    the Upscaling test requests assign fields on the render thread. Section 6 has the full list.
+10. **The hard ports added sites of every kind this plan handles** (2026-11-19): new `RequestSize` users (ViewAtmosphere's atlas,
+    Physical Sky's AP shadow, both planned), clients registered inside the frame with a schedule gate (ViewAtmosphere's composite,
+    the screenshot's clean scene), a staged buffer adopted through `AtNextBegin` (Physical Lens's ghost paths), readback passes
+    inside the post stage (the lens focus, the adaptation), and previous-frame reads of History textures (Physical Sky's LUTs).
+    They are rows in section 5 (6.9, 6.20 to 6.23) and items in 7.12. The post stage now fails with the R9 error when the Post
+    Processing chain runs on the graph (it held for Physical Lens until `aa221de9b`). The readback passes are the obvious
+    candidates **(inferred; which pass trips it is being found separately)**. Either way it is the conflict this plan must settle
+    before step 4 records stages against pending versions (Q11).
 
 ---
 
@@ -361,8 +393,9 @@ Split in five sub-steps, serial.
 **4c. CS: the frame revision coordinator.** `src/RenderGraph/Frame/Revision.{h,cpp}` (new). Generic parts go to OMS later only if a
 second user appears; today everything generic it needs is already OMS's (`RevisionAssembler`, `SerializedTaskPump`, `StateGraph`).
 - The lane: one `org::async::SerializedTaskPump` on the executor the runtime already uses for graph builds **(open question Q3: which)**.
-- Slots of its `RevisionAssembler`: `kInputs` (empty until step 5), `kTextures`, `kBuilds`, `kRecordings` (one fragment per member
-  declared segment, requiring the `kTextures` and `kBuilds` fragments it was recorded against).
+- Slots of its `RevisionAssembler`: `kInputs` (empty until step 5), `kTextures`, `kBuffers` (CS-owned versioned buffers: Physical
+  Lens's ghost paths, 4e; DCLF's buffer set joins it in 10b), `kBuilds`, `kRecordings` (one fragment per member declared segment,
+  requiring the `kTextures`, `kBuffers` and `kBuilds` fragments it was recorded against).
 - On a wake: collect wishes (`RequestSize` now; variables from step 5), post texture versions (4a), compute the closure with
   `GraphHost::EpochsDeclaring` over the changed slots, map epochs to declared segments, and for each member segment and frame slot call
   `RequestDeclared` with `versions = ComposedVersions{pending textures}` and the staged generation when the segment has one.
@@ -389,7 +422,15 @@ coordinator (section 7.8).
 - **Intermediate:** the version-lag branch stays for slots that publish outside revisions (engine imports via `JoinSlot`/
   `EnsureViews`, native back buffer). It counts its uses per slot in the census. Deleted in step 9.
 - **Intermediate:** `Builds::SwitchStaged` stays for staged epochs that are not CS declared segments (guest own-epoch anchors
-  HDROutput and FrameGeneration's hudless copy). Deleted in step 7 (sub-step 7b).
+  HDROutput and FrameGeneration's hudless copy). Deleted in step 7 (sub-step 7b). The FrameGeneration ticket now also holds the
+  screenshot's clean scene copy (`cs.screenshot.clean`, `027887780`), so 7b moves both clients.
+- **Buffer versions outside DCLF.** Physical Lens's ghost paths (`ORGPhysicalLens.cpp:StagedBuffer`) are a CS-owned
+  `org::VersionedBuffer` whose new version is made on a CPU change (a new lens model), uploaded on the uploader's worker path,
+  polled each frame and adopted through `AtNextBegin`. It joins revisions here: the lens model is the event, the upload is a
+  `kBuffers` fragment that resolves when its tracked upload completes (the same shape as `PostVersionGrowth` for DCLF), and the
+  post stage is a closure member through `EpochsDeclaring` of the paths slot. The flare constants that must match the version
+  (surfaces, path count, sensor plane, focal length, pupil, coating) become the fragment's payload, read from `Adopted()`. That
+  deletes the per-frame `Poll` of the ticket and the lens's `AtNextBegin` user. A cancelled upload stays fatal.
 
 **Design choices.**
 - Recordings are requested through the existing `RequestDeclared`, not a new path, so descriptions, parity and the absent-pass key keep
@@ -414,6 +455,10 @@ first wish to adoption (p50/p95/max)`.
 
 **Risks.**
 - Recording count (section 7.2). Detect: census `recordings per revision`.
+- A member stage whose recording is not replayable (R9). The coordinator records every member against pending versions through
+  `RequestEpochRecording`, which throws for such a recording. The post stage hits this today whenever the Post Processing chain
+  runs on the graph. Step 4 cannot start until Q11 is decided and the post stage records replayable recordings again. Detect: run
+  `guest-quick` and `native-quick` with the post chain on and Physical Lens's ghosts and starburst on.
 - A member segment absent in this frame kind (menu): it still needs recordings for every slot, as today's "ahead" recordings. Detect:
   a `menu` run with a resize in it (add one `setting` step to `menu` while the menu is open).
 - Exports: a D3D11 reader that cached the old SRV pointer. Today's `Resize` already re-makes exports, so features already re-read them.
@@ -507,13 +552,19 @@ size/shape settings to `Setting<T>`, and deletes its in-frame checks and resets.
 3. Reads sizes for constants, group counts and viewports from `Adopted()`, never from live settings or `Desc()` of a twin in flight.
 4. Uses `FirstFrame` for temporal reset. Deletes `ResetHistories`, `Rearm`, `fresh` users, `clearPending`.
 5. Deletes its prepass polling, its `RequestSize` calls, its `Register` re-calls and any `DrainCommandRing` for resizes.
-6. Adds its change to a cs-test config (`resize` grows one block per feature, or a feature config) and runs it.
+6. Deletes its `FrameAnchors::Scheduled` gate, if it has one: the client and every frame-wide value that tells other shaders it
+   runs (ViewAtmosphere's `PostWaterComposite`) switch in the same adoption, so there is no frame where one is on and the other
+   is not.
+7. Adds its change to a cs-test config (`resize` grows one block per feature, or a feature config) and runs it.
 
 **Intermediate.** None new. Each migration deletes the feature's share of earlier intermediates.
 
 **Test per migration.** The feature's config block in three modes (`native-vulkan`, `native-d3d12`, `guest`), standard set,
 `latch-census-short` once per three migrations. Shots of the feature before and after a change compared against the pre-migration
-build (section 7.10).
+build (section 7.10). Two open defects make some baselines unusable (`dclf-open-defects.md`, "Graph-mode port gaps"): guest kMAIN
+goes non-finite with the fog's volumetric fog on, and native's fog volumes hold almost no fog. Until they are fixed, 6.1 and
+6.21 compare against plain D3D11 shots and the fog's debug views (`CS_ORG_FOG_DEBUG`, `CS_ORG_VIEW_ATMOSPHERE_DEBUG`), not
+against the pre-migration graph build.
 
 **Acceptance per migration.** Zero `stale recording`, zero `structural rebuild` lines caused by the feature's change, the boundary
 census shows none of its sites, the feature's grep in section 8 is empty.
@@ -600,7 +651,10 @@ constants), no key build, shots match.
 naming the import and the caller. Work through each source the step 1 census listed: an import whose texture follows a variable gets a
 declared dependency instead (ImageSpace `CheckImports`, Upscaling's `QueueEvaluate`/`QueueCopyToMain`/`QueueDepthUpscale`/`RunUpscale`/
 `CopyHudless`, HDR `Compose`, `BinkGraph.cpp:UpdateTargets`, `Menu/ImGuiRenderer.cpp:UpdateTarget`). `EnsureViews` (more views on an
-import) becomes "declare the views at registration".
+import) becomes "declare the views at registration". Sources added since: the cubemap capture imports kMAIN until Dynamic
+Cubemaps' first update and Deferred's forward main target after it (`110daff05`), so its import switches once in a session;
+the fog takes Deferred's frame-checked directional shadow map (`07608f8e8`). Each becomes a declared dependency (the forward
+target as the import from the start, with Dynamic Cubemaps' "first update done" as a variable if the two really differ).
 - Delete the version-lag branch in `Schedule` (the step 4 intermediate) once its census count is zero by construction.
 
 **Test.** Standard set, `hdr` in four modes (acceptance: no black frame in a shot taken 2 frames after the switch, a new `shot` step at
@@ -634,10 +688,25 @@ payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembl
   soon as its recordings are ready (risk, section 7.2).
 - Delete `snapshotSlot` (`LatestSlot` of snapshots), `Impl::StaleKindOf`'s build and generation checks, `AdoptSnapshot` as a separate
   adoption (its body becomes the `kScene` install callback).
+- Ports' DCLF data, and where each lands:
+  - Physical Sky's and ViewAtmosphere's frame textures read published ids, so a new version of a LUT or of the medium has DCLF's
+    colour and face epochs in its closure through `ComposedVersions`, like any CS texture. The guest-only captured D3D11 views
+    (AP shadow, clouds) stay late-bound until those resources are graph twins.
+  - ViewAtmosphere's reflection medium through per-epoch views (decided): the view a frame texture names per epoch is part of
+    the bound set of that epoch's recording, so it changes only with a revision. It is not a late-bound per-frame switch
+    **(inferred: the per-epoch frame-texture API is not built yet; build it as bound)**.
+  - Advanced Skin's material table is a frame-value pool: late-bound, outside revisions, nothing to move. The frame binding
+    count (6 since t38) is bound and set at setup. Its `GpuTextures` generation re-put is DCLF's own event, not a frame variable.
+  - Tree Wind for object LOD (deferred, redesign pending): its `Draws::Versioned` buffer grows with the scene buffers, so it is
+    one more entry of DCLF's buffer `NamedVersions`, adopted with `kScene`. Its commit-hook uploads tag each region, which keeps
+    a record from reading a region the adopted version does not hold yet. If the redesign keeps the CPU copy path, its pool jobs
+    stay DCLF's scene-lane work, never revision work.
 
 **10c. Toggles and conditions as variables.** `Toggles` (`ToggleSet` fields) and `GraphConditions` become variables in `kInputs`.
 Delete `Toggles::BeginFrame`/`Adopt` and `RefreshGraphConditions`' polling at the build point. Then make in-frame build requests
-(step 1's late changes) fatal too.
+(step 1's late changes) fatal too. Tree Wind's `TreeModSupport` (when its port lands) changes the classification of DCLF members,
+not a graph or a bound resource: its `Setting<T>` event wakes DCLF's scene lane to re-classify, and the result arrives with a
+later `kScene` fragment.
 
 **Test.** Everything in step 7's list plus `native-census`, `native-tour` (long), `river` with `native-vulkan`, `rain` with `guest`,
 `flicker-taa`. DCLF-specific: the DCLF settings menu toggles (cull mode, CPU/GPU pipeline) through `setting` steps in a new
@@ -668,7 +737,7 @@ display size wherever a texture followed it.
 | 6.6 | Screen Space GI | `DisplaySize` (kMAIN), `ResolutionMode`, `Enabled`, `EnableGI`, `EnableExperimentalSpecularGI`, `EnableTemporalDenoiser`, `EnableBlur`, debug overrides | `ORGScreenSpaceGI.cpp:Prepass` (`Config::Current`, `recompileFlag`, `MainDesc`) | same-shape kept, else new twins; `RegisterReset` + `RegisterChain`; `PublishOutputs` of new objects (rebuild every graph); `Rearm(kResetClientId)` | textures on `DisplaySize` + `ResolutionMode`; outputs keep one slot each (1-texel when off); programs on the define fields; client on config | `Rearm` → `FirstFrame`. Dispatch clamp from `Adopted()`. Quality preset buttons in `DrawSettings` assign fields: they become `Setting` writes. |
 | 6.7 | ImageSpace kept textures and chain | `DisplaySize`, final target (HDR's `PostChainTarget`), luminance levels, SAO levels, water copy widths, flow map | `ImageSpace.cpp:BeginFrame` (first ImageSpace call): `CheckImports`, `CheckChainSteps`, `CheckWorldSteps`, `CheckStartSteps`, `CheckMenuSteps`, `CheckFlowMap` | `Frame::Resources::Texture2D` (`RequestSize`, `fresh`, new twins); re-register 3 chain clients; publish adapt pair and flow map (rebuild every graph) | kept textures declared on `DisplaySize`; chain clients on `HdrOutputTarget`, levels; adapt pair keeps its slots | Viewports from `DynamicRatios` move to step 8. Delete the retry every 120 frames. `flicker-taa`, `hdr`, `guest+map`. |
 | 6.8 | LLF clusters | `DynamicRatios` (cluster grid = dynamic screen / 64) | `LightLimitFix.cpp:UpdateClusterParameters` → `ORGLightCulling.cpp:Execute`; `pending` shape applied in `ORGLightCulling::BeginFrame` | pass revision, recording | cluster buffers sized for `DisplaySize` (they already use the non-dynamic size at `SetupResources`); grid count from `Adopted()` as a constant | Delete `pending`. No resource change: the pass reads the count from constants. |
-| 6.9 | Post effects | effect list and order (`enabled` per effect), CODBloom used mips (derived from `MipBlendFactor`), DoF (`UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`), PhysicalGlare (`FFTResolution`, `ApertureMode`), LensFlare (`FFTResolution`, `GhostModeInt`), LUT (`LutPath`), ColorGrading tonemapper, kMAIN size and format | `ORGPostProcessing.cpp:BeforeTonemap` (`key`, `Impl::Rebuild`); per-effect `Update`/`Build` | new transient twins, `Register`; kept twins in effect `Build` (MotionBlur `horizontal`, PhysicalGlare, DoF, LUT, LocalExposure, ColorGrading LUT, LensFlare spectra, HistogramAutoExposure buffers) | per-effect `DeclareClient` on its fields; kept textures declared; `dynamicWidth` out of the key (step 8 for the viewport) | HistogramAutoExposure `clearPending` → `FirstFrame`. Derived variable for CODBloom so a scene-layer blend of floats does not rebuild unless the mip count changes. Needs the nested `setting` step (5). Split by effect across agents. |
+| 6.9 | Post effects | effect list and order (`enabled` per effect), CODBloom used mips (derived from `MipBlendFactor`), DoF (`UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`), PhysicalGlare (`FFTResolution`, `ApertureMode`), LensFlare (`FFTResolution`, `GhostModeInt`), LUT (`LutPath`), ColorGrading tonemapper, kMAIN size and format | `ORGPostProcessing.cpp:BeforeTonemap` (`key`, `Impl::Rebuild`); per-effect `Update`/`Build` | new transient twins, `Register`; kept twins in effect `Build` (MotionBlur `horizontal`, PhysicalGlare, DoF, LUT, LocalExposure, ColorGrading LUT, LensFlare spectra, HistogramAutoExposure buffers) | per-effect `DeclareClient` on its fields; kept textures declared; `dynamicWidth` out of the key (step 8 for the viewport) | HistogramAutoExposure `clearPending` → `FirstFrame`. Derived variable for CODBloom so a scene-layer blend of floats does not rebuild unless the mip count changes. Needs the nested `setting` step (5). Split by effect across agents. Physical Lens and Camera FX are 6.20. DoF publishes its focus to the chain (`Published::kDoFFocus`), so the lens declares it. HistogramAutoExposure's readback now feeds the pre-exposure (`State::UpdateSharedData`), which stays a per-frame late-bound value. |
 | 6.10 | Sun Rays (Effects11) | `DisplaySize` (half sizes were dynamic), kMAIN format, `EnableSunRays`, inputs | `ORGSunRays.cpp:PrepareFrame` | 5 transient twins, programs, `Register` | textures on `DisplaySize`; client on inputs | `Effects11::ClearShaderCache` → `Release`: a program variable. |
 | 6.11 | Effects11 kept textures | display size (`screenWidth/Height`), technique enable bits, tonemap owner | `ORGFxRuntime.cpp:Prepare` | new `Resources` set with one-shot clears; `Planner::Build` + `Register` | kept textures on `DisplaySize`; client on `ShapeKey` | one-shot clears → `FirstFrame`. Effects11's own `SettingManager` (string keys): its writes raise the shape variable at its setter. |
 | 6.12 | Volumetric Lighting | interior/exterior quality and custom size, engine VL descriptor, `DynamicRatios` (blur area, latch only) | `ORGVolumetricLighting.cpp:EndRender/Blur` (`DescriptorSize`, `SettingsSizes`) | `RegisterAgain`: new transient Texture3D; frame skipped until scheduled | textures on the size settings and an `Interior` variable; blur area stays a constant | Delete the skipped frame (the old revision draws until adoption). `guest-interior`/`native-interior`. |
@@ -676,9 +745,13 @@ display size wherever a texture followed it.
 | 6.14 | Upscaling | `UpscaleMethod`, `qualityMode` (→ `RenderSize`), `frameGeneration`, `frameGenMethod`, `frameGenMultiplier`, HDR and presenter format for hudless | `Upscaling.cpp:CheckResources` (static `previousUpscaleMode`), `CaptureHudlessColor` → `CreateHudlessTexture` every frame; `ORGUpscaling.cpp:QueueEvaluate/...` re-register | `DrainCommandRing`, destroy/create upscaled and hudless twins; `UpscaleChanged`/`HudlessChanged`; `FrameGen::Controller::Reconcile` | upscaled texture on `DisplaySize` + `UpscaleMethod` (today it never follows a size change: a gap); hudless on `HdrEnabled` + presenter format; client on method | Delete every resize `DrainCommandRing` and `previousUpscaleMode`. Test requests (`RequestUpscaleTest`/`RequestFrameGenTest`) write `Setting`s. `upscalers`, `fg`. |
 | 6.15 | HDR Display and HDR output | `HdrEnabled`, `HdrOutputTarget`, back buffer identity, program | `HDRDisplay.cpp:BeginRenderFrame`; `ORGHDRDisplay.cpp:Compose` per present | re-register HDROutput client (own epoch, mid-frame) | composite client on those variables; HDR textures on `DisplaySize` (setup-only today, never resized: a gap) | Depends on 7b for the own epoch. `hdr`. |
 | 6.16 | IBL | `EnableIBL`, `UseStaticIBL`, reflection cubemap, Dynamic Cubemaps' env published | `ORGIBL.cpp:Prepass` | `Refresh`, `declared` | client on those variables | — |
-| 6.17 | Skylighting | reset event, occlusion/cascade imports | `ORGSkylighting.cpp:ResolveInputs` (from `Update`) → `Refresh`; `QueueReset` → `Rearm` | `Refresh`, one-shot reset | client on imports; `SkylightingReset` variable → `FirstFrame` of its probe textures (a new version, born cleared) | Removes the last `Rearm` user with SSGI. |
+| 6.17 | Skylighting | reset event, occlusion/cascade imports | `ORGSkylighting.cpp:ResolveInputs` (from `Update`) → `Refresh`; `QueueReset` → `Rearm` | `Refresh`, one-shot reset | client on imports; `SkylightingReset` variable → `FirstFrame` of its probe textures (a new version, born cleared) | Removes the last `Rearm` user with SSGI. The roof-leak fix (`204f6072f`) adds a published zenith map and a probe coverage volume; the zenith copy runs on zenith frames only, as a gate (late-bound), not a revision. |
 | 6.18 | Setup-only features made correct: SSS (`SSMode`, `EnableCharacterLighting`, working textures), Dynamic Cubemaps (`EnabledSSR`, reflection cubemap size), Volumetric Shadows (cascade width), Cloud Shadows, Subsurface Scattering `Refresh` sites | engine target and shadow map variables, their define fields | `AfterDeferredPasses`, `AfterUpdate`, `UpdateImports` (`Refresh`, `programsDirty`) | nothing (sized once) | textures and programs declared on the engine variables and settings | Correct rather than lucky (investigation 3.4 item 5). |
 | 6.19 | DCLF family clients' `Refresh` (Sky, DecalOcclusion, BloodSplatter, ShadowMask) and Bink | their targets, `HdrOutputTarget` | `CanTake`/`MakeClient` `Refresh`, `BinkGraph.cpp:UpdateTargets` (+ `BuildPending`) | `Refresh`, a build between frames | clients on target variables | Bink's `BuildPending` goes. These run in CS stages, so they are step 6, not step 10. |
+| 6.20 | Physical Lens and Camera FX (post chain, with 6.9) | Lens: `ImageEffects`, `Diffraction`, ghosts on (derived: `Intensity > 0`), the lens model (preset, f-number, focus, zoom, coating: CPU inputs, not variables). Camera FX: its effect `enabled`. Composite: `HAS_PHYSICAL_LENS` while the lens publishes outputs; linear lighting (Composite always draws then, `eb71d2e7f`) | `ORGPhysicalLens.cpp` Commit compares cache inputs each frame (gates, not builds); `StagedBuffer::Poll` each frame; focus readback each camera frame | chain rebuild when Diffraction or ghosts toggle; a new paths version per lens model; Composite's permutation | per-effect `DeclareClient` on those fields and on linear lighting; ghost paths as a `kBuffers` fragment (4e); Camera FX's transient lens image is a frame transient of the chain, no declaration | The caches stay gates (an on-change pass is late-bound work, not a revision). The focus and adaptation readbacks need Q11's answer before the post stage can be a revision member. The ghosts keep the model of the adopted paths version, read from `Adopted()`. |
+| 6.21 | ViewAtmosphere (medium and post-water composite) | medium: `enabled`, `{near,middle,distant}{PixelSize,Slices}` (atlas size, at most 8 M texels), `DisplaySize`; composite: EHF on, Physical Sky off (until its media are on the graph), program built, inputs published (`CompositeActive`) | `ViewAtmosphere::Prepare` → `ORGViewAtmosphere::Prepass` (latches parameters each frame); atlas through `RequestSize` (planned); `CompositeActive()` re-registers the composite inside the frame; `CompositeAfterWater` skips frames while `FrameAnchors::Scheduled` is false | versioned Texture3D medium; composite client registered again on an input change | atlas declared on the size settings and `DisplaySize`; composite `DeclareClient` on those variables; `PostWaterComposite` is `Adopted().Get(...)` | Today `PostWaterComposite` (read by Lighting, Effect, Water, Sky and the SSAO composite to skip their own fog) turns on with the registration, while the composite waits for its build: those frames have no fog at all (`view-atmosphere-port.md` open question 4). In a revision both switch together; delete the `Scheduled` gate. The shared volume's switch (`SharedVolumeActive`, planned) withdraws the fog's ids: use the existence rule (keep slots, 1-texel versions) instead. Reflections: per-epoch frame-texture views, bound per epoch (10b). Baselines: see the fog defects above. |
+| 6.22 | Physical Sky | `enabled`, `enableVolumetricClouds` (native reports clouds off until phase 4), `halfResApShadow` (use only, not size), `DisplaySize` (AP shadow), Dynamic Cubemaps loaded (AP depth, decision 7 of the port) | LUTs every enabled frame at EarlyPrepass (gated); disk phase LUT only when its 12 constants change (gate); AP shadow `RequestSize` on a resolution change (planned, phase 2) | nothing yet: LUTs are fixed-size History/Persistent twins | LUTs declared at setup (no dependency); AP shadow on `DisplaySize`; `cs.physical-sky.composite` (phase 2, after `cs.deferred`) and `cs.physical-sky` (clouds) `DeclareClient` on `enabled`, clouds and Dynamic Cubemaps | Previous-frame reads (7.12): the reflection faces read the LUTs before this frame writes them. A newly enabled sky's first frame gives the faces born-cleared LUTs (decision 5a: one frame of black sky in reflections) unless the faces take `FirstFrame` and skip. Guest frame textures read captured D3D11 views (late-bound); native gets zero views of the declared kind, so phase 4 switches a register's source from a zero view to a graph resource: give the cloud targets their slots from the start (existence rule). The lightning readback ring (planned) is a readback in the pre-main CS stage: Q11. |
+| 6.23 | Screenshot clean scene | kFRAMEBUFFER size and format (`DisplaySize`, `HdrEnabled`/presenter format) | `ORGScreenshot.cpp` compares kFRAMEBUFFER's size and format with its texture on every capture; then `FrameAnchors::Scheduled` | a new Persistent twin and a new client inside the frame; the capture falls back to the D3D11 snapshot until its build switches in | texture and client declared once on `DisplaySize` and the format variable | Moves with the hudless copy in 7b (same FrameGeneration ticket). The capture's own readback buffers are on the Capture anchor's placed epoch, outside the UI stage's recording. |
 
 ---
 
@@ -813,6 +886,13 @@ Order follows section 5. **S** = size, **Sh** = shape (pass set, program, format
 | 6.18 | DynamicCubemaps (GPU-style struct: check) | `EnabledSSR` : uint | define | Sh |
 | 6.18 | TerrainShadows | `EnableTerrainShadow` : bool | client | T |
 | 6.18 | GrassCollision | `EnableGrassCollision` : bool | client | T |
+| 6.20 | PhysicalLens | `ImageEffects`, `Diffraction` : bool | mapping cache client; diffraction passes in the build | Sh |
+| 6.20 | | `Intensity` : float | ghost passes in the build (derived `> 0`) | Sh (derived) |
+| 6.20 | Camera FX | effect `enabled` : bool | chain list (two passes, transient lens image) | Sh |
+| 6.21 | ViewAtmosphere (`Settings`, GPU-copied by `FeatureBuffer.cpp:ViewAtmosphereBufferData`: split) | `nearPixelSize`, `nearSlices`, `middlePixelSize`, `middleSlices`, `distantPixelSize`, `distantSlices` : uint | atlas extent | S |
+| 6.21 | | `enabled` : uint | medium, composite client, `PostWaterComposite` | T, Sh |
+| 6.22 | PhysicalSky | `enabled` : bool | LUT, AP and cloud clients | T |
+| 6.22 | | `enableVolumetricClouds` : bool | cloud passes, frame texture sources | Sh |
 | 10c | DCLF (`ToggleSet`) | `cullMode`, `pipelineMode`, `interiorCpu`, `exteriorCpu`, `shadows`, `projectedUv`, `cpuRecord`, `cpuCadence`, `registered` | graph conditions, revision | Sh |
 
 Not size-relevant (no port): MotionBlur `SampleCount` (constant only), SSS `BurleySamples`/`ScatterMode`, HistogramAutoExposure,
@@ -858,6 +938,12 @@ A new version of a `History` texture is zero-filled on the uploader before it is
 true for exactly the first frame after the revision that gave it a new version. Features pass it to their temporal pass as "history
 invalid". Frame-kind switches (load screens) do not reset history unless a feature declares that.
 
+Previous-frame readers (`kPreviousFrame`) see the born-cleared contents on that first frame too, because they run before the
+writer. Physical Sky's reflection faces are such readers: on the first frame after a new LUT version they read zero LUTs. That is
+allowed by decision 5a, but a reader that would turn zeros into a visible artefact (black sky in the faces) should read
+`FirstFrame` of the texture it reads and skip. A `kPreviousFrame` id whose writer and reader are in different stages makes both
+stages closure members of a new version, which `EpochsDeclaring` already finds.
+
 ### 7.6 Shader reload
 
 Step 7c. Today `RequestAllSynchronous` rebuilds every epoch on the owner thread with the host thread held. The end state is an event
@@ -870,6 +956,11 @@ whose revision has every epoch as a member. Open question Q5 on the pipeline swa
   FrameGeneration hudless copy) become revision members in 7b.
 - **Native.** The back buffer's versions and the swap chain colour space and format become revision inputs (9a). The HDR switch's
   black frames go away because the old chain keeps drawing until the new one is adopted. Frame generation is off in native (no change).
+- **Ports with a per-mode source.** Physical Sky's AP shadow and cloud registers read the captured D3D11 view in guest and a zero
+  view in native (no D3D11 pass writes them there). Guest's capture is late-bound. Native's zero view is a fixed declaration. When
+  those passes move onto the graph, both modes read the graph twin and the per-mode difference goes. Native reports volumetric
+  clouds off until then (`PhysicalSky::VolumetricCloudsEnabled`), so the clouds variable has a mode-dependent value, not a
+  mode-dependent path.
 
 ### 7.8 The starvation rule (decision 4a)
 
@@ -897,6 +988,31 @@ Compare shots with `python tools/cs-test/cs_test.py compare <A> <B>`. Brightness
 sections quote 0.1 to 1.8 for the quick configs and up to 26 for Dragonsreach's windows in the census; treat those as noise and look at
 the image before calling a regression.
 
+### 7.12 Readbacks, uploads, gates and lagging registrations (from the hard ports)
+
+Each mechanism the ports added, what event drives it, what it carries and what replays.
+
+| Mechanism | Port | Event | Carries | Replays? | Fits the model |
+|---|---|---|---|---|---|
+| LUT client at EarlyPrepass | Physical Sky | none (every enabled frame); `enabled` for the client | History LUTs, fixed size | yes: a gated pass in the pre-depth stage's recording | yes. The client is declared on `enabled` (6.22). |
+| Disk phase LUT on change | Physical Sky | its 12 constants (CPU compare at commit) | a Persistent LUT, rewritten in place | yes: the gate is late-bound | yes. An on-change pass is a gate, never a revision. |
+| Previous-frame reads | Physical Sky (faces) | none | last frame's LUT contents | yes | yes, with 7.5's first-frame note. |
+| Per-draw latch handles | Physical Sky (sky, water families) | none | heap indices per draw | yes (late-bound) | yes. |
+| Medium client with latched parameters | ViewAtmosphere | `enabled`, atlas sizes (6.21) | versioned Texture3D medium, parameters copied from the latch each run | yes | yes, once the atlas is declared on its settings. |
+| Post-water composite with a lagging registration | ViewAtmosphere | `CompositeActive()` inputs | a client at EngineDraws, `PostWaterComposite` | yes | not today: the registration and `PostWaterComposite` switch before the build that holds the client (`Scheduled` gate). Fixed by 6.21. |
+| Skin material pool | Advanced Skin in DCLF | per-slot resolve each frame; `GpuTextures` replies and generation | table rows at t38, descriptor owners | n/a (FrameValues) | yes: late-bound. |
+| Staged ghost paths | Physical Lens | a new lens model (CPU) | a `VersionedBuffer` version and the model fields it was built for | the post stage's recording binds the slot: the version must be adopted at a boundary | yes, as a `kBuffers` fragment (4e). Today: `AtNextBegin` (intermediate). |
+| Lens caches (mapping, diffraction, ghost wave, planning) | Physical Lens | inputs compared at commit | Persistent textures and buffers | yes: gates, and the indirect argument seeds are copied from the latch every run, zeros when idle | yes. |
+| GPU-argument draws and dispatches | Physical Lens | none | arguments written by compute | yes, by design (seeded every run) | yes. |
+| DoF focus readback | Physical Lens | the camera active | a texel to the CPU a few frames late | **no** on frames that want it (an empty pass otherwise): a readback capture | conflicts with R9 (Q11). |
+| Adaptation readback | Histogram Auto Exposure | every frame | the adaptation and histogram, the adaptation now feeding the pre-exposure | **no** on frames that want it (`ORGHistogramAutoExposure.cpp:ReadbackPass::Prepare`) | conflicts with R9 (Q11). |
+| Lightning readback ring (planned) | Physical Sky | gated query | candidates to the CPU | **no** | conflicts with R9 (Q11). Design it after Q11. |
+| Clean scene copy | Screenshot | a pending SDR capture | a Persistent texture | yes (own ticket today) | yes, after 6.23 and 7b. |
+| Pre-exposure | the post chain, FSR, XeSS, DLSS | every frame (from the adaptation readback, `State::UpdateSharedData`) | one float in SharedData and in the SDK options | the value is late-bound | yes, but the SDK options are set on the render thread (`Streamline.cpp:EvaluateXeSS/FSR/DLSS` read `globals::state->preExposure`) while the evaluate records at execution later **(inferred race: in native the next frame's options can be set before this frame's evaluate records)**. The value must travel with the frame's evaluate, as the frame's other SDK options must (section 11, 4.3). |
+
+The readbacks are the one real conflict with the plan. A revision records every member stage against pending versions and replays
+the result, so a stage that cannot be replayed cannot be a member. Q11 decides how readbacks live beside replay.
+
 ---
 
 ## 8. Scaffolding-removed checklist (final form)
@@ -907,7 +1023,7 @@ return nothing (or only the stated exception) at the end.
 | Item | Removed in | Proof |
 |---|---|---|
 | `RequestSize`, `RequestExtent`, `ApplySizeRequests` | 7a | `rg -n "RequestSize\|RequestExtent\|ApplySizeRequests" src` |
-| `AtNextBegin` (RequestSize, Terrain Shadows, ImGui users and the hook itself) | 4b, 6.2, 6.3, 7a | `rg -n "AtNextBegin\|atNextBegin" src` |
+| `AtNextBegin` (RequestSize, Terrain Shadows, ImGui, Physical Lens's staged paths, Upscaling's test requests, and the hook itself) | 4b, 4e, 6.2, 6.3, 6.14, 7a | `rg -n "AtNextBegin\|atNextBegin" src` |
 | Prepass size checks (`FollowSizes`, `CheckChainSteps`, `CheckImports`, `CheckWorldSteps`, `CheckStartSteps`, `CheckMenuSteps`, `CheckFlowMap`, `previousUpscaleMode`, LLF `pending` shape, `SettingsSizes` re-checks, `RegisterAgain`) | 6.x | `rg -n "FollowSizes\|Check(Chain\|World\|Start\|Menu)Steps\|CheckImports\|CheckFlowMap\|previousUpscaleMode\|RegisterAgain" src` and `rg -n "pending" src/Features/LightLimitFix/ORGLightCulling.cpp` |
 | Resize `DrainCommandRing` calls | 6.14, 6.15 | `rg -n "DrainCommandRing" src/Features` (left: only fault paths in `FrameGenController.cpp`, if still needed) |
 | `FrameAnchors::Service` resize poll | 7a | `rg -n "ResizeGeneration\|resizeGeneration\|ResizeCauses" src` |
@@ -931,6 +1047,10 @@ return nothing (or only the stated exception) at the end.
 | Structural rebuilds from publishing under an existing id (EHF, SSGI, LLF, adapt pair, flow map) | 6.x | `rg -n "RequestStructuralRebuild" src` shows only revision-driven shape-class changes; the census shows no `structural rebuild` after `resize` and the toggles |
 | `GraphResources.h` header rules for `RequestSize`/resize generation | 7a | `rg -n "RequestSize\|resize generation" src/RenderGraph/GraphResources.h` |
 | The guest own-epoch path that takes builds mid-frame | 7b | `rg -n "own epoch" src/RenderGraph/Frame/FrameDriver.cpp` (comment gone) and no `OwnEpoch` build attaches in the census |
+| Schedule gates for clients registered inside the frame (ViewAtmosphere's composite, the screenshot's clean scene) | 6.21, 6.23, 7a | `rg -n "FrameAnchors::Scheduled\|bool Scheduled" src` |
+| The lens's per-frame upload poll (`StagedBuffer::Poll`) | 4e | `rg -n "StagedBuffer\|Poll\(\)" src/Features/PostProcessing/ORG/ORGPhysicalLens.cpp` |
+| Readback captures inside CS stage recordings | Q11's answer | `rg -n "PlanReadbackCapture" src` shows only the places Q11 allows |
+| The screenshot's per-capture size and format compare | 6.23 | `rg -n "const bool same" src/Features/Screenshot/ORGScreenshot.cpp` |
 
 Kept on purpose (not scaffolding): `ComposedVersions`, `NamedVersions` texture entries, `AttachStagedEpochGraphs`, `EpochsDeclaring`,
 the ORG adoption observer (development check), the missed-writer check, `Setting<T>` and its registry, late-bound data paths.
@@ -951,6 +1071,8 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q8 | TextureStreaming `BaseSize` and WetnessEffects `RaindropGridSize`: size-relevant or not. | Read `TextureStreaming.cpp:SetSettings` and the wetness shaders. Port only if a texture size follows them. |
 | Q9 | How often `AttachStagedEpochGraph` is refused in practice. | Step 3's counter over the full test set. Any refusal after step 4 is fatal by design; if refusals occur in normal runs, find the configuration change that causes them. |
 | Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | Check `docs/development/org-native-frame-graph.md` and the cleanup plan for A7's state before 7b. |
+| Q11 | **Needs the user's decision.** Readbacks against replayed recordings (R9). A revision records every member stage once per frame slot and replays it, and a readback capture is never replayable. Today the post stage holds the lens focus and adaptation readbacks, and the planned lightning ring would put one in the pre-main stage. The post stage already fails with the R9 error when the Post Processing chain runs on the graph (being fixed separately). | Options: (a) readbacks leave CS stages: each runs on a placed epoch or ticket of its own after the stage, reading the published texture; (b) ORG gets a replayable readback: the copy targets a ring entry picked by a run-latched index, and the CPU learns completion from the retirement clock instead of a lifecycle callback; (c) a stage that holds a readback is recorded every frame and never replayed, which makes it unable to be a revision member, so the readback would block any revision touching that stage. Recommended: (b), since it keeps one stage and no extra epochs, and Physical Sky's lightning ring is already designed that way (ring entry per frame in flight, non-blocking completion query). Whatever fixes the post stage now should be checked against this choice. |
+| Q12 | Lagging registrations (`FrameAnchors::Scheduled`) as an interim. ViewAtmosphere's composite and the screenshot's clean scene skip frames until their build holds them. Before 6.21 and 6.23 land, keep the gate, or make the switch of `PostWaterComposite` wait for the same frame as the composite? | Recommended: keep the gate until 6.21, but tie `PostWaterComposite` to `Scheduled` (not to the registration) so the frames between have the shaders' own fog instead of none. That is a point fix, deleted by 6.21. |
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
