@@ -827,6 +827,15 @@ struct ORGExponentialHeightFog::Impl
 		open(a_state.nearVolume, false);
 		if (a_state.shape.farEnabled)
 			open(a_state.farVolume, true);
+		// The histories hold data only once a run with history passes copied into them. The state committed here is the one this
+		// run executes, which lags a new registration by a build. Marking them at Prepass let the next frame read a history no pass
+		// had written: recycled memory, kept by the temporal blend (huge but finite values that overflow the half-float volume).
+		const bool temporal = a_state.shape.temporal;
+		hasScatteringHistory = temporal;
+		hasDepthHistory = temporal && static_cast<bool>(a_state.shape.inputs[kDepth]);
+		hasScatteringHistoryFar = temporal && a_state.shape.farEnabled;
+		hasDepthHistoryFar = hasScatteringHistoryFar && static_cast<bool>(a_state.shape.inputs[kDepth]);
+		lastFrame = globals::state->frameCount;
 	}
 
 	/** @brief Only a change of inputs, history or group reduction gets here. A new extent alone is FollowSizes. False, logged, on failure. */
@@ -1087,11 +1096,7 @@ bool ORGExponentialHeightFog::Prepass()
 			shape.inputs[kDepth].resource ? "the engine's depth" : shape.inputs[kDepth].name);
 	}
 
-	impl->hasScatteringHistory = shape.temporal;
-	impl->hasDepthHistory = shape.temporal && inputs.depth;
-	impl->hasScatteringHistoryFar = shape.temporal && farEnabled;
-	impl->hasDepthHistoryFar = shape.temporal && farEnabled && inputs.depth;
-	impl->lastFrame = frame;
+	// The commit marks the histories, for the state the run executes.
 	impl->ranLastFrame = true;
 	impl->fallbackReason.clear();
 	return true;
