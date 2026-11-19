@@ -57,6 +57,8 @@ namespace FrameGen
 		bool StepModeTeardown(Method a_target);
 		void StepLoadState(Method a_target);
 		void StepFSRDelivery(Method a_target);
+		/** @brief Native: a replacement when DLSS-G's swap chain was made with another vsync than the frame wants. */
+		void StepDLSSGVsync(Method a_target);
 		/** @brief Asks the active presenter for a replacement with a_method, and waits for it before the switch completes. */
 		void RequestPresentation(Method a_method, const char* a_reason);
 

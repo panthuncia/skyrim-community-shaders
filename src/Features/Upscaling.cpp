@@ -2083,9 +2083,11 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 			const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 			auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 			auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
-			ID3D11Resource* fgDepth = Unwrap((IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture);
+			const bool depthIsCopy = IsUpscalingActive() && depthCopy.texture;
+			ID3D11Resource* fgDepth = Unwrap(depthIsCopy ? depthCopy.texture : depth.texture);
 
-			if (!IsUpscalingActive()) {
+			// Guest gives DLSS-G an evaluate a frame without an upscaler. Native sets the frame's constants in the inputs pass instead.
+			if (!IsUpscalingActive() && !RenderGraph::Engine::Native::Active()) {
 				CreateUpscaledTexture();
 				auto& mainColor = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 				if (auto* upscaled = UpscaledResource(); upscaled && mainColor.texture)
@@ -2102,7 +2104,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 				Streamline::GetSingleton()->TagDLSSGResources(
 					fgDepth, motionTexture, a_hudlessColor,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
-					(uint32_t)displaySize.x, (uint32_t)displaySize.y);
+					(uint32_t)displaySize.x, (uint32_t)displaySize.y, jitter.x, jitter.y, depthIsCopy);
 			}
 		}
 	} else if (fgMethod == FrameGenMethod::kFSR && gameplay) {

@@ -1,0 +1,99 @@
+# DLSS frame generation switched on mid-session: the fg steps with "fg dlss". NVIDIA only (RTX 40 and later); elsewhere the
+# switch falls back to FSR-FG and the run says nothing about DLSS-G. DLSS-G needs the window in the foreground, so run it without
+# CS_TEST_BACKGROUND. Compose it with a mode: native-vulkan+fg-dlss, native-d3d12+fg-dlss, guest+fg-dlss, d3d11+fg-dlss. Read
+# "[Streamline] DLSS-G status OK (presenting 2 frames" and the [FGTEST] presents (native-frame-generation-plan.md, step 8).
+extends = ["base"]
+
+[run]
+timeout_s = 400
+
+[env]
+CS_VK_DRIVER_TRACE = "1"
+
+# The graph modes' hudless breaks with the fog's volumetric fog on (native-frame-generation-plan.md, 3.6).
+[features]
+ExponentialHeightFog = false
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "fg"
+arg = "dlss"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fg"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "fg-csmenu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "Journal Menu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "fg-pause"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Journal Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# Frames, not world-ready: plain D3D11 mode records no world-ready after a coc.
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "fg-loaded"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "fg"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "fg", "fg-csmenu", "fg-pause", "fg-loaded"]
+# DLSS-G's statuses that name a broken integration, and Streamline's check that the proxy present runs every frame.
+no_log = ["getCurrentBackBufferIndexNotCalled", "reflexNotDetectedAtRuntime", "presentCommon() was not observed"]

@@ -154,6 +154,9 @@ namespace
 			if (a_feature == sl::kFeatureDLSS_G) {
 				g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSGSetOptions));
 				g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(g_sl.slDLSSGGetState));
+				// The options and state calls are made unchecked from here on.
+				if (!g_sl.slDLSSGSetOptions || !g_sl.slDLSSGGetState)
+					return false;
 			} else if (a_feature == sl::kFeatureFSR_G) {
 				g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationSetOptions", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationSetOptions));
 				g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRGetFrameGenState", reinterpret_cast<void*&>(g_sl.slFSRGetFrameGenState));
@@ -308,8 +311,9 @@ void Streamline::PreloadInterposer()
 	Initialize();
 }
 
-// Probe with the system loader before slInit decides which FG plugin to load.
-static bool ProbeDLSSGHardware()
+// Probe with the system loader before slInit decides which FG plugin to load. A nonzero a_luid (native mode) checks only the
+// adapter the device is made on, so a second GPU's optical flow does not load DLSS-G for a device that lacks it.
+static bool ProbeDLSSGHardware(uint64_t a_luid)
 {
 	if (Switches::On("CS_FORCE_FSR_FG")) {
 		logger::info("[Streamline] CS_FORCE_FSR_FG=1: hardware probe reports no DLSS-G (FSR-FG path forced)");
@@ -339,12 +343,22 @@ static bool ProbeDLSSGHardware()
 			auto enumDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
 			auto enumExts = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(gipa(instance, "vkEnumerateDeviceExtensionProperties"));
 			auto destroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
-			if (enumDevices && enumExts) {
+			auto getProps2 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(gipa(instance, "vkGetPhysicalDeviceProperties2"));
+			if (enumDevices && enumExts && (!a_luid || getProps2)) {
 				uint32_t count = 0;
 				enumDevices(instance, &count, nullptr);
 				std::vector<VkPhysicalDevice> devices(count);
 				enumDevices(instance, &count, devices.data());
 				for (auto dev : devices) {
+					if (a_luid) {
+						VkPhysicalDeviceIDProperties ids{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+						VkPhysicalDeviceProperties2 props{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ids };
+						getProps2(dev, &props);
+						uint64_t luid = 0;
+						std::memcpy(&luid, ids.deviceLUID, sizeof(luid));
+						if (!ids.deviceLUIDValid || luid != a_luid)
+							continue;
+					}
 					uint32_t extCount = 0;
 					enumExts(dev, nullptr, &extCount, nullptr);
 					std::vector<VkExtensionProperties> exts(extCount);
@@ -364,7 +378,8 @@ static bool ProbeDLSSGHardware()
 		}
 	}
 	FreeLibrary(vk);
-	logger::info("[Streamline] hardware probe: DLSS-G-class GPU (VK_NV_optical_flow) {}", found ? "present" : "absent");
+	logger::info("[Streamline] hardware probe: DLSS-G-class GPU (VK_NV_optical_flow) {}{}", found ? "present" : "absent",
+		a_luid ? " on the native device's adapter" : "");
 	return found;
 }
 
@@ -424,7 +439,7 @@ bool Streamline::Initialize()
 	const auto slDirWide = slDir.wstring();
 	const wchar_t* pluginPaths[] = { slDirWide.c_str() };
 	// The controller keeps at most one frame-generation feature loaded at runtime.
-	dlssgHardware = ProbeDLSSGHardware();
+	dlssgHardware = ProbeDLSSGHardware(native ? nativeAdapterLuid : 0);
 
 	// Frame generation needs Reflex and PCL. DLSS-G does not load without Reflex. FSR-FG needs PCL's present marker: without it
 	// sl.common never recycles the input copies it makes each frame, and holds 32 frames of them (3.3 GB at 4K, past the budget of
@@ -434,8 +449,8 @@ bool Streamline::Initialize()
 	// CS_STREAMLINE_DLSS=0 leaves DLSS and DLSS-G out. On a machine with an NVIDIA GPU, DLSS-G's plugin adds VK_NV_optical_flow to
 	// the device even when DXVK runs on another vendor's GPU (DXVK_FILTER_DEVICE_NAME), and that device then fails to create.
 	const bool dlssRequested = Util::SwitchFile::Value("CS_STREAMLINE_DLSS") != "0";
-	// Native mode loads FSR-FG as guest does. DLSS-G stays out of native until step 8 of the native frame generation plan, so the
-	// device takes no optical-flow queue for it.
+	// Native mode loads both frame generation plugins as guest does. Native unloads DLSS-G again before its first swap chain
+	// (UnloadDLSSGBeforeFirstSwapchain), but slInit must load it so the device takes its extensions and queues.
 	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureFSR, sl::kFeatureXeSS, sl::kFeatureFSR_G };
 	if (dlssRequested)
 		featuresToLoad.push_back(sl::kFeatureDLSS);
@@ -445,8 +460,12 @@ bool Streamline::Initialize()
 		featuresToLoad.push_back(sl::kFeatureReflex);
 		featuresToLoad.push_back(sl::kFeaturePCL);
 	}
-	if (dlssgHardware && reflexRequested && dlssRequested && !native)
+	if (dlssgHardware && reflexRequested && dlssRequested)
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);
+	else if (native)
+		logger::info("[Streamline] DLSS-G is not loaded for the native device: {}", !dlssgHardware ? "its adapter has no optical flow hardware" :
+																					 !dlssRequested ? "CS_STREAMLINE_DLSS=0" :
+																									  "CS_STREAMLINE_REFLEX=0");
 	if (reflexRequested)
 		logger::info("[Streamline] Reflex, PCL and DLSS-G loaded (CS_STREAMLINE_REFLEX=0 leaves them out)");
 	else
@@ -488,12 +507,25 @@ bool Streamline::Initialize()
 	return true;
 }
 
-bool Streamline::InitializeForNative()
+bool Streamline::InitializeForNative(uint64_t a_adapterLuid)
 {
 	if (triedInit)
 		return initialized && native;
 	native = true;
+	nativeAdapterLuid = a_adapterLuid;
 	return Initialize();
+}
+
+void Streamline::UnloadDLSSGBeforeFirstSwapchain()
+{
+	if (!initialized || !native || std::ranges::find(loadedFeatures, static_cast<uint32_t>(sl::kFeatureDLSS_G)) == loadedFeatures.end())
+		return;
+	// Not supported on this adapter: Streamline refuses the change, and the plugin never attaches.
+	const sl::Result result = g_sl.slSetFeatureLoaded ? g_sl.slSetFeatureLoaded(sl::kFeatureDLSS_G, false) : sl::Result::eErrorMissingOrInvalidAPI;
+	g_dlssgDesiredLoaded.store(false, std::memory_order_release);
+	g_dlssgCurrentlyLoaded.store(false, std::memory_order_release);
+	logger::info("[Streamline] DLSS-G unloaded before the native device's first swap chain (result {}); it loads again at a presentation replacement",
+		static_cast<int>(result));
 }
 
 void* Streamline::InterposerModule() const
@@ -525,7 +557,7 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 	featureReflex = supported(sl::kFeatureReflex);
 	featureXeSS = supported(sl::kFeatureXeSS);
 	featureFSR = supported(sl::kFeatureFSR);
-	featureDLSSG = false;
+	featureDLSSG = dlssgHardware && supported(sl::kFeatureDLSS_G);
 	featureFSRFG = supported(sl::kFeatureFSR_G);
 	if (featureDLSS) {
 		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(g_sl.slDLSSGetOptimalSettings));
@@ -555,6 +587,18 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 		featureFSRFG = g_sl.slFSRFrameGenerationSetOptions != nullptr && g_sl.slFSRGetFrameGenState != nullptr &&
 		               g_sl.slFSRFrameGenerationCompleteSwapchainTeardown != nullptr;
 	}
+	// The functions resolve while the plugin is unloaded (UnloadDLSSGBeforeFirstSwapchain). It stays unloaded until the controller
+	// loads it at a presentation replacement.
+	if (featureDLSSG) {
+		g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSGSetOptions));
+		g_sl.slGetFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void*&>(g_sl.slDLSSGGetState));
+		featureDLSSG = g_sl.slDLSSGSetOptions != nullptr && g_sl.slDLSSGGetState != nullptr;
+	}
+	if (!featureDLSSG)
+		logger::info("[Streamline] DLSS-G unsupported on the native device: {}", !dlssgHardware ? "no optical flow hardware on its adapter" :
+																				  std::ranges::find(loadedFeatures, static_cast<uint32_t>(sl::kFeatureDLSS_G)) == loadedFeatures.end() ?
+																									   "not loaded (CS_STREAMLINE_DLSS or CS_STREAMLINE_REFLEX)" :
+																									   "Streamline refused it on this adapter, or its functions are missing");
 	// Loaded from slInit, as in guest. The controller unloads it at a presentation replacement while frame generation is off.
 	if (featureFSRFG) {
 		g_fsrfgDesiredLoaded.store(true, std::memory_order_release);
@@ -573,8 +617,8 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 			isRTXBelow40Series = isNvidiaGPU && desc.DeviceId < kFirstAdaDeviceID;
 		}
 	}
-	logger::info("[Streamline] native device feature support: DLSS={} Reflex={} FSR={} XeSS={} FSR-G={} (no DLSS-G in native mode); NVIDIA {}",
-		featureDLSS, featureReflex, featureFSR, featureXeSS, featureFSRFG, isNvidiaGPU);
+	logger::info("[Streamline] native device feature support: DLSS={} Reflex={} FSR={} XeSS={} FSR-G={} DLSS-G={}; NVIDIA {}",
+		featureDLSS, featureReflex, featureFSR, featureXeSS, featureFSRFG, featureDLSSG, isNvidiaGPU);
 }
 
 void Streamline::SetVulkanDevice()
@@ -689,6 +733,9 @@ void Streamline::SetVulkanDevice()
 									 "Ada or newer (M)");
 	}
 }
+
+// The last frame whose common constants were set on viewport 0. DLSS-G reads them, and Streamline wants them once a frame.
+static std::atomic<uint32_t> g_viewport0ConstantsFrame{ UINT32_MAX };
 
 static sl::FrameToken* TokenForFrame(uint32_t a_frameId)
 {
@@ -1557,6 +1604,8 @@ static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::View
 		logger::error("[Streamline] slSetConstants failed for viewport {} (result {})", vpId, static_cast<int>(constantsRes));
 		return constantsRes;
 	}
+	if (vpId == 0)
+		g_viewport0ConstantsFrame.store(frame, std::memory_order_release);
 
 	const bool d3d12 = RenderGraph::Backend::IsD3D12();
 	const sl::ViewportHandle viewport = a_viewport;
@@ -1702,6 +1751,96 @@ static sl::Result cs_RecordFrameGenInputs(uint32_t a_renderWidth, uint32_t a_ren
 	s_queuedFrame = frame;
 	return sl::Result::eOk;
 }
+
+/**
+ * @brief DLSS-G reads the options' viewport, where the upscalers set the frame's constants. Without an upscaler this sets them,
+ * once a frame. False when the frame has none.
+ */
+static bool cs_EnsureDLSSGConstants(uint32_t a_displayWidth, uint32_t a_displayHeight, float a_jitterX, float a_jitterY)
+{
+	sl::FrameToken* token = RenderFrameToken();
+	if (!token)
+		return false;
+	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
+	if (g_viewport0ConstantsFrame.load(std::memory_order_acquire) == frame)
+		return true;
+	sl::Constants consts;
+	if (!cs_BuildConstants(consts, a_displayWidth, a_displayHeight, a_jitterX, a_jitterY))
+		return false;
+	if (const sl::Result constantsRes = g_sl.slSetConstants(consts, *token, g_sl.viewport); constantsRes != sl::Result::eOk) {
+		logger::error("[Streamline] slSetConstants failed for DLSS-G's viewport (result {})", static_cast<int>(constantsRes));
+		return false;
+	}
+	g_viewport0ConstantsFrame.store(frame, std::memory_order_release);
+	return true;
+}
+
+/**
+ * @brief DLSS-G's tags as the UI stage's pass, after the hudless copy (ORGUpscaling::QueueFrameGenInputs): the depth, motion
+ * vector and hudless tags on the pass's command list. Each is tagged valid only now, so Streamline copies it in the state the
+ * pass declares, and DLSS-G reads the copies at the present. DLSS-G has no evaluate. Everything the recording uses is captured
+ * by value, so a replayed recording tags again.
+ */
+static sl::Result cs_RecordDLSSGInputs(uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_displayWidth, uint32_t a_displayHeight,
+	bool a_depthCopy, bool* a_queued)
+{
+	using RenderGraph::Engine::Native::ExternalImageInfo;
+	*a_queued = false;
+	sl::FrameToken* token = RenderFrameToken();
+	if (!token)
+		return sl::Result::eOk;
+	static uint32_t s_queuedFrame = UINT32_MAX;
+	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
+	if (s_queuedFrame == frame)
+		return sl::Result::eOk;
+	const sl::ViewportHandle viewport = g_sl.viewport;
+
+	const bool d3d12 = RenderGraph::Backend::IsD3D12();
+	auto record = [=](void* a_list, std::span<const ExternalImageInfo> a_infos) {
+		std::array<sl::Resource, 3> resources{};
+		std::array<sl::SubresourceRange, 3> ranges{};
+		for (std::size_t i = 0; i < a_infos.size() && i < resources.size(); ++i) {
+			const auto& info = a_infos[i];
+			if (d3d12) {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, static_cast<uint32_t>(info.state) };
+			} else {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, nullptr, reinterpret_cast<void*>(info.view), static_cast<uint32_t>(info.state) };
+				resources[i].width = info.width;
+				resources[i].height = info.height;
+				resources[i].nativeFormat = info.format;
+				resources[i].mipLevels = info.mips;
+				resources[i].arrayLayers = info.layers;
+				resources[i].usage = info.usage;
+				ranges[i].aspectMask = cs_ImageAspect(static_cast<VkFormat>(info.format));
+				ranges[i].baseMipLevel = 0;
+				ranges[i].levelCount = info.mips;
+				ranges[i].baseArrayLayer = 0;
+				ranges[i].layerCount = info.layers;
+				resources[i].next = &ranges[i];
+			}
+		}
+		sl::Extent renderExtent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent displayExtent{ 0, 0, a_displayWidth, a_displayHeight };
+		std::array<sl::ResourceTag, 3> tags{
+			sl::ResourceTag{ &resources[0], sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent },
+			sl::ResourceTag{ &resources[1], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent },
+			sl::ResourceTag{ &resources[2], sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, &displayExtent }
+		};
+		auto* commandBuffer = static_cast<sl::CommandBuffer*>(a_list);
+		if (const sl::Result tagRes = g_sl.slSetTagForFrame(*token, viewport, tags.data(), static_cast<uint32_t>(tags.size()), commandBuffer); tagRes != sl::Result::eOk) {
+			logger::error("[Streamline] slSetTagForFrame failed for DLSS-G's inputs (result {})", static_cast<int>(tagRes));
+			return false;
+		}
+		return true;
+	};
+	if (!ORGUpscaling::Get().QueueFrameGenInputs("Streamline DLSS-G inputs", std::move(record), a_depthCopy))
+		return sl::Result::eOk;
+	static std::once_flag logged;
+	std::call_once(logged, [] { logger::info("[Streamline] DLSS-G's inputs are the UI stage's pass"); });
+	*a_queued = true;
+	s_queuedFrame = frame;
+	return sl::Result::eOk;
+}
 #endif
 
 static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
@@ -1757,6 +1896,8 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 				return constantsRes;
 			}
 			s_constFrameByVp[vpId] = g_sl.renderFrameId.load(std::memory_order_acquire);
+			if (vpId == 0)
+				g_viewport0ConstantsFrame.store(s_constFrameByVp[vpId], std::memory_order_release);
 		}
 	} else {
 		sl::Constants consts;
@@ -2514,7 +2655,7 @@ static void cs_NoteDlssgTagSkip(const char* a_reason)
 void Streamline::TagDLSSGResources(
 ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	ID3D11Resource* a_hudlessColor, uint32_t a_renderWidth, uint32_t a_renderHeight,
-	uint32_t a_displayWidth, uint32_t a_displayHeight)
+	uint32_t a_displayWidth, uint32_t a_displayHeight, float a_jitterX, float a_jitterY, bool a_depthCopy)
 {
 	// DLSS-G interpolates from these tags at present, through Streamline's present hook. It is not separated from render-graph epochs:
 	// if a graph epoch is the last GPU work before it, its output can be corrupt (docs/development/render-graph.md, "Hazard: external
@@ -2527,6 +2668,39 @@ ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 		cs_NoteDlssgTagSkip("game gave no depth or motion-vector target");
 		return;
 	}
+
+#if defined(CS_HAS_RENDER_GRAPH)
+	// Graph modes: the UI stage's pass after the hudless copy. Plain D3D11 mode keeps the interop ring below.
+	if (ORGUpscaling::Get().RecordsFrameGenInputs() || native) {
+		// Every gameplay frame has its constants, tagged or not.
+		const bool constants = cs_EnsureDLSSGConstants(a_displayWidth, a_displayHeight, a_jitterX, a_jitterY);
+		if (!a_hudlessColor || !ORGUpscaling::Get().RecordsFrameGenInputs()) {
+			cs_NoteDlssgTagSkip("the graph holds no hudless colour");
+			ClearDLSSGTags();
+			return;
+		}
+		if (!g_sl.dlssgCloneTagsPrimed.load(std::memory_order_acquire)) {
+			cs_NoteDlssgTagSkip("clone tags not primed yet");
+			ClearDLSSGTags();
+			return;
+		}
+		if (!constants) {
+			cs_NoteDlssgTagSkip("the frame has no constants");
+			ClearDLSSGTags();
+			return;
+		}
+		bool queued = false;
+		(void)cs_RecordDLSSGInputs(a_renderWidth, a_renderHeight, a_displayWidth, a_displayHeight, a_depthCopy, &queued);
+		if (queued) {
+			g_sl.dlssgTaggedThisFrame = true;
+			cs_NoteDlssgTagSkip(nullptr);
+		} else {
+			cs_NoteDlssgTagSkip("the inputs pass is not scheduled yet");
+			ClearDLSSGTags();
+		}
+		return;
+	}
+#endif
 
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk->CommandResourcesReady()) {
@@ -2655,6 +2829,14 @@ void Streamline::ClearDLSSGTags()
 		sl::ResourceTag{ nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, nullptr },
 		sl::ResourceTag{ nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, nullptr },
 	};
+	// Native mode: null tags copy nothing, so they need no command list. The inputs pass did not run for this frame.
+	if (native) {
+		if (const sl::Result tagResult = g_sl.slSetTagForFrame(*token, g_sl.viewport, tags, static_cast<uint32_t>(std::size(tags)), nullptr); tagResult == sl::Result::eOk)
+			g_sl.dlssgTaggedThisFrame = true;
+		else
+			logger::error("[Streamline] DLSS-G passthrough tags failed (result {})", static_cast<int>(tagResult));
+		return;
+	}
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk->CommandResourcesReady())
 		return;
@@ -2699,6 +2881,16 @@ bool Streamline::EnsureDLSSGPresentTag()
 bool Streamline::CompleteSwapchainTeardown()
 {
 	return SwapchainTornDown();
+}
+
+void Streamline::TurnDLSSGOffBeforeSwapchainChange()
+{
+	if (!initialized || !native || !featureDLSSG || !g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) || !g_sl.dlssgModeOn)
+		return;
+	// Streamline asks for the mode off before any swap chain change. The presents already queued take it, then the change runs.
+	if (!SetDLSSGMode(false, g_sl.dlssgCachedDisplayW, g_sl.dlssgCachedDisplayH))
+		stl::report_and_fail("[Streamline] DLSS-G refused its mode off before a swap chain change");
+	logger::info("[Streamline] DLSS-G mode off before a swap chain change");
 }
 
 void Streamline::SetDLSSGDesiredLoaded(bool a_loaded)

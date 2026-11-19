@@ -242,12 +242,12 @@ namespace RenderGraph::Engine::Native
 		 * @brief Initializes Streamline for the native backend before the device exists, so the device can come up through it.
 		 * False when Streamline cannot run, and the upscalers fall back to TAA.
 		 */
-		bool NativeStreamline(rhi::DeviceCreateInfo::StreamlineHost& a_host)
+		bool NativeStreamline(rhi::DeviceCreateInfo::StreamlineHost& a_host, uint64_t a_adapterLuid)
 		{
 			if (!globals::features::upscaling.loaded)
 				return false;
 			auto* streamline = Streamline::GetSingleton();
-			if (!streamline->InitializeForNative() || !streamline->InterposerModule())
+			if (!streamline->InitializeForNative(a_adapterLuid) || !streamline->InterposerModule())
 				return false;
 			a_host.interposer = streamline->InterposerModule();
 			a_host.features = streamline->LoadedFeatures().data();
@@ -261,9 +261,10 @@ namespace RenderGraph::Engine::Native
 		bool CreateBasicRhiDevice(IDXGIAdapter* a_adapter, std::shared_ptr<rhi::DevicePtr>& a_out, std::string& a_reason)
 		{
 			static rhi::DeviceCreateInfo::StreamlineHost streamlineHost{};
-			const bool streamline = NativeStreamline(streamlineHost);
 			if (DXGI_ADAPTER_DESC described{}; a_adapter && SUCCEEDED(a_adapter->GetDesc(&described)))
 				g_adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(described.AdapterLuid.HighPart)) << 32) | described.AdapterLuid.LowPart;
+			// After the adapter's LUID: DLSS-G loads only when this adapter has the hardware.
+			const bool streamline = NativeStreamline(streamlineHost, g_adapterLuid);
 			// D3D12 backend on the same adapter. Code after this is shared except where it checks OnD3D12().
 			if (::RenderGraph::Backend::Requested() == rhi::Backend::D3D12) {
 				D3D12DeviceOptions options{};
@@ -1138,6 +1139,7 @@ namespace RenderGraph::Engine::Native
 			FrameGen::PresentationConfig requestedPresentation{};
 			PresentationState adoptedPresentation{};
 			std::function<bool()> defaultTornDown;  // under presentationLock
+			std::function<void()> leaving;          // under presentationLock
 			// With a presentation layer, the vsync the swap chain was made for. Submission thread, under presentLock.
 			std::optional<bool> layerVsync;
 			std::atomic<bool> hdr10Supported = false;
@@ -2698,8 +2700,21 @@ namespace RenderGraph::Engine::Native
 			return g_device->backBuffer->QueryInterface(a_riid, a_out);
 		}
 
+		/** @brief Runs the presentation's leaving step (SetPresentationLeaving) on this thread. */
+		void RunPresentationLeaving()
+		{
+			std::function<void()> leaving;
+			{
+				std::lock_guard guard(g_device->presentationLock);
+				leaving = g_device->leaving;
+			}
+			if (leaving)
+				leaving();
+		}
+
 		HRESULT SwapChainResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT)
 		{
+			RunPresentationLeaving();
 			// A queued present uses the swap chain and back buffer, so let it finish before taking the lock.
 			RenderGraphRuntime::Get().DrainSubmissions("a swap chain resize", true);
 			std::lock_guard guard(g_device->presentLock);
@@ -4619,6 +4634,8 @@ namespace RenderGraph::Engine::Native
 		swapchainDesc.format = state->swapchainFormat;
 		swapchainDesc.bufferCount = state->bufferCount;
 		swapchainDesc.allowTearing = true;
+		// DLSS-G attaches to every swap chain made while it is loaded, and this one has no presentation layer.
+		Streamline::GetSingleton()->UnloadDLSSGBeforeFirstSwapchain();
 		if (state->Rhi().CreateSwapchain(swapchainDesc, state->swapchain) != rhi::Result::Ok || !state->swapchain)
 			Fail("the native swap chain", "BasicRHI could not create a swap chain on the game's window");
 		// HDR Display switches the colour space later.
@@ -5101,6 +5118,7 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device)
 			return 0;
+		RunPresentationLeaving();
 		std::uint64_t serial;
 		{
 			std::lock_guard guard(g_device->presentationLock);
@@ -5126,6 +5144,14 @@ namespace RenderGraph::Engine::Native
 			return;
 		std::lock_guard guard(g_device->presentationLock);
 		g_device->defaultTornDown = std::move(a_tornDown);
+	}
+
+	void SetPresentationLeaving(std::function<void()> a_leaving)
+	{
+		if (!g_device)
+			return;
+		std::lock_guard guard(g_device->presentationLock);
+		g_device->leaving = std::move(a_leaving);
 	}
 
 	PresentationState Presentation()
@@ -5328,6 +5354,7 @@ namespace RenderGraph::Engine::Native
 	PresentationState Presentation() { return {}; }
 	PresentationState FramePresentation() { return {}; }
 	void SetPresentationTornDown(std::function<bool()>) {}
+	void SetPresentationLeaving(std::function<void()>) {}
 	void OnFrameBegin() {}
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}
