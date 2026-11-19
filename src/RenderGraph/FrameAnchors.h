@@ -285,6 +285,13 @@ namespace FrameAnchors
 	*/
 	bool ScheduledThisFrame(std::string_view a_id, Anchor a_anchor);
 
+	/**
+	* @brief Whether every stage of this frame with a step at a_anchor holding a_id has ended this frame, and one such stage exists.
+	* Then a tap of a_anchor now comes after those stages, such as a menu scene's tonemap after the post stage, and no stage takes it.
+	* Render owner.
+	*/
+	bool StagePassed(std::string_view a_id, Anchor a_anchor);
+
 	/** @brief Whether the stage holding a_anchor wholly has a_id's current registration in its last schedule.
 	*  For work queued before the frame's Begin, such as a Bink tick. Render owner. */
 	bool InStage(std::string_view a_id, Anchor a_anchor);

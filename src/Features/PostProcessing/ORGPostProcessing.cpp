@@ -775,6 +775,8 @@ struct ORGPostProcessing::Impl
 	bool colorGraded = false;
 	bool exposureResolved = true;
 	std::vector<Index> order;
+	// A tonemap after the post stage was seen and logged.
+	bool passedLogged = false;
 
 	// Empty means on the graph. Logged when it changes.
 	std::optional<std::string> reason;
@@ -996,6 +998,16 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.ran = false;
 	if (!RenderGraphRuntime::Get().IsActive()) {
 		s.SetSkipped("the render graph is not active");
+		return;
+	}
+	// A second tonemap in the frame can come after the post stage has ended. The loading menu's 3D model draws one in every frame
+	// of DCLF's load hold. No stage takes it, so D3D11 runs the chain for it, as in a frame kind without a post stage.
+	// It is not the world's tonemap, so it leaves the logged state alone. Otherwise the chain would seem to leave and rejoin the graph each frame.
+	if (FrameAnchors::StagePassed(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
+		if (!s.passedLogged) {
+			s.passedLogged = true;
+			logger::info("[ORG] Post Processing: a tonemap after this frame's post stage, such as a menu scene's, runs the chain on D3D11 (logged once)");
+		}
 		return;
 	}
 
