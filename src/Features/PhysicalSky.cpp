@@ -13,10 +13,12 @@
 #include "CloudShadows.h"
 #include "Deferred.h"
 #include "Effects11.h"
+#include "Features/PhysicalSky/ORGPhysicalSky.h"
 #include "Features/ViewAtmosphere.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "PostProcessing/ColorSpace.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "SkySync.h"
 #include "TerrainShadows.h"
 
@@ -571,6 +573,12 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 	aerosolScatter = optics.scatter;
 	aerosolAbsorption = optics.absorption;
 	aerosolPhaseG = optics.phaseG;
+}
+
+bool PhysicalSky::VolumetricCloudsEnabled() const
+{
+	// Native mode runs no D3D11 work and the clouds are not on the render graph yet, so their targets would hold nothing.
+	return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed && !RenderGraph::Engine::Native::Active();
 }
 
 bool PhysicalSky::IsActive() const
@@ -1661,23 +1669,28 @@ void PhysicalSky::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		texTrLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texTrLut->CreateSRV(srvDesc);
-		texTrLut->CreateUAV(uavDesc);
+		// Graph twins in graph mode (ORGPhysicalSky), else D3D11 textures.
+		using Lut = ORGPhysicalSky::Lut;
+		const auto makeLut2D = [&](eastl::unique_ptr<Texture2D>& a_texture, Lut a_lut) {
+			if (auto* twin = ORGPhysicalSky::MakeLut2D(a_lut, tex2dDesc)) {
+				a_texture.reset(twin);
+				return;
+			}
+			a_texture = eastl::make_unique<Texture2D>(tex2dDesc);
+			a_texture->CreateSRV(srvDesc);
+			a_texture->CreateUAV(uavDesc);
+		};
+		makeLut2D(texTrLut, Lut::Transmittance);
 
 		tex2dDesc.Width = kMsLutW;
 		tex2dDesc.Height = kMsLutH;
 
-		texMsLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texMsLut->CreateSRV(srvDesc);
-		texMsLut->CreateUAV(uavDesc);
+		makeLut2D(texMsLut, Lut::Multiscatter);
 
 		tex2dDesc.Width = kSvLutW;
 		tex2dDesc.Height = kSvLutH;
 
-		texSvLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texSvLut->CreateSRV(srvDesc);
-		texSvLut->CreateUAV(uavDesc);
+		makeLut2D(texSvLut, Lut::SkyView);
 		texSkyTail = eastl::make_unique<Texture2D>(tex2dDesc, "PhysicalSky::SkyTail");
 		texSkyTail->CreateSRV(srvDesc);
 		texSkyTail->CreateUAV(uavDesc);
@@ -1698,9 +1711,13 @@ void PhysicalSky::SetupResources()
 		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D,
 		uavDesc.Texture3D = { .MipSlice = 0, .FirstWSlice = 0, .WSize = kApLutD };
 
-		texApLut = eastl::make_unique<Texture3D>(tex3dDesc);
-		texApLut->CreateSRV(srvDesc);
-		texApLut->CreateUAV(uavDesc);
+		if (auto* twin = ORGPhysicalSky::MakeLut3D(Lut::AerialPerspective, tex3dDesc)) {
+			texApLut.reset(twin);
+		} else {
+			texApLut = eastl::make_unique<Texture3D>(tex3dDesc);
+			texApLut->CreateSRV(srvDesc);
+			texApLut->CreateUAV(uavDesc);
+		}
 	}
 	{
 		D3D11_TEXTURE2D_DESC texDesc;
@@ -1739,12 +1756,16 @@ void PhysicalSky::SetupResources()
 			.Usage = D3D11_USAGE_DEFAULT,
 			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS
 		};
-		texDiskPhaseLut = eastl::make_unique<Texture2D>(desc, "PhysicalSky::DiskPhaseLut");
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv{ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D };
-		srv.Texture2D.MipLevels = 1;
-		texDiskPhaseLut->CreateSRV(srv);
-		const D3D11_UNORDERED_ACCESS_VIEW_DESC uav{ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D };
-		texDiskPhaseLut->CreateUAV(uav);
+		if (auto* twin = ORGPhysicalSky::MakeLut2D(ORGPhysicalSky::Lut::DiskPhase, desc)) {
+			texDiskPhaseLut.reset(twin);
+		} else {
+			texDiskPhaseLut = eastl::make_unique<Texture2D>(desc, "PhysicalSky::DiskPhaseLut");
+			D3D11_SHADER_RESOURCE_VIEW_DESC srv{ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D };
+			srv.Texture2D.MipLevels = 1;
+			texDiskPhaseLut->CreateSRV(srv);
+			const D3D11_UNORDERED_ACCESS_VIEW_DESC uav{ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D };
+			texDiskPhaseLut->CreateUAV(uav);
+		}
 		diskPhaseCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<std::array<float, 12>>(), "PhysicalSky::DiskPhaseConstants");
 		diskPhaseValid = false;
 	}
@@ -1752,6 +1773,7 @@ void PhysicalSky::SetupResources()
 	SetupVolumetricResources();
 
 	UpdateShaders();
+	ORGPhysicalSky::Get().Setup(*this);
 }
 
 void PhysicalSky::ClearShaderCache()
@@ -2073,12 +2095,24 @@ void PhysicalSky::Reset()
 	cbData.volCloudUseSun = sunDir.z > -std::sin(solarLimit) ? 1u : 0u;
 }
 
+void PhysicalSky::PostPostLoad()
+{
+	Hooks::Install();
+	ORGPhysicalSky::Reserve();
+}
+
 void PhysicalSky::EarlyPrepass()
 {
-	if (cbData.enabled) {
-		UpdateDiskPhaseLut();
-		GenerateLuts();
+	if (!cbData.enabled)
+		return;
+	// On the render graph the LUTs run at the EarlyPrepass anchor; D3D11's cloud passes still read the disk phase LUT at t106.
+	if (ORGPhysicalSky::Get().GenerateLuts(*this)) {
+		auto* srv = texDiskPhaseLut->srv.get();
+		globals::d3d::context->CSSetShaderResources(106, 1, &srv);
+		return;
 	}
+	UpdateDiskPhaseLut();
+	GenerateLuts();
 }
 
 void PhysicalSky::ReflectionsPrepass()

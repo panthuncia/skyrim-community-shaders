@@ -1,13 +1,26 @@
-#define COMPUTESHADER
+// Dual-target (Common/OrgResources.hlsli). The graph reads the constants from a latch (ORGPhysicalSky).
+#ifndef COMPUTESHADER
+#	define COMPUTESHADER
+#endif
+#include "Common/OrgResources.hlsli"
 #include "Common/Math.hlsli"
 
-cbuffer DiskPhaseConstants : register(b0)
-{
-	float4 DropletPhase;
-	float4 DiskRadii;        // xyz are Sun, Masser, Secunda.
-	float4 PhaseParameters;  // cirrus forward/backward g, aerosol g, vanilla cloud forward g.
-};
-RWTexture2D<float4> OutputPhase : register(u0);
+// DropletPhase; DiskRadii xyz are Sun, Masser, Secunda; PhaseParameters are cirrus forward/backward g, aerosol g, vanilla cloud forward g.
+#define DISK_PHASE_FIELDS(M, A) M(float4, DropletPhase) M(float4, DiskRadii) M(float4, PhaseParameters)
+
+#define DISK_PHASE_RESOURCES(X)                 \
+	X(UAV, RWTexture2D<float4>, OutputPhase, 0) \
+	X(LATCH, DiskPhaseFrame, Constants, 0)
+ORG_PUSH_BLOCK(DISK_PHASE_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(DiskPhaseFrame, DiskPhaseConstants, 0)
+DISK_PHASE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(DiskPhaseFrame, Constants, 0)
+#define ORG_GLOBAL_LATCH Constants
+DISK_PHASE_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutputPhase, 0)
 
 // Gauss-Legendre nodes on [0, 1]. The HG CDF is the integration coordinate,
 // so even a sub-degree diffraction peak is integrated without missing its energy.
