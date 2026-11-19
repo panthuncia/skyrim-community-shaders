@@ -11,6 +11,7 @@
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Recipe.h"
 #	include "RenderGraph/Frame/RecipeTable.h"
+#	include "RenderGraph/Frame/RevisionRecordings.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -3540,6 +3541,170 @@ namespace FrameAnchors
 		state.inBegin = false;
 	}
 
+	/** @brief A revision's member stages, each with one recording request per frame slot that has a schedule. */
+	struct RevisionRecordings
+	{
+		struct Slot
+		{
+			RenderGraph::Frame::SegmentFields fields;  // the slot's schedule the recording was asked for
+			std::shared_ptr<SegmentRecording> entry;
+		};
+		struct Member
+		{
+			std::uint32_t declared = kDeclared;
+			std::array<Slot, RenderGraphRuntime::kGameFramesInFlight> slots{};
+		};
+		RecordVersions versions;
+		std::vector<Member> members;
+	};
+
+	std::shared_ptr<RevisionRecordings> MakeRevisionRecordings(std::span<const std::uint32_t> a_epochs, std::shared_ptr<const org::IResourceVersions> a_versions,
+		std::uint64_t a_serial, std::vector<std::uint32_t>& a_others)
+	{
+		auto revision = std::make_shared<RevisionRecordings>();
+		revision->versions = { std::move(a_versions), a_serial };
+		AddRevisionMembers(*revision, a_epochs, a_others);
+		return revision;
+	}
+
+	std::uint32_t AddRevisionMembers(RevisionRecordings& a_revision, std::span<const std::uint32_t> a_epochs, std::vector<std::uint32_t>& a_others)
+	{
+		std::uint32_t added = 0;
+		for (const auto epoch : a_epochs) {
+			const auto declared = DeclaredOfEpoch(epoch);
+			if (declared == kDeclared) {
+				if (std::ranges::find(a_others, epoch) == a_others.end())
+					a_others.push_back(epoch);
+				continue;
+			}
+			if (std::ranges::any_of(a_revision.members, [&](const RevisionRecordings::Member& a_member) { return a_member.declared == declared; }))
+				continue;
+			a_revision.members.push_back({ declared });
+			++added;
+		}
+		return added;
+	}
+
+	RevisionProgress AdvanceRevisionRecordings(RevisionRecordings& a_revision, std::uint64_t a_frame)
+	{
+		RevisionProgress progress;
+		auto& state = Anchors();
+		progress.ready = true;
+		if (!state.host)
+			return progress;
+		auto lock = Guard();
+		auto& host = *state.host;
+		const auto note = [](std::string& a_line, std::string_view a_what) {
+			a_line += fmt::format("{}{}", a_line.empty() ? "" : ", ", a_what);
+		};
+		const auto missing = [&](std::uint32_t a_declared, std::uint32_t a_slot) {
+			if (progress.ready)
+				progress.missing = a_declared;
+			progress.ready = false;
+			note(progress.waiting, fmt::format("{} slot {}", declaredInfo[a_declared].names.label, a_slot));
+		};
+		// Requests made here are Begin's, not mid-frame re-records.
+		const bool inBegin = std::exchange(state.inBegin, true);
+		for (auto& member : a_revision.members) {
+			const auto declared = member.declared;
+			const auto& label = declaredInfo[declared].names.label;
+			// The attached graph takes no new recording while a build is staged. The revision waits until it switched in.
+			if (host.StagedGeneration(EpochOfDeclared(declared))) {
+				if (progress.ready)
+					progress.missing = declared;
+				progress.ready = false;
+				note(progress.deferred, label);
+				continue;
+			}
+			auto& recordings = state.declaredRecordings[declared];
+			for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
+				auto& slot = member.slots[s];
+				const auto& scheduled = state.schedule[declared][s];
+				// A slot without a current schedule binds nothing yet. After adoption Schedule records it against the adopted versions.
+				if (!scheduled.recording || !host.EpochRecordingCurrent(*scheduled.recording)) {
+					slot = {};
+					continue;
+				}
+				if (slot.entry && slot.fields == scheduled.fields) {
+					std::shared_ptr<const org::GraphHost::EpochRecording> recorded;
+					bool done = false;
+					bool dropped = false;
+					std::string error;
+					{
+						const std::lock_guard entryLock(recordings.mutex);
+						done = slot.entry->done;
+						recorded = slot.entry->recording;
+						dropped = slot.entry->dropped;
+						error = slot.entry->error;
+					}
+					if (!done) {
+						missing(declared, s);
+						continue;
+					}
+					if (recorded && host.EpochRecordingCurrent(*recorded)) {
+						++progress.recordings;
+						continue;
+					}
+					if (!recorded && !dropped)
+						FailRecording(declared, slot.fields, s, error.empty() ? std::string("no recording") : error);
+					// Dropped by a build, or recorded on a build replaced since: asked for again.
+					++progress.askedAgain;
+					note(progress.dropReasons, fmt::format("{} slot {}: {}", label, s, recorded ? std::string("a build attached since it was recorded") : error));
+				}
+				slot.fields = scheduled.fields;
+				slot.entry = RequestDeclared(state, declared, slot.fields, s, a_frame, " (frame revision)", nullptr, a_revision.versions);
+				bool ready = false;
+				{
+					const std::lock_guard entryLock(recordings.mutex);
+					ready = slot.entry->done && slot.entry->recording && host.EpochRecordingCurrent(*slot.entry->recording);
+				}
+				if (ready)
+					++progress.recordings;
+				else
+					missing(declared, s);
+			}
+		}
+		state.inBegin = inBegin;
+		return progress;
+	}
+
+	std::vector<std::string> RevisionMembers(const RevisionRecordings& a_revision)
+	{
+		std::vector<std::string> labels;
+		for (const auto& member : a_revision.members)
+			labels.emplace_back(declaredInfo[member.declared].names.label);
+		return labels;
+	}
+
+	void InstallRevisionSchedules(const RevisionRecordings& a_revision)
+	{
+		auto& state = Anchors();
+		if (!state.host)
+			return;
+		auto lock = Guard();
+		for (const auto& member : a_revision.members)
+			for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
+				const auto& slot = member.slots[s];
+				if (!slot.entry)
+					continue;
+				std::shared_ptr<const org::GraphHost::EpochRecording> recorded;
+				{
+					const std::lock_guard entryLock(state.declaredRecordings[member.declared].mutex);
+					recorded = slot.entry->recording;
+				}
+				auto& scheduled = state.schedule[member.declared][s];
+				// The revision was found ready in this Begin, so nothing may have moved since.
+				if (!recorded || !scheduled.recording || !(scheduled.fields == slot.fields)) {
+					const auto message = fmt::format("Community Shaders: the {}'s frame slot {} changed between its frame revision's last check and its adoption",
+						declaredInfo[member.declared].names.label, s);
+					logger::critical("[ORG] frame revision: {}", message);
+					stl::report_and_fail(message);
+				}
+				// The description and its build stay. Only what the slot binds moves to the adopted versions.
+				scheduled.recording = std::move(recorded);
+			}
+	}
+
 	RunResult Run(const Point& a_point)
 	{
 		const RunDepthScope depth;
@@ -4169,6 +4334,7 @@ namespace FrameAnchors
 
 // Built without OpenRenderGraph: no anchor has an epoch, and every hook does nothing.
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/Frame/RevisionRecordings.h"
 
 namespace FrameAnchors
 {
@@ -4233,6 +4399,17 @@ namespace FrameAnchors
 	void AddToFrame(std::vector<std::uint32_t>&) {}
 	void SetTicketsAhead(org::GraphHost&) {}
 	void Attach(org::GraphHost&) {}
+	struct RevisionRecordings
+	{};
+	std::shared_ptr<RevisionRecordings> MakeRevisionRecordings(std::span<const std::uint32_t>, std::shared_ptr<const org::IResourceVersions>, std::uint64_t,
+		std::vector<std::uint32_t>&)
+	{
+		return nullptr;
+	}
+	std::uint32_t AddRevisionMembers(RevisionRecordings&, std::span<const std::uint32_t>, std::vector<std::uint32_t>&) { return 0; }
+	RevisionProgress AdvanceRevisionRecordings(RevisionRecordings&, std::uint64_t) { return { .ready = true }; }
+	std::vector<std::string> RevisionMembers(const RevisionRecordings&) { return {}; }
+	void InstallRevisionSchedules(const RevisionRecordings&) {}
 }
 
 #endif
