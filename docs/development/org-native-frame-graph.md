@@ -8677,3 +8677,12 @@ About 1,800 lines net.
 - **The legacy cs-ab scenarios** still feed `gen_schema.py`, which keeps old switches that only they name in the schema. Dropping
   them, or reading them only for types, is a cs-test change of its own.
 - `org-full-port.md` and the frame revision plans still name the owned frame: they are history and plans.
+
+### Checks after C3 and C5
+
+On DLL `7443b456d89e`, background runs, one launch each. All seven passed: `d3d11+quick`, `latch-census-short`, `guest+map`,
+`guest+menu`, `native-vulkan+hdr`, `native-vulkan+resize` and `native-flicker`.
+
+- No `FailClients` stop, no consecutive-registration warning and no frame tap error. The `[E]`/`[C]` line kinds are unchanged.
+- Shots match the earlier runs in structure. The CS menu shots differ in the menu's layout. The `taa` and live shots of the resize
+  run differ by about 22, probably from saved upscaler settings that changed between the runs. That was not confirmed.
