@@ -1,10 +1,6 @@
 #define PHYSICAL_LENS_PLAN_BAKE 1
 #include "PostProcessing/PhysicalLensFlare/flare.cs.hlsl"
-RWStructuredBuffer<float4> PlanOutput : register(u5);
-StructuredBuffer<float4> PlanTable : register(t6);
-RWStructuredBuffer<uint> PlanStatus : register(u0);
-RWStructuredBuffer<uint> PlanRequests : register(u4);
-StructuredBuffer<uint> RequestedPlans : register(t0);
+PHYSICAL_LENS_PLANNING_RESOURCES(ORG_RESOURCE)
 #ifdef PHYSICAL_LENS_PLAN_GRID_CAP
 static const uint PlanningGridCap = PHYSICAL_LENS_PLAN_GRID_CAP;
 #else
@@ -186,6 +182,17 @@ void BakePlan(uint path, uint row, uint lane)
 	if (lane < 4)
 		PlanOutput[(row * PathCount + path) * 6 + 2 + lane] = float4(PupilPDF[lane * 2], PupilPDF[lane * 2 + 1]);
 }
+
+#if defined(CS_ORG_BINDLESS)
+// ORG only: zeroes the plan status when the lens model or sensor changes, in place of D3D11's UAV clear. A gated
+// dispatch, so a kept recording does nothing on runs that did not ask for it.
+[numthreads(64, 1, 1)] void ClearPlanStatus(uint3 id : SV_DispatchThreadID) {
+	uint count, stride;
+	PlanStatus.GetDimensions(count, stride);
+	if (id.x < count)
+		PlanStatus[id.x] = 0;
+}
+#endif
 
 [numthreads(64, 1, 1)] void BakeRequestedPlans(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
 	uint entry = RequestedPlans[group.x];

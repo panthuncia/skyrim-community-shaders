@@ -119,6 +119,13 @@ namespace ORGPostChain
 		// Physical Lens's image mapping (RGBA32F array of 3) and its PhysicalLensImaging::DiffractionParameters region.
 		inline constexpr std::string_view kPhysicalLensMapping = "PostProcessing::PhysicalLens::ChromaticMapping";
 		inline constexpr std::string_view kPhysicalLensDiffraction = "PostProcessing::PhysicalLens::DiffractionParameters";
+		// Physical Lens's ghosts (R32F array of 3, half the chain's size) and its diffraction outputs (Composite's t10 to t14).
+		inline constexpr std::string_view kPhysicalLensGhosts = "PostProcessing::PhysicalLens::Ghosts";
+		inline constexpr std::string_view kPhysicalLensWaveKernel = "PostProcessing::PhysicalLens::DiffractionCore";
+		inline constexpr std::string_view kPhysicalLensWaveRegions = "PostProcessing::PhysicalLens::Regions";
+		inline constexpr std::string_view kPhysicalLensWaveSources = "PostProcessing::PhysicalLens::DiffractionSources";
+		inline constexpr std::string_view kPhysicalLensWaveTiles = "PostProcessing::PhysicalLens::DiffractionTiles";
+		inline constexpr std::string_view kPhysicalLensWaveTail = "PostProcessing::PhysicalLens::DiffractionRadiance";
 	}
 
 	/** @brief Dispatches through it run only on frames Commit opens it, with the group counts given there. */
@@ -241,9 +248,10 @@ namespace ORGPostChain
 		/** @brief Cached across builds. Common and stage defines are added as Util::CompileShader adds them. Null fails the build. */
 		std::shared_ptr<const RasterProgram> Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
-		/** @brief For an accumulating draw. */
+		/** @brief For an accumulating draw. A vertex source replaces the fullscreen triangle; both stages get the defines. */
 		std::shared_ptr<const RasterProgram> RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
-			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
+			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main", std::string_view a_vertexSource = {},
+			std::wstring a_vertexEntry = L"main");
 		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 

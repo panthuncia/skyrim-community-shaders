@@ -1,20 +1,44 @@
+// Dual-target (Common/OrgResources.hlsli). On ORG the aperture and surface are a latch region, and each dispatch's stage
+// is a push constant.
+#include "Common/OrgResources.hlsli"
+#define PHYSICAL_LENS_GHOST_WAVE_RESOURCES(X)         \
+	X(SRV, Texture2DArray<float4>, Field, 0)          \
+	X(SRV, Texture2D<float4>, Material, 1)            \
+	X(UAV, RWTexture2DArray<float4>, OutField, 0)     \
+	X(UAV, RWTexture2D<float4>, Atlas, 1)             \
+	X(UAV, RWTexture2D<float4>, OutMaterial, 2)
+#if defined(CS_ORG_BINDLESS)
+struct GhostWaveConstants
+{
+	float4 Aperture, Surface;
+};
+struct GhostWaveStage
+{
+	uint4 Stage;
+};
+ORG_PUSH_BLOCK(PHYSICAL_LENS_GHOST_WAVE_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, GhostWaveConstants, GhostWave, 1)
+		ORG_HANDLE(PUSH, GhostWaveStage, GhostStage, 2))
+#endif
 #include "PostProcessing/PhysicalLensImaging/aperture.hlsli"
 #include "PostProcessing/PhysicalLensImaging/microstructure.hlsli"
 #include "PostProcessing/PhysicalLensImaging/spectrum.hlsli"
 
 // Hullin et al. eq. (5). Cache a finite-bandwidth 2D fractional Fourier
 // aperture; never evaluate this transform per ghost or per frame.
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, GhostWaveConstants, GhostWave, 1)
+static float4 Aperture = GhostWave.Aperture;
+static float4 Surface = GhostWave.Surface;
+static uint4 Stage = GhostStage.Stage;
+#else
 cbuffer GhostWaveParameters : register(b1)
 {
 	float4 Aperture;  // blades, curvature, rotation, f-number
 	float4 Surface;   // amount, entrance pupil radius mm, stable seed, unused
 	uint4 Stage;      // wavelength sample, inverse FFT, Fresnel multiplier, unused
 };
-Texture2DArray<float4> Field : register(t0);
-Texture2D<float4> Material : register(t1);
-RWTexture2DArray<float4> OutField : register(u0);
-RWTexture2D<float4> Atlas : register(u1);
-RWTexture2D<float4> OutMaterial : register(u2);
+#endif
+PHYSICAL_LENS_GHOST_WAVE_RESOURCES(ORG_RESOURCE)
 static const float Pi = 3.141592653589793;
 #ifndef PHYSICAL_LENS_GHOST_WAVE_SIZE
 #	define PHYSICAL_LENS_GHOST_WAVE_SIZE 512
@@ -70,7 +94,11 @@ groupshared float2 Samples[Size];
 		float2 value = Field.Load(int4(x, group.x, group.y, 0)).xy;
 		if (Stage.z) {
 			float2 uv = float2(x, group.x);
+#if defined(CS_ORG_BINDLESS)
+			uv = select(uv >= Size * .5, uv - Size, uv);
+#else
 			uv = uv >= Size * .5 ? uv - Size : uv;
+#endif
 			value = ComplexMultiply(value, Phasor(-Pi * sin(Theta(group.y)) / 512 * dot(uv, uv)));
 		}
 		Samples[reversebits(x) >> (32u - (uint)firstbithigh(Size))] = value;

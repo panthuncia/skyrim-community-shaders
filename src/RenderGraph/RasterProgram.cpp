@@ -316,6 +316,8 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 		return skip("an empty viewport");
 	if (!slot)
 		return skip("no pipeline slot");
+	if (a_draw.indirectBuffer.valid() && !drawSignature)
+		return skip("an indirect buffer without the program's draw signature");
 	std::array<rhi::ColorAttachment, 8> colours{};
 	for (std::uint32_t i = 0; i < targetCount; ++i) {
 		const auto& colour = a_draw.colours[i];
@@ -388,7 +390,9 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	if (a_draw.indirect && drawSignature) {
 		const auto region = a_draw.indirect->At(a_recording.Run());
 		commands.ExecuteIndirect(drawSignature->GetHandle(), region.buffer->GetAPIResource().GetHandle(), region.offset + a_draw.indirectOffset, {}, 0, 1);
-	} else
+	} else if (a_draw.indirectBuffer.valid() && drawSignature)
+		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirectBuffer, a_draw.indirectBufferOffset, {}, 0, 1);
+	else
 		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
 	if (counted)
 		commands.EndQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
