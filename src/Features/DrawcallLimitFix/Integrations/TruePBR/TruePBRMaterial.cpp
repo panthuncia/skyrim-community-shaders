@@ -5,6 +5,8 @@
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialHookFrame.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <utility>
@@ -71,6 +73,8 @@ namespace DCLF::Integrations::TruePBR
 		constexpr std::uint16_t kCoatSpecularLevel = Off(offsetof(PBR, coatSpecularLevel));
 		constexpr std::uint16_t kFuzzColor = Off(offsetof(PBR, fuzzColor));
 		constexpr std::uint16_t kFuzzWeight = Off(offsetof(PBR, fuzzWeight));
+		constexpr std::uint16_t kFuzzRoughness = Off(offsetof(PBR, fuzzRoughness));
+		constexpr std::uint16_t kFuzzRoughnessTexture = Off(offsetof(PBR, fuzzRoughnessTexture));
 		constexpr std::uint16_t kGlint = Off(offsetof(PBR, glintParameters));
 		constexpr std::uint16_t kRmaos = Off(offsetof(PBR, rmaosTexture));
 		constexpr std::uint16_t kEmissive = Off(offsetof(PBR, emissiveTexture));
@@ -286,7 +290,10 @@ namespace DCLF::Integrations::TruePBR
 				}
 			}
 
-			const float projected1[4]{ a_snapshot.At<float>(kProjectedScale), a_snapshot.At<float>(kProjectedScale + 4), a_snapshot.At<float>(kProjectedScale + 8), 0.f };
+			// w is the fuzz roughness, -1 for none (BSLightingShaderMaterialPBR::GetFuzzRoughness).
+			const float fuzzRoughness = a_snapshot.At<float>(kFuzzRoughness);
+			const float projected1[4]{ a_snapshot.At<float>(kProjectedScale), a_snapshot.At<float>(kProjectedScale + 4), a_snapshot.At<float>(kProjectedScale + 8),
+				std::isfinite(fuzzRoughness) && fuzzRoughness >= 0.f ? std::min(fuzzRoughness, 1.f) : -1.f };
 			a_write.PS(ps.MaterialObjectRGBScale, projected1, 4);
 			const float projected2[4]{ a_snapshot.At<float>(kProjectedRoughness), a_snapshot.At<float>(kProjectedSpecularLevel), 0.f, 0.f };
 			a_write.PS(ps.ParallaxOccData, projected2, 4);
@@ -303,6 +310,11 @@ namespace DCLF::Integrations::TruePBR
 			optionalMap(kDisplacement, a_frame.defaultBlack, 4, PBRShaderFlags::HasDisplacement);
 			optionalMap(kFeatures0, a_frame.defaultWhite, 12, PBRShaderFlags::HasFeaturesTexture0);
 			optionalMap(kFeatures1, a_frame.defaultWhite, 9, PBRShaderFlags::HasFeaturesTexture1);
+			// TruePBR's HasFuzzRoughnessTexture: the displacement map's green, when asked for and the map is loaded.
+			const auto* displacement = a_snapshot.At<const void*>(kDisplacement);
+			if ((shaderFlags & static_cast<std::uint32_t>(PBRShaderFlags::Fuzz)) != 0 && a_snapshot.At<bool>(kFuzzRoughnessTexture) && displacement != nullptr &&
+				displacement != a_frame.defaultBlack && a_snapshot.View(kDisplacement) != nullptr)
+				set(PBRShaderFlags::HasFuzzRoughnessTexture);
 
 			a_write.PSBits(ps.PBRFlags, shaderFlags);
 

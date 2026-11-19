@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/OwnedRows.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace DCLF::TreeInstances
@@ -60,8 +61,10 @@ namespace DCLF::TreeInstances
 		std::uint32_t maxIndices = 0;
 		RenderGraph::BufferRef stats;
 		std::uint32_t frame = 0;
+		// Tree Wind's TreeWindCB for this frame, read by the vertex stage at kDCLFTreeWind. Zero (still) without the feature.
+		float wind[5][4]{};
 	};
-	static_assert(sizeof(DrawRow) == 64);
+	static_assert(sizeof(DrawRow) == 144 && offsetof(DrawRow, wind) == 64);
 	/**
 	 * @brief The visible list's header: three DrawInstanced argument sets (phase 1 depth, phase 2 depth, colour) and the retest count.
 	 * The depth commit writes it with no instances.

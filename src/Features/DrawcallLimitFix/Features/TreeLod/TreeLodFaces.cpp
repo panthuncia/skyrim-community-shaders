@@ -241,7 +241,7 @@ namespace DCLF::Features::TreeLod
 		a_context.RegisterPass({ .key = "tree-lod.faces-cull", .passName = "{view}.tree-lod-cull", .make = &FacesCull, .cpuPipeline = true });
 	}
 
-	static_assert(sizeof(TreeInstances::DrawRow) == 64 && sizeof(TreeInstances::VisibleHeader) == 64 && TreeInstances::kMaxGroupInstances == 75 &&
+	static_assert(sizeof(TreeInstances::DrawRow) == 144 && sizeof(TreeInstances::VisibleHeader) == 64 && TreeInstances::kMaxGroupInstances == 75 &&
 	                  kTreeLodCullGroup == 64,
 		"tree LOD's faces' sizes are not the shaders' (TreeInstancesLayout.h, TreeLodCullCS.hlsl)");
 }

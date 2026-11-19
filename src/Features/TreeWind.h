@@ -97,6 +97,9 @@ public:
 	/** @brief Binds the wind buffer, and the bend data for a tree LOD draw, for the current Lighting or Utility draw. Called from State::Draw. */
 	void SetShaderResources(ID3D11DeviceContext* a_context);
 
+	/** @brief The frame's wind block as the DistantTree draws read it, set in Reset. Drawcall Limit Fix copies it into its tree LOD rows. Render thread. */
+	const WindCB& FrameWind() const { return frameWind; }
+
 	void ApplyPreset(Preset a_preset);
 
 	/** @brief Picks out the tree LOD draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders. */
@@ -111,6 +114,7 @@ private:
 
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
+	WindCB frameWind{};
 
 	TreeShapes::BendWeights bendWeights;
 	// Bend data of the tree LOD shape being drawn, nullptr for every other draw

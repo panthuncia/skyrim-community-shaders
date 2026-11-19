@@ -6,10 +6,6 @@
 #if defined(DCLF_PULLED) && !defined(DCLF_PULLED_ROWS)
 #	define DCLF_PULLED_ROWS
 #endif
-// DCLF tree LOD has no Tree Wind data yet.
-#if defined(DCLF_PULLED) && defined(TREE_WIND)
-#	undef TREE_WIND
-#endif
 #include "Common/ColorManagement.hlsli"
 #include "Common/DeviceRef.hlsli"
 #include "Common/FrameBuffer.hlsli"
@@ -40,7 +36,7 @@ DeviceRef DCLFTreeDrawAt(uint a_offset) { return DeviceRefAdd(DCLFTreeDraw(), a_
 // TreeLod::DrawRow: its tables' refs.
 DeviceRef DCLFTreeTable(uint a_offset) { return DeviceLoad(uint2, DCLFTreeDrawAt(a_offset), 8); }
 static const uint kDCLFTreeInstances = 0, kDCLFTreeShapes = 8, kDCLFTreeMeshes = 16, kDCLFTreeVisible = 24;
-static const uint kDCLFTreeTexture = 32, kDCLFTreeSampler = 36, kDCLFTreeAlphaRef = 40;
+static const uint kDCLFTreeTexture = 32, kDCLFTreeSampler = 36, kDCLFTreeAlphaRef = 40, kDCLFTreeWind = 64;
 static const uint kDCLFTreeGroupInstances = 75;
 // One draw holds every tree type, so the lanes of a vertex wave read different meshes' buffers.
 // Their index stays non-uniform even where DEVICE_REF_ASSUME_UNIFORM makes other refs uniform.
@@ -104,6 +100,19 @@ struct VS_OUTPUT
 
 #ifdef VSHADER
 #	if defined(DCLF_PULLED)
+#		if defined(TREE_WIND)
+#			define TREE_WIND_ROWS
+#			include "TreeWind/TreeWind.hlsli"
+// TreeWindCB as the depth commit copied it into the draw row, the same frame's for the Z-prepass and the colour pass.
+void DCLFTreeLoadWind()
+{
+	TreeWind::Wind = asfloat(DeviceLoad(uint4, DCLFTreeDrawAt(kDCLFTreeWind), 16));
+	TreeWind::Params = asfloat(DeviceLoad(uint4, DCLFTreeDrawAt(kDCLFTreeWind + 16), 16));
+	TreeWind::Shape = asfloat(DeviceLoad(uint4, DCLFTreeDrawAt(kDCLFTreeWind + 32), 16));
+	TreeWind::Detail = asfloat(DeviceLoad(uint4, DCLFTreeDrawAt(kDCLFTreeWind + 48), 16));
+	TreeWind::Gusts = asfloat(DeviceLoad(uint4, DCLFTreeDrawAt(kDCLFTreeWind + 64), 16));
+}
+#		endif
 // The record's instance data (TEXCOORD4, TEXCOORD5 of the engine's draw), its mesh's vertex, and its shape's translation: the
 // engine's World is the shape's, a translation. Precise throughout: the Z-prepass and the colour pass each compute the
 // position, and the colour pass tests EQUAL against the Z-prepass's depth.
@@ -157,6 +166,19 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	precise float3 modelPosition = input.InstanceData1.xyz + adjustedModelPosition.xyz;
 	// The translation is made eye-relative first, so the sum never rounds at world magnitude.
 	precise float4 relativePosition = float4((translate - FrameBuffer::CameraPosAdjust.xyz) + modelPosition, 1.0);
+	precise float4 previousRelativePosition = float4((translate - FrameBuffer::CameraPreviousPosAdjust.xyz) + modelPosition, 1.0);
+#		if defined(TREE_WIND)
+#			if !defined(RENDER_DEPTH)
+	vsout.RestWorldPosition = relativePosition.xyz;
+#			endif
+	DCLFTreeLoadWind();
+	if (TreeWind::IsEnabled()) {
+		// The engine's World is a translation, so its world position is this eye-relative one.
+		precise float cameraDistance = length(relativePosition.xyz);
+		relativePosition.xy += TreeWind::GetBillboardOffset(input.InstanceData1.xyz, input.Position.z, input.InstanceData1.w, cameraDistance, TreeWind::Wind.x);
+		previousRelativePosition.xy += TreeWind::GetBillboardOffset(input.InstanceData1.xyz, input.Position.z, input.InstanceData1.w, cameraDistance, TreeWind::Wind.y);
+	}
+#		endif
 	precise float4 viewPosition = mul(FrameBuffer::CameraViewProj, relativePosition);
 
 #		ifdef RENDER_DEPTH
@@ -164,7 +186,6 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	vsout.Depth.zw = input.InstanceData2.zw;
 #		else
 	vsout.WorldPosition = relativePosition;
-	precise float4 previousRelativePosition = float4((translate - FrameBuffer::CameraPreviousPosAdjust.xyz) + modelPosition, 1.0);
 	vsout.PreviousWorldPosition = previousRelativePosition;
 	vsout.ViewPosition = viewPosition;
 #		endif  // RENDER_DEPTH
