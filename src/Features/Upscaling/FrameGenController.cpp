@@ -3,6 +3,7 @@
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
 #include "FramePresenter.h"
+#include "PresentationRevision.h"
 #include "Streamline.h"
 
 #include "../../Globals.h"
@@ -67,9 +68,7 @@ namespace FrameGen
 
 	void Controller::RequestPresentation(Method a_method, const char* a_reason)
 	{
-		auto& presenter = ActivePresenter();
-		presenter.RequestConfig(Presentation(a_method), a_reason);
-		awaitedSerial = presenter.RequestedSerial();
+		awaitedRequest = PresentationRevision::Request(Presentation(a_method), a_reason);
 	}
 
 	const char* Controller::Name(Method a_method)
@@ -131,7 +130,7 @@ namespace FrameGen
 			!Streamline::GetSingleton()->IsDLSSGLoaded())
 			return;
 		const auto adopted = RenderGraph::Engine::Native::Presentation();
-		if (adopted.serial != adopted.requested || !adopted.presentationLayer)
+		if (PresentationRevision::Pending() || adopted.serial != adopted.requested || !adopted.presentationLayer)
 			return;
 		if (Presentation(Method::kDLSSG).vsync != adopted.vsync)
 			RequestPresentation(Method::kDLSSG, "DLSS-G vsync change");
@@ -144,8 +143,9 @@ namespace FrameGen
 
 		auto* sl = Streamline::GetSingleton();
 		auto& presenter = ActivePresenter();
-		// The swap chain has the config asked for, and the features' load changes ran with it.
-		if (presenter.AdoptedSerial() < awaitedSerial || !sl->IsDLSSGLoadSettled() || !sl->IsFSRFGLoadSettled())
+		// The adopted revision's swap chain has the config asked for, and the features' load changes ran with it.
+		if (presenter.AdoptedSerial() < awaitedSerial || !PresentationRevision::Has(awaitedRequest) || !sl->IsDLSSGLoadSettled() ||
+			!sl->IsFSRFGLoadSettled())
 			return;
 
 		if (sl->IsDLSSGLoaded()) {

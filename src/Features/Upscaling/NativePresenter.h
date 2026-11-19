@@ -8,7 +8,8 @@ namespace FrameGen
 {
 	/**
 	 * @brief The native swap chain as a presenter. A configuration change replaces the swap chain on the submission thread
-	 * (RenderGraph::Engine::Native::RequestPresentation), and the render thread sees the result from the next frame's begin.
+	 * (RenderGraph::Engine::Native::RequestPresentation), and the render thread sees the result with the frame revision that
+	 * waited for it (FrameGen::PresentationRevision).
 	 */
 	class NativePresenter final : public Presenter
 	{
@@ -17,7 +18,7 @@ namespace FrameGen
 
 		/** @brief Native mode is up and Streamline loaded a frame generation feature on its device. */
 		bool Available() const override;
-		/** @brief The swap chain as it was at this frame's begin. Render owner. */
+		/** @brief The swap chain of the adopted frame revision. Not ready while a replacement is in flight. Render owner. */
 		SurfaceState Surface() const override;
 		/** @brief Asks for a replacement with a_config. The torn-down step set last runs between the destroy and the create. */
 		void RequestConfig(const PresentationConfig& a_config, const char* a_reason) override;

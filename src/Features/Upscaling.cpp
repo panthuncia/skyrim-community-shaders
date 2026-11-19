@@ -20,6 +20,7 @@
 #include "RenderGraph/Switches.h"
 #include "Upscaling/FrameGenController.h"
 #include "Upscaling/ORGUpscaling.h"
+#include "Upscaling/PresentationRevision.h"
 #include "Upscaling/Streamline.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
@@ -886,7 +887,7 @@ void Upscaling::UpdatePresentModePreference()
 		const auto method = !IsFrameGenerationActive()                      ? FrameGen::Method::kNone :
 		                    GetFrameGenMethod() == FrameGenMethod::kDLSSG ? FrameGen::Method::kDLSSG :
 		                                                                    FrameGen::Method::kFSR;
-		FrameGen::ActivePresenter().RequestConfig(FrameGen::Controller::Presentation(method), "frame-rate setting changed present mode");
+		FrameGen::PresentationRevision::Request(FrameGen::Controller::Presentation(method), "frame-rate setting changed present mode");
 	}
 }
 

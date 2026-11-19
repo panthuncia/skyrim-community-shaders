@@ -314,8 +314,6 @@ namespace RenderGraph::Frame::Driver
 				Recipes::Check(*host);
 		FrameAnchors::BeginFrame(state.current);
 		Engine::ImageSpace::OnFrameBegin();
-		// The swap chain's presentation this frame presents into (a replacement lands between frames).
-		Engine::Native::OnFrameBegin();
 		{
 			const std::lock_guard lock(state.mutex);
 			for (std::uint32_t s = 0; s < kSegments; ++s)

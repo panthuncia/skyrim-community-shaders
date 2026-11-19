@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Features/Upscaling/PresentationConfig.h"
+
 #include <memory>
 #include <string>
 
@@ -9,8 +11,9 @@ namespace org::services
 }
 
 /**
-* @brief The revision coordinator's side of the frame-wide variables (frame revision plan, step 5b). Only Revision.cpp uses it,
-* with the render graph. Render thread only: it is the variable set's one consumer.
+* @brief The revision coordinator's side of the frame-wide variables (frame revision plan, step 5b). Revision.cpp and its input
+* producers (Revision::RegisterInputProducer) use it, with the render graph. Render thread only: it is the variable set's one
+* consumer.
 */
 namespace RenderGraph::Frame::Vars::Lane
 {
@@ -22,6 +25,9 @@ namespace RenderGraph::Frame::Vars::Lane
 
 	/** @brief Makes a_snapshot the adopted values. Inside the adoption point. */
 	void Adopt(std::shared_ptr<const org::services::VariableSnapshot> a_snapshot);
+
+	/** @brief The presentation a_values carries. */
+	FrameGen::PresentationConfig PresentationConfigIn(const org::services::VariableSnapshot& a_values);
 
 	/**
 	* @brief The names of the variables a_newer changed since a_older, comma separated. Without a_older, the variables written

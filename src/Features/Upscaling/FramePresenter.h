@@ -11,15 +11,6 @@
 // mode. FrameGen::Controller drives either one the same way (docs/development/plans/native-frame-generation-plan.md).
 namespace FrameGen
 {
-	// What the swap chain presents with. A change replaces the swap chain at a present boundary.
-	struct PresentationConfig
-	{
-		Method method = Method::kNone;
-		bool hdr = false;
-		bool vsync = false;
-		bool tearing = true;
-	};
-
 	// What the present writes into for this frame.
 	struct SurfaceState
 	{

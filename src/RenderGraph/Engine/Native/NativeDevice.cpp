@@ -1137,13 +1137,11 @@ namespace RenderGraph::Engine::Native
 			// under presentLock and publishes what it made under presentationLock, which never waits on anything.
 			std::atomic<uint64_t> presentationRequested = 0;
 			std::mutex presentationLock;
-			FrameGen::PresentationConfig requestedPresentation{};
 			PresentationState adoptedPresentation{};
 			std::function<bool()> defaultTornDown;  // under presentationLock
 			std::function<void()> leaving;          // under presentationLock
 			// With a presentation layer, the vsync the swap chain was made for. Submission thread, under presentLock.
 			std::optional<bool> layerVsync;
-			std::atomic<bool> hdr10Supported = false;
 			PresentationState framePresentation{};  // render owner
 			// The render thread queues a present only once the one before has finished.
 			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
@@ -2047,7 +2045,6 @@ namespace RenderGraph::Engine::Native
 			/** @brief Publishes what the swap chain is now. Under presentLock. */
 			void PublishPresentation(uint64_t a_serial, bool a_vsync)
 			{
-				hdr10Supported.store(swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), std::memory_order_relaxed);
 				const bool hdr10 = swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084;
 				const bool layer = swapchain->Caps().presentationLayer;
 				std::lock_guard guard(presentationLock);
@@ -5099,23 +5096,6 @@ namespace RenderGraph::Engine::Native
 		a_us = g_device ? g_device->presentPaceUs.exchange(0, std::memory_order_relaxed) : 0;
 	}
 
-	bool SetSwapChainColorSpace(bool a_hdr)
-	{
-		if (!g_device)
-			return false;
-		FrameGen::PresentationConfig config;
-		{
-			std::lock_guard guard(g_device->presentationLock);
-			config = g_device->requestedPresentation;
-		}
-		const bool supported = !a_hdr || g_device->hdr10Supported.load(std::memory_order_relaxed);
-		if (config.hdr != a_hdr) {
-			config.hdr = a_hdr;
-			(void)RequestPresentation(config, {});
-		}
-		return supported;
-	}
-
 	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig& a_config, std::function<bool()> a_tornDown)
 	{
 		if (!g_device)
@@ -5124,12 +5104,10 @@ namespace RenderGraph::Engine::Native
 		std::uint64_t serial;
 		{
 			std::lock_guard guard(g_device->presentationLock);
-			g_device->requestedPresentation = a_config;
 			serial = g_device->presentationRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
 			g_device->adoptedPresentation.requested = serial;
 		}
-		logger::info("[ORG native] presentation request {}: frame generation {}, {}, vsync {}, tearing {}; the submission thread replaces the swap chain",
-			serial, static_cast<int>(a_config.method), a_config.hdr ? "HDR10" : "SDR", a_config.vsync, a_config.tearing);
+		logger::info("[ORG native] presentation request {}: {}; the submission thread replaces the swap chain", serial, std::format("{}", a_config));
 		// After the presents queued so far. The latest request wins, so a superseded one does nothing.
 		RenderGraphRuntime::Get().QueueOnSubmitThread([a_config, tornDown = std::move(a_tornDown), serial] {
 			if (!g_device || g_device->presentationRequested.load(std::memory_order_acquire) != serial)
@@ -5166,7 +5144,7 @@ namespace RenderGraph::Engine::Native
 
 	PresentationState FramePresentation() { return g_device ? g_device->framePresentation : PresentationState{}; }
 
-	void OnFrameBegin()
+	void AdoptPresentation()
 	{
 		if (g_device && ::FrameAnchors::IsRenderOwner())
 			g_device->framePresentation = Presentation();
@@ -5351,13 +5329,12 @@ namespace RenderGraph::Engine::Native
 	}
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
-	bool SetSwapChainColorSpace(bool) { return false; }
 	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig&, std::function<bool()>) { return 0; }
 	PresentationState Presentation() { return {}; }
 	PresentationState FramePresentation() { return {}; }
 	void SetPresentationTornDown(std::function<bool()>) {}
 	void SetPresentationLeaving(std::function<void()>) {}
-	void OnFrameBegin() {}
+	void AdoptPresentation() {}
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}
 	rhi::QueueProgress GraphicsProgress() { return {}; }

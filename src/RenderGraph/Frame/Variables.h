@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Features/Upscaling/PresentationConfig.h"
+
 #include <cstdint>
 #include <format>
 #include <string_view>
@@ -17,8 +19,8 @@
 * Getters named Adopted... are for the render thread. They return the value of the last adopted revision, or the initial value
 * before the first adoption.
 *
-* Without the render graph every call does nothing and getters return the initial values. This header includes nothing of ORG
-* or OMS, since features include it.
+* Without the render graph there are no revisions. HdrEnabled and PresentationConfig read back the newest written value, the
+* others their initial value. This header includes nothing of ORG or OMS, since features include it.
 */
 namespace RenderGraph::Frame::Vars
 {
@@ -101,6 +103,13 @@ namespace RenderGraph::Frame::Vars
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. What the upscaler SDK is configured with. */
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer);
+	/**
+	* @brief Any thread. What the swap chain presents with. A revision that changes it is adopted only once the swap chain has it
+	* (the presenter's input fragment, FrameGen::PresentationRevision).
+	*/
+	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view a_writer);
+	/** @brief Any thread. The newest written presentation, which no revision may carry yet. For writers that change one field. */
+	FrameGen::PresentationConfig WrittenPresentationConfig();
 
 	/** @brief Render thread. The adopted display size. */
 	Extent2D AdoptedDisplaySize();
@@ -120,6 +129,8 @@ namespace RenderGraph::Frame::Vars
 	CubemapShape AdoptedReflectionCubemap();
 	/** @brief Render thread. The adopted upscaler options. */
 	UpscalerOptions AdoptedUpscalerOptions();
+	/** @brief Render thread. The presentation of the adopted revision: the swap chain had it when the revision was adopted. */
+	FrameGen::PresentationConfig AdoptedPresentationConfig();
 
 	/**
 	* @brief Any thread. One event on the feature's settings variable "FeatureSettings.<feature>", a serial. The variable is

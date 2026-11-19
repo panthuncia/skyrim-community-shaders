@@ -30,6 +30,8 @@ namespace FrameGen
 		uint64_t RequestedSerial() const override;
 		/** @brief Registers DXVK's torn-down callback on first use. */
 		void SetTornDown(std::function<bool()> a_tornDown) override;
+		/** @brief Whether DXVK runs the torn-down callback, which is the only report of a replacement. */
+		bool ReportsReplacements() const;
 		void Settled(Method a_owner) override;
 		void BeforePresent(Method) override;
 		bool Quiesce(Method a_leaving) override;
