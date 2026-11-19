@@ -99,12 +99,12 @@ namespace GrassCollision
 				collisionSample = lerp(ZRANGE.x, ZRANGE.y, collisionSample);
 
 				collisionHeights += collisionSample.x * w;
-				const float penetration = max(0, min(maximumDepth, worldPosition.z - collisionSample.x));
+				GRASS_COLLISION_PRECISE float penetration = max(0, min(maximumDepth, worldPosition.z - collisionSample.x));
 				[branch] if (penetration > 0.0)
 					collisionAmount += penetration * ProceduralAnimation(collisionSample.y - collisionSample.x, distanceFromCenter) * w;
 
 				previousCollisionHeights += collisionSample.z * w;
-				const float previousPenetration = max(0, min(maximumDepth, worldPosition.z - collisionSample.z));
+				GRASS_COLLISION_PRECISE float previousPenetration = max(0, min(maximumDepth, worldPosition.z - collisionSample.z));
 				[branch] if (previousPenetration > 0.0)
 					previousCollisionAmount += previousPenetration * ProceduralAnimation(collisionSample.w - collisionSample.z, distanceFromCenter) * w;
 
