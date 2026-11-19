@@ -13,6 +13,7 @@
 #include "Upscaling/DxvkPresenter.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -1432,6 +1433,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 	auto screenWidth = static_cast<int>(screenSize.x);
 	auto screenHeight = static_cast<int>(screenSize.y);
+	RenderGraph::Frame::Vars::Extent2D renderSize{ static_cast<std::uint32_t>(screenWidth), static_cast<std::uint32_t>(screenHeight) };
 
 	if (upscaleMethod == UpscaleMethod::kFSR || upscaleMethod == UpscaleMethod::kXeSS || upscaleMethod == UpscaleMethod::kDLSS) {
 		auto getUpscaleRatio = [](uint qualityMode) -> float {
@@ -1469,6 +1471,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 		}
 		resolutionScale.x = static_cast<float>(renderWidth) / static_cast<float>(screenWidth);
 		resolutionScale.y = static_cast<float>(renderHeight) / static_cast<float>(screenHeight);
+		renderSize = { static_cast<std::uint32_t>(renderWidth), static_cast<std::uint32_t>(renderHeight) };
 
 		auto phaseCount = GetJitterPhaseCount(renderWidth, screenWidth);
 
@@ -1496,6 +1499,19 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 	dynamicResolutionHeightRatio = resolutionScale.y;
 
 	runtimeData.dynamicResolutionLock = 1;
+
+	// Written every frame. Only a changed value is an event (plan, step 5b).
+	{
+		namespace Vars = RenderGraph::Frame::Vars;
+		constexpr std::string_view writer = "Upscaling::ConfigureUpscaling";
+		static_assert(static_cast<std::uint32_t>(UpscaleMethod::kXeSS) == static_cast<std::uint32_t>(Vars::Upscaler::XeSS));
+		const auto method = static_cast<Vars::Upscaler>(upscaleMethod);
+		const bool hdr = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.IsHDREnabledForFrame();
+		Vars::SetRenderSize(renderSize, writer);
+		Vars::SetDynamicRatios({ resolutionScale.x, resolutionScale.y }, writer);
+		Vars::SetUpscaleMethod(method, writer);
+		Vars::SetUpscalerOptions({ method, settings.qualityMode, { static_cast<std::uint32_t>(screenWidth), static_cast<std::uint32_t>(screenHeight) }, hdr }, writer);
+	}
 
 	static float s_loggedScale = -1.0f;
 	static int s_loggedMethod = -1;

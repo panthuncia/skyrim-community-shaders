@@ -17,7 +17,9 @@ namespace org
 * - twins' size wishes (GraphResources::Texture2D/Texture3D::RequestSize): the next versions are made on the revision lane, off
 *   the render thread, born cleared for histories;
 * - CS-owned versioned buffers' new contents (PublishBuffer): uploaded from the lane, ready once the upload completes;
-* - staged builds of CS stages: every frame slot is recorded on the staged build.
+* - staged builds of CS stages: every frame slot is recorded on the staged build;
+* - the frame-wide variables (Frame/Variables.h): every revision carries the newest snapshot it started with, and adoption
+*   makes it the frame's. A revision with only variable changes needs no lane work and is adopted in the Begin that starts it.
 * The closure is every epoch whose graph declares a changed slot. The CS stages among it, and every stage with a staged build,
 * record every frame slot against the pending versions. Once all of it is ready, one Begin adopts it whole: versions, exports,
 * staged builds and every member stage's schedule switch in the same frame. One revision is prepared at a time. Inputs that

@@ -8,6 +8,8 @@
 #	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/RevisionRecordings.h"
+#	include "RenderGraph/Frame/Variables.h"
+#	include "RenderGraph/Frame/VariablesLane.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -21,6 +23,7 @@
 #	include <ORGModuleServices/ComposedVersions.h>
 #	include <ORGModuleServices/GrowableBufferSet.h>
 #	include <ORGModuleServices/VersionedBufferBuild.h>
+#	include <ORGModuleServices/Variables.h>
 #	include <ORGModuleServices/VersionedTextureGrowth.h>
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/Runtime/IUploadService.h>
@@ -43,7 +46,7 @@ namespace RenderGraph::Frame::Revision
 	{
 		using GraphResources::Extent;
 
-		// The revision's fragments (plan, step 4c). Inputs come with step 5.
+		// The revision's fragments (plan, step 4c). Inputs hold the variables' snapshot (step 5b).
 		constexpr std::uint32_t kRevisionInputs = 0;
 		constexpr std::uint32_t kRevisionTextures = 1;
 		constexpr std::uint32_t kRevisionBuffers = 2;
@@ -102,6 +105,12 @@ namespace RenderGraph::Frame::Revision
 			std::vector<RevisionBuffer> buffers;
 		};
 
+		/** @brief The value of the inputs fragment: the variables' values the revision started with. */
+		struct RevisionInputs
+		{
+			std::shared_ptr<const org::services::VariableSnapshot> variables;
+		};
+
 		/** @brief The value of the builds fragment: the staged builds the revision attaches. */
 		struct RevisionBuilds
 		{
@@ -126,6 +135,9 @@ namespace RenderGraph::Frame::Revision
 			std::vector<Extent> from;  // each twin's extent when planned
 			std::vector<Extent> to;
 			std::vector<BufferWish> bufferWishes;
+			// The newest variables when it started, and the names of those changed since the revision before.
+			std::shared_ptr<const org::services::VariableSnapshot> variables;
+			std::string changedVariables;
 			std::uint64_t firstWish = 0;
 			std::uint64_t planned = 0;  // the frame it was handed to the lane
 			std::shared_ptr<org::runtime::IUploadService> uploads;
@@ -151,7 +163,7 @@ namespace RenderGraph::Frame::Revision
 
 		struct RevisionStats
 		{
-			std::uint64_t prepared = 0, adopted = 0, superseded = 0, resized = 0, askedAgain = 0, builds = 0, buffers = 0;
+			std::uint64_t prepared = 0, adopted = 0, superseded = 0, resized = 0, askedAgain = 0, builds = 0, buffers = 0, variableRevisions = 0;
 			std::uint32_t maxMembers = 0, maxRecordings = 0, maxBuilds = 0;
 			std::vector<std::uint64_t> wishFrames;
 		};
@@ -176,6 +188,10 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t plannedSerial = 0;
 			std::uint64_t askedAgainSinceWish = 0;
 			std::uint64_t serials = 0;
+			// The variables: the newest snapshot taken at Begin and the one the last started revision carries.
+			std::shared_ptr<const org::services::VariableSnapshot> variables;
+			std::shared_ptr<const org::services::VariableSnapshot> startedVariables;
+			std::uint64_t variablesFirstChange = 0;  // the frame of the first change no revision carries yet
 			std::shared_ptr<PreparedRevision> preparing;
 			std::shared_ptr<PreparedRevision> adopted;
 			std::deque<std::pair<std::uint64_t, std::shared_ptr<PreparedRevision>>> retiring;
@@ -425,17 +441,25 @@ namespace RenderGraph::Frame::Revision
 				if (!job->bufferWishes.empty())
 					job->firstWish = (std::min)(job->firstWish, a_coordinator.bufferFirstWish);
 			}
+			// The variables changed since the last revision started. Every revision carries the newest snapshot.
+			const bool variablesChanged = a_coordinator.variables && a_coordinator.variables != a_coordinator.startedVariables;
+			if (variablesChanged)
+				job->firstWish = (std::min)(job->firstWish, a_coordinator.variablesFirstChange);
 			const bool lane = !job->plans.empty() || !job->bufferWishes.empty();
-			if (!lane && !FrameAnchors::StagedStages())
+			if (!lane && !FrameAnchors::StagedStages() && !variablesChanged)
 				return;
-			if (!lane)
+			if (job->firstWish == UINT64_MAX)
 				job->firstWish = a_frame;
+			if (variablesChanged)
+				job->changedVariables = Vars::Lane::ChangedNames(*a_coordinator.variables, a_coordinator.startedVariables.get());
+			job->variables = a_coordinator.variables;
+			a_coordinator.startedVariables = a_coordinator.variables;
 			job->serial = ++a_coordinator.serials;
 			job->planned = a_frame;
 			job->host = host;
 			a_coordinator.preparing = job;
 			if (!lane) {
-				// Builds only: nothing for the lane to make.
+				// Builds or variables only: nothing for the lane to make.
 				job->done.store(true, std::memory_order_release);
 				return;
 			}
@@ -471,6 +495,8 @@ namespace RenderGraph::Frame::Revision
 			auto revision = std::move(a_coordinator.preparing);
 			logger::info("[ORG] frame revision {}: superseded before adoption ({}); its inputs are prepared again", revision->serial, a_why);
 			a_coordinator.plannedSerial = 0;
+			// Its variable changes count again against the adopted values.
+			a_coordinator.startedVariables = Vars::Lane::Adopted();
 			// Its buffer contents go back, unless newer ones came meanwhile.
 			if (revision->buffers) {
 				const std::lock_guard lock(a_coordinator.bufferMutex);
@@ -496,9 +522,12 @@ namespace RenderGraph::Frame::Revision
 			auto revision = std::move(a_coordinator.preparing);
 			auto& assembler = *a_coordinator.assembler;
 			const auto stagedEpochs = revision->recordings ? FrameAnchors::RevisionStagedEpochs(*revision->recordings) : std::vector<std::uint32_t>{};
-			// Sealed once complete, so it is selected in this Begin. Inputs stay empty until step 5.
+			// Sealed once complete, so it is selected in this Begin.
 			auto draft = assembler.Begin();
-			draft.Set(kRevisionInputs, nullptr);
+			auto inputsValue = std::make_shared<RevisionInputs>();
+			inputsValue->variables = revision->variables;
+			const auto inputs = org::async::RevisionFragment::MakeReady(std::move(inputsValue));
+			draft.Set(kRevisionInputs, inputs);
 			draft.Set(kRevisionTextures, revision->made ? revision->made->fragment : nullptr);
 			draft.Set(kRevisionBuffers, revision->buffersFragment);
 			std::shared_ptr<const org::async::RevisionFragment> builds;
@@ -508,7 +537,7 @@ namespace RenderGraph::Frame::Revision
 				builds = org::async::RevisionFragment::MakeReady(std::move(value));
 			}
 			draft.Set(kRevisionBuilds, builds);
-			std::vector<org::async::RevisionFragment::Requirement> requirements;
+			std::vector<org::async::RevisionFragment::Requirement> requirements{ { kRevisionInputs, inputs } };
 			if (revision->made)
 				requirements.push_back({ kRevisionTextures, revision->made->fragment });
 			if (revision->buffersFragment)
@@ -525,15 +554,18 @@ namespace RenderGraph::Frame::Revision
 			if (assembler.TrySelect() != org::async::RevisionAssembler::Selection::Selected)
 				FailRevision(fmt::format("revision {} was complete but not selected", revision->serial));
 			const auto lease = assembler.AcquireActive();
+			const auto adoptedInputs = lease->Get<RevisionInputs>(kRevisionInputs);
 			const auto named = lease->Get<org::services::NamedVersions>(kRevisionTextures);
 			const auto buffers = lease->Get<RevisionBuffers>(kRevisionBuffers);
 			const auto attaching = lease->Get<RevisionBuilds>(kRevisionBuilds);
 			const auto recorded = lease->Get<RevisionMemberRecordings>(kRevisionRecordings);
 			if (static_cast<bool>(named) != static_cast<bool>(revision->made) || static_cast<bool>(buffers) != static_cast<bool>(revision->buffers) ||
-				static_cast<bool>(attaching) != !stagedEpochs.empty() || !recorded)
-				FailRevision(fmt::format("revision {} was selected without its versions, builds or recordings", revision->serial));
+				static_cast<bool>(attaching) != !stagedEpochs.empty() || !recorded || !adoptedInputs || !adoptedInputs->variables)
+				FailRevision(fmt::format("revision {} was selected without its inputs, versions, builds or recordings", revision->serial));
 			{
 				const Boundary::Caller caller("revision");
+				// The frame reads the variables of the revision it runs.
+				Vars::Lane::Adopt(adoptedInputs->variables);
 				if (named)
 					named->AdoptAll();
 				for (std::size_t i = 0; i < revision->twins.size(); ++i)
@@ -577,6 +609,7 @@ namespace RenderGraph::Frame::Revision
 					++stats->adopted;
 					stats->builds += stagedEpochs.size();
 					stats->buffers += bufferCount;
+					stats->variableRevisions += revision->changedVariables.empty() ? 0 : 1;
 					stats->maxMembers = (std::max)(stats->maxMembers, static_cast<std::uint32_t>(members.size()));
 					stats->maxRecordings = (std::max)(stats->maxRecordings, revision->recordingCount);
 					stats->maxBuilds = (std::max)(stats->maxBuilds, static_cast<std::uint32_t>(stagedEpochs.size()));
@@ -598,9 +631,9 @@ namespace RenderGraph::Frame::Revision
 				for (const auto epoch : revision->others)
 					others += fmt::format("{}{}", others.empty() ? "" : ", ", EpochText(epoch));
 				logger::info("[ORG] frame revision {}: adopted at frame {} with every member stage, {} frames after its first input (prepared in {:.2f} ms "
-							 "on the lane); twins [{}]; buffers [{}]; staged builds {}; member stages [{}] with {} recordings; not members [{}]",
-					revision->serial, a_frame, wishFrames, revision->milliseconds, twins, bufferNames, stagedEpochs.size(), stages.empty() ? "none" : stages,
-					revision->recordingCount, others.empty() ? "none" : others);
+							 "on the lane); twins [{}]; buffers [{}]; variables [{}]; staged builds {}; member stages [{}] with {} recordings; not members [{}]",
+					revision->serial, a_frame, wishFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, stagedEpochs.size(),
+					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others);
 			}
 			a_coordinator.adopted = std::move(revision);
 		}
@@ -705,8 +738,8 @@ namespace RenderGraph::Frame::Revision
 #	if !defined(CS_RELEASE_PROFILE)
 		Testing::RegisterExitReport([] { LogStats(); });
 #	endif
-		logger::info("[ORG] frame revision: size wishes, buffer contents and staged stage builds are prepared off the render thread and adopted whole at "
-					 "a frame's Begin");
+		logger::info("[ORG] frame revision: size wishes, buffer contents, staged stage builds and variable changes are prepared off the render thread "
+					 "and adopted whole at a frame's Begin");
 	}
 
 	void AdoptLatest()
@@ -718,6 +751,15 @@ namespace RenderGraph::Frame::Revision
 		const std::uint64_t frame = Driver::Current().frame + 1;
 		coordinator.beginFrame.store(frame, std::memory_order_relaxed);
 		ReleaseRetired(coordinator);
+		// The same snapshot, with no allocation, while no variable changed.
+		auto previous = std::exchange(coordinator.variables, Vars::Lane::Take());
+		if (coordinator.variables != previous) {
+			// The first change no revision carries yet starts the wait.
+			if (previous == coordinator.startedVariables)
+				coordinator.variablesFirstChange = frame;
+			// A new event: drops asked again before it are not starvation.
+			coordinator.askedAgainSinceWish = 0;
+		}
 		ApplyResizes(coordinator);
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
@@ -760,11 +802,12 @@ namespace RenderGraph::Frame::Revision
 		logger::info("[ORG] frame revision: prepared {}, adopted {}, superseded {}, members per revision (max {}), recordings per revision (max {}), builds "
 					 "per revision (max {}, {} in all), buffers {}, frames from first input to adoption (p50/p95/max) {}; recordings asked again {}, resized "
 					 "at Begin without a version {}; session: prepared {}, adopted {}, superseded {}, members (max {}), recordings (max {}), builds (max {}, "
-					 "{} in all), buffers {}, input to adoption {}, asked again {}, resized {}",
+					 "{} in all), buffers {}, input to adoption {}, asked again {}, resized {}; with variable changes {} (session {})",
 			w.prepared, w.adopted, w.superseded, w.maxMembers, w.maxRecordings, w.maxBuilds, w.builds, w.buffers, Percentiles(w.wishFrames), w.askedAgain,
 			w.resized, s.prepared, s.adopted, s.superseded, s.maxMembers, s.maxRecordings, s.maxBuilds, s.builds, s.buffers, Percentiles(s.wishFrames),
-			s.askedAgain, s.resized);
+			s.askedAgain, s.resized, w.variableRevisions, s.variableRevisions);
 		coordinator.window = {};
+		Vars::LogStats();
 	}
 }
 

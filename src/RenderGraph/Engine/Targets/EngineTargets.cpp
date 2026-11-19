@@ -11,6 +11,7 @@
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/Frame/EngineTargetUse.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -987,6 +988,26 @@ namespace RenderGraph::Engine::Targets
 			return true;
 		}
 
+		/** @brief The set's shapes as frame variables (plan, step 5b). In every mode, since the engine makes the set once. */
+		void RaiseTargetVariables()
+		{
+			constexpr std::string_view writer = "engine targets";
+			if (const auto* state = RE::BSGraphics::State::GetSingleton())
+				Frame::Vars::SetDisplaySize({ state->screenWidth, state->screenHeight }, writer);
+			auto* renderer = Renderer();
+			if (!renderer)
+				return;
+			D3D11_TEXTURE2D_DESC desc{};
+			if (auto* shadows = DepthData(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS)).texture) {
+				shadows->GetDesc(&desc);
+				Frame::Vars::SetEngineShadowMap({ { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format), desc.ArraySize }, writer);
+			}
+			if (auto* cube = CubeData(static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS)).texture) {
+				cube->GetDesc(&desc);
+				Frame::Vars::SetReflectionCubemap({ desc.Width }, writer);
+			}
+		}
+
 		/** @brief Only these get handles, matching what UseHandles does at creation. */
 		bool Owned(const std::unique_ptr<EngineTexture>& a_texture)
 		{
@@ -1037,6 +1058,7 @@ namespace RenderGraph::Engine::Targets
 	{
 		auto& state = Targets();
 		state.inSet = false;
+		RaiseTargetVariables();
 		if (!state.changed || !Active())
 			return;
 		state.changed = false;

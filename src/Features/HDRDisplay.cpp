@@ -13,6 +13,7 @@
 #include "PostProcessing.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -650,6 +651,20 @@ namespace
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
 	};
+
+	/** @brief The frame's HDR state as frame variables (plan, step 5b). Written every frame, so only a change is an event. */
+	void RaiseHdrVariables(const HDRDisplay& a_hdr, std::string_view a_writer)
+	{
+		namespace Vars = RenderGraph::Frame::Vars;
+		Vars::SetHdrEnabled(a_hdr.IsHDREnabledForFrame(), a_writer);
+		Vars::TargetIdentity target;
+		if (auto* texture = a_hdr.PostChainTarget()) {
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			target = { reinterpret_cast<std::uint64_t>(texture), { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format) };
+		}
+		Vars::SetHdrOutputTarget(target, a_writer);
+	}
 }
 
 void HDRDisplay::PostPostLoad()
@@ -700,6 +715,7 @@ void HDRDisplay::SetupResources()
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		hdrEnabledForFrame = settings.enableHDR;
 	}
+	RaiseHdrVariables(*this, "HDRDisplay::SetupResources");
 
 	cachedDisplayMaxLuminance = GetDisplayMaxLuminance();
 
@@ -809,13 +825,13 @@ void HDRDisplay::BeginRenderFrame()
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		requestedHDR = settings.enableHDR;
 	}
-	if (requestedHDR == hdrEnabledForFrame)
-		return;
-
-	hdrEnabledForFrame = requestedHDR;
-	logger::info("HDR: applying enableHDR={} for the next rendered frame", hdrEnabledForFrame);
-	UpdateHDRData();
-	UpdateSwapChainColorSpace();
+	if (requestedHDR != hdrEnabledForFrame) {
+		hdrEnabledForFrame = requestedHDR;
+		logger::info("HDR: applying enableHDR={} for the next rendered frame", hdrEnabledForFrame);
+		UpdateHDRData();
+		UpdateSwapChainColorSpace();
+	}
+	RaiseHdrVariables(*this, "HDRDisplay::BeginRenderFrame");
 }
 
 void HDRDisplay::RedirectFramebuffer()

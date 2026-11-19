@@ -30,6 +30,7 @@
 #	include "RenderGraph/ExternalWork.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Transients.h"
+#	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
@@ -2026,6 +2027,7 @@ namespace RenderGraph::Engine::Native
 					(void)MakeGraphBackBuffer();
 				}
 				logger::info("[ORG native] swap chain and back buffer resized to {}x{}", width, height);
+				::RenderGraph::Frame::Vars::SetDisplaySize({ width, height }, "native swap chain resize");
 				return S_OK;
 			}
 
