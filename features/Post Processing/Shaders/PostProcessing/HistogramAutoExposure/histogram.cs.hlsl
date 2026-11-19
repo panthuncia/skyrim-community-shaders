@@ -1,23 +1,27 @@
-#include "Common/PreExposure.hlsli"
 /// By ProfJack/五脚猫, 2024-2-17 UTC
 /// ref:
 /// https://bruop.github.io/exposure/
 /// https://knarkowicz.wordpress.com/2016/01/09/automatic-exposure/
 
+#define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
 #include "PostProcessing/HistogramAutoExposure/common.hlsli"
 
-#include "Common/Color.hlsli"
-
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (HistogramAutoExposure::AutoExposureCB at
 // b1). The ORG chain (ORG/ORGHistogramAutoExposure.cpp) gives heap handles in the push block and the constants from
-// its latch.
+// its latch. The scene pre-exposure is read from SharedData, so the push block, which holds its handles, comes before
+// the headers that declare it.
 #define HISTOGRAM_RESOURCES(X)                               \
+	X(SHARED, ConstantBuffer, Shared, 0)                     \
 	X(SRV, Texture2D<float4>, TexColor, 0)                   \
 	X(UAV, RWStructuredBuffer<uint>, RWBufferHistogram, 0)   \
 	X(UAV, RWStructuredBuffer<float>, RWBufferAdaptation, 1) \
 	X(LATCH, AutoExposureConstants, AutoExposure, 1)
 ORG_PUSH_BLOCK(HISTOGRAM_RESOURCES(ORG_HANDLE))
+
+#include "Common/Color.hlsli"
+#include "Common/PreExposure.hlsli"
+
 HISTOGRAM_RESOURCES(ORG_RESOURCE)
 
 const static float MinLogLum = -13;

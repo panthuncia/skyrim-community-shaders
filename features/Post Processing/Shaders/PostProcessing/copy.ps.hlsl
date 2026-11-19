@@ -9,10 +9,9 @@ struct CopyConstants
 	uint inputGamut;
 	uint outputGamut;
 	float gamma;
+	float scale;  // divides out the scene pre-exposure when Composite did not run
 #if defined(CS_ORG_BINDLESS)
-	uint source;  // ORG only: 1 reads texSrcAlt instead of texSrc. D3D11 leaves it 0 and binds texSrc alone.
-#else
-	float scale;  // D3D11 only: divides out the scene pre-exposure when Composite did not run.
+	uint source;  // ORG only: 1 reads texSrcAlt instead of texSrc. D3D11 binds texSrc alone.
 #endif
 };
 
@@ -42,8 +41,8 @@ float4 main(FullscreenTriangleVSOutput input) : SV_Target
 		color = texSrc.Load(pixel);
 #else
 	float4 color = texSrc.Load(pixel);
-	color.rgb *= Copy.scale;
 #endif
+	color.rgb *= Copy.scale;
 	if (Copy.inputGamut != Copy.outputGamut) {
 		if (Copy.inputGamut == 1)
 			color.rgb = AP1TosRGB(color.rgb);

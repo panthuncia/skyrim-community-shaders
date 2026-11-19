@@ -5,26 +5,32 @@
 
 #	include "Features/PostProcessing/ORGPostEffect.h"
 
+#	include "Features/LinearLighting.h"
 #	include "Features/PostProcessing/Composite.h"
 #	include "Features/PostProcessing/HistogramAutoExposure.h"
 #	include "Features/PostProcessing/LocalExposure.h"
+#	include "Globals.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 
 namespace ORGPostChain
 {
 	namespace
 	{
-		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 		// COMPOSITE_RESOURCES order.
 		struct CompositeBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle texColor, texBloom, texFlare, texGlare, texAdaptation, texLocalExposureLog, texLuminanceGrid,
 				texBlurredLuminance, linearSampler, bloomSampler;
 			ShaderBindings::Latch autoExposure, localExposure, composite;
 		};
 
-		/** @brief Composite::Draw on the graph. A contributor whose published outputs are missing is left out, and with none the image passes through. */
+		/**
+		* @brief Composite::Draw on the graph. A contributor whose published outputs are missing is left out. With none the image passes
+		* through, unless linear lighting stores the scene pre-exposed: then the draw still divides the pre-exposure out.
+		*/
 		class CompositeEffect final : public Effect
 		{
 		public:
@@ -48,8 +54,9 @@ namespace ORGPostChain
 				const bool hasGlare = static_cast<bool>(glare);
 				const bool hasExposure = adaptation && autoExposure;
 				const bool hasLocalExposure = logLuminance && grid && blurred && localExposure;
-				// Nothing to add, so nothing drawn, as Composite::Draw.
-				if (!hasBloom && !hasFlare && !hasGlare && !hasExposure && !hasLocalExposure)
+				// Nothing to add or resolve, so nothing drawn, as Composite::Draw. The chain counts on this draw to resolve exposure.
+				const bool preExposed = globals::features::linearLighting.IsLinearLightingActive();
+				if (!hasBloom && !hasFlare && !hasGlare && !hasExposure && !hasLocalExposure && !preExposed)
 					return;
 
 				if (!linearSampler || !borderSampler) {
@@ -71,9 +78,11 @@ namespace ORGPostChain
 					if (on)
 						defines.emplace_back(name, "");
 				}
-				auto program = a_builder.Raster("PostProcessing/Composite/composite.ps.hlsl", ShaderBindings::Words<CompositeBlock>(), { kFormat },
+				// As Composite::SetupResources: the resolved exposure can exceed FP16 before the tone mapper.
+				const auto format = preExposed ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
+				auto program = a_builder.Raster("PostProcessing/Composite/composite.ps.hlsl", ShaderBindings::Words<CompositeBlock>(), { format },
 					std::move(defines), L"PSComposite");
-				auto image = a_builder.CreateImage("PostProcessing::Composite::Output", kFormat, D3D11_BIND_RENDER_TARGET);
+				auto image = a_builder.CreateImage("PostProcessing::Composite::Output", format, D3D11_BIND_RENDER_TARGET);
 				constants = a_builder.Latch<Composite::CompositeCB>();
 
 				// Left-out contributors' entries are never read, so they get placeholders.
@@ -81,7 +90,7 @@ namespace ORGPostChain
 				const auto unusedLatch = Bind::Latch(constants);
 				a_builder.Draw({ .name = "draw",
 					.program = std::move(program),
-					.bindings = { Bind::Srv(a_builder.Current()), srvOrUnused(hasBloom, bloom), srvOrUnused(hasFlare, flare),
+					.bindings = { Bind::Shared(), Bind::Srv(a_builder.Current()), srvOrUnused(hasBloom, bloom), srvOrUnused(hasFlare, flare),
 						srvOrUnused(hasGlare, glare), srvOrUnused(hasExposure, adaptation), srvOrUnused(hasLocalExposure, logLuminance),
 						srvOrUnused(hasLocalExposure, grid), srvOrUnused(hasLocalExposure, blurred), Bind::Handle(linearSampler.Index()),
 						Bind::Handle(borderSampler.Index()), hasExposure ? Bind::Latch(*autoExposure) : unusedLatch,

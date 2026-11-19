@@ -1,5 +1,7 @@
+// The threshold reads the scene pre-exposure from SharedData, so the push block, which holds its handles, comes before
+// the headers that declare it.
+#define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
-#include "PostProcessing/common.hlsli"
 
 static const float PI = 3.14159265359;
 static const float EPSILON = 1e-6;
@@ -7,11 +9,15 @@ static const int NUM_GHOSTS = 8;
 
 // Resources (dual-target: Common/OrgResources.hlsli; the constants: lensflare_constants.hlsli)
 #define LENS_FLARE_RESOURCES(X)                \
+	X(SHARED, ConstantBuffer, Shared, 0)       \
 	X(SRV, Texture2D<float4>, InputTexture, 0) \
 	X(SAMPLER, SamplerState, ColorSampler, 0)  \
 	X(SAMPLER, SamplerState, BorderSampler, 1) \
 	X(UAV, RWTexture2D<float4>, OutputTexture, 0)
 ORG_PUSH_BLOCK(LENS_FLARE_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, LensFlareConstants, LensFlareFrame, 1))
+
+#include "PostProcessing/common.hlsli"
+
 LENS_FLARE_RESOURCES(ORG_RESOURCE)
 
 #include "PostProcessing/LensFlare/lensflare_constants.hlsli"

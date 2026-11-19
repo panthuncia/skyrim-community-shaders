@@ -1,4 +1,3 @@
-#include "Common/PreExposure.hlsli"
 // Physical Glare — Threshold extraction and zero-padded downsampling
 // Community Shaders / Post Processing — Author: Jiaye, 2026
 //
@@ -11,17 +10,23 @@
 // References:
 //   [1] Delavennat (2021), Physically-based Real-time Glare, LiU.
 
+#define ORG_SHARED_CONSTANTS
 #include "PostProcessing/PhysicalGlare/glare.hlsli"
 
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
-// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch. The scene
+// pre-exposure is read from SharedData, so the push block comes before the header that declares it.
 #define THRESHOLD_RESOURCES(X)                 \
+	X(SHARED, ConstantBuffer, Shared, 0)       \
 	X(SRV, Texture2D<float4>, TexColor, 0)     \
 	X(UAV, RWTexture2D<float2>, RWTexFFT_R, 0) \
 	X(UAV, RWTexture2D<float2>, RWTexFFT_G, 1) \
 	X(UAV, RWTexture2D<float2>, RWTexFFT_B, 2) \
 	X(LATCH, GlareConstants, Glare, 1)
 ORG_PUSH_BLOCK(THRESHOLD_RESOURCES(ORG_HANDLE))
+
+#include "Common/PreExposure.hlsli"
+
 THRESHOLD_RESOURCES(ORG_RESOURCE)
 
 [numthreads(8, 8, 1)] void CS_Threshold(uint2 tid : SV_DispatchThreadID) {
