@@ -1,7 +1,34 @@
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below. The ORG pass
+// (src/Features/ViewAtmosphere/ORGViewAtmosphere.cpp) passes heap handles in the push block, with the
+// shared constants and the included feature headers' resources. The list is the same in every permutation.
 #define COMPUTESHADER
 #define PS_SKY_SAMPLERS
 #define MEDIUM_COMPOSITE
-SamplerState SampColorSampler : register(s0);
+#if defined(CS_ORG_BINDLESS)
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define VIEW_ATMOSPHERE_ORG_HANDLES
+#endif
+#include "Common/OrgResources.hlsli"
+
+#define VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(X)                                         \
+	X(SHARED, ConstantBuffer, Shared, 0)                                               \
+	X(SAMPLER, SamplerState, SampColorSampler, 0)                                      \
+	X(SRV, Texture2D<float>, TexMediumDepth, 40)                                       \
+	X(UAV, RWTexture2D<float4>, MainRW, 0)                                             \
+	X(EXTERN, Texture3D<float4>, ViewAtmosphereLuminance, 125)                         \
+	X(EXTERN, Texture3D<float4>, ViewAtmosphereTransmittance, 126)                     \
+	X(EXTERN, StructuredBuffer<uint>, ViewAtmosphereData, 127)                         \
+	X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    \
+	X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) \
+	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       \
+	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       \
+	X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     \
+	X(UNREAD, TextureCube<float3>, EnvReflectionsTexture, 30)                          \
+	X(UNREAD, Texture2D<float4>, DepthTexture, 17)
+ORG_PUSH_BLOCK(VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_HANDLE))
+VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
+
 #include "Common/SharedData.hlsli"
 #ifdef PHYSICAL_SKY
 #	include "PhysicalSky/Common.hlsli"
@@ -10,9 +37,6 @@ SamplerState SampColorSampler : register(s0);
 #	include "ExponentialHeightFog/ExponentialHeightFog.hlsli"
 #endif
 #include "Common/ViewMedium.hlsli"
-
-Texture2D<float> TexMediumDepth : register(t40);
-RWTexture2D<float4> MainRW : register(u0);
 
 [numthreads(8, 8, 1)] void main(uint2 pixel : SV_DispatchThreadID) {
 	uint2 size;

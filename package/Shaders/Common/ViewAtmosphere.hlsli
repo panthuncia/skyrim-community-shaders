@@ -20,22 +20,51 @@ namespace ViewAtmosphere
 		float4 history;
 		row_major float4x4 clipToWorld;
 	};
+// Where the medium comes from in each build:
+// - An ORG pass that lists the handles (VIEW_ATMOSPHERE_ORG_HANDLES): EXTERN entries ViewAtmosphereLuminance,
+//   ViewAtmosphereTransmittance and ViewAtmosphereData (src/Features/ViewAtmosphere/ORGViewAtmosphere.h).
+// - Any other ORG pass: no medium. Enabled() is false and the reads compile away.
+// - DCLF's draws: t104, t107 and t108, its frame textures. DCLF's own buffers hold t125-t127 (DrawPipelines.h).
+// - D3D11: t125-t127.
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES) && defined(VIEW_ATMOSPHERE_ORG_HANDLES)
+	static Texture3D<float4> Luminance = ResourceDescriptorHeap[OrgHandle_ViewAtmosphereLuminance];
+	static Texture3D<float4> Transmittance = ResourceDescriptorHeap[OrgHandle_ViewAtmosphereTransmittance];
+	static StructuredBuffer<Parameters> Data = ResourceDescriptorHeap[OrgHandle_ViewAtmosphereData];
+#elif defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+#	define VIEW_ATMOSPHERE_ABSENT
+	static Texture3D<float4> Luminance = ResourceDescriptorHeap[0];
+	static Texture3D<float4> Transmittance = ResourceDescriptorHeap[0];
+	static StructuredBuffer<Parameters> Data = ResourceDescriptorHeap[0];
+#elif defined(DCLF_BINDLESS)
+	Texture3D<float4> Luminance : register(t104);
+	Texture3D<float4> Transmittance : register(t107);
+	StructuredBuffer<Parameters> Data : register(t108);
+#else
 	Texture3D<float4> Luminance : register(t125);
 	Texture3D<float4> Transmittance : register(t126);
 	StructuredBuffer<Parameters> Data : register(t127);
+#endif
 
 	bool Enabled()
 	{
+#if defined(VIEW_ATMOSPHERE_ABSENT)
+		return false;
+#else
 		uint count, stride;
 		Data.GetDimensions(count, stride);
 		return count > 0u && SharedData::PostWaterComposite != 0u && Data[0].flags.x != 0u && Data[0].flags.w == 0u;
+#endif
 	}
 
 	bool ReflectionEnabled()
 	{
+#if defined(VIEW_ATMOSPHERE_ABSENT)
+		return false;
+#else
 		uint count, stride;
 		Data.GetDimensions(count, stride);
 		return count > 0u && Data[0].flags.x != 0u && Data[0].flags.w == 1u;
+#endif
 	}
 
 	float ReflectionDistance(float slice)

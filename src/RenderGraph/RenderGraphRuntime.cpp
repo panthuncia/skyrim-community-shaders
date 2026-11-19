@@ -1341,6 +1341,7 @@ struct RenderGraphRuntime::Impl
 			{ "cs.subsurface", "SubsurfaceScattering" },
 			{ "cs.skylighting", "Skylighting" },
 			{ "cs.exp-height-fog", "ExponentialHeightFog" },
+			{ "cs.view-atmosphere", "ViewAtmosphere" },
 			{ "cs.ssgi", "ScreenSpaceGI" },
 			{ "cs.screen-space-shadows", "ScreenSpaceShadows" },
 			{ "cs.cloud-shadows", "CloudShadows" },

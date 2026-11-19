@@ -197,7 +197,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
 				{ .foreign = Segment::LightCulling },
 				{ .anchor = Anchor::Prepass,
-					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.screen-space-shadows", "cs.skylighting" },
+					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.screen-space-shadows", "cs.skylighting",
+						"cs.view-atmosphere" },
 					.whole = true },
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
@@ -226,6 +227,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				// The post-water composite of the medium into kMAIN, after the water is blended in (ViewAtmosphere's post-water hook).
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
 				{ .point = true },
 			} },
 			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
@@ -246,6 +249,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				// The post-water composite of the medium into kMAIN, after the water is blended in (ViewAtmosphere's post-water hook).
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
 				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
 				{ .point = true },
 			} },
