@@ -30,6 +30,7 @@ bool ORGHDRDisplay::IsActive() const
 
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/Frame/SegmentId.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -288,6 +289,12 @@ bool ORGHDRDisplay::TakeUIClear()
 	return std::exchange(uiCleared, false);
 }
 
+void ORGHDRDisplay::FollowWithD3D11()
+{
+	// The stage's end point, as the present would tap it. A capture after it uses D3D11.
+	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+}
+
 bool ORGHDRDisplay::CanClearScene() const
 {
 	const auto& hdr = globals::features::hdrDisplay;
@@ -390,6 +397,9 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 			outputDesc.Height, hdrScene ? "the HDR texture" : "the framebuffer", state.registered->backBuffer ? "on the graph" : "not on the graph");
 	}
 
+	// A new registration composes once the UI stage's build holds it. Until then ApplyHDR composes with D3D11.
+	if (!FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::HDROutput))
+		return Composed::None;
 	state.constants = a_constants;
 	const D3D11_TEXTURE2D_DESC& sceneDesc = hdr.hdrTexture ? hdr.hdrTexture->desc : outputDesc;
 	state.clearGroupsX = a_clearScene ? (sceneDesc.Width + kClearGroupSize - 1) / kClearGroupSize : 0;
@@ -417,6 +427,7 @@ FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return n
 Texture2D* ORGHDRDisplay::MakeTexture(Texture, const D3D11_TEXTURE2D_DESC&, const char*) { return nullptr; }
 void ORGHDRDisplay::ReleaseTextures() {}
 std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D*) const { return nullptr; }
+void ORGHDRDisplay::FollowWithD3D11() {}
 bool ORGHDRDisplay::TakeUIClear() { return false; }
 bool ORGHDRDisplay::CanClearScene() const { return false; }
 ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB&, ID3D11Texture2D*, bool) { return Composed::None; }

@@ -72,7 +72,7 @@ namespace RenderGraph::Frame::Driver
 		Starved,              // a staged build's recordings were asked for again and again: it would never switch in
 		Unbacked,             // GPU work reached an engine target native mode keeps without memory (Frame/EngineTargetUse.h)
 		NotExecuted,          // a skeleton clear or copy run did not execute what it took (nothing draws it another way)
-		OwnEpoch, // native mode: an anchor would run an epoch of its own
+		OwnEpoch,             // an anchor would run an epoch of its own
 		Count
 	};
 

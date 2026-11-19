@@ -25,7 +25,7 @@ namespace RenderGraph::Frame::Recipes::Table
 	using Segment = RenderGraphRuntime::Segment;
 
 	inline constexpr std::size_t kMaxNames = 8;
-	inline constexpr std::size_t kMaxSteps = 19;
+	inline constexpr std::size_t kMaxSteps = 21;
 	inline constexpr std::size_t kMaxEpochs = 10;
 	inline constexpr std::size_t kMaxCommitBefore = 20;
 
@@ -62,7 +62,6 @@ namespace RenderGraph::Frame::Recipes::Table
 	enum class Role : std::uint8_t
 	{
 		Graph,   // the stage's own graph: a CS stage's epoch, or one of Drawcall Limit Fix's
-		Ticket, // an anchor that keeps its own ticket after the stage in native mode, such as frame generation
 		Placed,  // an anchor's own epoch (or a module's) placed here only for the host's epoch order
 	};
 
@@ -118,7 +117,6 @@ namespace RenderGraph::Frame::Recipes::Table
 
 	constexpr Epoch Own(Segment a_segment) { return { a_segment, Role::Graph }; }
 	constexpr Epoch Placed(Anchor a_anchor, Names a_clients = {}) { return { AnchorSegment(a_anchor), Role::Placed, a_clients }; }
-	constexpr Epoch Ticket(Anchor a_anchor, Names a_clients) { return { AnchorSegment(a_anchor), Role::Ticket, a_clients }; }
 
 	// Epochs whose submission commits the point-ended world stages when their usual next GPU work does not come.
 	inline constexpr Segment kEndsWorld[] = { Segment::Forward, Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing,
@@ -284,15 +282,17 @@ namespace RenderGraph::Frame::Recipes::Table
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
 				Placed(Anchor::ImageSpace), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
-				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless", "cs.screenshot.clean" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
-		// UI, in every frame kind: screen blood, menu scenes, Scaleform displays, clears at three places, the present's clients, overlay and capture.
-		// Ends at a point just before the present, or before HDR output, which keeps its own ticket.
+				Placed(Anchor::FrameGeneration), Placed(Anchor::Interface), Placed(Anchor::Present) } },
+		// UI, in every frame kind: frame generation's hudless copy and the screenshot's clean scene, screen blood, menu scenes, Scaleform
+		// displays, clears at three places, the present's clients, overlay, HDR output and capture. Ends at a point just before the present.
 		{ .id = StageId::Ui,
 			.owner = Owner::Cs,
 			.name = "UI",
 			.segment = SegmentId::Ui,
 			.names = { "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
 			.steps = { {
+				// Main_PostProcessing after the post chain: kFRAMEBUFFER without the HUD, with the pre-exposure divided out.
+				{ .anchor = Anchor::FrameGeneration, .clients = { "cs.upscaling.hudless", "cs.screenshot.clean" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.blood-splatter" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.frozen" } },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" } },
@@ -310,15 +310,16 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
 				{ .anchor = Anchor::Present, .clients = { "cs.bink", "cs.gpu-load" }, .whole = true },
 				{ .anchor = Anchor::Overlay, .clients = { "cs.imgui" }, .whole = true },
+				// HDR Display's composite reads the UI texture the steps above drew.
+				{ .anchor = Anchor::HDROutput, .clients = { "cs.hdr" }, .whole = true },
 				{ .anchor = Anchor::Capture, .clients = { "cs.screenshot" }, .whole = true },
 				{ .point = true },
 			} },
 			.opensLast = true,
 			.switchesEverySlot = true,
-			.commitBefore = Segments({ Segment::AnchorHDROutput, Segment::AnchorCapture }),
-			.commit = "just before the present (or HDR output)",
-			.commitSite = "the present hook, before the capture and the present (Hooks.cpp); BeforeGpuWork before HDR output or the Capture anchor",
-			.epochs = { Own(StageSegment(SegmentId::Ui)), Placed(Anchor::Overlay), Ticket(Anchor::HDROutput, { "cs.hdr" }), Placed(Anchor::Capture) } },
+			.commit = "just before the present",
+			.commitSite = "the present hook, after the capture and before the present (Hooks.cpp)",
+			.epochs = { Own(StageSegment(SegmentId::Ui)), Placed(Anchor::Overlay), Placed(Anchor::HDROutput), Placed(Anchor::Capture) } },
 	} };
 
 	/** @brief The stage of a StageId. */

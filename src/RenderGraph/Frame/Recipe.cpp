@@ -29,7 +29,7 @@ namespace RenderGraph::Frame::Recipes
 
 		namespace Table = Recipes::Table;
 
-		/** @brief Visits every stage's own graphs and the tickets after them. */
+		/** @brief Visits every stage's own graphs. */
 		template <class F>
 		void ForCheckedEpochs(F&& a_visit)
 		{

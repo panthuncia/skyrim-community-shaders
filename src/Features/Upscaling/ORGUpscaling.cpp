@@ -242,6 +242,8 @@ struct ORGUpscaling::Impl
 	std::shared_ptr<const EvaluateWork> evaluate;
 
 	bool registered = false, hudlessRegistered = false;
+	// Set only around CopyHudless's tap, so the clean scene's tap of the same step does not copy the hudless.
+	bool hudlessArmed = false;
 	bool depthRegistered = false;
 	bool failed = false;
 };
@@ -568,11 +570,16 @@ namespace
 			if (const auto impl = weak.lock(); impl && impl->hudless)
 				impl->hudless->Register(a_graph);
 		};
-		// CopyHudless runs the anchor for this copy alone, so every committing run draws it.
+		client.active = [weak] {
+			const auto impl = weak.lock();
+			return impl && impl->hudlessArmed;
+		};
 		client.commit = [weak](const FrameAnchors::Point&) {
 			if (const auto impl = weak.lock())
 				impl->hudlessGate->OpenDraw(0);
 		};
+		// The UI stage's frame generation step also takes the clean scene's tap in the same frame.
+		client.repeats = true;
 		impl.hudlessRegistered = FrameAnchors::Register(std::move(client));
 		return impl.hudlessRegistered;
 	}
@@ -888,7 +895,13 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 		MarkFailed(impl, "its FrameGeneration client could not be registered");
 		return false;
 	}
-	return FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration) && IsActive();
+	// A new registration copies once the UI stage's build holds it. Until then the frame has no hudless.
+	if (!FrameAnchors::Scheduled(kHudlessClientId, FrameAnchors::Anchor::FrameGeneration))
+		return false;
+	impl->hudlessArmed = true;
+	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration);
+	impl->hudlessArmed = false;
+	return ran && IsActive();
 }
 
 #else  // !CS_HAS_RENDER_GRAPH

@@ -76,7 +76,7 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
-	// The clean scene's copy, at the FrameGeneration anchor (RecipeTable.h names it on that anchor's ticket).
+	// The clean scene's copy, at the UI stage's FrameGeneration step (RecipeTable.h).
 	constexpr const char* kCleanClientId = "cs.screenshot.clean";
 	// How many capture points a capture may wait for its copy and readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
@@ -487,6 +487,8 @@ namespace
 			gate->OpenDraw(0);
 			copy->copied = globals::state->frameCount;
 		};
+		// The UI stage's frame generation step also takes the hudless copy's tap in the same frame.
+		client.repeats = true;
 		return FrameAnchors::Register(std::move(client));
 	}
 }

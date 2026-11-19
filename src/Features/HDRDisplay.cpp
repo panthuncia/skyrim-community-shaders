@@ -1099,7 +1099,8 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 	UINT syncInterval,
 	UINT flags,
 	bool hdrReady,
-	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain)
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd)
 {
 	if (UsesDeferredPresentComposite()) {
 		DeferredPresentCleanupScope cleanup{ *this };
@@ -1116,8 +1117,10 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 		ID3D11RenderTargetView* nullRTV = nullptr;
 		globals::d3d::context->OMSetRenderTargets(1, &nullRTV, nullptr);
 		ApplyHDR();
-		const HRESULT retval = PresentToSwapChain(swapChain, syncInterval, flags);
-		return retval;
+		// The suppressed chain left the frame's end to this present, so HDR output is a step of the UI stage.
+		return frameEnd(swapChain, syncInterval, flags, [this](IDXGISwapChain* a_swapChain, UINT a_syncInterval, UINT a_flags) {
+			return PresentToSwapChain(a_swapChain, a_syncInterval, a_flags);
+		});
 	}
 
 	RunHDRBeforePresentChain(hdrReady);
@@ -1135,7 +1138,8 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 	IDXGISwapChain* swapChain,
 	UINT syncInterval,
 	UINT flags,
-	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain)
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd)
 {
 	const bool hdrReady = loaded && hdrDataCB && outputTexture && IsHDREnabledForFrame();
 	D3D11_VIEWPORT savedViewport{};
@@ -1168,7 +1172,7 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 	globals::d3d::context->RSSetViewports(1, &savedViewport);
 
 	ZoneScopedN("CS.Present.HdrChain");
-	return RunPresentChainWithHDR(swapChain, syncInterval, flags, hdrReady, presentChain);
+	return RunPresentChainWithHDR(swapChain, syncInterval, flags, hdrReady, presentChain, frameEnd);
 }
 
 void HDRDisplay::ClearUIBuffer()
@@ -1254,6 +1258,9 @@ void HDRDisplay::ApplyHDR()
 
 		// CS_ORG_HDR_DISPLAY: the composite, and the copy when it can, on the render graph. Else D3D11.
 		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get(), clearScene);
+		// The D3D11 composite or copy below reads what the UI stage draws, so the stage's work goes first.
+		if (composed == ORGHDRDisplay::Composed::None || (backBuffer && composed != ORGHDRDisplay::Composed::OutputAndBackBuffer))
+			ORGHDRDisplay::Get().FollowWithD3D11();
 		if (composed == ORGHDRDisplay::Composed::None) {
 			// The graph did not compose, so it did not clear the scene either.
 			if (clearScene && hdrTexture->rtv) {

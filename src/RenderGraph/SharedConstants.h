@@ -54,7 +54,7 @@ namespace SharedConstants
 	void Register(org::RenderGraph& a_graph);
 
 	/** @brief One upload point per step of a declared segment, each with its own latch block. A step past the last would read another's values. */
-	inline constexpr std::uint32_t kUploadPoints = 19;
+	inline constexpr std::uint32_t kUploadPoints = 21;
 
 	/**
 	 * @brief A pass that copies upload point a_point's latch region into the four buffers. Null for a point out of range.

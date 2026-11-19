@@ -1236,7 +1236,7 @@ ID3D11Texture2D* Upscaling::HudlessResource() const
 
 bool Upscaling::CopyHudlessColor(ID3D11ShaderResourceView* a_source)
 {
-	// CS_ORG_UPSCALING: the copy is a pass at the FrameGeneration anchor.
+	// Graph modes: the copy is a pass of the UI stage's FrameGeneration step.
 	if (ORGUpscaling::Get().Holds(ORGUpscaling::Target::Hudless))
 		return ORGUpscaling::Get().CopyHudless(a_source);
 	if (!a_source || !hudlessTexture || !hudlessTexture->rtv)
