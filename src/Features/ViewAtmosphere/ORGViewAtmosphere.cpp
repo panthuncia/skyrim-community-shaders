@@ -399,6 +399,12 @@ void ORGViewAtmosphere::CompositeAfterWater()
 		impl->compositeFrame == frame)
 		return;
 	impl->compositeFrame = frame;
+	// A new registration lags until a build that holds it switches in at a frame boundary. Work the schedule has no place for stops the game.
+	if (!FrameAnchors::Scheduled(kCompositeClientId, Anchor::EngineDraws)) {
+		static Util::ReasonLog s_lag("[ORG] Atmosphere and Fog: the post-water composite lags (the frame's schedule does not hold it yet)");
+		s_lag.Report("not scheduled");
+		return;
+	}
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	if (!main.texture)
 		return;
