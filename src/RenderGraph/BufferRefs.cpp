@@ -1,4 +1,4 @@
-// Buffer view refs from the graph host's device (BufferRefs.h). Built with OpenRenderGraph only: nothing else includes the header.
+// Buffer view refs from the graph host's device. Built with OpenRenderGraph only.
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
@@ -34,7 +34,7 @@ namespace RenderGraph
 
 	BufferRef BufferRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
-		// The ORG buffer is known here: the validator judges it by the graph's own rule, not as a handle.
+		// The validator judges an ORG buffer by the graph's own rule, not as a handle.
 		if (UndeclaredAccess::On())
 			UndeclaredAccess::NoteResource(a_buffer, "BufferRefOf", a_where);
 		auto* host = RenderGraphRuntime::Get().Host();
@@ -143,13 +143,13 @@ namespace RenderGraph
 
 	namespace
 	{
-		/** @brief One site's and buffer's latch checks (CheckDeclaredRefs), kept across graph builds. */
+		/** @brief One site's and buffer's latch checks, kept across graph builds. */
 		struct MismatchCounts
 		{
 			std::string site, what;
 			std::atomic<std::uint64_t> checked{ 0 }, mismatched{ 0 }, skipped{ 0 };
 			std::atomic<bool> logged{ false };
-			std::uint64_t reportedMismatched = 0, reportedSkipped = 0;  // at the last summary (under the registry's lock)
+			std::uint64_t reportedMismatched = 0, reportedSkipped = 0;  // at the last summary, under the registry's lock
 		};
 
 		struct MismatchRegistry
@@ -178,8 +178,7 @@ namespace RenderGraph
 			return *made;
 		}
 
-		// Every 10 seconds, the sites whose mismatches or skips grew since the last summary: a real mismatch grows every frame, a race
-		// between frames in flight shows as skips.
+		// Every 10 seconds, the sites whose counts grew. A real mismatch grows every frame, a race between frames in flight shows as skips.
 		void SummarizeMismatches()
 		{
 			auto& registry = Mismatches();
@@ -207,7 +206,7 @@ namespace RenderGraph
 		std::string what;
 		org::ResourceBindingToken binding;
 		std::shared_ptr<const RefLatch> latch;
-		std::shared_ptr<org::VersionedBuffer> late;  // a late-bound buffer: checked against its current version
+		std::shared_ptr<org::VersionedBuffer> late;  // checked against its current version
 	};
 
 	namespace
@@ -261,7 +260,7 @@ namespace RenderGraph
 			latch->Set({});
 			return {};
 		}
-		// The same backing again (a frame reading the version the last one did) keeps its version.
+		// The same backing again keeps its version.
 		if (buffer->Get() != a_backing)
 			buffer->PublishLate(a_backing, std::move(a_owner));
 		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
@@ -276,7 +275,7 @@ namespace RenderGraph
 
 	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset)
 	{
-		// The preparation's bindings hold the version a versioned buffer binds this frame, at the slot its declaration captured.
+		// The preparation's bindings hold the version a versioned buffer binds this frame.
 		const auto resource = a_preparation.ResolveCapturedResource(a_preparation.CaptureResource(a_binding));
 		rhi::Device device = a_preparation.device;
 		if (!device)
@@ -290,23 +289,22 @@ namespace RenderGraph
 		if (!a_refs.entries)
 			return;
 		for (const auto& entry : *a_refs.entries) {
-			// The frame before the latch is read: a frame that ends during the check makes it a skip.
+			// Read the frame before the latch, so a frame that ends during the check makes it a skip.
 			const std::uint64_t frame = RefFrame();
 			const auto latched = entry.latch->Take();
 			if (!latched.ref)
 				continue;
-			// By site and buffer, across builds: a few entries a pass, so the lookup is cheap.
+			// By site and buffer, across builds.
 			auto& counts = CountsOf(a_site, entry.what);
 			BufferRef declared{};
 			bool matched = false;
 			try {
 				if (entry.late) {
-					// Its current version and the latch must be this frame's: a version published for the next frame while the latch still
-					// holds this one's (or the other way round) is a race between frames in flight, not a mismatch.
+					// The current version and the latch must both be this frame's. Otherwise it is a race between frames in flight, not a mismatch.
 					const auto current = entry.late->Get();
 					auto* host = RenderGraphRuntime::Get().Host();
 					if (!current || !host)
-						continue;  // no version published yet: nothing the latch could carry
+						continue;  // no version published yet
 					declared = MakeBufferRef(host->Device(), current->GetAPIResource().GetHandle(), 0, std::source_location::current());
 					if (latched.frame != frame || RefFrame() != frame) {
 						counts.skipped.fetch_add(1, std::memory_order_relaxed);
@@ -314,7 +312,7 @@ namespace RenderGraph
 					}
 					matched = declared.viewSlot == latched.ref.viewSlot;
 				} else {
-					// The version bound to this preparation, which may be an earlier frame's than the latch's latest.
+					// The version bound to this preparation, which may be older than the latch's latest.
 					declared = DeclaredBufferRef(a_preparation, entry.binding);
 					matched = declared.viewSlot == latched.ref.viewSlot ||
 					          std::ranges::any_of(latched.history, [&](const BufferRef& a_ref) { return a_ref && a_ref.viewSlot == declared.viewSlot; });
@@ -343,7 +341,7 @@ namespace RenderGraph
 	{
 		if (!BufferRefChecksOn())
 			return;
-		// A null ref beside a real address: a shader that loads through it reads heap slot 0 as a buffer.
+		// A null ref beside a real address makes a shader read heap slot 0 as a buffer.
 		if (!a_ref) {
 			if (a_address) {
 				auto& counts = CheckCounts();

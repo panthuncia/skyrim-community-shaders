@@ -25,8 +25,8 @@ namespace RenderGraph::ExternalWork
 		{
 			std::mutex lock;
 			std::unique_ptr<org::ExternalClient> client;
-			bool failed = false;    // the client could not be made: no more tries this session
-			bool shutDown = false;  // after Shutdown: nothing is made again
+			bool failed = false;    // no more tries this session
+			bool shutDown = false;  // nothing is made again
 			std::atomic<std::uint64_t> submissions{ 0 };
 			std::set<std::string> loggedFailures;
 		};
@@ -37,7 +37,7 @@ namespace RenderGraph::ExternalWork
 			return state;
 		}
 
-		/** @brief The client, made on the first call with the render graph active. Null until then, and after a failure. With the lock. */
+		/** @brief Made on the first call with the render graph active. Null until then and after a failure. Call with the lock. */
 		org::ExternalClient* ClientLocked(State& a_state)
 		{
 			if (a_state.client || a_state.failed || a_state.shutDown)
@@ -50,11 +50,11 @@ namespace RenderGraph::ExternalWork
 				auto device = host->Device();
 				org::ExternalClient::Desc desc{};
 				desc.runtime = host->GetRuntime().shared_from_this();
-				// The graphs' slots, in their order: a handoff between a graph and the client matches queues by slot.
+				// The graphs' queue slots in their order, since a handoff matches queues by slot.
 				desc.queues = { { device.GetQueue(rhi::QueueKind::Graphics), rhi::QueueKind::Graphics },
 					{ device.GetQueue(rhi::QueueKind::Compute), rhi::QueueKind::Compute }, { device.GetQueue(rhi::QueueKind::Copy), rhi::QueueKind::Copy } };
 				desc.name = "CS external work";
-				// Native mode has no home states: the client is open, and the ledgers carry what it leaves to the next user.
+				// Native mode has no home states, so the client is open and the ledgers carry what it leaves to the next user.
 				desc.closed = host->ClosedExecutions() || host->GetDesc().externalHomeStates;
 				desc.entryFullBarrier = true;
 				const bool closed = desc.closed;
@@ -88,13 +88,13 @@ namespace RenderGraph::ExternalWork
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
 		std::shared_ptr<const void> a_keepAlive, std::span<const rhi::TimelinePoint> a_signals)
 	{
-		// The stages whose commit point this is commit first: this work must follow them on the GPU.
+		// Stages whose commit point this is commit first, since this work must follow them on the GPU.
 		::FrameAnchors::BeforeGpuWork("external work");
-		// So do the epochs still on the submission thread (the render owner's only: another thread's work has no order against them).
+		// So do the render owner's epochs still on the submission thread.
 		RenderGraphRuntime::Get().DrainSubmissions("external work");
 		::RenderGraph::FrameSequence::NoteBoundary(fmt::format("external work: {}", a_label));
 		auto& state = Get();
-		// One submission at a time: the client serializes them anyway, and this lock also covers its creation and Shutdown.
+		// One submission at a time. The lock also covers the client's creation and Shutdown.
 		std::lock_guard guard(state.lock);
 		auto* client = ClientLocked(state);
 		if (!client)

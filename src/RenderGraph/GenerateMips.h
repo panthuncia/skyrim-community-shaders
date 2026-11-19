@@ -20,40 +20,32 @@ struct ComputeProgram;
 namespace GraphPasses
 {
 	/**
-	 * @brief ORG's GenerateMips.hlsl (org::GenerateMipsPass's shader, docs/pipelines.md "Built-in passes with shaders") as a CS program.
+	 * @brief ORG's GenerateMips.hlsl built as a CS ComputeProgram.
 	 *
-	 * CS's graphs have no org::PipelineCompiler, so org::GenerateMipsPass cannot declare its pipeline here. This builds the same shader
-	 * with ComputeProgram from Data/Shaders/OpenRenderGraph (cmake/RenderGraph.cmake ships it), with the same 7-word push block. Each mip
-	 * is the area-weighted average of the mip above it; float, UNORM and SNORM formats whose UAVs take typed loads.
+	 * CS's graphs have no org::PipelineCompiler, so org::GenerateMipsPass cannot declare its pipeline here.
+	 * Each mip is the area-weighted average of the one above. Formats must allow typed UAV loads.
 	 */
 	struct GenerateMipsProgram
 	{
 		std::shared_ptr<const ComputeProgram> compute;  // its dispatch signature serves the gated steps
-		bool array = false;                             // built for 2D arrays and cube maps (ORG_GENERATE_MIPS_ARRAY)
+		bool array = false;                             // ORG_GENERATE_MIPS_ARRAY, for 2D arrays and cube maps
 	};
 
-	/**
-	 * @brief Builds the program: a_array for texture arrays and cube maps, else for 2D textures. Render thread, at setup (it blocks on a
-	 * compile the shader store does not have). Null, logged, when it cannot be built.
-	 */
+	/** @brief Render thread, at setup, since it blocks on an uncached compile. Null and logged on failure. */
 	std::shared_ptr<const GenerateMipsProgram> LoadGenerateMips(rhi::Device a_device, bool a_array);
 
-	/** @brief One indirect dispatch's arguments, as the gate's latch region holds them: group counts, then a pad to 16 bytes. */
+	/** @brief Group counts, then a pad to 16 bytes. */
 	struct DispatchGroups
 	{
 		std::uint32_t x = 0, y = 0, z = 0, pad = 0;
 	};
 
-	/**
-	 * @brief The group counts of each mip step of a a_width x a_height texture with a_mips mips and a_slices slices (or faces): one
-	 * entry per mip from 1, for a gate's latch region.
-	 */
+	/** @brief The group counts of each mip step from mip 1, for a gate's latch region. */
 	std::vector<DispatchGroups> GenerateMipsGroups(std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_mips, std::uint32_t a_slices);
 
 	/**
-	 * @brief Makes the mip chain's dispatches conditional for a client that builds the mips only on some frames, while its recording is
-	 * kept: step i (mip i + 1) reads its group counts from a_latch's region of the run being recorded, at a_offset + i * 16 bytes
-	 * (DispatchGroups). The client's commit writes GenerateMipsGroups there, or zeros to skip the chain.
+	 * @brief Makes the mip dispatches conditional while the recording is kept. Step i reads its counts at a_offset + i * 16.
+	 * The commit writes GenerateMipsGroups there, or zeros to skip the chain.
 	 */
 	struct GenerateMipsGate
 	{
@@ -61,10 +53,7 @@ namespace GraphPasses
 		std::uint32_t offset = 0;
 	};
 
-	/**
-	 * @brief A pass that builds mips 1 to N-1 of a_texture from mip 0, for a frame anchor client's make. The texture is a 2D texture, an
-	 * array or a cube map (a_program built to match), with unordered access on every mip. Without a gate it dispatches every execution.
-	 */
+	/** @brief Builds mips 1 to N-1 from mip 0. Every mip needs unordered access. Without a gate it dispatches every execution. */
 	std::shared_ptr<org::RenderPass> MakeGenerateMips(std::shared_ptr<const GenerateMipsProgram> a_program, std::shared_ptr<org::Resource> a_texture,
 		GenerateMipsGate a_gate = {});
 }

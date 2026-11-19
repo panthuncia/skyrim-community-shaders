@@ -51,13 +51,12 @@ namespace RenderGraphMemory
 			}
 		}
 
-		// Host memory on a discrete GPU (the upload pages and readbacks), not the device's budget.
+		// Host memory on a discrete GPU, not the device's budget.
 		bool InHostMemory(const org::memory::ResourceMemoryRecord& a_record)
 		{
 			return a_record.heapType == rhi::HeapType::Upload || a_record.heapType == rhi::HeapType::Readback || a_record.heapType == rhi::HeapType::HostCached;
 		}
 
-		// A name's family (MemoryWindow.h's ReportLine): the name up to its last '.', and the first word after it, without digits.
 		std::string Family(const std::string& a_name)
 		{
 			if (a_name.empty())
@@ -78,8 +77,6 @@ namespace RenderGraphMemory
 			return records;
 		}
 
-		// The widget's snapshot of VRAM attribution's: a row per resource (Vram::RowFlags are the widget's MemoryRowFlags), a
-		// category per source and type, the heaps and the reconciliation.
 		org::ui::MemorySnapshot Snapshot(const Vram::Snapshot& a_snapshot)
 		{
 			constexpr auto same = [](std::uint32_t a, std::uint32_t b) { return a == b; };
@@ -125,7 +122,7 @@ namespace RenderGraphMemory
 			return out;
 		}
 
-		// Rebuilt at most twice a second: the rows are thousands of strings.
+		// Rebuilt at most twice a second, since the rows are thousands of strings.
 		org::ui::MemorySnapshot g_snapshot;  // UI thread
 		std::chrono::steady_clock::time_point g_snapshotTime{};
 
@@ -137,7 +134,7 @@ namespace RenderGraphMemory
 			std::uint32_t count = 0;
 		};
 
-		// The a_count largest of a_sums as "name M MB (n)", comma-separated.
+		// The a_count largest as "name M MB (n)", comma-separated.
 		std::string Largest(const std::unordered_map<std::string, Sum>& a_sums, std::size_t a_count)
 		{
 			std::vector<std::pair<std::string, Sum>> rows(a_sums.begin(), a_sums.end());
@@ -167,7 +164,7 @@ namespace RenderGraphMemory
 		}
 		g_widget.PushFrameSample(std::chrono::duration<double>(now - g_start).count(), g_snapshot.totalBytes);
 		ImGui::SetNextWindowSize(ImVec2(1100.0f, 650.0f), ImGuiCond_FirstUseEver);
-		// No frame-graph batches: the persistent graph's are its build's, not readable while it runs (the widget says so).
+		// No frame-graph batches, since the persistent graph's are not readable while it runs.
 		g_widget.Draw(&g_windowOpen, &g_snapshot, nullptr);
 	}
 
@@ -181,7 +178,7 @@ namespace RenderGraphMemory
 		std::uint32_t deviceCount = 0;
 		std::unordered_map<std::string, Sum> families, names;
 		for (const auto& record : records) {
-			// A placement in an aliasing pool is the pool's memory, which the pool's own record counts.
+			// A placement in an aliasing pool is counted by the pool's own record.
 			if (!record.CountsTowardTotal())
 				continue;
 			if (InHostMemory(record)) {
@@ -193,7 +190,7 @@ namespace RenderGraphMemory
 			auto& family = families[Family(record.resourceName)];
 			family.bytes += record.bytes;
 			++family.count;
-			// An unnamed resource by its type and size (texture extent and format), so a run tells them apart.
+			// Name an unnamed resource by its type and size, so a run tells them apart.
 			auto& name = names[!record.resourceName.empty() ? record.resourceName
 			                   : record.width                ? fmt::format("(unnamed {} {}x{}x{} format {} {:.1f} MB)", MajorCategory(record.resourceType), record.width,
 																	   record.height, record.arraySize, static_cast<int>(record.format), MiB(record.bytes))
@@ -204,7 +201,7 @@ namespace RenderGraphMemory
 		auto line = fmt::format("render graph memory (ORG-tracked): {:.1f} MB device-local in {} resources ({:.1f} MB more in host memory: upload pages, "
 										"readbacks); device-local by family: {}; by name: {}",
 			MiB(device), deviceCount, MiB(host), Largest(families, a_families), Largest(names, a_names));
-		// CS_ORG_VRAM_SOURCE=org: the allocator's owner labels too, which include what the host allocates outside tracked resources.
+		// CS_ORG_VRAM_SOURCE=org adds the allocator's owner labels, which cover memory outside tracked resources.
 		if (Vram::Org::Selected()) {
 			std::unordered_map<std::string, Sum> owners;
 			std::uint64_t spilled = 0;

@@ -33,7 +33,7 @@ namespace
 		return RenderGraph::ProgramBuild::MakeRequest(a_path, a_source, a_desc.entry, L"cs_6_6", a_desc.defines);
 	}
 
-	// a_source: the program's shader, the label its pipeline's debugging dumps go under (BASICRHI_VK_DUMP_ISA, DXVK_PIPELINE_STATS).
+	// a_source labels the pipeline's debugging dumps.
 	rhi::PipelinePtr CreatePipeline(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, const std::vector<std::byte>& a_binary, const std::string& a_entry,
 		const std::filesystem::path& a_source)
 	{
@@ -52,9 +52,8 @@ namespace
 	}
 
 	/**
-	 * @brief The program's registry rebuild: its source compiled again as it is now (off the owner thread; an unchanged one is a memory
-	 * cache hit), and a new SPIR-V's pipeline made under the program's own layout, on the compile's thread. The program is held weakly:
-	 * one released meanwhile has nothing to rebuild.
+	 * @brief Recompiles the source off the owner thread and makes a new pipeline under the program's own layout.
+	 * The program is held weakly, so one released meanwhile is skipped.
 	 */
 	org::services::LiveRebuild Rebuild(std::weak_ptr<const ComputeProgram> a_program, rhi::Device a_device, ComputeProgram::Desc a_desc)
 	{
@@ -64,7 +63,7 @@ namespace
 			const auto source = ReadSource(path);
 			if (!compiler || source.empty())
 				return a_done({ .error = compiler ? fmt::format("missing shader source {}", path.string()) : std::string("no runtime shader compiler") });
-			// The compiler copies the source; a memory-cache hit (nothing changed) completes here, on this thread.
+			// A memory-cache hit completes here on this thread.
 			(void)compiler->CompileAsync(MakeRequest(a_desc, path, source),
 				[a_program, a_device, a_request, a_done = std::move(a_done), entry = Util::WStringToString(a_desc.entry), source = std::filesystem::path(a_desc.source)](
 					const org::services::ShaderArtifact& a_artifact) {
@@ -75,7 +74,7 @@ namespace
 						return a_done({ .fingerprint = fingerprint });
 					const auto program = a_program.lock();
 					if (!program)
-						return a_done({ .fingerprint = a_request.fingerprint });  // released: nothing binds it
+						return a_done({ .fingerprint = a_request.fingerprint });  // released, nothing binds it
 					auto pipeline = CreatePipeline(a_device, program->layout->GetHandle(), a_artifact.binary, entry, source);
 					if (!pipeline)
 						return a_done({ .error = fmt::format("the compute pipeline ({}) could not be created", entry) });
@@ -89,7 +88,7 @@ namespace
 rhi::PipelineHandle ComputeProgram::Pipeline() const
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// Non-owning: the registry holds the payload it replaced until every submission that may use it has completed.
+	// Non-owning. The registry keeps a replaced payload until every submission that may use it has completed.
 	return (*static_cast<const rhi::PipelinePtr*>(slot->Peek()))->GetHandle();
 #	else
 	return {};
@@ -132,7 +131,7 @@ void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::s
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// The defines resolved once, here: a hot reload compiles the same permutation.
+	// Resolved once here, so a hot reload compiles the same permutation.
 	Desc desc = a_desc;
 	if (desc.commonDefines)
 		desc.defines = RenderGraph::ProgramBuild::WithCommonDefines(a_desc.defines, L"cs_6_6");
@@ -143,7 +142,7 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 		return {};
 	}
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
-	// Before the source is read: a reload that starts after rebuilds it (PipelineRegistry::Register).
+	// Read before the source, so a reload that starts after rebuilds it.
 	const std::uint64_t builtFor = registry.SourcesGeneration();
 	const std::filesystem::path path = RenderGraph::ProgramBuild::SourcePath(desc.source);
 	const auto bytes = ReadSource(path);
@@ -179,7 +178,6 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 		logger::error("[ORG] {}: the dispatch signature could not be created", desc.source);
 		return {};
 	}
-	// Live while an owner holds the program (the slot is its).
 	org::services::LivePipelineDesc live;
 	live.id = fmt::format("{} ({})", desc.source, entry);
 	live.sources = { desc.source };

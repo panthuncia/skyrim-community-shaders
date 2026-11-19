@@ -37,7 +37,7 @@ namespace FrameAnchors::SelfTest
 		constexpr const char* kClientId = "cs.org.anchor-selftest";
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
 		constexpr std::uint32_t kTextureSize = 16;
-		constexpr std::uint32_t kOutputWords = 64;  // word a: the check; word 32 + a: kMAIN's texel
+		constexpr std::uint32_t kOutputWords = 64;  // word a is the check, word 32 + a is kMAIN's texel
 		constexpr std::uint32_t kMainWord = 32;
 		constexpr std::uint32_t kNoIndex = 0xFFFFFFFFu;
 		// Runs without a value before the test reports that nothing came back.
@@ -57,7 +57,7 @@ namespace FrameAnchors::SelfTest
 		static_assert(sizeof(SelfTestConstants) == 32);
 		constexpr std::uint32_t kConstantWords = sizeof(SelfTestConstants) / sizeof(std::uint32_t);
 
-		/** @brief What the raster pass writes at an anchor; the compute pass stores it plus one. */
+		/** @brief What the raster pass writes at an anchor. The compute pass stores it plus one. */
 		constexpr std::uint32_t ValueOf(std::uint32_t a_anchor) { return 0x0A5C0000u | (a_anchor << 8); }
 
 		struct Resources
@@ -67,7 +67,7 @@ namespace FrameAnchors::SelfTest
 			std::array<std::shared_ptr<org::PixelBuffer>, kAnchors> textures;
 			std::shared_ptr<org::Buffer> output;                 // uint[kOutputWords]
 			std::shared_ptr<org::Buffer> readback;               // host copy of output
-			Texture main;  // the engine's kMAIN, or null
+			Texture main;  // or null
 		};
 
 		struct Status
@@ -93,7 +93,7 @@ namespace FrameAnchors::SelfTest
 			return out;
 		}
 
-		// The raster pass: the anchor's value into its texture, through RasterProgram.
+		// The raster pass writes the anchor's value into its texture.
 		struct DrawBindings
 		{
 			org::DeclaredViewToken target;
@@ -138,7 +138,7 @@ namespace FrameAnchors::SelfTest
 			std::uint32_t anchor;
 		};
 
-		// The compute pass: the texel into the anchor's word (plus one), the texel cleared, kMAIN's texel beside it.
+		// The compute pass stores the texel plus one in the anchor's word, clears it, and stores kMAIN's texel beside it.
 		struct ReadBindings
 		{
 			org::DeclaredViewToken texture, output, main;
@@ -196,7 +196,7 @@ namespace FrameAnchors::SelfTest
 			std::uint32_t anchor;
 		};
 
-		// The copy pass: the anchor's two words into the host copy, which Check reads.
+		// The copy pass copies the anchor's two words into the host copy.
 		struct ReadbackBindings
 		{
 			org::ResourceBindingToken output;
@@ -267,7 +267,7 @@ namespace FrameAnchors::SelfTest
 			resources->output->Materialize();
 			resources->readback = org::Buffer::CreateShared(rhi::HeapType::Readback, kOutputWords * sizeof(std::uint32_t));
 			resources->readback->SetName(fmt::format("{}.readback", kClientId));
-			// Zero: a word still zero has not come back yet.
+			// A word still zero has not come back yet.
 			auto readback = resources->readback->GetAPIResource();
 			void* mapped = nullptr;
 			readback.Map(&mapped);
@@ -275,7 +275,7 @@ namespace FrameAnchors::SelfTest
 				return nullptr;
 			std::memset(mapped, 0, kOutputWords * sizeof(std::uint32_t));
 			readback.Unmap(0, kOutputWords * sizeof(std::uint32_t));
-			// The engine target import: a missing kMAIN only leaves its texel out.
+			// A missing kMAIN only leaves its texel out.
 			resources->main = EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN));
 			return resources;
 		}
@@ -354,7 +354,7 @@ namespace FrameAnchors::SelfTest
 			readback.Map(&mapped);
 			if (!mapped)
 				return;
-			// The value is the same every run: a copy the GPU is still writing reads the same word.
+			// The value is the same every run, so a copy the GPU is still writing reads the same word.
 			std::uint32_t words[kOutputWords]{};
 			std::memcpy(words, mapped, sizeof(words));
 			readback.Unmap(0, 0);
@@ -363,8 +363,7 @@ namespace FrameAnchors::SelfTest
 			if (got == expected) {
 				test.reported[anchor] = true;
 				test.passed |= 1u << anchor;
-				// The first value an anchor returns may come from the main menu (no scene in kMAIN yet, and the menu's frames may run off
-				// the render thread): the line says so, so a 0 there is not read as a graph that sees no scene.
+				// The first value may come from the main menu with no scene in kMAIN yet. The line says so, so a 0 there is not misread.
 				logger::info("[ORG] anchor self-test: {} OK after {} runs (wrote 0x{:08X}, read back 0x{:08X}; kMAIN(0,0).r {}; game frame {}{})", Name(a_anchor),
 					test.runs[anchor], ValueOf(anchor), got,
 					test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,

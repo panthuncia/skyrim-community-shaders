@@ -26,38 +26,28 @@ namespace org::services
 }
 
 /**
- * @brief A render-graph raster program: a vertex and a pixel shader with the pipeline state for one set of targets.
- *
- * The raster twin of ComputeProgram. Both stages are HLSL under Data/Shaders, compiled to SPIR-V at runtime through the same
- * ORGModuleServices compiler and shader store, with BasicRHI's descriptor-heap ABI (OrgBindless.hlsli): the shaders fetch their
- * resources from the descriptor heap by index, and their constants are the push block (a cbuffer at b0, both stages).
- *
- * The default vertex stage is the fullscreen triangle (kFullscreenVertexShader): three vertices, no vertex buffer, TEXCOORD0 from
- * (0,0) at the top left to (1,1) at the bottom right, as PostProcessing's fullscreen.hlsli.
- *
- * A pass declares its targets with PassBuilder::RenderTarget (a mip or slice through RtvView) and its depth with DepthRead or
- * DepthReadWrite, then records with Draw. The viewport is the pass's render area, which may be a rectangle of the targets (a mip's
- * size, say).
- *
- * Hot reload works as for ComputeProgram: Load registers the pipeline with RenderGraphRuntime::PipelineRegistry with both sources as
- * its dependencies, and a reload swaps a new pipeline into the same slot at the graph's next build.
- */
+* @brief A render-graph raster program: a vertex and a pixel shader with the pipeline state for one set of targets.
+*
+* The raster twin of ComputeProgram. Both stages are HLSL under Data/Shaders, compiled to SPIR-V at runtime with BasicRHI's
+* descriptor-heap ABI. Shaders fetch resources by heap index, and their constants are the push block at b0.
+* The default vertex stage is a fullscreen triangle with TEXCOORD0 from (0,0) top left to (1,1) bottom right.
+* The viewport is the pass's render area. Hot reload swaps a new pipeline into the same slot at the graph's next build.
+*/
 struct RasterProgram
 {
 	/** @brief The fullscreen-triangle vertex shader, relative to Data/Shaders. */
 	static constexpr const char* kFullscreenVertexShader = "RenderGraph/FullscreenVS.hlsl";
 
 	rhi::PipelineLayoutPtr layout;
-	// The registry's (payload: rhi::PipelinePtr); bind Pipeline() at record time, never a handle kept across recordings.
+	// Bind Pipeline() at record time. Never keep a handle across recordings.
 	std::shared_ptr<org::services::LivePipelineSlot> slot;
 	std::uint32_t constantWords = 0;
 	std::uint32_t targetCount = 0;
 	bool hasDepth = false;
-	// The draw command signature under the program's layout (vertex count, instance count, first vertex, first instance), for
-	// DrawDesc::indirect.
+	// The draw command signature under the program's layout, for DrawDesc::indirect.
 	rhi::CommandSignaturePtr drawSignature;
 
-	/** @brief Record time: the pipeline to bind, the slot's current one (it changes only at a graph build, where nothing records). */
+	/** @brief The pipeline to bind at record time. It changes only at a graph build, where nothing records. */
 	rhi::PipelineHandle Pipeline() const;
 
 	/** @brief A colour target's format and blending. */
@@ -73,9 +63,7 @@ struct RasterProgram
 		std::wstring pixelEntry = L"main";
 		std::string vertexSource = kFullscreenVertexShader;
 		std::wstring vertexEntry = L"main";
-		// Generated stages (the ORG FX runtime's lowered passes): when set, a stage compiles this text instead of reading its file,
-		// and the stage's source above is only the name diagnostics and the shader store give it. Such a program has no files to
-		// hot reload; a reload of every shader compiles the same text again.
+		// Generated stages compile this text instead of a file. The source above is then just a name, and there is nothing to hot reload.
 		std::string pixelText;
 		std::string vertexText;
 		std::wstring languageVersion = L"2021";                      // DXC -HV: "2018" for FXC-era sources (vector ?:, && and || on vectors)
@@ -89,29 +77,21 @@ struct RasterProgram
 		// The pipeline's primitive type: a draw sets the same one (SetPrimitiveTopology) before it draws.
 		rhi::PrimitiveTopology topology = rhi::PrimitiveTopology::TriangleList;
 		bool alphaToCoverage = false;
-		// Also the defines the D3D11 build of each stage gets (ProgramBuild::WithCommonDefines: VSHADER, PSHADER, CS's common
-		// defines), so a dual-target shader compiles the same permutation on both paths. Off for generated stages (the FX
-		// runtime's), which have no D3D11 build with CS's defines.
+		// Also give each stage CS's common defines, as its D3D11 build gets, so dual-target shaders compile the same permutation.
+		// Off for generated stages, which have no D3D11 build.
 		bool commonDefines = true;
-		// Each stage's whole define list, used as is when not empty (defines and commonDefines are then ignored for that stage). Set
-		// by ProgramCache on the requesting thread: CS's common defines read State, which a build thread must not.
+		// Each stage's full define list, used as is when not empty. Set by ProgramCache on the requesting thread,
+		// since CS's common defines read State, which a build thread must not.
 		std::vector<std::pair<std::wstring, std::wstring>> vertexStageDefines;
 		std::vector<std::pair<std::wstring, std::wstring>> pixelStageDefines;
 	};
 
-	/**
-	 * @brief Compiles both stages (or finds them in the cache) and creates the pipeline; null, logged, when the runtime has no
-	 * compiler, a stage fails to compile, or the pipeline cannot be made. Blocks on a compile the cache does not have, so call it at
-	 * setup, not per frame.
-	 */
+	/** @brief Compiles both stages or finds them cached, and makes the pipeline. Null, logged, on failure.
+	*  Blocks on an uncached compile, so call it at setup, not per frame. */
 	static std::shared_ptr<const RasterProgram> Load(rhi::Device a_device, const Desc& a_desc);
 
-	/**
-	 * @brief Compiles both stages of a_desc into the shader store (or finds them there) without making a pipeline, so a later Load
-	 * of a desc with the same sources and defines finds them. False when the runtime has no compiler yet or a stage failed
-	 * (logged as a warning: the caller names the permutation).
-	 * Blocks on the compile: call it from a compile thread or at setup.
-	 */
+	/** @brief Compiles both stages into the shader store without making a pipeline, so a later Load finds them. Blocks.
+	*  False when there is no compiler yet or a stage failed. */
 	static bool CompileStages(const Desc& a_desc);
 
 	/** @brief A colour attachment: a declared RenderTarget view and what the pass does with its contents first. */
@@ -132,10 +112,7 @@ struct RasterProgram
 		bool clearStencil = false;  // with LoadOp::Clear: the stencil is cleared to 0 too
 	};
 
-	/**
-	 * @brief The render area. It is also the viewport and the scissor, unless DrawDesc::dynamicViewport or DrawDesc::scissor
-	 * replaces them for the draw.
-	 */
+	/** @brief The render area. Also the viewport and scissor, unless the draw replaces them. */
 	struct Viewport
 	{
 		std::uint32_t x = 0, y = 0, width = 0, height = 0;
@@ -147,11 +124,9 @@ struct RasterProgram
 		std::span<const Colour> colours;  // as many as the program's targets
 		const Depth* depth = nullptr;     // when the program has a depth format
 		Viewport viewport;
-		// When set, the draw's viewport (CommandList::SetViewports) instead of the render area. It may be fractional and reach
-		// past the render area and the targets: the render area and the scissor clip it. A fullscreen draw's TEXCOORD0 then
-		// spans this viewport, not the render area.
+		// The draw's own viewport instead of the render area. It may reach past the targets, and then TEXCOORD0 spans this viewport.
 		std::optional<rhi::Viewport> dynamicViewport;
-		// When set, the draw's scissor (CommandList::SetScissors), clipped to the render area. Unset: the render area.
+		// The draw's scissor, clipped to the render area. Unset means the render area.
 		std::optional<rhi::ScissorRect> scissor;
 		std::span<const std::uint32_t> constants;  // at most constantWords
 		std::uint32_t vertexCount = 3;             // the fullscreen triangle
@@ -159,23 +134,17 @@ struct RasterProgram
 		const char* debugName = nullptr;
 		// The stencil test's and REPLACE's reference (OMSetDepthStencilState's), for a program whose depth state enables stencil.
 		std::uint32_t stencilReference = 0;
-		// When set, the draw's four uints (vertex count, instance count, first vertex, first instance) are read from this latch
-		// block, indirectOffset bytes into the region of the recording's run, instead of vertexCount and instanceCount. A
-		// vertex count of zero there draws nothing, so a kept recording can do no work on a frame by its data alone.
+		// Reads the draw's four indirect uints from this latch block in the recording's run. A vertex count of zero draws nothing,
+		// so a kept recording can skip work by its data alone.
 		const org::LatchBlock* indirect = nullptr;
 		std::uint32_t indirectOffset = 0;
-		// When valid, the draw is counted by this occlusion query: it is begun after the render pass begins and ended before the pass
-		// ends, so it holds this draw alone. The caller resets the query before and resolves it after.
+		// An occlusion query around this draw alone. The caller resets it before and resolves it after.
 		rhi::QueryPoolHandle occlusionPool{};
 		std::uint32_t occlusionIndex = 0;
 	};
 
-	/**
-	 * @brief Record time: begins a render pass on the draw's targets, binds the program, pushes the constants, draws, and ends the
-	 * pass. The descriptor heaps are the frame's, which the graph binds before the first pass. Records nothing when the draw does
-	 * not match the program (target count, depth, constants) or its viewport is empty, and returns false then: its occlusion query,
-	 * if it has one, was not begun.
-	 */
+	/** @brief Record time. Begins a render pass, binds the program, pushes constants, draws and ends the pass.
+	*  Returns false and records nothing when the draw does not match the program or its viewport is empty. */
 	bool Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const;
 };
 

@@ -22,8 +22,7 @@
 #include <unordered_set>
 #include <vector>
 
-// BasicRHI's D3D12 import (rhi_interop_dx12.h), declared here: that header brings DirectX-Headers' d3d12.h, which this translation
-// unit's Windows SDK headers would meet.
+// Declared here because rhi_interop_dx12.h brings DirectX-Headers' d3d12.h, which clashes with this unit's Windows SDK headers.
 struct ID3D12Resource;
 namespace rhi::dx12
 {
@@ -52,7 +51,7 @@ namespace RenderGraph
 
 	namespace
 	{
-		/** @brief The newest graph import of each image (ImportDxvkTexture), held weakly, for GraphResourceOfImage. */
+		/** @brief The newest graph import of each image, held weakly. */
 		struct GraphImports
 		{
 			std::mutex mutex;
@@ -82,7 +81,7 @@ namespace RenderGraph
 		{
 			if (!HomeLayoutOf(a_image.layout))
 				return {};
-			// D3D12 (native mode): the description carries the ID3D12Resource where the VkImage goes (Native::DescribeResource).
+			// In D3D12 native mode the description carries the ID3D12Resource where the VkImage goes.
 			if (Backend::IsD3D12()) {
 				rhi::ResourcePtr resource;
 				if (rhi::dx12::import_resource(a_device, reinterpret_cast<ID3D12Resource*>(a_image.image), resource) != rhi::Result::Ok)
@@ -105,9 +104,8 @@ namespace RenderGraph
 			import.createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 			import.createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 			import.currentLayout = a_image.layout;
-			// In GENERAL, DXVK and the graph share the image with memory barriers alone. In any other layout the graph uses it
-			// exclusively and moves it between layouts, starting from and returning to this one. An exclusive import of an image in
-			// GENERAL (native mode's graph imports) does the same from GENERAL.
+			// In GENERAL, DXVK and the graph share the image with memory barriers alone.
+			// In any other layout, or when exclusive, the graph moves it between layouts and returns it to this one.
 			import.simultaneousAccess = a_image.layout == VK_IMAGE_LAYOUT_GENERAL && !a_exclusive;
 			import.debugName = a_name;
 			rhi::ResourcePtr resource;
@@ -119,7 +117,7 @@ namespace RenderGraph
 
 	rhi::ResourcePtr ImportDxvkImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name)
 	{
-		// A raw import: the native context and raw views use it between graph executions, where the image rests in its home.
+		// A raw import, used between graph executions while the image rests in its home layout.
 		return ImportImage(a_device, a_image, a_name, false);
 	}
 
@@ -139,15 +137,13 @@ namespace RenderGraph
 		const auto home = HomeLayoutOf(a_image.layout);
 		if (!home)
 			return nullptr;
-		// Native mode imports every image exclusively: the graph moves it into each pass's layout. Each image is one graph resource
-		// (FrameAnchors' imports find its slot first), so one tracker follows its layout.
+		// Native mode imports every image exclusively. Each image must be one graph resource so one tracker follows its layout.
 		const bool exclusive = NativeGraphMovesImages();
 		auto resource = ImportImage(a_device, a_image, a_name, exclusive);
 		if (!resource)
 			return nullptr;
-		// The home state: the graph finds the image in it and gives it back in it (external home states).
+		// The graph finds the image in its home state and gives it back in it.
 		a_desc.initialLayout = *home;
-		// Common-only (simultaneous access, every pass in GENERAL) is for DXVK's images resting in GENERAL.
 		const bool commonOnly = *home == rhi::ResourceLayout::Common && !exclusive;
 		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
 		if (result) {
@@ -160,7 +156,7 @@ namespace RenderGraph
 
 	bool NativeGraphMovesImages()
 	{
-		// Native mode has one model on both backends: the graph's ledgers carry every image's state between executions.
+		// Native mode has one model on both backends, where the graph's ledgers carry every image's state.
 		return Engine::Native::Active();
 	}
 
@@ -244,7 +240,6 @@ namespace RenderGraph
 
 	namespace
 	{
-		/** @brief One graph resource of an image, as the duplicate check knows it. */
 		struct ImageResource
 		{
 			std::weak_ptr<org::Resource> resource;
@@ -271,7 +266,6 @@ namespace RenderGraph
 			static const bool on = Switches::On("CS_ORG_IMAGE_DUPLICATE_CHECK");
 			return on;
 		}
-		/** @brief Drops the entries of resources that are gone. */
 		void Prune(ImageResources& a_images, std::vector<ImageResource>& a_entries)
 		{
 			std::erase_if(a_entries, [&](const ImageResource& a_entry) {
@@ -346,7 +340,7 @@ namespace RenderGraph
 
 	namespace
 	{
-		/** @brief A registered made image (RegisterMadeImage). Held weakly: its maker decides its life. */
+		/** @brief A registered made image, held weakly since its maker decides its life. */
 		struct MadeEntry
 		{
 			std::weak_ptr<org::Resource> resource;
@@ -385,7 +379,7 @@ namespace RenderGraph
 			});
 			made.pruneAt = (std::max<std::size_t>)(256, 2 * made.byImage.size());
 		}
-		// A new image under a handle an old entry still names: the old one's image is gone, so its entry goes too.
+		// A new image under a handle an old entry still names means the old image is gone.
 		if (const auto old = made.byImage.find(a_image); old != made.byImage.end())
 			made.imageOf.erase(old->second.key);
 		made.byImage[a_image] = { a_resource, a_resource.get(), {}, std::make_shared<const org::TextureDescription>(a_views), std::string(a_name) };
@@ -443,14 +437,13 @@ namespace RenderGraph
 
 	namespace
 	{
-		// A described buffer as BasicRHI sees it: one import per native buffer, which every range of it shares (BufferRefs: its raw view
-		// pair). The map holds them weakly: the leases' keep holds them.
+		// One import per native buffer, shared by every range of it. Held weakly, since the leases keep them alive.
 		struct ImportedBuffer
 		{
 			rhi::ResourcePtr resource;
-			std::uint64_t bytes = 0;  // what the import's views cover (Vulkan); D3D12 imports the whole resource
-			std::uint64_t base = 0;       // the import's device address (Vulkan), which its views are written from
-			std::uint64_t described = 0;  // the buffer's start as the description gave it when imported: a reused handle value's differs
+			std::uint64_t bytes = 0;  // what the import's views cover on Vulkan, D3D12 imports the whole resource
+			std::uint64_t base = 0;       // the import's device address on Vulkan
+			std::uint64_t described = 0;  // the buffer's start as described at import, which differs for a reused handle value
 		};
 		struct ImportedBuffers
 		{
@@ -463,7 +456,7 @@ namespace RenderGraph
 			static ImportedBuffers imports;
 			return imports;
 		}
-		// The ref check's import lines: the first 32.
+		// Logs the first 32 import mismatches.
 		bool LogImportMismatch()
 		{
 			static std::atomic<std::uint32_t> logged{ 0 };
@@ -477,7 +470,7 @@ namespace RenderGraph
 		a_keep.reset();
 		if (!a_device || !a_buffer || !a_bytes)
 			return {};
-		// A raw view loads whole words, so it covers the range's last partial word too. The buffers it imports are padded to whole words.
+		// A raw view loads whole words, so it covers the last partial word too. Imported buffers are padded to whole words.
 		const std::uint64_t end = a_offset + ((a_bytes + 3) & ~std::uint64_t(3));
 		auto& imports = Imports();
 		std::shared_ptr<ImportedBuffer> imported;
@@ -485,8 +478,7 @@ namespace RenderGraph
 			const std::lock_guard lock(imports.mutex);
 			auto& slot = imports.byBuffer[a_buffer];
 			imported = slot.lock();
-			// The description's address names the buffer: a cached import of another buffer whose handle value this one reuses
-			// would read the old buffer's memory. Imported again.
+			// A reused handle value of another buffer would read the old buffer's memory, so import again.
 			const std::uint64_t base = a_address >= a_offset ? a_address - a_offset : 0;
 			if (imported && !Backend::IsD3D12() && a_address && imported->described && imported->described != base) {
 				if (BufferRefChecksOn() && LogImportMismatch())
@@ -496,8 +488,7 @@ namespace RenderGraph
 				imported.reset();
 			}
 			if (!imported || (!Backend::IsD3D12() && imported->bytes < end)) {
-				// A range past the import's views (or no import): import it again, covering every range seen so far. The older import
-				// stays while the leases that took it hold it.
+				// A range past the import's views is imported again over every range seen so far. Leases keep the older import alive.
 				auto fresh = std::make_shared<ImportedBuffer>();
 				if (Backend::IsD3D12()) {
 					fresh->resource = ImportD3D12Resource(a_device, reinterpret_cast<void*>(a_buffer), "CS described buffer");
@@ -505,7 +496,6 @@ namespace RenderGraph
 					rhi::vulkan::ImportedBufferDesc desc{};
 					desc.buffer = reinterpret_cast<VkBuffer>(a_buffer);
 					desc.size = (std::max)(end, imported ? imported->bytes : 0);
-					// A described buffer has a device address (its description's), which the views are written from.
 					desc.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 					desc.concurrentSharing = true;
 					desc.debugName = "CS described buffer";
@@ -516,7 +506,7 @@ namespace RenderGraph
 					if (fresh->resource && rhi::vulkan::get_resource_info(fresh->resource.Get(), info))
 						fresh->base = info.deviceAddress;
 					fresh->described = a_address ? base : 0;
-					// The import's address is what its views are written from: it must be the description's.
+					// The views are written from the import's address, so it must match the description's.
 					if (fresh->resource && a_address && fresh->base != base && BufferRefChecksOn() && LogImportMismatch())
 						logger::error("[ORG] ref check: VkBuffer 0x{:x} imported at 0x{:x}, but described at 0x{:x} (offset {}, address 0x{:x})", a_buffer,
 							fresh->base, base, a_offset, a_address);
@@ -533,7 +523,7 @@ namespace RenderGraph
 		}
 		const BufferRef ref = ToBufferRef(a_device.GetBufferViewRef({ imported->resource->GetHandle(), a_offset }));
 		if (ref && BufferRefChecksOn() && !Backend::IsD3D12()) {
-			// The handle's address now, from the driver: the import must still be this buffer's.
+			// The import must still be this buffer's.
 			const std::uint64_t now = rhi::vulkan::get_vk_buffer_device_address(a_device, reinterpret_cast<VkBuffer>(a_buffer));
 			if (now != imported->base && LogImportMismatch())
 				logger::error("[ORG] ref check: VkBuffer 0x{:x} is at 0x{:x} now, its import at 0x{:x} (offset {}, {} bytes, described address 0x{:x}) from {}:{}",

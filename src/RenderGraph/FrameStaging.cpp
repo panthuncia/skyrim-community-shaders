@@ -47,7 +47,7 @@ namespace RenderGraph
 				block = std::move(*best);
 				spare.erase(best);
 			} else if (desc.maxBlocks && made.load(std::memory_order_relaxed) >= desc.maxBlocks) {
-				// Every block exists. When none of the spares is big enough, the smallest goes: a larger one takes its place.
+				// When every block exists and no spare is big enough, the smallest is replaced by a larger one.
 				if (spare.empty())
 					return nullptr;
 				spare.erase(std::ranges::min_element(spare, {}, [](const auto& a_block) { return a_block->Stride(); }));
@@ -69,7 +69,7 @@ namespace RenderGraph
 				logger::info("[ORG] {}: {} staging buffers made, more than the {} it keeps ({} runs a frame); the extra ones are freed after use",
 					desc.name, count, keep, desc.runsPerFrame);
 		}
-		// The pool is held weakly: a block that comes back after the pool is gone is released.
+		// Held weakly, so a block that comes back after the pool is gone is released.
 		std::weak_ptr<FrameStaging> pool = weak_from_this();
 		auto* raw = block.get();
 		return std::shared_ptr<org::LatchBlock>(raw, [pool, block = std::move(block)](org::LatchBlock*) mutable {
@@ -85,7 +85,7 @@ namespace RenderGraph
 			spare.push_back(std::move(a_block));
 			return;
 		}
-		// Past what the pool keeps: released (through ORG's deletion path), and no longer counted.
+		// Past what the pool keeps, so release it through ORG's deletion path.
 		made.fetch_sub(1, std::memory_order_relaxed);
 	}
 }

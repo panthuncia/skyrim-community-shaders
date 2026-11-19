@@ -45,14 +45,13 @@ namespace GraphResources::SelfTest
 		};
 		constexpr std::uint32_t kConstantWords = sizeof(SelfTestConstants) / sizeof(std::uint32_t);
 
-		/** @brief What the pass writes into a texture of that width. */
 		constexpr std::uint32_t ValueOf(UINT a_width) { return 0x6A5E0000u | a_width; }
 
 		struct Resources
 		{
 			std::shared_ptr<const ComputeProgram> write;
 			std::unique_ptr<Texture2D> texture;
-			winrt::com_ptr<ID3D11Texture2D> staging;  // the texture's size: D3D11 copies the export into it
+			winrt::com_ptr<ID3D11Texture2D> staging;  // D3D11 copies the export into it
 		};
 
 		struct Status
@@ -95,7 +94,7 @@ namespace GraphResources::SelfTest
 			return true;
 		}
 
-		// The compute pass: ValueOf(width) into every texel of the exported texture.
+		// The compute pass writes ValueOf(width) into every texel of the exported texture.
 		struct WriteBindings
 		{
 			org::DeclaredViewToken texture;
@@ -111,7 +110,7 @@ namespace GraphResources::SelfTest
 		class WritePass final : public org::TypedRenderGraphPass<WritePass, WriteFrame, WriteBindings>
 		{
 		public:
-			// At the build, on the render thread: the texture as it is now (GraphResources' rule: read Graph() when the pass is made).
+			// Read Graph() when the pass is made, on the render thread.
 			explicit WritePass(const Resources& a_resources) :
 				program(a_resources.write), texture(a_resources.texture->Graph()), width(a_resources.texture->Desc().Width),
 				height(a_resources.texture->Desc().Height) {}
@@ -166,7 +165,7 @@ namespace GraphResources::SelfTest
 			return client;
 		}
 
-		/** @brief The step's value came back: resize for the next step, or finish (which releases the texture through its export rule). */
+		/** @brief Resizes for the next step, or finishes and releases the texture. */
 		void Advance(Status& a_test)
 		{
 			auto& resources = *a_test.resources;
@@ -212,7 +211,7 @@ namespace GraphResources::SelfTest
 			return;
 		auto resources = std::make_shared<Resources>();
 		resources->write = ComputeProgram::Load(host->Device(), { .source = kShader, .entry = L"CSMain", .constantWords = kConstantWords });
-		// Transient, but exported: never aliased.
+		// Transient, but exported, so never aliased.
 		resources->texture = std::make_unique<Texture2D>(TextureDesc(kSizes[0], false), kTextureName,
 			Options{ .lifetime = Lifetime::Transient, .d3d11 = Export::SRV });
 		if (!resources->write || !*resources->texture || !resources->texture->D3D11() || !resources->texture->SRV() || !CreateStaging(*resources)) {
@@ -258,7 +257,7 @@ namespace GraphResources::SelfTest
 					Advance(test);
 					return;
 				}
-				// Zero: DXVK's initial clear, before the rebuilt graph's first write.
+				// Zero is DXVK's initial clear, before the rebuilt graph's first write.
 				if (got != 0 || test.copies >= kPatience) {
 					logger::error("[ORG] graph resource self-test: {}x{} MISMATCH: D3D11 read 0x{:08X}, expected 0x{:08X}", size, size, got, expected);
 					FrameAnchors::Unregister(kClientId);
@@ -266,7 +265,7 @@ namespace GraphResources::SelfTest
 					return;
 				}
 			}
-			// Right after the epoch in D3D11's stream: the graph gave the texture back in its home layout.
+			// The graph gave the texture back in its home layout, so D3D11 can copy it right after the epoch.
 			context->CopyResource(resources.staging.get(), resources.texture->D3D11());
 			test.copyPending = true;
 			++test.copies;

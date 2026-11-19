@@ -75,9 +75,9 @@ namespace FrameAnchors
 		};
 
 		constexpr std::array<AnchorInfo, kAnchors> kInfo{ {
-			// Runs a frame: one per cubemap the engine renders (BSCubeMapCamera::RenderCubemap)
+			// Runs once per cubemap the engine renders.
 			{ "ReflectionsPrepass", { "CS anchor: reflections prepass", "CS anchor: reflections prepass inputs", "FrameAnchors::ReflectionsPrepass / ", "cs.anchor.reflections-prepass" }, false },
-			// Runs a frame: one per reflection face whose sky is drawn
+			// Runs once per reflection face whose sky is drawn.
 			{ "SkyReflections", { "CS anchor: reflection sky", "CS anchor: reflection sky inputs", "FrameAnchors::SkyReflections / ", "cs.anchor.sky-reflections" }, false },
 			{ "EarlyPrepass", { "CS anchor: early prepass", "CS anchor: early prepass inputs", "FrameAnchors::EarlyPrepass / ", "cs.anchor.early-prepass" }, false },
 			{ "DepthDone", { "CS anchor: depth done", "CS anchor: depth done inputs", "FrameAnchors::DepthDone / ", "cs.anchor.depth-done" }, false },
@@ -94,40 +94,34 @@ namespace FrameAnchors
 			{ "Overlay", { "CS anchor: overlay", "CS anchor: overlay inputs", "FrameAnchors::Overlay / ", "cs.anchor.overlay" }, true },
 			{ "HDROutput", { "CS anchor: HDR output", "CS anchor: HDR output inputs", "FrameAnchors::HDROutput / ", "cs.anchor.hdr-output" }, true },
 			{ "Capture", { "CS anchor: capture", "CS anchor: capture inputs", "FrameAnchors::Capture / ", "cs.anchor.capture" }, true },
-			// Runs a frame: one per shadow map slice cleared
+			// Runs once per shadow map slice cleared.
 			{ "EngineShadowClear", { "CS anchor: engine shadow clear", "CS anchor: engine shadow clear inputs", "FrameAnchors::EngineShadowClear / ", "cs.anchor.engine-shadow-clear" }, false },
-			// Runs a frame: one per reflection face batch
+			// Runs once per reflection face batch.
 			{ "EngineCubeClear", { "CS anchor: engine cube clear", "CS anchor: engine cube clear inputs", "FrameAnchors::EngineCubeClear / ", "cs.anchor.engine-cube-clear" }, false },
-			// Runs a frame: one per batch of the other engine clears
+			// Runs once per batch of the other engine clears.
 			{ "EngineFrameClear", { "CS anchor: engine frame clear", "CS anchor: engine frame clear inputs", "FrameAnchors::EngineFrameClear / ", "cs.anchor.engine-frame-clear" }, false },
-			// Runs a frame: Main::RenderDepth, FinishAccumulating and DeferredPasses
+			// Runs in Main::RenderDepth, FinishAccumulating and DeferredPasses.
 			{ "EngineDepthCopy", { "CS anchor: engine depth copy", "CS anchor: engine depth copy inputs", "FrameAnchors::EngineDepthCopy / ", "cs.anchor.engine-depth-copy" }, false },
-			// Runs a frame: one per Scaleform segment drawn on the graph (a display, and one more per D3D11 part); 6 was not passed in a menu tour
+			// Runs once per Scaleform segment the graph draws, plus one per D3D11 part.
 			{ "Interface", { "CS anchor: interface", "CS anchor: interface inputs", "FrameAnchors::Interface / ", "cs.anchor.interface" }, true },
-			// Runs a frame: one per batch of ImageSpace draws and dispatches, the sum of ImageSpace.cpp's kScopeRuns: RenderSSAO's, the
-			// reflection pass's, the HDR effect's and the pre-tonemap composites' (two each: a batch cut short by a draw the graph does
-			// not take), one per effect call outside them (depth of field or the distant blur, its two compute blurs, refraction, the
-			// radial blur, the snow copy, the water blend, the LDR downsample, the copies, the blurs and the get-hit draw there:
-			// twenty-four), and one per water flow copy (four).
-			// Late: the TAA or the upscaler can follow a batch inside the chain.
+			// Runs once per ImageSpace batch or effect call. ImageSpace.cpp's kScopeRuns has the counts.
+			// Late because TAA or the upscaler can follow a batch inside the chain.
 			{ "ImageSpace", { "CS anchor: image space", "CS anchor: image space inputs", "FrameAnchors::ImageSpace / ", "cs.anchor.image-space" }, true },
 			// Runs a frame: the world's shadow masks, the water mask, the water, a menu scene's shadow masks and the screen blood.
 			{ "EngineDraws", { "CS anchor: engine draws", "CS anchor: engine draws inputs", "FrameAnchors::EngineDraws / ", "cs.anchor.engine-draws" }, true },
-			// Runs a frame: one per sun occlusion query the engine submits (Sun::SubmitOcclusionQuery's indices 0 to 2; two seen a frame).
+			// Runs once per sun occlusion query. Usually two a frame.
 			{ "EngineQueries", { "CS anchor: engine queries", "CS anchor: engine queries inputs", "FrameAnchors::EngineQueries / ", "cs.anchor.engine-queries" }, false },
-			// Runs a frame: one, at the VL blur's call in RenderWorldPostProcess (the generate, the raymarch, the apply and the blurs)
+			// Runs once, at the VL blur call in RenderWorldPostProcess.
 			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false },
-			// Runs a frame: one per decal occlusion test (the decals the engine places this frame; none in most frames)
+			// Runs once per decal occlusion test. Most frames have none.
 			{ "DecalQueries", { "CS anchor: decal queries", "CS anchor: decal queries inputs", "FrameAnchors::DecalQueries / ", "cs.anchor.decal-queries" }, false },
-			// Runs a frame: one per copy of kMAIN into its copy texture the engine makes (native mode only)
+			// Runs once per engine copy of kMAIN into its copy texture. Native mode only.
 			{ "EngineCopy", { "CS anchor: engine copy", "CS anchor: engine copy inputs", "FrameAnchors::EngineCopy / ", "cs.anchor.engine-copy" }, true },
 		} };
 
 		namespace Table = RenderGraph::Frame::Recipes::Table;
 
-		// Where each segment runs in a frame (the recipe table's epochs, in frame order): AddToFrame puts an anchor's own epoch before the
-		// first epoch of the order that runs after it. A segment's place only has to be right against the anchors next to it; the order
-		// names the frame, while the ledgers order the work whatever runs.
+		// The recipe table's epochs in frame order. AddToFrame puts each anchor epoch just before the next one in this order.
 		constexpr auto kTimeline = Table::Timeline();
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
@@ -142,15 +136,8 @@ namespace FrameAnchors
 
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
-		/**
-		 * @brief The CS stages, as the recipe table declares them (Frame/RecipeTable.h). Each is one epoch whose graph holds its
-		 * steps' passes, in the steps' order. A step is one hook of the frame (a tap), in the order the engine reaches them: an anchor with the
-		 * clients it holds there (a whole step holds its anchor wholly: the anchor has no epoch of its own), another module's epoch (foreign),
-		 * whose passes the module hands to the stage (SetForeignPasses), or a point. The last step is the end tap: the stage's one commit.
-		 * Earlier taps only stage their clients' values: their commits write into the frame slot's staging run (the frame inputs,
-		 * GraphHost::EpochStagingRun), never into the ticket's. The end tap copies the staged values into the slot's copy and submits the
-		 * stage's one ticket (docs/development/org-native-frame-graph.md, "The recipe").
-		 */
+		// CS stages from the recipe table. Each stage is one epoch that holds its steps' passes in order.
+		// Earlier steps only stage values. The last step commits them and submits the stage's one ticket.
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
 		constexpr std::uint32_t kMaxSteps = static_cast<std::uint32_t>(Table::kMaxSteps);
 		// Each step that reads CS's shared constants uploads them at its own point.
@@ -179,7 +166,6 @@ namespace FrameAnchors
 			}
 			return out;
 		}
-		// The CS stages as FrameAnchors reads them (the same in both modes).
 		constexpr std::array<DeclaredInfo, kDeclared> declaredInfo = DeclaredFromTable();
 
 		/** @brief The anchors a declared segment has a step at in this mode, a bit each. */
@@ -216,7 +202,7 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_client.passes, [&](const PassDesc& a_pass) { return a_pass.anchor == a_anchor; });
 		}
 
-		/** @brief Whether a step holds a client: the step names it and it has passes at the step's anchor (at a whole step, a diagnostic client too). */
+		/** @brief Whether a step holds a client. A whole step also holds diagnostic clients. */
 		bool StepHolds(const Step& a_step, const ClientDesc& a_client)
 		{
 			if (a_step.anchor == Anchor::Count || !HasPassesAt(a_client, a_step.anchor))
@@ -224,7 +210,7 @@ namespace FrameAnchors
 			return Table::Has(a_step.clients, a_client.id) || (a_step.whole && Table::Has(Table::kDiagnosticClients, a_client.id));
 		}
 
-		/** @brief Whether a step's client a_client has instances this step makes: its range, or every instance from its first. */
+		/** @brief The range of a_client's instances this step makes. */
 		std::pair<std::uint32_t, std::uint32_t> StepInstances(const Step& a_step, const ClientDesc& a_client)
 		{
 			const std::uint32_t max = std::min<std::uint32_t>(a_client.maxInstances, 255);
@@ -233,7 +219,7 @@ namespace FrameAnchors
 			return { first, count };
 		}
 
-		/** @brief Whether a client of a built snapshot is a_desc's registration: the same desc, or the same id for a matchesById client. */
+		/** @brief Whether a built client is a_desc's registration, by desc or by id for matchesById clients. */
 		bool SameClient(const std::shared_ptr<const ClientDesc>& a_built, const std::shared_ptr<const ClientDesc>& a_desc)
 		{
 			return a_built == a_desc || (a_built && a_desc && a_built->matchesById && a_built->id == a_desc->id);
@@ -242,16 +228,12 @@ namespace FrameAnchors
 		/** @brief Whether a declared segment ends at a point (its last step is no anchor's hook). */
 		bool PointEnded(std::uint32_t a_declared) { return declaredInfo[a_declared].steps[declaredInfo[a_declared].stepCount - 1].point; }
 
-		/** @brief The anchor whose hook ends a declared segment: its last step's. */
+		/** @brief The anchor whose hook ends a declared segment. */
 		Anchor EndTap(std::uint32_t a_declared) { return declaredInfo[a_declared].steps[declaredInfo[a_declared].stepCount - 1].anchor; }
 
 		std::uint32_t EpochOfDeclared(std::uint32_t a_declared) { return RenderGraphRuntime::EpochOf(declaredInfo[a_declared].segment); }
 
-		/**
-		 * @brief What a declared segment's recording is made for: the segment's fields of the frame description. The host's thread
-		 * prepares the segment's passes with it (PassPrepareContext::preparationData), and each pass whose client is off in it records
-		 * only its barriers (org::RenderGraphPass::SetSkipWhen).
-		 */
+		/** @brief The frame description fields a segment recording is made for. Passes of clients that are off record only barriers. */
 		struct SegmentHostData final : org::IHostExecutionData
 		{
 			std::uint32_t segment = 0;
@@ -262,56 +244,47 @@ namespace FrameAnchors
 			}
 		};
 
-		/**
-		 * @brief One recording of a declared segment, for one description of it (FieldsHash) and one frame slot: the published copy
-		 * that slot's runs take. Recording one copy waits for no GPU work, because the slot's last run is four frames old.
-		 */
+		/** @brief One recording of a segment, for one description and one frame slot.
+		*  Recording waits for no GPU work because the slot last ran four frames ago. */
 		struct SegmentRecording
 		{
 			std::uint64_t hash = 0;
 			std::uint32_t slot = 0;
 			RenderGraph::Frame::SegmentFields fields;
 			std::shared_ptr<const org::GraphHost::EpochRecording> recording;  // set once the host's thread recorded every copy
-			bool done = false;                                               // the request completed (recorded, failed or dropped)
-			bool dropped = false;  // a graph build dropped the request before it was recorded: no failure, it is asked for again
+			bool done = false; // recorded, failed or dropped
+			bool dropped = false; // a graph build dropped it before recording. Not a failure, it is asked for again
 			std::string error;     // why it failed or was dropped
 			std::uint64_t lastFrame = 0;                                     // the last frame that asked for it
 		};
 
-		/**
-		 * @brief A declared segment's recordings: the last few descriptions' (kKeep) for each frame slot, so a field that toggles
-		 * records nothing new.
-		 */
+		/** @brief A segment's recordings for its last kKeep descriptions per slot, so a toggling field records nothing new. */
 		struct SegmentRecordings
 		{
 			static constexpr std::size_t kKeep = 6 * RenderGraphRuntime::kGameFramesInFlight;
 			std::mutex mutex;  // the host's thread completes requests under it
 			std::vector<std::shared_ptr<SegmentRecording>> entries;
-			RenderGraph::Frame::SegmentFields last{};  // the fields of the last description asked for, for the reason a new one logs
+			RenderGraph::Frame::SegmentFields last{}; // the last description's fields, to log why a new one differs
 			bool any = false;
-			// The segment's version generation (SegmentFields::versions): moved when a kept recording binds a version that is no
-			// longer current. Render owner.
+			// Bumped when a kept recording binds a version that is no longer current. Render owner.
 			std::uint64_t versionGeneration = 0;
 		};
 
 		/**
-		 * @brief Which passes a CS stage's build hands to ORG (docs/development/org-native-frame-graph.md, "Absent passes"). A pass the
-		 * key leaves out is absent from the build: no pass, no barriers, no recording. Per client registration (by its desc, so a client
-		 * registered again starts whole): whether its passes are present, and which of its rows. A client the key does not list (one
-		 * registered since) is present whole. Instances are never cut: an instance count is a late engine decision, and an empty
-		 * instance records no barriers (it skips at execution). Immutable once published.
-		 */
+		* @brief Which passes a stage's build includes. A left-out pass gets no barriers and no recording.
+		* Unlisted clients are present whole. Instances are never cut because the engine picks counts late.
+		*/
 		struct BuildKey
 		{
 			struct Client
 			{
 				std::shared_ptr<const ClientDesc> desc;
 				bool present = true;
-				std::array<std::uint64_t, 4> rows{};  // its rows present (bits of rows its passes carry)
+				std::array<std::uint64_t, 4> rows{}; // rows present, a bit per row
 			};
-			bool all = true;  // every pass: a build before the stage's first key (setup), or with absence off
+			bool all = true; // every pass, before the stage's first key or with absence off
 			std::vector<Client> clients;
-			std::uint32_t foreign = 0;  // the module steps present (a bit per step)
+			std::uint32_t foreign = 0; // module steps present, a bit per step
 			std::uint64_t serial = 0;   // keys are numbered as they are made
 			std::uint64_t frame = 0;    // the frame whose Begin made it
 
@@ -324,7 +297,7 @@ namespace FrameAnchors
 			}
 		};
 
-		/** @brief Whether a key (null: every pass) has a pass present. a_row: the pass's row, -1 for none. */
+		/** @brief Whether a key has a pass present. A null key has every pass. a_row is -1 for none. */
 		bool KeyHas(const BuildKey* a_key, const ClientDesc& a_client, std::int32_t a_row)
 		{
 			if (!a_key || a_key->all)
@@ -347,7 +320,7 @@ namespace FrameAnchors
 			return rows;
 		}
 
-		/** @brief A client's part of a key (null: every pass): present or not, and its rows present. */
+		/** @brief A client's part of a key, whether it is present and which rows. */
 		std::pair<bool, std::array<std::uint64_t, 4>> KeyPart(const BuildKey* a_key, const ClientDesc& a_client)
 		{
 			const auto own = RowsOf(a_client);
@@ -364,13 +337,13 @@ namespace FrameAnchors
 			return { true, rows };
 		}
 
-		/** @brief The module step bits a key has present, of a_steps (a bit per module step; null key: all of them). */
+		/** @brief The module step bits of a_steps that a key has present. */
 		std::uint32_t KeyForeign(const BuildKey* a_key, std::uint32_t a_steps)
 		{
 			return !a_key || a_key->all ? a_steps : a_key->foreign & a_steps;
 		}
 
-		/** @brief What one key has that the other does not, over a_clients and a_steps module steps, as text; empty when equal. */
+		/** @brief Text listing what one key has that the other lacks. Empty when equal. */
 		std::string DiffKeys(const BuildKey* a_before, const BuildKey* a_after, const std::vector<std::shared_ptr<const ClientDesc>>& a_clients, std::uint32_t a_steps)
 		{
 			std::string added, dropped;
@@ -421,10 +394,7 @@ namespace FrameAnchors
 			return (KeyForeign(a_inner, a_steps) & ~KeyForeign(a_outer, a_steps)) == 0;
 		}
 
-		/**
-		 * @brief Whether a key has some passes present only because it does not know their client: a build before the stage's first key, or
-		 * one made before a client registered.
-		 */
+		/** @brief Whether a key includes passes only because it predates their client's registration. */
 		bool KeyProvisional(const BuildKey* a_key, const std::vector<std::shared_ptr<const ClientDesc>>& a_clients)
 		{
 			if (!a_key || a_key->all)
@@ -432,10 +402,7 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return !a_key->Find(a_client.get()); });
 		}
 
-		/**
-		 * @brief A stage's use of its passes, for its next key (render owner): the stage's own clock, which runs only in frames whose recipe
-		 * has the stage, and when each client registration, each of its rows and each module step was last wanted, on that clock.
-		 */
+		/** @brief A stage's pass use for its next key, on a clock that only ticks in frames that run the stage. Render owner. */
 		struct KeyUse
 		{
 			struct Client
@@ -451,11 +418,11 @@ namespace FrameAnchors
 			std::array<double, 32> foreign;
 			std::uint64_t requestedSerial = 0;  // the last key a build was asked for with, and the frame it was asked at
 			std::uint64_t requestedFrame = 0;
-			std::uint64_t switchedSerial = 0;  // the last requested key whose build switched in (its lag is logged once)
+			std::uint64_t switchedSerial = 0; // the last requested key whose build switched in
 			KeyUse() { foreign.fill(-1e30); }
 		};
 
-		/** @brief D3D11 textures the imports let go of on any thread, released on the render thread (ServiceRetiredTextures). */
+		/** @brief D3D11 textures dropped on any thread, released later on the render thread. */
 		struct RetiredTextures
 		{
 			std::mutex mutex;
@@ -470,10 +437,7 @@ namespace FrameAnchors
 			return *retired;
 		}
 
-		/**
-		 * @brief Render thread: the D3D11 textures let go of since the last call go once D3D11's last use is done. A loose slot's last
-		 * version may be dropped on any thread (a graph build, the host), and D3D11 releases belong on the render thread.
-		 */
+		/** @brief Render thread. Releases the D3D11 textures dropped since the last call once D3D11 is done with them. */
 		void ServiceRetiredTextures()
 		{
 			auto& retired = Retired();
@@ -489,12 +453,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief An image's one graph resource: its slot. Two kinds:
-		 * - an id import (State::imports): the slot lasts as long as an id names it; a new D3D11 texture of the same shape class is
-		 *   the slot's next version. Several ids of one image share one entry.
-		 * - a loose one (State::loose, ShareImage before any id import of the image): the slot lives while its holders hold it. Each
-		 *   of its versions keeps this entry, and with it the D3D11 texture, as its owner; the state only watches it.
-		 */
+		* @brief An image's graph slot. An id import lives while an id names it. A new texture of the same shape is its next version.
+		* A loose slot, from ShareImage before any id import, lives while its holders hold it. Each version owns this entry.
+		*/
 		struct EngineImport
 		{
 			winrt::com_ptr<ID3D11Texture2D> texture;  // the current version's D3D11 texture
@@ -502,8 +463,8 @@ namespace FrameAnchors
 			std::weak_ptr<org::VersionedTexture> looseSlot;  // a loose one's
 			std::string id;                                  // the id (or the loose holder's name) it was made under, for the logs
 			std::uint64_t image = 0;                         // the current version's VkImage (ID3D12Resource on D3D12)
-			DxvkOrgInteropImageInfo info{};                  // the current version's image, to import it again with more views
-			org::TextureDescription views;                   // the views the current version has: what a new importer's are compared with
+			DxvkOrgInteropImageInfo info{}; // to import it again with more views
+			org::TextureDescription views; // the current version's views, compared with a new importer's
 
 			std::shared_ptr<org::VersionedTexture> Slot() const { return slot ? slot : looseSlot.lock(); }
 
@@ -511,7 +472,7 @@ namespace FrameAnchors
 			EngineImport(const EngineImport&) = default;
 			EngineImport& operator=(const EngineImport&) = default;
 
-			/** @brief The D3D11 texture goes to the render thread: this may be the last version's owner, dropped on any thread. */
+			/** @brief Sends the D3D11 texture to the render thread, since the last owner may drop it on any thread. */
 			~EngineImport()
 			{
 				if (!texture)
@@ -523,7 +484,7 @@ namespace FrameAnchors
 			}
 		};
 
-		/** @brief One pass of the build: its client (which owns its desc) and the desc. */
+		/** @brief One pass of the build. The client keeps the desc alive. */
 		struct ScheduledPass
 		{
 			std::shared_ptr<const ClientDesc> client;
@@ -534,10 +495,10 @@ namespace FrameAnchors
 		struct Snapshot
 		{
 			std::uint64_t serial = 0;                                // State::serial when it was published
-			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
+			std::vector<std::shared_ptr<const ClientDesc>> clients; // registration order
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
 			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
-			// Each declared segment's clients, in registration order (SegmentClients). Made once, at Publish.
+			// Each declared segment's clients in registration order, made once at Publish.
 			std::array<std::vector<std::shared_ptr<const ClientDesc>>, kDeclared> segmentClients;
 		};
 
@@ -545,22 +506,19 @@ namespace FrameAnchors
 		struct Client
 		{
 			std::shared_ptr<const ClientDesc> desc;
-			// The snapshot that first held its passes and resources as they are now (Register, Refresh, a resize): a graph built
-			// from that one or a later one runs them.
+			// The first snapshot holding its passes and resources as they are now. Graphs built from it or later run them.
 			std::uint64_t serial = 0;
-			// Per pass: the snapshot a pending one-shot pass was armed in; 0 once it ran (always 0 for other passes).
+			// Per pass, the snapshot a pending one-shot pass was armed in. 0 once it ran.
 			std::vector<std::uint64_t> armed;
-			// The declared segments that hold it (a bit per segment), for the description heldOf. A tap asks this, not the steps'
-			// client ids by string.
+			// The declared segments that hold it, a bit each. Taps check this instead of comparing client ids.
 			const ClientDesc* heldOf = nullptr;
 			std::uint64_t held = 0;
 		};
 
 		/**
-		 * @brief The run gates of a registration that left the graphs (unregistered, replaced or dropped). The anchors' graphs built
-		 * before snapshot serial still hold its passes, which replay whenever another client runs the anchor: every such run closes
-		 * these gates, so the old passes do no work and never read latch slots nobody wrote for that run.
-		 */
+		* @brief Gates of a registration that left the graphs. Older graphs still hold its passes and replay them,
+		* so every run closes these gates to stop them reading latch slots nobody wrote.
+		*/
 		struct RetiredGates
 		{
 			std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
@@ -568,32 +526,30 @@ namespace FrameAnchors
 			std::uint64_t serial = 0;  // the first snapshot without them
 		};
 
-		/** @brief The anchors' state. Render thread, but the snapshot and the built serials, which a build writes and reads. */
+		/** @brief The anchors' state. Render thread, except the snapshot and built serials, which builds also touch. */
 		struct State
 		{
 			std::array<bool, kAnchors> reserved{};
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
-			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports;  // by graph id; the ids of one image share one
+			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports; // by graph id. Ids of one image share an entry
 			std::vector<std::weak_ptr<EngineImport>> loose;                             // ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
 			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
 			std::vector<RetiredGates> retired;
-			// Per anchor: its submitted runs since the host's seal runsSeal (the last Present), and the most it ever had in one frame
-			// (diagnostics: LogRunStats).
+			// Per anchor, runs since the last Present seal, and the most ever in one frame for LogRunStats.
 			std::array<std::uint32_t, kAnchors> runsThisFrame{};
 			std::array<std::uint64_t, kAnchors> runsSeal{};
 			std::array<std::atomic<std::uint32_t>, kAnchors> peakRuns{};
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 			std::array<std::atomic<std::uint64_t>, kAnchors> built{};  // the snapshot each anchor's graph was last built from
-			// The snapshot each anchor's last build was made from, and the one before it. An epoch failure drops the clients of the
-			// failed build (OnEpochFailed); a failed build that kept the old graph puts the one before back.
+			// Each anchor's last build snapshot and the one before. OnEpochFailed drops the failed build's clients,
+			// and a failed build that kept the old graph restores the previous snapshot.
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> builtSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> previousSnapshots{};
-			// Declared segments: whether each has an epoch (AddToFrame), the anchors they hold (which then have no epoch of their own),
-			// each segment graph's snapshots as for the anchors above, and each segment's recordings.
+			// Declared segments. Anchors a segment holds have no epoch of their own.
 			std::array<bool, kDeclared> declaredEpochs{};
 			std::uint32_t declaredMembers = 0;
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kDeclared> declaredSnapshots{};
@@ -601,32 +557,26 @@ namespace FrameAnchors
 			std::array<SegmentRecordings, kDeclared> declaredRecordings;
 			// Each segment graph's passes recorded ahead, from its last attached build: their revisions go into its description.
 			std::array<std::atomic<std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>>, kDeclared> declaredPasses{};
-			// A stage's staged build (GraphHost::StageEpochGraph, BuildManager::Desc::staged): the snapshot it was built from and its passes
-			// recorded ahead, set when it is staged. BeginFrame records it for every frame slot and switches it in whole.
+			// A stage's staged build and its passes recorded ahead. BeginFrame records it for every slot and switches it in whole.
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kDeclared> stagedSnapshots{};
 			std::array<std::atomic<std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>>, kDeclared> stagedPasses{};
-			// Absent passes (docs/development/org-native-frame-graph.md, "Absent passes"): per stage, the key the next build takes (null:
-			// every pass), the attached build's and the staged build's, and the stage's use of its passes. A build reads nextKeys when it
-			// starts. Render owner, but the keys, which a build reads.
+			// Absent-pass keys per stage. A null key means every pass. Builds read nextKeys when they start. The rest is render owner.
 			std::array<std::atomic<std::shared_ptr<const BuildKey>>, kDeclared> nextKeys{};
 			std::array<std::atomic<std::shared_ptr<const BuildKey>>, kDeclared> declaredKeys{};
 			std::array<std::atomic<std::shared_ptr<const BuildKey>>, kDeclared> stagedKeys{};
 			std::array<KeyUse, kDeclared> keyUse;
 			std::uint64_t keySerial = 0;
-			bool describingKey = false;  // BeginFrame describes a stage's key: every variant a frame may pick, and the passes always present
+			bool describingKey = false; // BeginFrame is describing a stage's key
 			// While a client's rows are described for a frame: the build's key the frame is described against, and the client (KeyHasRow).
 			const BuildKey* describingAgainst = nullptr;
 			const ClientDesc* describingClient = nullptr;
 			RenderGraph::Frame::Kind keyKind = RenderGraph::Frame::Kind::Count;  // the last frame's kind, for the key's kind switch
-			// Each stage's frame inputs (docs/development/org-native-frame-graph.md, "The recipe"): the frame its taps staged values in
-			// and have not committed yet (0: none), the frame slot's staging run they wrote (GraphHost::EpochStagingRun, set at Begin),
-			// and the clients whose executed callbacks the commit calls, with each tap's point. Render owner.
+			// Each stage's frame inputs, staged by its taps until the commit. stagedFrame is 0 when nothing is staged. Render owner.
 			std::array<std::uint64_t, kDeclared> stagedFrame{};
 			std::array<org::RunRef, kDeclared> stagingRun{};
 			std::array<std::vector<std::pair<std::shared_ptr<const ClientDesc>, Point>>, kDeclared> stagedExecuted{};
-			// The schedule (docs/development/org-native-frame-graph.md, "Recipe plan, stage 1"): per segment and frame slot, the
-			// description the slot's frames run on, its recording (made on the host's thread for the attached build) and the segment
-			// graph's snapshot it was made on. A frame takes its slot's schedule at Begin and keeps it to its end. Render owner.
+			// Per segment and frame slot, the description, recording and snapshot the slot's frames run on.
+			// A frame takes its slot's schedule at Begin and keeps it to the end. Render owner.
 			struct Scheduled
 			{
 				RenderGraph::Frame::SegmentFields fields;
@@ -634,8 +584,7 @@ namespace FrameAnchors
 				std::shared_ptr<const Snapshot> built;
 			};
 			std::array<std::array<Scheduled, RenderGraphRuntime::kGameFramesInFlight>, kDeclared> schedule{};
-			// This frame's: the schedule's recording and snapshot (null when the segment is absent), and the frame's own description of
-			// the segment, which the taps compare a lagging schedule with. Render owner.
+			// This frame's schedule. Null when the segment is absent. Render owner.
 			std::array<std::shared_ptr<const org::GraphHost::EpochRecording>, kDeclared> frameRecording{};
 			std::array<std::shared_ptr<const Snapshot>, kDeclared> frameBuilt{};
 			std::array<RenderGraph::Frame::SegmentFields, kDeclared> frameWanted{};
@@ -644,32 +593,27 @@ namespace FrameAnchors
 			std::array<std::uint64_t, kDeclared> waitFrame{};
 			// The frame a stage's staged build was first seen at Begin (0: none): its switch's lag counts from it.
 			std::array<std::uint64_t, kDeclared> stagedSince{};
-			// A staged build's recordings so far (the starvation rule in Schedule): the build they count for, the descriptions asked for (fields hash and slot),
-			// and how many of those were asked for again because their recording was gone. A staged build switches in once every slot's
-			// recording is ready; requests that keep replacing its recordings starve it.
+			// A staged build's recordings, for the starvation rule in Schedule. It switches in once every slot is ready,
+			// so requests that keep replacing its recordings can starve it.
 			std::array<std::uint64_t, kDeclared> stagedCounted{};
 			std::array<std::unordered_set<std::uint64_t>, kDeclared> stagedAsked{};
 			std::array<std::uint32_t, kDeclared> stagedAskedAgain{};
-			// Whether this frame's recording bound the current versions at Begin: a version published after Begin is a mismatch, one
-			// published before it lags until the new recording is ready.
+			// Whether this frame's recording bound the current versions at Begin.
+			// A version published after Begin is a mismatch. One published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
-			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
+			bool inBegin = false; // BeginFrame is choosing schedules. A recording asked for outside it is a mid-frame re-record
 			std::array<std::uint64_t, kDeclared> endedFrame{};
-			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
-			// when the frame's first tap takes the ticket.
+			// Taps so far of each step in the held run. Reset when the frame's first tap takes the ticket.
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
 			std::uint32_t tapInstance = 0;  // the instance the commits running now write (TapInstance)
-			std::atomic<bool> stagesOpen{ false };  // a stage holds staged values not committed yet: BeforeGpuWork's check without the mutex
-			std::atomic<std::uint32_t> stagesOpenMask{ 0 };  // which stages: a bit per declared segment (the residue census)
-			// A stage's commit is submitting its block (SubmitSegment). What that submission does is the block itself: the external commands
-			// that carry it into DXVK's stream, and DXVK's flush before a split. Neither the census nor StagesHoldValues counts it.
+			std::atomic<bool> stagesOpen{ false }; // a stage holds uncommitted values. Lets BeforeGpuWork check without the mutex
+			std::atomic<std::uint32_t> stagesOpenMask{ 0 }; // a bit per declared segment, for the residue census
+			// A stage commit is submitting its block. The census and StagesHoldValues do not count that submission.
 			std::atomic<bool> submittingStage{ false };
-			// GPU work submitted between a stage's first tap and its commit (BeforeGpuWork), by why, since the last report. It runs ahead of
-			// the stage's work on the GPU.
+			// GPU work submitted between a stage's first tap and its commit, by reason. It runs ahead of the stage's work on the GPU.
 			std::vector<std::pair<const char*, std::uint64_t>> insideHeld;
 			std::uint64_t insideHeldLines = 0;
-			// The epoch an anchor's run counted there already (Run, with the anchor's name). Its submission calls BeforeGpuWork again
-			// for the same epoch, which then counts nothing. UINT32_MAX: none.
+			// The epoch whose run was already counted. Its submission calls BeforeGpuWork again, which then counts nothing. UINT32_MAX for none.
 			std::uint32_t insideHeldCounted = UINT32_MAX;
 		};
 
@@ -680,11 +624,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief With CS_ORG_LOADING_THREAD=1, the anchors' state is also under this mutex: the render owner's runs and claims, and every
-		 * call that changes the clients or imports (a feature's Register on the main thread during a load, while the loading thread
-		 * runs). Recursive: a run's commit, executed and onFailed callbacks may register. Nothing under it takes Renderer::Lock, and
-		 * the host's thread never takes it (the builds read the published snapshot). Without the switch it is not taken.
-		 */
+		* @brief With CS_ORG_LOADING_THREAD=1, guards the anchors' state against a feature registering during a load.
+		* Recursive since run callbacks may register. Never take Renderer::Lock under it. The host's thread never takes it.
+		*/
 		std::unique_lock<std::recursive_mutex> Guard()
 		{
 			if (!RenderGraph::Engine::LoadingScreen::Requested())
@@ -698,13 +640,13 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_client.passes, [&](const PassDesc& a_pass) { return a_pass.anchor == a_anchor; });
 		}
 
-		/** @brief Whether the client is in the graphs: one that reads the shared constants waits until they exist. */
+		/** @brief Whether the client is in the graphs. One that reads the shared constants waits until they exist. */
 		bool InGraphs(const ClientDesc& a_client)
 		{
 			return !a_client.sharedConstants || SharedConstants::Ready();
 		}
 
-		/** @brief Whether a client with passes at the anchor reads the shared constants: the anchor's epoch then uploads them. */
+		/** @brief Whether a client at the anchor reads the shared constants, so the epoch must upload them. */
 		bool UsesSharedConstants(const std::vector<std::shared_ptr<const ClientDesc>>& a_clients, Anchor a_anchor)
 		{
 			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return a_client->sharedConstants && HasPasses(*a_client, a_anchor); });
@@ -743,10 +685,7 @@ namespace FrameAnchors
 			return kDeclared;
 		}
 
-		/**
-		 * @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. One stage at
-		 * most holds an anchor wholly.
-		 */
+		/** @brief The stage whose epoch holds the anchor's passes, or kDeclared when it has its own epoch. */
 		std::uint32_t DeclaredOfAnchor(const State& a_state, std::uint32_t a_index)
 		{
 			if (!(a_state.declaredMembers >> a_index & 1u))
@@ -763,16 +702,13 @@ namespace FrameAnchors
 			return a_state.builtSnapshots[a_index].load(std::memory_order_acquire);
 		}
 
-		/**
-		 * @brief The serial the anchor's graphs were built from: a client registered (or refreshed) at that serial or before is in them. Its own
-		 * graph's, or for an anchor with no epoch of its own the stages' (the oldest of the stages with a step there).
-		 */
+		/** @brief The serial the anchor's graphs were built from. For an anchor without its own epoch, the oldest stage's. */
 		std::uint64_t BuiltSerial(const State& a_state, std::uint32_t a_index)
 		{
 			return a_state.built[a_index].load(std::memory_order_acquire);
 		}
 
-		/** @brief The epochs whose graphs hold (or will hold) the passes of the anchors in a_mask: each one's own, and the stages that hold them. */
+		/** @brief The epochs whose graphs hold the passes of the anchors in a_mask. */
 		std::vector<std::uint32_t> EpochsOf(const State& a_state, std::uint32_t a_mask)
 		{
 			std::vector<std::uint32_t> epochs;
@@ -837,7 +773,7 @@ namespace FrameAnchors
 					armed = a_state.serial;
 		}
 
-		/** @brief The anchors' epochs built again at their next execution (the others keep their graphs); a_reason is logged with the build. */
+		/** @brief Rebuilds the anchors' epochs at their next execution. a_reason is logged. */
 		void Rebuild(State& a_state, std::uint32_t a_anchorMask, std::string_view a_reason)
 		{
 			if (!a_state.host)
@@ -847,10 +783,7 @@ namespace FrameAnchors
 				RenderGraph::Builds::Request(epoch, reason);
 		}
 
-		/**
-		 * @brief Rebuild for a resource identity change no version stands for (a replaced import, a resized twin that is not
-		 * versioned): the anchors' epochs, through GraphResources::RequestStructuralRebuild.
-		 */
+		/** @brief Rebuild for a resource identity change that no version covers, such as a replaced import. */
 		void StructuralRebuild(State& a_state, std::uint32_t a_anchorMask, std::string_view a_reason)
 		{
 			if (!a_state.host)
@@ -869,11 +802,7 @@ namespace FrameAnchors
 			return mask;
 		}
 
-		/**
-		 * @brief After Publish: a_client's registration left the graphs. Its gates (but a_kept, which the registration replacing it
-		 * still has and closes as its own) are closed at every run of its anchors until each is built from this snapshot or a later
-		 * one (RetiredGates).
-		 */
+		/** @brief Closes a departed registration's gates at every run until its anchors are rebuilt without it. a_kept belongs to the replacement. */
 		void RetireGates(State& a_state, const ClientDesc& a_client, const std::vector<std::shared_ptr<RenderGraph::RunGate>>& a_kept = {})
 		{
 			std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
@@ -904,7 +833,7 @@ namespace FrameAnchors
 			});
 		}
 
-		/** @brief The anchor's submitted runs since the host's last seal (SealPresented): the count starts again at each seal. */
+		/** @brief The anchor's submitted runs since the last Present seal. */
 		std::uint32_t& RunsSinceSeal(State& a_state, std::uint32_t a_index)
 		{
 			const std::uint64_t seals = a_state.host->Seals();
@@ -936,10 +865,8 @@ namespace FrameAnchors
 			return ids.empty() ? std::string("none still registered") : ids;
 		}
 
-		/**
-		 * @brief The one report of failed clients. A graph mode has no D3D11 path to return them to, so development builds stop here
-		 * with a_what and a_why (Frame::Driver::MismatchFatal). Release builds log it, and the clients, already removed, draw nothing.
-		 */
+		/** @brief Reports failed clients. Development builds stop, since a graph mode has no D3D11 path to return them to.
+		*  Release builds log it, and the already removed clients draw nothing. */
 		void FailClients(std::string_view a_what, std::string_view a_why)
 		{
 			const auto message = fmt::format("Community Shaders: {}: {}", a_what, a_why);
@@ -951,21 +878,15 @@ namespace FrameAnchors
 			logger::error("[ORG] frame anchors: {}. The clients are removed and draw nothing.", message);
 		}
 
-		/**
-		 * @brief Whether passes marked PassDesc::gpuGated are recorded ahead instead of at execution: native mode, unless
-		 * CS_ORG_GPU_GATES=0. Their gate then decides on the GPU, through their indirect counts.
-		 */
+		/** @brief Whether gpuGated passes record ahead and gate on the GPU through indirect counts. Native mode, unless CS_ORG_GPU_GATES=0. */
 		bool GpuGates()
 		{
 			static const bool on = Switches::Number("CS_ORG_GPU_GATES", 1) != 0;
 			return on && RenderGraph::Engine::Native::Active();
 		}
 
-		/**
-		 * @brief Fails the clients with passes at the anchor in a failed build that are still registered as they were in a_failed, the
-		 * snapshot it was built from (FailClients). In release builds they are removed and their anchors built again without them. A
-		 * client registered again since is not in that build, and its rebuild is already asked for. Render thread.
-		 */
+		/** @brief Fails the clients of a failed build that are still registered as they were in a_failed. Render thread.
+		*  Release builds remove them and rebuild their anchors without them. */
 		void DropFailedClients(std::uint32_t a_anchors, const char* a_name, const std::shared_ptr<const Snapshot>& a_failed, const std::string& a_error)
 		{
 			auto lock = Guard();
@@ -998,12 +919,7 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return a_client->sharedConstants && (AnchorMask(*a_client) & a_mask); });
 		}
 
-		/**
-		 * @brief The anchors' passes in each graph: an anchor epoch's graph takes its anchor's passes, a stage's graph its steps' passes;
-		 * each registers the clients' resources and the engine imports. Every other epoch's graph
-		 * gets nothing from it.
-		 */
-		/** @brief Whether a declared segment holds a client: one of its steps does. */
+		/** @brief Whether one of a declared segment's steps holds the client. */
 		bool SegmentHolds(std::uint32_t a_declared, const ClientDesc& a_client)
 		{
 			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
@@ -1012,7 +928,7 @@ namespace FrameAnchors
 			return false;
 		}
 
-		/** @brief Whether a declared segment holds a pass: a step at its anchor holds its client. */
+		/** @brief Whether a declared segment holds a pass, through a step at the pass's anchor. */
 		bool SegmentHoldsPass(std::uint32_t a_declared, const ClientDesc& a_client, const PassDesc& a_pass)
 		{
 			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k) {
@@ -1023,13 +939,13 @@ namespace FrameAnchors
 			return false;
 		}
 
-		/** @brief A declared segment's clients in a snapshot, in registration order: the order of the description's clientsOn bits. */
+		/** @brief A declared segment's clients in registration order, which is the order of the clientsOn bits. */
 		const std::vector<std::shared_ptr<const ClientDesc>>& SegmentClients(const Snapshot& a_snapshot, std::uint32_t a_declared)
 		{
 			return a_snapshot.segmentClients[a_declared];
 		}
 
-		/** @brief Whether a declared segment holds a registered client (SegmentHolds, kept per description). Render thread. */
+		/** @brief SegmentHolds, cached per registration. Render thread. */
 		bool ClientHolds(Client& a_client, std::uint32_t a_declared)
 		{
 			if (a_client.heldOf != a_client.desc.get()) {
@@ -1042,7 +958,7 @@ namespace FrameAnchors
 			return (a_client.held >> a_declared & 1u) != 0;
 		}
 
-		/** @brief Whether a step's clients in a snapshot read CS's shared constants: the segment uploads them for that step. */
+		/** @brief Whether a step's clients read CS's shared constants, so the segment uploads them for that step. */
 		bool StepUsesSharedConstants(const Snapshot& a_snapshot, std::uint32_t a_declared, std::uint32_t a_step)
 		{
 			const auto& step = declaredInfo[a_declared].steps[a_step];
@@ -1065,7 +981,7 @@ namespace FrameAnchors
 			std::function<bool()> declared;
 		};
 
-		/** @brief Each module epoch's passes, by RenderGraphRuntime::Segment value. Render thread writes; builds read a copy. */
+		/** @brief Each module epoch's passes, by Segment value. The render thread writes and builds read a copy. */
 		struct ForeignTable
 		{
 			std::mutex mutex;
@@ -1101,14 +1017,12 @@ namespace FrameAnchors
 				const std::uint32_t declared = anchor == Anchor::Count ? DeclaredOfEpoch(epoch) : kDeclared;
 				if (anchor == Anchor::Count && declared == kDeclared)
 					return;
-				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
-				// Recorded when the graph is installed: at its attach for a build the build manager makes (on its own thread, and possibly
-				// dropped), at once for one the host makes on the owner thread. A failed managed build drops its clients (DropFailedClients).
+				// Record what this graph was built from when it is installed. That is at attach for a managed build, which may be dropped,
+				// or at once for a build the host makes on the owner thread.
 				if (declared != kDeclared) {
-					// A declared segment's graph: what it was built from is the segment's, and each member anchor's.
-					// The passes this build makes (GatherDeclared fills it): their revisions are part of the segment's description.
+					// The passes this build makes. Their revisions are part of the segment's description.
 					declaredPasses = std::make_shared<std::vector<std::weak_ptr<org::RenderPass>>>();
-					// The stage's key as the build starts: the passes it hands to ORG (GatherDeclared).
+					// The stage's key as the build starts.
 					key = Anchors().nextKeys[declared].load(std::memory_order_acquire);
 					const auto commit = [declared, built = snapshot, passes = declaredPasses, built_key = key] {
 						auto& anchors = Anchors();
@@ -1122,7 +1036,7 @@ namespace FrameAnchors
 								anchors.previousSnapshots[i].store(anchors.builtSnapshots[i].load(std::memory_order_acquire), std::memory_order_release);
 								anchors.builtSnapshots[i].store(built, std::memory_order_release);
 							} else if ((StepAnchorsOf(declared) >> i & 1u) && (anchors.declaredMembers >> i & 1u)) {
-								// A shared anchor with no epoch of its own: its clients are in the graphs once every stage with a step there was built with them.
+								// A shared anchor is in the graphs once every stage with a step there was built with its clients.
 								std::uint64_t serial = UINT64_MAX;
 								for (std::uint32_t d = 0; d < kDeclared; ++d)
 									if (anchors.declaredEpochs[d] && (StepAnchorsOf(d) >> i & 1u)) {
@@ -1181,7 +1095,7 @@ namespace FrameAnchors
 					GatherDeclared(a_graph, declared, epoch, a_out);
 					return;
 				}
-				// The shared constants' upload first: the passes that read them follow it (the graph orders them by the buffers).
+				// Upload the shared constants first. The graph orders their readers after it through the buffers.
 				if (UsesSharedConstantsIn(snapshot->clients, anchors))
 					if (auto upload = SharedConstants::MakeUploadPass())
 						a_out.push_back(std::move(org::RenderGraph::ExternalPassDesc::Copy("cs.shared.upload", std::move(upload))
@@ -1204,9 +1118,8 @@ namespace FrameAnchors
 						desc.PreferQueue(org::QueueKind::Compute);
 					else if (pass.kind != PassKind::Render)
 						desc.PreferQueue(org::QueueKind::Graphics);
-					// Recorded after the run's commit, on the graphics queue only (PassDesc::atExecution): in DXVK's stream (guest), or inline
-					// into the epoch's own list (native).
-					// A GPU-gated pass is recorded ahead instead: its closed entries make its indirect counts zero (GpuGates).
+					// atExecution passes record after the run's commit, in DXVK's stream or inline in native mode.
+					// A GPU-gated pass records ahead instead, and its closed entries zero its indirect counts.
 					if (pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution())
 						desc.RecordAtExecution();
 					a_out.push_back(std::move(desc.Epoch(epoch)));
@@ -1214,7 +1127,7 @@ namespace FrameAnchors
 			}
 
 		private:
-			/** @brief The anchors whose passes this snapshot puts in the graph: an anchor's own, or a declared segment's members. */
+			/** @brief The anchors whose passes this snapshot puts in the graph. */
 			std::uint32_t AnchorsIn(Anchor a_anchor, std::uint32_t a_declared) const
 			{
 				if (a_anchor != Anchor::Count)
@@ -1225,13 +1138,9 @@ namespace FrameAnchors
 			}
 
 			/**
-			 * @brief A declared segment's graph: its steps' passes in the steps' order, each anchor's by order key. Before a step whose
-			 * clients read CS's shared constants, an upload of the values its tap saw (SharedConstants::MakeUploadPass with the step's
-			 * index). Each pass is off in a recording whose description turns its client off (SetSkipWhen): it records only its barriers
-			 * then. A pass marked atExecution (an open draw list, a pass that reads its run's slots or gate answers when it records) is
-			 * recorded at execution, as the segment's late batch, inline at the segment's submission, unless its draws are GPU-gated. A
-			 * late batch of gated copies and clears alone keeps its list while its gate answers repeat (CS_ORG_KEEP_GATED).
-			 */
+			* @brief A declared segment's graph, with its steps' passes in order and a shared-constants upload before steps that read them.
+			* atExecution passes record late, inline at the segment's submission, unless their draws are GPU-gated.
+			*/
 			void GatherDeclared(org::RenderGraph& a_graph, std::uint32_t a_declared, std::uint32_t a_epoch, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) const
 			{
 				const auto& clients = SegmentClients(*snapshot, a_declared);
@@ -1240,10 +1149,10 @@ namespace FrameAnchors
 					if (declaredPasses && a_pass)
 						declaredPasses->push_back(a_pass);
 				};
-				// The build's key: a pass it leaves out is not handed to ORG at all.
+				// A pass the build's key leaves out is not handed to ORG at all.
 				const BuildKey* const buildKey = key.get();
 				const auto firstPass = a_out.size();
-				// The stage's pass count, once per build (the per-kind check: a frame kind's stage carries only its own passes).
+				// Logs the stage's pass count once per build, to check a frame kind's stage carries only its own passes.
 				struct CountLine
 				{
 					const std::vector<org::RenderGraph::ExternalPassDesc>& out;
@@ -1283,7 +1192,6 @@ namespace FrameAnchors
 									.PreferQueue(org::QueueKind::Graphics)
 									.Epoch(a_epoch)));
 						}
-					// One pass instance, in the graph's order.
 					const auto emit = [&](const ScheduledPass& scheduled, std::uint32_t instance, bool instanced) {
 						const auto& pass = *scheduled.pass;
 						if (!KeyHas(buildKey, *scheduled.client, pass.row))
@@ -1300,15 +1208,14 @@ namespace FrameAnchors
 							// A row the description did not select records only its barriers.
 							if (row >= 0 && row < 256 && !(data->fields.rows[static_cast<std::size_t>(row) / 64] >> (static_cast<std::uint32_t>(row) % 64) & 1u))
 								return true;
-							// A client past the described ones is always on, as before instances.
+							// A client past the described ones is always on.
 							if (bit >= RenderGraph::Frame::kSegmentClients)
 								return false;
 							if (!(data->fields.clientsOn >> bit & 1u))
 								return true;
 							return instanced && instance >= data->fields.instances[bit];
 						});
-						// Recorded at execution as on an anchor: a gated pass whose draws are not indirect still reads its run's gate
-						// answers (and often its run's slots) when it records. A GPU-gated pass is recorded ahead.
+						// A gated pass without indirect draws still reads its run's gate answers when it records, so it records at execution.
 						const bool live = pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution();
 						if (!live)
 							note(made);
@@ -1328,13 +1235,11 @@ namespace FrameAnchors
 					for (const auto& scheduled : snapshot->passes) {
 						if (scheduled.pass->anchor != step.anchor || !StepHolds(step, *scheduled.client))
 							continue;
-						// A client with instances has its pass made once per instance. Instance k is off in a recording whose
-						// description declares k instances or fewer.
+						// A client with instances gets one pass per instance. Instance k is off when the description declares k or fewer.
 						const bool instanced = scheduled.client->maxInstances > 1 && scheduled.pass->makeInstance;
-						// The step's instances of the client: its range (StepInstances).
 						const auto [first, count] = instanced ? StepInstances(step, *scheduled.client) : std::pair<std::uint32_t, std::uint32_t>{ 0, 1 };
 						if (instanced && scheduled.client->instanceMajor) {
-							// Every pass of the step's first instance, then of the next, ...: the taps' order across the client's passes.
+							// Instance-major order, every pass of the first instance and then the next. This matches the taps' order.
 							if (std::ranges::find(major, scheduled.client.get()) != major.end())
 								continue;
 							major.push_back(scheduled.client.get());
@@ -1350,13 +1255,13 @@ namespace FrameAnchors
 				}
 			}
 
-			// A declared segment's graph: the passes it made, kept with the build (State::declaredPasses), and the key it was built with.
+			// The passes and key a declared segment's build was made with.
 			std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>> declaredPasses;
 			std::shared_ptr<const BuildKey> key;
 			std::shared_ptr<const Snapshot> snapshot;
 		};
 
-		/** @brief The import's description: its views as their owner (the engine, a feature) made them. Any view may be null. */
+		/** @brief The import's description, with its views as their owner made them. Any view may be null. */
 		org::TextureDescription DescribeColour(const D3D11_TEXTURE2D_DESC& a_desc, ID3D11ShaderResourceView* a_srv, ID3D11RenderTargetView* a_rtv,
 			ID3D11UnorderedAccessView* a_uav)
 		{
@@ -1381,7 +1286,7 @@ namespace FrameAnchors
 				a_uav->GetDesc(&view);
 				desc.hasUAV = true;
 				desc.uavFormat = rhi::helpers::ToRHI(view.Format);
-				// A CPU-side UAV too, so a pass can clear it (AnchorPasses::Clear), as GraphResources' twins have.
+				// A CPU-side UAV too, so AnchorPasses::Clear can clear it.
 				desc.hasNonShaderVisibleUAV = true;
 			}
 			return desc;
@@ -1408,7 +1313,7 @@ namespace FrameAnchors
 			return desc;
 		}
 
-		/** @brief Width, height and format of a version's backing: an import (ExternalTextureResource) or a texture ORG made (PixelBuffer). */
+		/** @brief Width, height and format of a version's backing, whether imported or made by ORG. */
 		std::uint32_t WidthOf(const org::Resource* a_resource)
 		{
 			if (const auto* external = dynamic_cast<const org::ExternalTextureResource*>(a_resource))
@@ -1436,13 +1341,13 @@ namespace FrameAnchors
 			return rhi::Format::Unknown;
 		}
 
-		/** @brief A view's format as the backing makes it: an unnamed one is the description's own format. */
+		/** @brief A view's format as the backing makes it. An unnamed one is the description's own format. */
 		rhi::Format ViewFormat(rhi::Format a_view, const org::TextureDescription& a_desc)
 		{
 			return a_view != rhi::Format::Unknown ? a_view : a_desc.format;
 		}
 
-		/** @brief Whether a backing with a_have's view serves one that asks for a_want's (an unnamed format asks for any). */
+		/** @brief Whether a backing view serves a requested one. An unnamed format asks for any. */
 		bool HasView(bool a_have, rhi::Format a_haveFormat, bool a_want, rhi::Format a_wantFormat)
 		{
 			return !a_want || (a_have && (a_wantFormat == rhi::Format::Unknown || a_haveFormat == a_wantFormat));
@@ -1458,10 +1363,8 @@ namespace FrameAnchors
 			       (!a_want.hasNonShaderVisibleUAV || a_have.hasNonShaderVisibleUAV) && (!a_want.isCubemap || a_have.isCubemap);
 		}
 
-		/**
-		 * @brief a_have with the views of a_want it lacks. Its format stays a_have's, so the result is the same shape class. A view both
-		 * have in different formats keeps a_have's: a_conflict names it then.
-		 */
+		/** @brief a_have plus the views of a_want it lacks. Its format stays a_have's, so the shape class is the same.
+		*  A view both have in different formats keeps a_have's, and a_conflict names it. */
 		org::TextureDescription MergeViews(const org::TextureDescription& a_have, const org::TextureDescription& a_want, std::string& a_conflict)
 		{
 			auto merged = a_have;
@@ -1487,10 +1390,7 @@ namespace FrameAnchors
 			return merged;
 		}
 
-		/**
-		 * @brief a_desc's subresources from the image itself, the same for every importer: one entry per mip, and its slices (in cubes
-		 * when a_desc asks for a cube and the slices make whole cubes).
-		 */
+		/** @brief a_desc's subresources from the image, the same for every importer. Slices form cubes when a_desc asks for a cube. */
 		void DescribeSubresources(org::TextureDescription& a_desc, const DxvkOrgInteropImageInfo& a_image)
 		{
 			a_desc.imageDimensions.clear();
@@ -1504,19 +1404,16 @@ namespace FrameAnchors
 			a_desc.arraySize = slices;
 		}
 
-		/** @brief The first 16 of each kind of import line: these repeat for a texture made again. */
+		/** @brief Limits each kind of import line to the first 16, since they repeat when a texture is made again. */
 		bool LogImportLine(std::atomic<std::uint32_t>& a_count)
 		{
 			return a_count.fetch_add(1, std::memory_order_relaxed) < 16;
 		}
 
 		/**
-		 * @brief The backing of a new slot for a_image with a_desc's views (a_desc gets the views the backing has). Native mode: the
-		 * image's graph-owned texture (Engine::Native::GraphTextureOf; a_texture may be null, then it is looked up by image), always. It
-		 * has every view its D3D11 bind flags allow, so an importer can only ask for one in another format (logged; it gets the
-		 * texture's), and importing the image again would only make a second graph resource of it. Otherwise the image imported. The one
-		 * place an image becomes a graph resource for the anchors and DCLF. Null, logged, on failure.
-		 */
+		* @brief The backing of a new slot for a_image. This is the one place an image becomes a graph resource. Null on failure.
+		* Native mode uses the image's graph-owned texture, which already has every view its bind flags allow.
+		*/
 		std::shared_ptr<org::GloballyIndexedResource> MakeBacking(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image,
 			org::TextureDescription& a_desc, const std::string& a_id)
 		{
@@ -1548,15 +1445,12 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief The graph resource an image ORG made already has (RenderGraph::MadeImageOf: a GraphResources twin's export, an engine
-		 * texture, a streaming window, native mode's exempt textures): the twin's slot when it is versioned, else the resource itself,
-		 * declared as itself. Null when the image is not one of those, or when its resource lacks a view a_desc asks for (logged): the
-		 * caller imports the image then, and the duplicate check names that second resource.
-		 */
+		* @brief The graph resource ORG already made for this image, such as a twin's export or an engine texture.
+		* Null when there is none or it lacks a requested view. The caller then imports the image.
+		*/
 		Texture MadeTexture(ID3D11Texture2D* a_texture, std::uint64_t a_image, const org::TextureDescription& a_desc, std::string_view a_by)
 		{
-			// Native mode: an exempt texture's graph resource is made on its first lookup (ImmutableTextureOf), which registers it. A
-			// read-only importer looks it up first, so the image keeps that one resource whoever asks first.
+			// Native mode makes an exempt texture's graph resource on its first lookup. Look it up first so the image keeps one resource.
 			if (a_texture && RenderGraph::Engine::Native::Active() && !a_desc.hasRTV && !a_desc.hasUAV && !a_desc.hasDSV)
 				(void)RenderGraph::Engine::Native::ImmutableTextureOf(a_texture, DXGI_FORMAT_UNKNOWN);
 			auto made = RenderGraph::MadeImageOf(a_image);
@@ -1580,15 +1474,12 @@ namespace FrameAnchors
 		/** @brief How a new backing joined an import's slot. */
 		enum class Joined : std::uint8_t
 		{
-			Version,   // the slot's next version, the same size: nothing is built again
-			Resized,   // the slot's next version, another size: passes that took the size at their build are made again
-			NewShape,  // another format, mip count or slice count: a new slot, and graphs built with the old one are built again
+			Version, // the slot's next version, same size. Nothing is rebuilt
+			Resized, // the slot's next version, new size. Passes that read the size at build are made again
+			NewShape, // new format, mip or slice count. A new slot, and graphs using the old one rebuild
 		};
 
-		/**
-		 * @brief Publishes a_next as a_slot's next version when it has the slot's shape class, kept alive with a_owner. Tickets prepared
-		 * for the old version are prepared again (NoteNewVersions). Render thread.
-		 */
+		/** @brief Publishes a_next as a_slot's next version if the shape class matches. a_owner keeps it alive. Render thread. */
 		Joined JoinSlot(org::VersionedTexture& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next, std::shared_ptr<const void> a_owner = {})
 		{
 			const auto previous = a_slot.CurrentResource();
@@ -1603,7 +1494,7 @@ namespace FrameAnchors
 			return sameSize ? Joined::Version : Joined::Resized;
 		}
 
-		/** @brief The entry whose current version is a_image: an id import, else a loose slot still held. Null when there is none. */
+		/** @brief The entry whose current version is a_image, an id import or a held loose slot. Null if none. */
 		std::shared_ptr<EngineImport> FindImage(State& a_state, std::uint64_t a_image)
 		{
 			if (!a_image)
@@ -1627,11 +1518,8 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_state.imports, [&](const auto& a_entry) { return a_entry.first != a_except && a_entry.second == a_import; });
 		}
 
-		/**
-		 * @brief Makes a_import's slot serve a_want's views too: when its current version lacks one, the slot's next version is the same
-		 * image imported again with both sets. Passes keep declaring the slot, so nothing is built again. A view both name in different
-		 * formats keeps the slot's (logged). Render thread.
-		 */
+		/** @brief Makes a_import's slot serve a_want's views too, by importing the image again when a view is missing.
+		*  Passes keep declaring the slot, so nothing is rebuilt. Render thread. */
 		void EnsureViews(const std::shared_ptr<EngineImport>& a_import, const org::TextureDescription& a_want, std::string_view a_by)
 		{
 			if (Covers(a_import->views, a_want))
@@ -1649,8 +1537,7 @@ namespace FrameAnchors
 			if (Covers(a_import->views, merged))
 				return;
 			const auto old = slot->CurrentResource();
-			// Native mode's graph-owned texture has every view its bind flags allow: importing its image again would add nothing but a
-			// second graph resource of it.
+			// Native mode's graph-owned texture already has every view its bind flags allow. A new import would only duplicate it.
 			if (dynamic_cast<const org::PixelBuffer*>(old.get())) {
 				static std::atomic<std::uint32_t> logged{ 0 };
 				if (LogImportLine(logged))
@@ -1659,7 +1546,7 @@ namespace FrameAnchors
 			}
 			DescribeSubresources(merged, a_import->info);
 			auto& runtime = RenderGraphRuntime::Get();
-			// The old version stops being the image's resource here: frames already prepared with it finish with it.
+			// Frames already prepared with the old version finish with it.
 			RenderGraph::RetireImageResource(old.get());
 			auto next = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), a_import->info, merged, a_import->id.c_str());
 			// A loose slot's versions keep its entry, and with it the D3D11 texture.
@@ -1678,7 +1565,7 @@ namespace FrameAnchors
 				logger::info("[ORG] frame anchors: {}'s slot has the views {} asks for now: a version of the same image", a_import->id, a_by);
 		}
 
-		/** @brief Drops a_import once nothing names it: its D3D11 texture goes once D3D11's last use is done. */
+		/** @brief Drops a_import once nothing names it. Its D3D11 texture goes once D3D11 is done with it. */
 		void ReleaseUnnamed(State& a_state, std::shared_ptr<EngineImport> a_import)
 		{
 			if (a_import && !NamedElsewhere(a_state, a_import, {}))
@@ -1693,12 +1580,11 @@ namespace FrameAnchors
 			auto& runtime = RenderGraphRuntime::Get();
 			if (!a_texture || !runtime.IsActive())
 				return {};
-			// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published slot, which every graph registers. Importing the image
-			// again would make a second resource whose uses the graph does not order with the owner's.
+			// An engine target ORG owns returns its published slot.
+			// A second import would make a resource whose uses the graph does not order with the owner's.
 			if (auto owned = RenderGraph::Engine::Targets::Find(a_texture))
 				return owned;
-			// Anything else is imported as DXVK's own texture, never as a tripwire handle. Native mode has no DXVK texture under its
-			// handles: its own records describe the handle itself.
+			// Import DXVK's own texture, never a tripwire handle. Native mode has no DXVK texture under its handles.
 			if (!RenderGraph::Engine::Native::Active())
 				a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
 			const auto found = state.imports.find(a_id);
@@ -1714,18 +1600,17 @@ namespace FrameAnchors
 			D3D11_TEXTURE2D_DESC textureDesc{};
 			a_texture->GetDesc(&textureDesc);
 			auto desc = a_describe(textureDesc);
-			// A cube (the engine's cubemap targets): its SRV is a cube view, and arraySize counts cubes.
+			// A cube's SRV is a cube view, and arraySize counts cubes.
 			desc.isCubemap = (textureDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
 			DescribeSubresources(desc, info.image);
 			const auto image = reinterpret_cast<std::uint64_t>(info.image.image);
 
-			// An image ORG made with a graph resource of its own (a twin's export in an engine slot, an engine texture): that resource.
-			// The id keeps whatever slot it had; this texture is not a version of it.
+			// An image ORG already made a graph resource for. The id keeps its slot, and this texture is not a version of it.
 			if (auto made = MadeTexture(a_texture, image, desc, a_id))
 				return made;
 
-			// One image, one graph resource: an image some importer already has keeps its slot, whoever came first. Two graph resources
-			// of one image would each track its state, and their layout moves would race.
+			// One image, one graph resource, whoever imported it first.
+			// Two resources would each track the image's state and race on layout moves.
 			if (auto shared = FindImage(state, image)) {
 				EnsureViews(shared, desc, a_id);
 				if (shared == previous) {
@@ -1734,8 +1619,7 @@ namespace FrameAnchors
 					return Texture(a_id, shared->slot);
 				}
 				if (!shared->slot) {
-					// A loose slot (ShareImage's) becomes this id's: the state holds it from now on, through an entry of its own. The loose
-					// entry stays its versions' owner (they hold it, so it cannot hold the slot).
+					// A loose slot from ShareImage becomes this id's. The loose entry stays its versions' owner, since they hold it.
 					auto taken = std::make_shared<EngineImport>(*shared);
 					taken->slot = shared->looseSlot.lock();
 					taken->looseSlot.reset();
@@ -1759,13 +1643,11 @@ namespace FrameAnchors
 			auto backing = MakeBacking(a_texture, info.image, desc, a_id);
 			if (!backing)
 				return {};
-			// A new texture for an id that alone names its slot: the slot's next version. A slot another id shares stays that id's; this
-			// one gets a slot of its own.
+			// A new texture for an id that alone names its slot becomes the slot's next version. A shared slot stays with the other id.
 			if (previous && !NamedElsewhere(state, previous, a_id)) {
 				const auto joined = JoinSlot(*previous->slot, backing);
 				if (joined != Joined::NewShape) {
-					// The old D3D11 texture goes once D3D11's last use is done. The slot's old version keeps its graph resource while a
-					// frame or a prepared ticket holds it.
+					// The old D3D11 texture goes once D3D11 is done with it. The old version lives while a frame or ticket holds it.
 					runtime.ReleaseAfterD3D11(std::make_shared<winrt::com_ptr<ID3D11Texture2D>>(std::move(previous->texture)));
 					previous->texture.copy_from(a_texture);
 					previous->image = image;
@@ -1787,9 +1669,7 @@ namespace FrameAnchors
 			state.imports[a_id] = std::move(import);
 			ReleaseUnnamed(state, previous);
 			Publish(state);
-			// The imports are registered with every anchor graph. A new one is built into the graphs that looked its id up (a client
-			// registering with it builds its own anchors again). One of another shape class is a new slot: every graph holding the
-			// old one is built again, off the render thread (the build manager).
+			// A new shape class is a new slot, so every graph holding the old one is rebuilt off the render thread.
 			if (previous)
 				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced by another shape class", a_id));
 			else if (state.host)
@@ -1900,11 +1780,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/**
-		 * @brief Whether the recipe table names client a_id at anchor a_anchor (Frame/RecipeTable.h). At an anchor a CS stage has a step at,
-		 * one of those steps names it. At an anchor that runs its own epoch (frame generation and HDR output, or every anchor without the
-		 * stages), a step names it there or the anchor's epoch entry does. A diagnostic client is named everywhere.
-		 */
+		/** @brief Whether the recipe table names client a_id at a_anchor. Diagnostic clients are named everywhere. */
 		bool TableNames(const State& a_state, std::string_view a_id, Anchor a_anchor)
 		{
 			if (Table::Has(Table::kDiagnosticClients, a_id))
@@ -1938,8 +1814,8 @@ namespace FrameAnchors
 			logger::warn("[ORG] frame anchors: {} not registered, the render graph is not active", a_client.id);
 			return false;
 		}
-		// Membership is the recipe table's: a client's every pass must be at an anchor where the table names the client. Anything else is a
-		// recipe mismatch: fatal in development builds, refused and logged once per client in release builds.
+		// Every pass must be at an anchor where the recipe table names the client.
+		// A mismatch is fatal in development builds, and refused with one log line in release.
 		for (const auto& pass : a_client.passes) {
 			if (IndexOf(pass.anchor) >= kAnchors || TableNames(state, a_client.id, pass.anchor))
 				continue;
@@ -1970,7 +1846,7 @@ namespace FrameAnchors
 			}
 			names.push_back(pass.name);
 		}
-		// Before CS's first upload the shared constants cannot be made yet: the client waits for them (Service).
+		// Until CS's first upload the shared constants do not exist, so the client waits for Service.
 		if (a_client.sharedConstants && !SharedConstants::Ensure() && SharedConstants::Failed()) {
 			logger::warn("[ORG] frame anchors: {} not registered: it reads the shared constants, which could not be made", a_client.id);
 			return false;
@@ -2079,10 +1955,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/**
-		 * @brief Before a run: clients waiting for the shared constants join once they exist (or fail with them), and a twin's resize
-		 * since the last run builds every anchor graph again and publishes the new resource.
-		 */
+		/** @brief Before a run, joins clients waiting for the shared constants and rebuilds every anchor graph after a twin resize. */
 		void Service(State& a_state)
 		{
 			const bool waiting = std::ranges::any_of(a_state.clients, [](const Client& a_client) { return !InGraphs(*a_client.desc); });
@@ -2122,7 +1995,7 @@ namespace FrameAnchors
 			}
 		}
 
-		/** @brief A client with work at this run: its desc, its serial then, and whether its commit runs (active). */
+		/** @brief A client with work at this run, and whether its commit runs. */
 		struct RunClient
 		{
 			std::shared_ptr<const ClientDesc> desc;
@@ -2134,7 +2007,7 @@ namespace FrameAnchors
 	namespace
 	{
 		std::atomic<DWORD> mainThread{ 0 };
-		// With CS_ORG_LOADING_THREAD=1: the thread that owns rendering (0 until the first claim: the main thread), and the claims.
+		// With CS_ORG_LOADING_THREAD=1, the thread that owns rendering. 0 means the main thread, before the first claim.
 		std::atomic<DWORD> renderOwner{ 0 };
 		std::atomic<std::uint64_t> ownerChanges{ 0 };
 
@@ -2173,8 +2046,8 @@ namespace FrameAnchors
 		if (main == 0)
 			return true;
 		if (!RenderGraph::Engine::LoadingScreen::Requested()) {
-			// A loading screen presents from a job thread (SE 38085). The anchors' state and the graph's frame upload instance belong
-			// to the main thread, so one-shot passes wait for the next main-thread frame.
+			// A loading screen presents from a job thread (SE 38085). The anchor state belongs to the main thread,
+			// so one-shot passes wait for the next main-thread frame.
 			if (main == self)
 				return true;
 			static std::atomic_flag logged;
@@ -2194,11 +2067,9 @@ namespace FrameAnchors
 		// Every engine frame begins here: most claims are by the thread that already owns rendering.
 		if (Owner() == self)
 			return;
-		// The last owner's epochs still on the submission thread reach the queue before this thread's work. Before the anchors' lock:
-		// a pass recorded on that thread may take it.
+		// Drain the last owner's epochs to the queue first. Do it before taking the anchors' lock, since a pass recorded there may take it.
 		RenderGraphRuntime::Get().DrainSubmissions("render ownership moved", true);
-		// Under the anchors' mutex: no claim lands inside another thread's anchor run, and the main thread's calls outside a frame
-		// (Register, imports) never interleave with it.
+		// Under the mutex so no claim lands inside another thread's run or a main-thread Register.
 		auto lock = Guard();
 		const DWORD previous = Owner();
 		if (previous == self)
@@ -2237,7 +2108,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/** @brief Fails every client after the graph stopped at a_name's epoch (FailClients). */
+		/** @brief Fails every client after the graph stopped at a_name's epoch. */
 		void StopAll(State& a_state, const char* a_name)
 		{
 			// What the stages staged is dropped uncommitted.
@@ -2258,7 +2129,7 @@ namespace FrameAnchors
 				RenderGraphRuntime::Get().GetDisabledReason());
 		}
 
-		/** @brief A lasting copy of a_text, for the census's causes (which keep pointers). Render owner. */
+		/** @brief A lasting copy of a_text, since the census keeps pointers. Render owner. */
 		const char* Interned(std::string a_text)
 		{
 			static std::set<std::string> texts;
@@ -2282,21 +2153,19 @@ namespace FrameAnchors
 	void BeforeGpuWork(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
-		// A stage that ends at a point commits just before the next GPU work that follows it in every world frame is submitted: the epochs
-		// its table entry lists (Frame/RecipeTable.h, Stage::commitBefore), in recipe order. The deferred+water stage's usual commit point is
-		// the engine's blended draw, the UI stage's the present (Hooks.cpp); these are the frames where that point did not come first.
+		// A point-ended stage commits just before the next GPU work in its table entry's commitBefore list.
+		// These are frames where its usual commit point, the blended draw or the present, did not come first.
 		if (a_segment != UINT32_MAX && state.host && IsRenderOwner())
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				if (std::ranges::find(declaredInfo[d].commitBefore, static_cast<Segment>(a_segment)) != declaredInfo[d].commitBefore.end())
 					(void)TapPoint(static_cast<RenderGraph::Frame::SegmentId>(d));
-		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
-		// submits. Counted by why, for the census; its first lines are logged.
+		// While a stage holds its ticket, other GPU work submitted now runs ahead of the stage's work. Counted by reason for the census.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
 			auto lock = Guard();
 			bool own = false;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				own = own || (state.stagedFrame[d] && a_segment == static_cast<std::uint32_t>(declaredInfo[d].segment));
-			// An anchor's run counted its epoch already (Run): its submission is the same GPU work.
+			// Run already counted this epoch, and its submission is the same GPU work.
 			const bool counted = a_segment != UINT32_MAX && state.insideHeldCounted == a_segment;
 			if (counted)
 				state.insideHeldCounted = UINT32_MAX;
@@ -2326,14 +2195,11 @@ namespace FrameAnchors
 		using RenderGraph::Frame::SegmentId;
 		namespace Driver = RenderGraph::Frame::Driver;
 
-		/** @brief A declared segment's fields for a frame: its built graph, the host's versions, and its clients' declared predicates. */
+		/** @brief A declared segment's fields for a frame, against a given build. */
 		SegmentFields DescribeDeclaredFrom(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, const std::shared_ptr<const Snapshot>& a_built,
 			const std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>& a_passes, std::uint64_t a_graph, const BuildKey* a_key, bool a_keyed);
 
-		/**
-		 * @brief A declared segment's fields for a frame, against its attached build. a_keyed: only what the build's key has present (a pass it
-		 * left out is absent); else the frame's own description, which may want more.
-		 */
+		/** @brief A declared segment's fields against its attached build. a_keyed cuts it to what the build's key has present. */
 		SegmentFields DescribeDeclared(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, bool a_keyed = true)
 		{
 			if (!a_declaredByKind || !a_state.host)
@@ -2343,10 +2209,7 @@ namespace FrameAnchors
 				a_state.declaredPasses[a_declared].load(std::memory_order_acquire), a_state.host->BuildGeneration(EpochOfDeclared(a_declared)), key.get(), a_keyed);
 		}
 
-		/**
-		 * @brief A declared segment's fields for a frame against a build (a_built its snapshot, a_passes its passes, a_graph its generation,
-		 * a_key its key). a_keyed: the description is cut to what the key has present.
-		 */
+		/** @brief A declared segment's fields for a frame against a build. a_keyed cuts it to what the key has present. */
 		SegmentFields DescribeDeclaredFrom(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, const std::shared_ptr<const Snapshot>& a_built,
 			const std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>& a_passes, std::uint64_t a_graph, const BuildKey* a_key, bool a_keyed)
 		{
@@ -2360,8 +2223,7 @@ namespace FrameAnchors
 			fields.graph = a_graph;
 			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
 			const auto& clients = SegmentClients(*built, a_declared);
-			// A stage whose graph holds no client and no module step has nothing to record (the UI stage before the overlay registers):
-			// it is absent from the frame, as before its first build.
+			// A stage with no client and no module step has nothing to record, so it is absent from the frame.
 			bool foreignStep = false;
 			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
 				foreignStep = foreignStep || declaredInfo[a_declared].steps[k].foreign != Segment::Count;
@@ -2393,7 +2255,7 @@ namespace FrameAnchors
 				if (info.steps[k].foreign != Segment::Count)
 					if (const auto foreign = ForeignOf(info.steps[k].foreign); foreign && (!foreign->declared || foreign->declared()))
 						fields.foreignOn |= 1u << k;
-			// What the build's key left out is absent: the description has it off.
+			// What the build's key left out is off in the description.
 			if (a_keyed && a_key && !a_key->all) {
 				for (std::size_t i = 0; i < clients.size(); ++i) {
 					const auto [present, rows] = KeyPart(a_key, *clients[i]);
@@ -2407,8 +2269,8 @@ namespace FrameAnchors
 				}
 				fields.foreignOn &= KeyForeign(a_key, ~0u);
 			}
-			// The passes recorded ahead name what their recordings depend on beyond their bindings: a kept recording binds those
-			// revisions, so they are part of the description. A pass that cannot tell is logged once a build.
+			// A kept recording binds the revisions its passes depend on beyond their bindings, so they go in the description.
+			// A pass that cannot tell is logged once per build.
 			if (const auto& passes = a_passes) {
 				std::uint64_t hash = 1469598103934665603ull;
 				std::uint32_t untold = 0;
@@ -2432,10 +2294,7 @@ namespace FrameAnchors
 			return fields;
 		}
 
-		/**
-		 * @brief Stops the game: a declared segment's recording failed. The frame cannot be drawn without it, and drawing it another way
-		 * would hide the defect. In every build.
-		 */
+		/** @brief Stops the game when a segment recording fails, in every build. Drawing the frame another way would hide the defect. */
 		[[noreturn]] void FailRecording(std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot, std::string_view a_cause)
 		{
 			const auto message = fmt::format(
@@ -2448,11 +2307,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief The recording of a declared segment for a_fields: the one kept for them, or a new request to the host's thread (logged
-		 * with the fields that changed since the last request). A kept one that a build dropped is asked for again. A kept one that
-		 * failed stops the game (FailRecording). Only BeginFrame asks (Schedule); a request at any other time is counted as a mid-frame
-		 * re-record. Never waits. Render owner.
-		 */
+		* @brief The segment recording for a_fields, kept or newly requested from the host's thread. Never waits. Render owner.
+		* A kept one that failed stops the game. Requests outside BeginFrame count as mid-frame re-records.
+		*/
 		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
 			std::uint64_t a_frame, std::string_view a_why, bool* a_asked = nullptr)
 		{
@@ -2489,10 +2346,8 @@ namespace FrameAnchors
 				entry->slot = a_slot;
 				entry->fields = a_fields;
 				entry->lastFrame = a_frame;
-				// Recordings of an older build are never used again, and each keeps that build's graph alive with its private alias
-				// pools (tens of MB a build). The staged build's are kept: it switches in only once every slot's recording is ready, and a
-				// description that alternates by frame (TAA's history rows) asks again each frame. Dropping them there kept the staged
-				// build from ever switching in.
+				// Recordings of an older build keep its graph and alias pools alive, tens of MB each, so they go.
+				// The staged build's stay. It needs every slot ready to switch in, and alternating descriptions would starve it.
 				const auto staged = a_state.host->StagedGeneration(EpochOfDeclared(a_declared));
 				std::erase_if(recordings.entries, [&](const auto& a_kept) {
 					return a_kept->done && a_kept->recording && !a_state.host->EpochRecordingCurrent(*a_kept->recording) &&
@@ -2554,12 +2409,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief A declared segment's schedule for this frame (BeginFrame). The frame slot keeps its schedule until the recording of the
-		 * frame's own description for that slot is ready; then it switches, here, before any of the frame's work. The recordings of a
-		 * new description are asked for here (this slot's and the next slots'), on the host's thread. Nothing waits. Returns the fields
-		 * the frame runs on: the schedule's, or the frame's own description with graph 0 when the slot has no schedule on the attached
-		 * build (the segment is absent this frame: its taps draw nothing). Render owner.
-		 */
+		* @brief A segment's schedule for this frame. A slot keeps its schedule until its recording of the new description is ready.
+		* Nothing waits. Graph 0 in the result means the segment is absent this frame. Render owner.
+		*/
 		SegmentFields Schedule(State& a_state, std::uint32_t a_declared, bool a_world, const RenderGraph::Frame::Description& a_frame)
 		{
 			const auto segment = static_cast<SegmentId>(a_declared);
@@ -2570,18 +2422,16 @@ namespace FrameAnchors
 			// A schedule of an older build is gone. Builds attach only at a frame boundary, before this.
 			if (active.recording && !host.EpochRecordingCurrent(*active.recording))
 				active = {};
-			// A schedule whose recording binds a version a slot replaced since: the segment's version generation moves, so the frame's
-			// description is a new one, recorded for the new version. Until that recording is ready the slot keeps its schedule, which
-			// binds (and holds) the old version: the stage lags a frame or two, it is never blank.
+			// A schedule whose recording binds a replaced version gets a new description for the new version.
+			// The slot keeps the old schedule until that is ready, so the stage lags a frame or two but is never blank.
 			a_state.frameVersionsCurrent[a_declared] = true;
 			if (active.recording && !host.EpochRecordingVersionsCurrent(*active.recording, slot)) {
 				if (active.fields.versions == recordings.versionGeneration)
 					++recordings.versionGeneration;
 				a_state.frameVersionsCurrent[a_declared] = false;
 			}
-			// A staged build (docs/development/org-native-frame-graph.md, "Builds switch in with their recordings"): recorded on the host's
-			// thread for every frame slot, for the frame's description of it, and switched in whole here, at a frame boundary, once every
-			// slot's recording is ready. Until then every slot keeps the attached build's schedule.
+			// A staged build is recorded for every slot and switches in whole here, once every slot's recording is ready.
+			// Until then every slot keeps the attached build's schedule.
 			const auto epoch = EpochOfDeclared(a_declared);
 			// Recorded and switched in frames of any kind, so a build made during a load or a menu is in place for the next world frame.
 			const std::uint64_t stagedGeneration = host.StagedGeneration(epoch);
@@ -2597,11 +2447,11 @@ namespace FrameAnchors
 						a_state.stagedAsked[a_declared].clear();
 						a_state.stagedAskedAgain[a_declared] = 0;
 					}
-					// A staged build with nothing to record (no client) switches in at once; the stage is absent on it.
+					// A staged build with no client switches in at once, with the stage absent on it.
 					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && staged.graph; ++s) {
 						bool asked = false;
 						const auto entry = RequestDeclared(a_state, a_declared, staged, s, a_frame.frame, " (staged build)", &asked);
-						// A description of this build asked for again: its finished recording was dropped before the build switched in.
+						// The build's finished recording was dropped before it switched in, so this description is asked for again.
 						if (asked && !a_state.stagedAsked[a_declared].insert(RenderGraph::Frame::FieldsHash(staged) * 31 + s).second)
 							++a_state.stagedAskedAgain[a_declared];
 						const std::lock_guard lock(recordings.mutex);
@@ -2612,9 +2462,8 @@ namespace FrameAnchors
 					}
 					if (a_state.stagedSince[a_declared] == 0)
 						a_state.stagedSince[a_declared] = a_frame.frame;
-					// The starvation rule: a staged build's recordings may be asked for again a few times (a build drops one), never
-					// without end. Past the limit the build would never switch in and the stage would run the replaced build's
-					// schedule for good: a schedule bug, a mismatch (fatal in development builds).
+					// The starvation rule. A staged build's recordings may be asked for again a few times, never without end.
+					// Past the limit it would never switch in. That is a schedule bug, fatal in development builds.
 					constexpr std::uint32_t kAskedAgainLimit = 4 * RenderGraphRuntime::kGameFramesInFlight;
 					if (!all && a_state.stagedAskedAgain[a_declared] > kAskedAgainLimit) {
 						Driver::NoteTapError(Driver::TapError::Starved, segment,
@@ -2626,7 +2475,7 @@ namespace FrameAnchors
 					Driver::NoteStagedAskedAgain(segment, a_state.stagedAskedAgain[a_declared]);
 					if (all && RenderGraph::Builds::SwitchStaged(epoch)) {
 						const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
-						// A build asked for by a new key: how many frames its passes took from the Begin that wanted them to this one.
+						// For a build asked for by a new key, how many frames its passes took to arrive.
 						std::string keyNote;
 						if (auto& use = a_state.keyUse[a_declared]; stagedKey && !stagedKey->all && stagedKey->serial >= use.requestedSerial && use.switchedSerial < use.requestedSerial) {
 							keyNote = fmt::format("; its key was asked for at frame {}, {} frames before", use.requestedFrame, a_frame.frame - use.requestedFrame);
@@ -2636,8 +2485,7 @@ namespace FrameAnchors
 							active.recording ? fmt::format(" ({})", RenderGraph::Frame::DiffFields(active.fields, staged)) : std::string(), keyNote);
 						for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
 							a_state.schedule[a_declared][s] = staged.graph ? State::Scheduled{ staged, ready[s], built } : State::Scheduled{};
-						// The replaced build's recordings are never used again. Each keeps that build's graph alive, with its private alias
-						// pools and the placements in them: a second copy of every transient of the stage until the next request.
+						// The replaced build's recordings are never used again. Each keeps that build's graph and alias pools alive.
 						{
 							const std::lock_guard lock(recordings.mutex);
 							std::erase_if(recordings.entries, [&](const auto& a_kept) {
@@ -2653,25 +2501,23 @@ namespace FrameAnchors
 					}
 				}
 			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
-			// The frame's description cut to what the attached build has present, and the frame's own: the taps take work the build left
-			// out as lagged work (the key asks for its build at this Begin).
+			// The frame's description cut to the attached build's key, and the full one. Taps treat the difference as lagged work.
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = DescribeDeclared(a_state, a_declared, a_world, false);
 			const bool keyLags = !(a_state.frameWanted[a_declared] == wanted);
-			// A stage outside its kinds' frames (a world stage in a menu's frames): the frame does not declare it, but a first schedule is
-			// recorded ahead for a slot that has none, so the frame-kind switch to its kinds finds a schedule in every frame slot. Its first
-			// frames lag at worst, they are never blank. The UI stage is in every kind's recipe.
+			// A stage outside its frame kinds still gets a first schedule recorded ahead for every slot.
+			// After a kind switch its first frames may lag, but are never blank.
 			if (!a_world && host.StagedGeneration(epoch) == 0) {
 				const SegmentFields ahead = DescribeDeclared(a_state, a_declared, true);
 				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && ahead.graph; ++s) {
 					auto& kept = a_state.schedule[a_declared][s];
 					if (kept.recording && host.EpochRecordingCurrent(*kept.recording))
 						continue;
-					// The description is this frame's: its parity fields (the slot-parity variants) fit only the slots of this frame's parity.
+					// Parity fields fit only the slots of this frame's parity.
 					if (s % 2 != a_frame.parity)
 						continue;
 					if (kept.recording && kept.fields == ahead && host.EpochRecordingCurrent(*kept.recording)) {
-						// A version replaced since: the next frame's description names the new one, and its recording replaces this.
+						// A version was replaced since. The next frame's description names the new one.
 						if (!host.EpochRecordingVersionsCurrent(*kept.recording, s) && kept.fields.versions == recordings.versionGeneration)
 							++recordings.versionGeneration;
 						continue;
@@ -2695,7 +2541,7 @@ namespace FrameAnchors
 				Driver::NoteScheduled(segment, Driver::Scheduled::Absent);
 				return wanted;
 			}
-			// While a build is staged the attached graph records nothing new (its bindings are frozen): the slots keep what they have.
+			// While a build is staged the attached graph's bindings are frozen, so slots keep what they have.
 			if (!(active.recording && active.fields == wanted) && !stillStaged) {
 				std::shared_ptr<SegmentRecording> entry;
 				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead) {
@@ -2719,8 +2565,7 @@ namespace FrameAnchors
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
-					// The UI stage: the other slots switch at this boundary too when their recordings of the description are ready
-					// (SwitchesEverySlot).
+					// The UI stage switches its other slots at this boundary too, once their recordings are ready.
 					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && declaredInfo[a_declared].switchesEverySlot; ++s) {
 						auto& other = a_state.schedule[a_declared][s];
 						if (s == slot || (other.recording && other.fields == wanted))
@@ -2736,7 +2581,7 @@ namespace FrameAnchors
 							other = { wanted, std::move(otherReady), active.built };
 					}
 				} else if (ready && host.EpochRecordingCurrent(*ready)) {
-					// Recorded with a version a slot replaced while it was made: the next frame's description names the new version.
+					// A slot replaced a version while this was recorded. The next frame's description names the new one.
 					++recordings.versionGeneration;
 				}
 			}
@@ -2755,13 +2600,9 @@ namespace FrameAnchors
 		constexpr double kKeyHold = 10.0;
 
 		/**
-		 * @brief A stage's key at Begin (docs/development/org-native-frame-graph.md, "Absent passes"). The stage's passes are described as
-		 * a key (DescribingKey: every variant a frame may pick, both kind groups, the passes always present) against the clients registered
-		 * now, and each wanted one is stamped on the stage's clock. The key keeps what was wanted within kKeyHold. A build is asked for when
-		 * the key wants a pass the stage's newest build (staged, else attached) left out, and, to drop unused passes, only at a load, a
-		 * frame-kind switch, or when that build's key was provisional (the first key, a client registered since). Otherwise the key is only
-		 * stored for the stage's next build, whatever asks for it. A steady scene asks for nothing. Render owner, inside BeginFrame.
-		 */
+		* @brief A stage's key at Begin. Passes wanted within kKeyHold stay present. A steady scene asks for no build. Render owner.
+		* A build is asked for when the key wants a pass the newest build lacks. Unused passes drop only at a load, a kind switch or after a provisional key.
+		*/
 		void UpdateKey(State& a_state, std::uint32_t a_declared, bool a_inRecipe, const RenderGraph::Frame::Description& a_frame, bool a_kindSwitch)
 		{
 			if (!a_state.host)
@@ -2809,7 +2650,7 @@ namespace FrameAnchors
 				if ((!load && !a_kindSwitch) || use.clients.empty())
 					return;
 			}
-			// The key: what was wanted within the hold. A client never described yet is not listed (present whole).
+			// The key keeps what was wanted within the hold. A client never described is unlisted, so it is present whole.
 			auto keep = std::make_shared<BuildKey>();
 			keep->all = false;
 			keep->frame = a_frame.frame;
@@ -2844,7 +2685,6 @@ namespace FrameAnchors
 			const bool hasStaged = a_state.host->StagedGeneration(epoch) != 0 && a_state.stagedSnapshots[a_declared].load(std::memory_order_acquire);
 			const auto built = hasStaged ? a_state.stagedKeys[a_declared].load(std::memory_order_acquire) : a_state.declaredKeys[a_declared].load(std::memory_order_acquire);
 			const auto next = a_state.nextKeys[a_declared].load(std::memory_order_acquire);
-			// The stage's module steps, a bit each.
 			std::uint32_t steps = 0;
 			for (std::uint32_t k = 0; k < info.stepCount && k < 32; ++k)
 				if (info.steps[k].foreign != Segment::Count)
@@ -2854,8 +2694,7 @@ namespace FrameAnchors
 			};
 			const bool covered = KeyCovers(built.get(), keep.get(), clients, steps);
 			const bool stale = !KeyCovers(keep.get(), built.get(), clients, steps);
-			// A build asked for with a key not in place yet (staged or attached) is on its way. One that never came (a failed build) is asked
-			// for again after a while.
+			// A requested build that has not arrived is in flight. One that never came, after a failure, is asked for again.
 			constexpr std::uint64_t kRequestFrames = 600;
 			const bool inFlight = use.requestedSerial && (!built || built->serial < use.requestedSerial) && a_frame.frame - use.requestedFrame < kRequestFrames;
 			const char* why = nullptr;
@@ -2885,8 +2724,6 @@ namespace FrameAnchors
 			}
 		}
 
-		/** @brief Whether any stage holds staged values not committed yet. Render owner. */
-		/** @brief SetWindowsClosedHook's hook. */
 		std::atomic<void (*)()> windowsClosedHook{ nullptr };
 
 		void UpdateStagesOpen(State& a_state)
@@ -2911,7 +2748,7 @@ namespace FrameAnchors
 			UpdateStagesOpen(a_state);
 		}
 
-		/** @brief Every run gate a stage's graph holds: its clients' and those of registrations it still holds after they left. */
+		/** @brief Every run gate a stage's graph holds, including those of departed registrations. */
 		template <class F>
 		void ForEachStageGate(const State& a_state, std::uint32_t a_declared, const Snapshot& a_built, F&& a_do)
 		{
@@ -2927,11 +2764,7 @@ namespace FrameAnchors
 							a_do(*gate);
 		}
 
-		/**
-		 * @brief Begin: a present stage's frame inputs for this frame slot are made empty. Its staging run's latch regions are zeroed and
-		 * every gate of its graph is closed there, so a tap's commit writes only what this frame staged. The GPU never reads the staging
-		 * run, so this waits for nothing. Render owner.
-		 */
+		/** @brief Empties a present stage's frame inputs for this slot. Waits for nothing, since the GPU never reads the staging run. */
 		void OpenInputs(State& a_state, std::uint32_t a_declared, std::uint32_t a_slot)
 		{
 			auto& host = *a_state.host;
@@ -2943,18 +2776,13 @@ namespace FrameAnchors
 			ZoneScopedN("CS.Stage.OpenInputs");
 			const auto staging = host.EpochStagingRun(EpochOfDeclared(a_declared), a_slot);
 			a_state.stagingRun[a_declared] = staging;
-			// Every latch region and every gate's record of the staging run cleared: a gate its client does not list (ClientDesc::gates)
-			// reads closed too unless a tap opens it.
+			// A gate its client does not list reads closed too, unless a tap opens it.
 			org::LatchBlock::ZeroStableRun(staging.lease);
 			RenderGraph::RunGate::ClearOpenAll(staging);
 			ForEachStageGate(a_state, a_declared, *built, [&](const RenderGraph::RunGate& a_gate) { a_gate.Close(staging); });
 		}
 
-		/**
-		 * @brief A stage's one commit, at its commit point: the values its taps staged this frame are copied into the frame slot's copy,
-		 * and its one ticket is submitted with the recording of the frame's schedule. Then the executed callbacks of every client that
-		 * staged. Render owner, under the anchors' mutex.
-		 */
+		/** @brief A stage's one commit. Copies the staged values into the slot's copy and submits its ticket. Render owner, under the mutex. */
 		RunResult SubmitSegment(State& a_state, const Point& a_point, std::uint32_t a_declared)
 		{
 			const auto segment = static_cast<SegmentId>(a_declared);
@@ -2962,7 +2790,7 @@ namespace FrameAnchors
 			auto& host = *a_state.host;
 			auto& runtime = RenderGraphRuntime::Get();
 			const std::uint32_t epoch = EpochOfDeclared(a_declared);
-			// The frame runs on the schedule it took at Begin: nothing is described, recorded or waited for here.
+			// The frame runs on the schedule it took at Begin. Nothing is described, recorded or waited for here.
 			const auto recording = a_state.frameRecording[a_declared];
 			const auto built = a_state.frameBuilt[a_declared];
 			const auto staging = a_state.stagingRun[a_declared];
@@ -2993,7 +2821,7 @@ namespace FrameAnchors
 				host.SetEpochCopy(epoch, frame.slot);
 				RenderGraphRuntime::EpochBodyScope body(declaredInfo[a_declared].segment);
 				result = runtime.TryExecuteEpoch(declaredInfo[a_declared].segment, [&](org::RenderGraph&) {
-					// The copy's last run is done once its ticket is taken: the staged values become its run's.
+					// Once the ticket is taken the copy's last run is done, and the staged values become this run's.
 					const auto run = host.CurrentRun();
 					if (!(run == expected))
 						Driver::NoteTapError(Driver::TapError::SlotMismatch, segment,
@@ -3021,8 +2849,7 @@ namespace FrameAnchors
 			a_state.stagedFrame[a_declared] = 0;
 			UpdateStagesOpen(a_state);
 			if (result == RenderGraphRuntime::EpochResult::Skipped) {
-				// The frame slot's published copy held a run neither sealed nor done (EpochCopiesBusyError). A stage runs once a frame on its
-				// slot's copy, sealed at the present, so this is a pacing defect: the frame would lose the stage's work. In every build.
+				// A stage runs once a frame on its slot's copy, sealed at present, so a busy copy is a pacing defect. Fatal in every build.
 				const auto message = fmt::format("Community Shaders: the {} found its frame slot's published copy busy at frame {} (slot {}) and would have "
 												 "skipped the frame's work. A stage never skips: the copy's last run was neither sealed by a present nor done.",
 					declaredInfo[a_declared].names.label, frame.frame, frame.slot);
@@ -3044,16 +2871,14 @@ namespace FrameAnchors
 				a_state.lateHook();
 			if (SegmentUsesSharedConstants(*built, a_declared))
 				SharedConstants::CheckAfterRun();
-			// A point step or a cut ends the segment at no anchor: no run shape.
+			// A point step or a cut ends at no anchor, so it has no run shape.
 			if (RenderGraph::RunShapes::On() && a_point.anchor != Anchor::Count) {
 				const std::uint32_t index = IndexOf(a_point.anchor);
 				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, 0);
 			}
 			PruneRetired(a_state);
-			// One-shot passes in the graph this run submitted have run: the next build leaves them out, and the next frame's description
-			// names that build.
-			// Only the anchors those passes sit at are built again: the epochs that hold them. Rebuilding every anchor of the stage also
-			// rebuilt the per-anchor epochs of its shared anchors, unstaged, which held Drawcall Limit Fix after each load.
+			// Rebuild only the anchors whose one-shot passes ran. Rebuilding every anchor of the stage also rebuilt
+			// its shared anchors' epochs unstaged, which held Drawcall Limit Fix after each load.
 			std::uint32_t ranOnce = 0;
 			for (auto& client : a_state.clients)
 				for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
@@ -3065,7 +2890,7 @@ namespace FrameAnchors
 				Publish(a_state);
 				Rebuild(a_state, ranOnce, "one-shot passes ran");
 			}
-			// Last: an executed callback may register, refresh or rearm. What each staged commit wrote is in the submitted run now.
+			// Last, since an executed callback may register, refresh or rearm.
 			for (const auto& [client, point] : executed)
 				if (client->executed)
 					client->executed(point);
@@ -3073,11 +2898,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief A declared stage's tap: one of its steps' hooks. The tap's clients stage their values: their commits write into the
-		 * frame slot's staging run (the frame inputs), with the step's shared constants. No ticket is taken here. The last step's tap is
-		 * the stage's one commit (SubmitSegment). A tap the description does not cover is a tap error and stages nothing. a_foreign: a
-		 * foreign step's commit (TapForeign), in place of the clients'. Render owner, under the anchors' mutex.
-		 */
+		* @brief A stage's tap at one of its steps' hooks. Clients stage their values into the slot's staging run. No ticket is taken.
+		* The last step's tap is the stage's commit. Render owner, under the mutex.
+		*/
 		RunResult TapDeclared(State& a_state, const Point& a_point, std::uint32_t a_declared, std::uint32_t a_step, const std::vector<RunClient>& a_clients,
 			const std::function<void()>* a_foreign = nullptr)
 		{
@@ -3092,11 +2915,8 @@ namespace FrameAnchors
 				Driver::NoteTapError(Driver::TapError::NotDeclared, segment, fmt::format("the {} tap fired", tap));
 				return { RunStatus::Idle };
 			}
-			// A stage's first tap of the frame (present or absent) ends the earlier stages that staged and are still open, at their end point: their commit
-			// point did not come (the deferred+water stage's, in a frame Drawcall Limit Fix's forward epoch does not run). Their tickets go
-			// first, in recipe order, so this stage's work follows theirs on the GPU.
-			// One that ends at a point and staged nothing this frame ends there without a ticket (the start stage in a frame without
-			// reflection faces).
+			// A stage's first tap ends earlier stages that are still open because their commit point did not come.
+			// Their tickets go first, in recipe order, so this stage's work follows theirs on the GPU.
 			if (a_state.stagedFrame[a_declared] != frame.frame)
 				for (std::uint32_t before = 0; before < a_declared; ++before) {
 					if (a_state.endedFrame[before] == frame.frame || !a_state.declaredEpochs[before] || !frame.Segment(static_cast<SegmentId>(before)).declared)
@@ -3110,9 +2930,8 @@ namespace FrameAnchors
 						}
 				}
 			if (!fields.graph) {
-				// No schedule for this frame slot yet (its graph's first build, or the frames after a build): the stage is absent from
-				// the frame, and its work is not drawn until its first schedule is ready. Its end tap still ends it, so the later stages'
-				// windows open where they would have.
+				// No schedule for this slot yet, so the stage is absent and draws nothing.
+				// Its end tap still ends it, so later stages' windows open on time.
 				Driver::NoteAbsentTap(segment);
 				if (end)
 					a_state.endedFrame[a_declared] = frame.frame;
@@ -3143,16 +2962,13 @@ namespace FrameAnchors
 				return { RunStatus::Failed };
 			}
 			const SegmentFields& held = fields;
-			// The frame's own description, when the schedule lags behind it: work it has on and the schedule off is left out this frame,
-			// not a mismatch (the same build, so the client bits name the same clients).
+			// When the schedule lags the frame's description, work the schedule has off is left out. That is not a mismatch.
 			const SegmentFields& wanted = a_state.frameWanted[a_declared];
 			const bool comparable = wanted.graph == held.graph;
-			// The clients that stage: this step's clients in the built graph, on in the schedule, with work this frame. An active client
-			// the schedule turned off is a mismatch, unless the frame's description has it on (the schedule lags), and its commit is not
-			// called.
+			// This step's clients that are on in the schedule and have work. An active client the schedule turned off is a mismatch,
+			// unless the schedule only lags.
 			std::vector<std::shared_ptr<const ClientDesc>> committed;
 			bool foreignOn = false;
-			// This tap's instance: the step's first instance and its earlier taps this frame.
 			const std::uint32_t local = a_state.stepTaps[a_declared][a_step]++;
 			const std::uint32_t instance = step.firstInstance + local;
 			if (a_foreign) {
@@ -3183,8 +2999,7 @@ namespace FrameAnchors
 					}
 					if (!active)
 						continue;
-					// The k-th tap of the step writes instance k. A client without instances has one; one with instances has as many
-					// as the description declared.
+					// The k-th tap of the step writes instance k.
 					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : clients[i]->repeats ? UINT32_MAX : 1u;
 					const bool inRange = clients[i]->maxInstances <= 1 || local < StepInstances(step, *clients[i]).second;
 					if (instance >= declaredInstances || !inRange) {
@@ -3200,7 +3015,7 @@ namespace FrameAnchors
 			}
 			if (step.anchor != Anchor::Count)
 				NoteSequenceRun(a_point, end ? RenderGraph::FrameSequence::RunKind::Commit : RenderGraph::FrameSequence::RunKind::Held, a_clients);
-			// Stage the tap's values into the frame inputs: the commits write the staging run, which nothing on the GPU reads.
+			// Nothing on the GPU reads the staging run the commits write.
 			a_state.stagedFrame[a_declared] = frame.frame;
 			UpdateStagesOpen(a_state);
 			{
@@ -3229,9 +3044,8 @@ namespace FrameAnchors
 					a_state.peakRuns[index].store(runs, std::memory_order_relaxed);
 			}
 			if (!end) {
-				// A staged tap counts as run for its callers, as an early tap of a held ticket did: what it staged reaches the GPU with
-				// the stage's commit, before any later GPU work that reads it (the census counts work submitted in between). Last: an
-				// executed callback may register, refresh or rearm.
+				// A staged tap counts as run. Its values reach the GPU with the stage's commit, before later work reads them.
+				// Last, since an executed callback may register, refresh or rearm.
 				for (const auto& client : committed)
 					if (client->executed)
 						client->executed(a_point);
@@ -3243,12 +3057,7 @@ namespace FrameAnchors
 			return SubmitSegment(a_state, a_point, a_declared);
 		}
 
-		/**
-		 * @brief The segment that holds a shared anchor's named clients now, and its step there. Its window must be open: the frame
-		 * declares it, its end tap has not fired, and every segment before it that the frame declares has ended (or it staged values already
-		 * already). kDeclared when none. Render owner.
-		 */
-		/** @brief Whether a declared segment's window is open now (OpenStepAt). Render owner. */
+		/** @brief Whether a declared segment's window is open now. Render owner. */
 		bool WindowOpen(const State& a_state, std::uint32_t a_declared)
 		{
 			const auto& frame = Driver::Current();
@@ -3257,8 +3066,8 @@ namespace FrameAnchors
 				return false;
 			if (a_state.stagedFrame[a_declared] == frame.frame)
 				return true;
-			// An earlier stage that ends at a point and has staged nothing yet does not hold this one back: this stage's first tap ends it.
-			// A stage that opens last (the UI stage) waits until every earlier stage of the frame ended.
+			// An earlier point-ended stage that staged nothing does not hold this one back, since this stage's first tap ends it.
+			// A stage that opens last, the UI stage, waits for every earlier stage to end.
 			const bool last = declaredInfo[a_declared].opensLast;
 			for (std::uint32_t before = 0; before < a_declared; ++before)
 				if (a_state.declaredEpochs[before] && frame.Segment(static_cast<SegmentId>(before)).declared && a_state.endedFrame[before] != frame.frame &&
@@ -3267,10 +3076,7 @@ namespace FrameAnchors
 			return true;
 		}
 
-		/**
-		 * @brief Whether step a_step of a declared segment takes its anchor's taps now: an untilLater step only until a later step of its stage
-		 * tapped this frame. Render owner.
-		 */
+		/** @brief Whether a step takes its anchor's taps now. An untilLater step does so until a later step of its stage taps. */
 		bool StepTakesTaps(const State& a_state, std::uint32_t a_declared, std::uint32_t a_step)
 		{
 			const auto& info = declaredInfo[a_declared];
@@ -3282,7 +3088,7 @@ namespace FrameAnchors
 			return true;
 		}
 
-		/** @brief The step of a declared segment that takes a tap of anchor a_anchor now (StepTakesTaps), the first such; kMaxSteps for none. */
+		/** @brief The first step of a declared segment that takes a tap of a_anchor now, or kMaxSteps. */
 		std::uint32_t TapStepAt(const State& a_state, std::uint32_t a_declared, Anchor a_anchor)
 		{
 			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
@@ -3356,7 +3162,7 @@ namespace FrameAnchors
 			if (step == kMaxSteps)
 				continue;
 			if (!WindowOpen(state, d)) {
-				// A segment absent from this frame (no schedule on the attached build yet) draws nothing; that is not a mismatch.
+				// A segment absent this frame draws nothing, and that is not a mismatch.
 				const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(d));
 				if (fields.declared && !fields.graph && state.endedFrame[d] != Driver::Current().frame)
 					Driver::NoteAbsentTap(static_cast<SegmentId>(d));
@@ -3669,7 +3475,7 @@ namespace FrameAnchors
 		if (!RenderGraphRuntime::Get().IsActive())
 			return;
 		using Kind = RenderGraph::Frame::Kind;
-		// Values the last frame staged and never committed (its commit point did not come, which the driver counts) are dropped.
+		// Drop values the last frame staged but never committed. The driver counts those.
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
 			if (state.stagedFrame[d] && state.stagedFrame[d] != a_frame.frame) {
 				if (!Driver::LoadStartedThisFrame())
@@ -3677,10 +3483,8 @@ namespace FrameAnchors
 						declaredInfo[d].names.label);
 				DropStaged(state, d);
 			}
-		// The segments a world frame draws: every one. A frozen world's capture frame draws the world once too. Each takes its frame
-		// slot's schedule here, switched to this frame's description when that description's recording is ready, and keeps it to the
-		// frame's end.
-		// Each frame kind's recipe lists its CS stages (Recipes::KindHas): the world's every stage, the other kinds the UI stage.
+		// Each segment takes its slot's schedule here and keeps it to the frame's end.
+		// A world frame draws every stage. Other frame kinds draw the UI stage.
 		state.inBegin = true;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			state.frameRecording[d].reset();
@@ -3694,7 +3498,7 @@ namespace FrameAnchors
 					OpenInputs(state, d, a_frame.slot);
 			}
 		}
-		// Each stage's key for its next build (absent passes): asked for here, built off the render thread, switched in like any build.
+		// Each stage's key for its next build. The build is made off the render thread and switches in like any other.
 		const bool kindSwitch = state.keyKind != Kind::Count && state.keyKind != a_frame.kind;
 		state.keyKind = a_frame.kind;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
@@ -3718,13 +3522,13 @@ namespace FrameAnchors
 		if (!runtime.IsActive())
 			return { RunStatus::Refused };
 		ServiceRetiredTextures();
-		// Before the clients are read: an anchor whose epoch failed drops its clients here (OnEpochFailed), not in the middle of a run.
+		// Drop failed epochs' clients here, before the clients are read, not in the middle of a run.
 		runtime.PollEpochFailures();
 		if (!runtime.IsActive())
 			return { RunStatus::Failed };
 		Service(state);
-		// The clients in this anchor's graph; the run happens when one is active or has a one-shot pass pending. A client waiting to
-		// join (registered after the build) does not run the epoch: its graph is built at the next build point.
+		// The run happens when a client is active or has a one-shot pass pending.
+		// A client registered after the build waits for the next build.
 		std::vector<RunClient> clients;
 		bool work = false;
 		for (const auto& client : state.clients) {
@@ -3743,9 +3547,8 @@ namespace FrameAnchors
 			}
 			return TapDeclared(state, a_point, declared, step, clients);
 		}
-		// A shared anchor: the clients a segment names commit into it while its window is open. The others run the anchor's own epoch.
-		// A segment-only client (ClientDesc::segmentOnly) has no passes there: with work outside every open window it draws nothing.
-		// A client a stage holds keeps its one-shot passes for that stage's run: they are no work for the anchor outside it.
+		// At a shared anchor, clients a segment names commit into it while its window is open. The others run the anchor's own epoch.
+		// A segment-only client draws nothing outside every open window.
 		const auto hasWork = [&](const RunClient& a_client) {
 			if (a_client.active)
 				return true;
@@ -3769,16 +3572,13 @@ namespace FrameAnchors
 				std::vector<RunClient> others = clients;
 				std::vector<RunClient> members;
 				RunResult tapped{ RunStatus::Idle };
-				// Every open segment with a step at this anchor takes its own clients. Two can be open at once: a stage whose commit
-				// point has not come yet (the deferred+water stage in a frame Drawcall Limit Fix's forward epoch does not run) and the
-				// post stage after it, which has staged this frame.
+				// Two segments can be open at once. A stage whose commit point has not come yet, and the post stage after it.
 				for (std::uint32_t declared = 0; declared < kDeclared; ++declared) {
 					const auto first = StepAt(declared, a_point.anchor);
 					if (first == kMaxSteps || !WindowOpen(state, declared))
 						continue;
 					const auto& built = state.frameBuilt[declared];
-					// Every step of the segment at this anchor takes its own clients (the post stage has three ImageSpace steps), each
-					// tapped when one of them has work.
+					// Each step at this anchor takes its own clients. The post stage has three ImageSpace steps.
 					for (std::uint32_t k = first; k < declaredInfo[declared].stepCount; ++k) {
 						const auto& stepInfo = declaredInfo[declared].steps[k];
 						if (stepInfo.anchor != a_point.anchor || !StepTakesTaps(state, declared, k))
@@ -3815,7 +3615,7 @@ namespace FrameAnchors
 				const bool otherWork = std::ranges::any_of(others, hasWork);
 				if (!otherWork)
 					return tapped;
-				// The rest run now in the anchor's own epoch: ahead of the segment's work on the GPU (counted, BeforeGpuWork).
+				// The rest run now in the anchor's own epoch, ahead of the segment's work on the GPU.
 				clients = std::move(others);
 				for (auto& member : members) {
 					member.active = false;
@@ -3828,9 +3628,8 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// Every engine operation has a stage's place or is dropped where it is taken, so no anchor runs an epoch of its own, in both modes.
-		// Work here is a mismatch: the frame did something its recipe has no place for. It draws nothing. HDR output and frame generation
-		// keep their anchors' tickets (pieces of their own; neither runs in the tests: HDR off, frame generation needs the foreground).
+		// No anchor runs its own epoch, so work here is a mismatch and draws nothing.
+		// HDR output and frame generation are the exceptions and keep their anchors' tickets.
 		const bool ownEpochError = a_point.anchor != Anchor::HDROutput && a_point.anchor != Anchor::FrameGeneration;
 		if (ownEpochError) {
 			std::string ids;
@@ -3841,8 +3640,7 @@ namespace FrameAnchors
 				fmt::format("the {} anchor had work outside every stage's step (clients [{}]); no stage of the frame has a place for it", kInfo[index].name, ids));
 			return { RunStatus::Idle };
 		}
-		// Every run takes a run lease of the host's: an anchor may run any number of times a frame without waiting for one of its
-		// runs of the same frame, which DXVK has not submitted yet. The runs are counted for the report alone (LogRunStats).
+		// Each run takes its own run lease, so an anchor can run many times a frame without waiting for DXVK to submit earlier runs.
 		auto& runs = RunsSinceSeal(state, index);
 		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
 		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
@@ -3852,8 +3650,7 @@ namespace FrameAnchors
 		const bool sharedConstants = UsesSharedConstants(descs, a_point.anchor);
 		std::uint64_t built = 0;
 		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
-		// The stage commit points and the open-stage census see this epoch here, named for the anchor (TryExecuteEpoch's own call
-		// for it counts nothing then).
+		// Report this epoch to the commit points and the census here, named for the anchor.
 		BeforeGpuWork(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
 		// TryExecuteEpoch calls BeforeGpuWork for the same submission: the census counts it once, here.
 		state.insideHeldCounted = static_cast<std::uint32_t>(segment);
@@ -3866,8 +3663,7 @@ namespace FrameAnchors
 				RenderGraph::RunShapes::BeginRun();
 				if (sharedConstants)
 					SharedConstants::Commit();
-				// Every gate closed first: a run does work only where this run's commits open it. That includes the gates of
-				// registrations whose passes this graph still holds after they left (RetiredGates).
+				// Close every gate first, including retired registrations' gates. A run does work only where its commits open a gate.
 				for (const auto& client : clients)
 					for (const auto& gate : client.desc->gates)
 						if (gate)
@@ -3888,28 +3684,26 @@ namespace FrameAnchors
 			return { RunStatus::Failed };
 		}
 		if (result == RenderGraphRuntime::EpochResult::EpochFailed) {
-			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
-			// other anchors and their clients run on.
+			// Only this anchor's epoch failed. Its clients are dropped at the next poll and the others run on.
 			return { RunStatus::Failed };
 		}
 		if (result != RenderGraphRuntime::EpochResult::Submitted) {
 			StopAll(state, Name(a_point.anchor));
 			return { RunStatus::Failed };
 		}
-		// The run is counted, and the peak reported (LogRunStats).
 		++runs;
 		if (runs > state.peakRuns[index].load(std::memory_order_relaxed))
 			state.peakRuns[index].store(runs, std::memory_order_relaxed);
 		if (RenderGraph::RunShapes::On()) {
-			// The run's shape (CS_ORG_EPOCH_STATS): its gate entries (noted as the commits opened them), targets and active clients.
+			// The run's shape for CS_ORG_EPOCH_STATS.
 			std::uint64_t active = 0;
 			for (const auto& client : clients)
 				if (client.active)
 					active += reinterpret_cast<std::uintptr_t>(client.desc.get()) * 0x9E3779B97F4A7C15ull;
 			RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
 		}
-		// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
-		// work directly after a graph epoch"). After the late anchors an upscaler, frame generation or the present may follow.
+		// An epoch must not be the last GPU work before a third-party Vulkan consumer. render-graph.md describes the hazard.
+		// After the late anchors an upscaler, frame generation or the present may follow.
 		if (kInfo[index].late && state.lateHook)
 			state.lateHook();
 		if (sharedConstants)
@@ -3927,8 +3721,8 @@ namespace FrameAnchors
 			Publish(state);
 			Rebuild(state, 1u << index, "one-shot passes ran");
 		}
-		// Last: an executed callback may register, refresh or rearm. A matchesById client whose newer registration is not built yet ran
-		// through the registration the graph holds (its commit writes what every registration's passes read).
+		// Last, since an executed callback may register. A matchesById client whose newer registration is not built yet
+		// ran through the registration the graph holds.
 		const auto ownBuilt = OwnSnapshot(state, index);
 		const auto heldById = [&](const RunClient& a_client) {
 			return a_client.desc->matchesById && ownBuilt &&
@@ -3943,10 +3737,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/**
-		 * @brief Whether the frame's schedule of declared segment a_declared holds this registration of a client and has it on. False while
-		 * the segment is absent (its first schedule on a build is still being recorded). Under the lock.
-		 */
+		/** @brief Whether this frame's schedule of the segment holds this client registration and has it on. Under the lock. */
 		bool ScheduleHolds(const State& a_state, std::uint32_t a_declared, const std::shared_ptr<const ClientDesc>& a_client)
 		{
 			const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(a_declared));
@@ -3970,8 +3761,8 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client)
 			return false;
-		// The stage that holds the anchor wholly in this frame's kind. A shared anchor: the open stage whose step takes the anchor's taps now
-		// and holds the client (HeldNow). No such stage: nothing draws the client's work.
+		// The stage that holds the anchor wholly, or at a shared anchor the open stage that takes its taps and holds the client.
+		// With no such stage nothing draws the client's work.
 		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
 			return ScheduleHolds(state, declared, client->desc);
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
@@ -4011,7 +3802,7 @@ namespace FrameAnchors
 		StageHold hold;
 		if (!state.host || !IsRenderOwner())
 			return hold;
-		// The open stage's step at the anchor that takes taps now and holds the client (a shared anchor has a step per client group).
+		// The open stage's step that takes taps now and holds the client.
 		const auto* registered = FindClient(state, a_id);
 		std::uint32_t declared = kDeclared, step = kMaxSteps;
 		for (std::uint32_t d = 0; d < kDeclared && declared == kDeclared; ++d) {
@@ -4025,8 +3816,7 @@ namespace FrameAnchors
 				}
 		}
 		if (declared >= kDeclared) {
-			// A stage the frame declares but has no schedule for yet (its first build), not ended, with a step that holds the client: the work
-			// is that stage's, and lags until its first schedule (held, not scheduled).
+			// A declared stage with no schedule yet that holds the client owns the work. It lags until the first schedule.
 			const auto& frame = Driver::Current();
 			for (std::uint32_t d = 0; d < kDeclared && registered; ++d) {
 				const auto& fields = frame.Segment(static_cast<SegmentId>(d));
@@ -4068,8 +3858,7 @@ namespace FrameAnchors
 		const auto waiting = [&] { return std::ranges::count_if(state.clients, [&](const Client& a_client) { return WaitsToJoin(state, a_client); }); };
 		if (waiting() == 0)
 			return true;
-		// Before the first world frame the graphs are built here; after it they are built off the render thread, and the clients join
-		// when the builds are attached (each attach records its anchor's snapshot).
+		// Before the first world frame the graphs are built here. After it they build off the render thread and clients join at attach.
 		const bool builtNow = runtime.BuildSetupGraphs(a_caller);
 		const auto left = waiting();
 		if (left == 0)
@@ -4083,10 +3872,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/**
-		 * @brief PrimeStages for one stage (a_segment): its description now, recorded for every frame slot on the host's thread while setup
-		 * waits, installed as each slot's schedule.
-		 */
+		/** @brief Records one stage's current description for every slot while setup waits, and installs it as each slot's schedule. */
 		void PrimeStage(State& state, Segment a_segment, std::string_view a_caller)
 		{
 			using namespace std::chrono_literals;
@@ -4113,8 +3899,7 @@ namespace FrameAnchors
 			}
 			if (!wanted.graph)
 				return;
-			// At setup, before the first frame: the host's thread records them; the first Begin finds them done and switches them in, so the
-			// first frame draws the stage (the session's first movie frame among it). The render thread never waits for a recording in a frame.
+			// Recorded at setup so the first frame draws the stage. The render thread never waits for a recording in a frame.
 			auto& recordings = state.declaredRecordings[ui];
 			const auto deadline = std::chrono::steady_clock::now() + 10s;
 			bool done = false;
@@ -4230,8 +4015,7 @@ namespace FrameAnchors
 
 	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
 	{
-		// Native mode: an exempt texture is one graph resource, read untracked, the same pointer on every call (no build). It is a
-		// plain resource, declared as itself.
+		// Native mode: an exempt texture is one plain graph resource, read untracked. No build is needed.
 		if (RenderGraph::Engine::Native::Active() && a_texture && RenderGraphRuntime::Get().IsActive()) {
 			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
 			if (a_srv)
@@ -4262,13 +4046,13 @@ namespace FrameAnchors
 		const auto image = reinterpret_cast<std::uint64_t>(a_image.image);
 		if (!image || !runtime.IsActive() || !runtime.Host())
 			return {};
-		// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published slot, the one the anchors' passes use.
+		// An engine target ORG owns returns its published slot.
 		if (auto owned = RenderGraph::Engine::Targets::FindImage(image))
 			return owned;
 		auto desc = a_desc;
 		DescribeSubresources(desc, a_image);
 		const std::string name(a_name);
-		// An image ORG made with a graph resource of its own: that resource (a versioned twin's slot).
+		// An image ORG already made a graph resource for, such as a versioned twin's slot.
 		if (auto made = MadeTexture(a_texture, image, desc, name))
 			return made;
 		// The slot an importer already made for the image, with the caller's views added when it lacks one.
@@ -4286,7 +4070,7 @@ namespace FrameAnchors
 		if (!backing)
 			return {};
 		entry->views = desc;
-		// The version keeps the entry, and with it the D3D11 texture: the image lives, and its handle is not reused, while the slot does.
+		// The version keeps the entry and its D3D11 texture alive, so the image handle is not reused while the slot lives.
 		auto slot = org::VersionedTexture::CreateImage(std::move(backing), entry);
 		entry->looseSlot = slot;
 		state.loose.push_back(entry);
@@ -4299,7 +4083,7 @@ namespace FrameAnchors
 		auto& state = Anchors();
 		const Anchor anchor = AnchorOfEpoch(a_epoch);
 		if (const auto declared = anchor == Anchor::Count ? DeclaredOfEpoch(a_epoch) : kDeclared; declared != kDeclared) {
-			// A declared segment's epoch: the clients of its members in the failed build are dropped, as for an anchor's.
+			// A segment epoch drops its members' clients from the failed build, as for an anchor.
 			const auto failed = state.declaredSnapshots[declared].load(std::memory_order_acquire);
 			if (a_keptGraph)
 				state.declaredSnapshots[declared].store(state.declaredPrevious[declared].load(std::memory_order_acquire), std::memory_order_release);
@@ -4325,15 +4109,14 @@ namespace FrameAnchors
 	{
 		auto& state = Anchors();
 		state.frozen = true;
-		// Declared segments: an epoch for each that is on and has a reserved anchor; the anchors it holds wholly have none of their
-		// own. Its end tap's anchor is reserved with it, so the hook that ends it always runs.
+		// Each enabled declared segment with a reserved anchor gets an epoch. Its end tap's anchor is reserved with it,
+		// so the hook that ends it always runs.
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			std::uint32_t members = 0;
 			bool any = false;
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				any = any || (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u));
-				// An anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other clients' work
-				// outside the stages' steps is a mismatch, Run), in both modes.
+				// An anchor any stage has a step at has no epoch of its own, in both modes.
 				if (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u))
 					members |= 1u << i;
 			}
@@ -4359,7 +4142,7 @@ namespace FrameAnchors
 			const std::uint32_t epoch = RenderGraphRuntime::EpochOf(static_cast<Segment>(segment));
 			if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
 				continue;
-			// Before the first epoch the frame runs after it (the epochs are segment values here).
+			// Before the first epoch that runs after it in the frame.
 			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
 			a_epochs.insert(after, epoch);
 		}

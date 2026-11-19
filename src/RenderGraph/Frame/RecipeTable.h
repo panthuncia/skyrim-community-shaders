@@ -11,23 +11,14 @@
 #include <string_view>
 
 /**
- * @brief The recipe table: CS's whole frame in one constexpr table (docs/development/org-native-frame-graph.md, "The recipe").
- *
- * Frame kinds name their stages in order. A stage is a CS stage (one graph, one ticket) or a Drawcall Limit Fix graph. A CS stage is an
- * ordered list of steps; each step names the client ids it holds. Everything else is derived from this table: FrameAnchors' stage and
- * step lookups, which stages each kind has, the epochs' frame positions for ORG, the host's epoch order, the recipe print and its check.
- *
- * - A **step** is one engine hook in frame order: an anchor (with the clients it holds, by id), another module's epoch (foreign), or a
- *   point that only ends the stage. A whole step holds its anchor wholly: the anchor has no epoch of its own, and no other stage has a
- *   step there.
- * - **Membership is explicit.** A client registers only when a step names it at each anchor its passes use (or, for an anchor that keeps
- *   its own epoch, that epoch's entry names it). Anything else is a recipe mismatch (FrameAnchors::Register). There are no id patterns.
- * - A stage's **epochs** list, in frame order, every epoch that sits in its part of the frame: its own graph (Graph), an anchor that
- *   keeps its own ticket after it in native mode (Ticket: frame generation, HDR output), and the anchors' own epochs placed there for the
- *   host's epoch order (Placed: the anchors' own epochs, which run only without the stages).
- *
- * Header deliberately free of ORG includes.
- */
+* @brief The recipe table: CS's whole frame in one constexpr table. Everything else is derived from it.
+*
+* Frame kinds name their stages in order. A stage is a CS stage, with one graph and one ticket, or a Drawcall Limit Fix graph.
+* A CS stage is an ordered list of steps. A step is one engine hook: an anchor with the client ids it holds, another module's
+* epoch, or a point that only ends the stage. A whole step holds its anchor, which then has no epoch of its own.
+* Membership is explicit. A client may register only where a step names it, or it is a recipe mismatch.
+* The header stays free of ORG includes.
+*/
 namespace RenderGraph::Frame::Recipes::Table
 {
 	using Anchor = FrameAnchors::Anchor;
@@ -49,20 +40,18 @@ namespace RenderGraph::Frame::Recipes::Table
 		return false;
 	}
 
-	/** @brief One step of a CS stage (see the header comment). */
+	/** @brief One step of a CS stage. */
 	struct Step
 	{
 		Anchor anchor = Anchor::Count;     // Count for a foreign or point step
 		Names clients{};                   // the clients the step holds at its anchor
 		Segment foreign = Segment::Count;  // a foreign step's module epoch
 		bool whole = false;                // the stage holds the anchor wholly: it has no epoch of its own
-		bool point = false;                // a CS point that is no anchor and no module epoch (TapPoint): it holds no passes and ends the stage
-		// The step takes taps only until a later step of its stage has tapped this frame; then its anchor's taps go to the stage's next
-		// step at the anchor. The UI stage's displays before a menu's scene: the first display after the scene's first tap is drawn after it.
+		bool point = false; // a CS point that is no anchor and no module epoch. It holds no passes and ends the stage
+		// Takes taps only until a later step of its stage has tapped this frame. Then its anchor's taps go to the next step there.
 		bool untilLater = false;
-		// The instances of a client with instances (ClientDesc::maxInstances) this step makes and taps: from firstInstance, instanceCount of
-		// them (0: every instance from firstInstance). The step's k-th tap this frame is instance firstInstance + k. Two steps at one anchor
-		// give the same client disjoint ranges (Scaleform's displays before and after a menu's scene).
+		// The instance range this step makes and taps, from firstInstance. A count of 0 means every instance from there.
+		// Two steps at one anchor give the same client disjoint ranges.
 		std::uint8_t firstInstance = 0;
 		std::uint8_t instanceCount = 0;
 
@@ -73,7 +62,7 @@ namespace RenderGraph::Frame::Recipes::Table
 	enum class Role : std::uint8_t
 	{
 		Graph,   // the stage's own graph: a CS stage's epoch, or one of Drawcall Limit Fix's
-		Ticket,  // an anchor that keeps its own ticket after the stage in native mode (frame generation, HDR output): in the recipe check
+		Ticket, // an anchor that keeps its own ticket after the stage in native mode, such as frame generation
 		Placed,  // an anchor's own epoch (or a module's) placed here only for the host's epoch order
 	};
 
@@ -109,11 +98,9 @@ namespace RenderGraph::Frame::Recipes::Table
 		SegmentId segment = SegmentId::Count;
 		FrameAnchors::SegmentNames names{};
 		std::array<Step, kMaxSteps> steps{};
-		// The stage's window opens only once every earlier stage of the frame has ended (FrameAnchors' WindowOpen). Without it, an earlier
-		// stage that ends at a point and staged nothing yet does not hold the window back.
+		// The window opens only once every earlier stage of the frame has ended. Otherwise a point-ended stage that staged nothing does not hold it back.
 		bool opensLast = false;
-		// A new description switches every frame slot at once, when each slot's recording of it is ready (the UI stage: its description
-		// changes with the frame kind, not by frame). Other stages keep one schedule per slot.
+		// A new description switches every frame slot at once, when all are ready. For the UI stage, whose description follows the frame kind.
 		bool switchesEverySlot = false;
 		// A point-ended stage commits just before any of these epochs is submitted (FrameAnchors::BeforeGpuWork), if it has not ended yet.
 		SegmentList commitBefore = Segments({});
@@ -133,34 +120,17 @@ namespace RenderGraph::Frame::Recipes::Table
 	constexpr Epoch Placed(Anchor a_anchor, Names a_clients = {}) { return { AnchorSegment(a_anchor), Role::Placed, a_clients }; }
 	constexpr Epoch Ticket(Anchor a_anchor, Names a_clients) { return { AnchorSegment(a_anchor), Role::Ticket, a_clients }; }
 
-	// The epochs whose submission commits the point-ended world stages before their own point: a frame where the usual next GPU work does
-	// not come (Drawcall Limit Fix not drawing yet, no first person). Every later stage's epoch, and the epochs past the world's end.
+	// Epochs whose submission commits the point-ended world stages when their usual next GPU work does not come.
 	inline constexpr Segment kEndsWorld[] = { Segment::Forward, Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing,
 		Segment::AnchorUpscale, Segment::AnchorInterface, Segment::AnchorPresent, StageSegment(SegmentId::Post) };
 
-	/**
-	 * @brief Clients a diagnostic switch registers at every anchor (CS_ORG_ANCHOR_SELFTEST): every whole step holds them, and they may
-	 * register at any anchor. Never in a test or play run.
-	 */
+	/** @brief Clients a diagnostic switch registers at every anchor. Every whole step holds them. Never in a test or play run. */
 	inline constexpr Names kDiagnosticClients{ "cs.org.anchor-selftest" };
 
-	/**
-	 * @brief The world's stages, in frame order. Recipe order is pass order. Each CS stage's commit point and why it is safe are in the
-	 * comment above it (docs/development/org-native-frame-graph.md, "The recipe").
-	 */
+	/** @brief The world's stages in frame order. Recipe order is pass order. Each CS stage's comment names its commit point. */
 	inline constexpr std::array<Stage, kStages> kStageTable{ {
-		// The frame's start (frame sequence census, a world frame). First the decal tests (SE 35563, AE 36562, before Main::Draw): a tap and
-		// an instance each, every instance with its own query range. Then the player's face tint at a load (the session's first world frames:
-		// ISAlphaBlend into kPLAYER_FACEGEN_TINT, before the cubemap render). Then Main::Draw's cubemap render (BSCubeMapCamera::RenderCubemap)
-		// runs the ReflectionsPrepass hook once, then each reflection face's sky batch (SkyReflections, once per face drawn: the faces' client
-		// has an instance per face). The faces are cleared by the load operations of their sky's first draw; the engine's clears of them are
-		// dropped. Main::RenderWaterEffects runs after the faces: the water displacement update and the flow copies are the start client's
-		// steps at the ImageSpace anchor (ImageSpace's StartSteps.inl), a tap per update and per copy, each with its own instances. Last, the
-		// shadow maps' clears (BSShadowLight::RenderShadowmap) that Drawcall Limit Fix's shadow view does not host: every world frame before
-		// DCLF draws and during its load holds. They are passes at a place (Engine/Skeleton): the engine's call stages each one. Pre-depth,
-		// pre-main and post read those maps. Its commit is a point just before the next GPU work that follows it in every world frame is
-		// submitted: DCLF's shadow view epoch or a later stage (BeforeGpuWork), at the latest when Main::RenderShadowMaps has returned (the
-		// EarlyPrepass hook's start, before its D3D11 work).
+		// The frame's start: decal tests, the face tint at a load, the cubemap faces, water effects and the shadow map clears DCLF does not host.
+		// Commits just before the next GPU work, DCLF's shadow view or a later stage, at the latest when Main::RenderShadowMaps returns.
 		{ .id = StageId::Start,
 			.owner = Owner::Cs,
 			.name = "start",
@@ -186,10 +156,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.name = "shadows",
 			.commit = "Drawcall Limit Fix's shadow views",
 			.epochs = { Own(Segment::ShadowView), Own(Segment::SkyOcclusion), Placed(Anchor::EarlyPrepass) } },
-		// The pre-depth stage: the EarlyPrepass clients (Main::RenderShadowMaps returned), then Main::RenderDepth's clear of the main depth when
-		// Drawcall Limit Fix's Z-prepass does not host it (every world frame before DCLF draws and during its load holds; no pre-depth pass
-		// reads the main depth). Its commit is a point just before DCLF's Z-prepass or a later stage (BeforeGpuWork, and a later stage's first
-		// tap): the clear must reach the GPU before the Z-prepass draws, which a load hold's frames submit.
+		// Pre-depth: the EarlyPrepass clients, then the main depth clear when DCLF's Z-prepass does not host it.
+		// Commits before DCLF's Z-prepass or a later stage, since the clear must reach the GPU before the Z-prepass draws.
 		{ .id = StageId::PreDepth,
 			.owner = Owner::Cs,
 			.name = "pre-depth",
@@ -216,10 +184,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.epochs = { Own(Segment::ZPrepass), Own(Segment::FirstPersonDepth), Placed(Anchor::EngineDepthCopy), Placed(Anchor::DepthDone),
 				Placed(Anchor::EngineCubeClear, { "cs.engine.skeleton.cube" }), Own(Segment::Reflection), Placed(Anchor::ReflectionsPrepass), Placed(Anchor::SkyReflections),
 				{ Segment::LightCulling, Role::Placed } } },
-		// Main::RenderDepth's end to the main pass's sky. The depth copy comes after DCLF's Z-prepass epoch (which holds first person's depth
-		// too), and light culling, the Prepass clients and the main pass's sky batch come before DCLF's main opaque epoch: no other GPU work runs
-		// in between (the census counts any that does). The sky's batch does not run in every world frame, so the stage ends at a point: just
-		// before DCLF's main opaque epoch or a later stage is submitted (BeforeGpuWork, and a later stage's first tap).
+		// Pre-main: the depth copy, light culling, the Prepass clients and the main pass's sky batch. Nothing else runs in between.
+		// The sky batch does not run every frame, so it ends at a point just before DCLF's main opaque epoch or a later stage.
 		{ .id = StageId::PreMain,
 			.owner = Owner::Cs,
 			.name = "pre-main",
@@ -242,12 +208,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.commitSite = "BeforeGpuWork, before DCLF's main opaque epoch or later GPU work; at the latest CS's depth copy in Deferred::DeferredPasses (Engine/Skeleton, RunCopy)",
 			.epochs = { Own(StageSegment(SegmentId::PreMain)), Placed(Anchor::Prepass), Placed(Anchor::Sky) } },
 		{ .id = StageId::Opaque, .owner = Owner::Dclf, .name = "opaque", .commit = "the main pass's opaque batches", .epochs = { Own(Segment::MainOpaque) } },
-		// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the composite and the
-		// end of the deferred passes; then the rest of Main::RenderWorld (100424 / 107142): the water stencil's clear and the water mask
-		// (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between them, the
-		// engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before DCLF's forward epoch
-		// is submitted (BeforeGpuWork), the next GPU work after the water blend: every tap has staged by then. The water's draws and the kMAIN
-		// copy are gated: a step that does not fire this frame (no water in view) does nothing.
+		// Deferred+water: the deferred passes, composite, water mask, reflections, SSAO, kMAIN copy and water, after DCLF's main opaque.
+		// Commits just before DCLF's forward epoch. The water steps are gated and do nothing when no water is in view.
 		{ .id = StageId::Deferred,
 			.owner = Owner::Cs,
 			.name = "deferred+water",
@@ -272,19 +234,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.epochs = { Own(StageSegment(SegmentId::Deferred)), Placed(Anchor::DeferredPasses), Placed(Anchor::DeferredComposite), Placed(Anchor::PostComposite),
 				Placed(Anchor::EngineDraws) } },
 		{ .id = StageId::Forward, .owner = Owner::Dclf, .name = "forward", .commit = "the engine's blended draw", .epochs = { Own(Segment::Forward) } },
-		// The sun stage: the rest of Main::RenderWorld after DCLF's forward epoch. First the precipitation: the engine draws its rain and snow
-		// in the main pass's blended draws (FinishAccumulatingPostResolveDepth's blended draw, the grouped alphas), and DCLF's forward epoch is
-		// submitted at that draw's start, before the engine's own blended draws (Features/Forward's ForwardHooks.cpp). So each precipitation
-		// draw comes after the deferred+water stage's commit, and before the sun query. Then the sun occlusion query
-		// (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), which must run on the GPU before the first-person geometry, which would occlude the
-		// sun: a stage of its own between DCLF's forward and first-person graphs, committed just before the first-person epoch is submitted
-		// (BeforeGpuWork) or at a later stage's first tap. The sun's client has two instances (the world's and first person's query); a stage
-		// run's k-th tap is instance k. The precipitation's draws are frame inputs, recorded in the stage's late batch. The deferred+water
-		// stage commits at the blended draw in every world frame (Features/Forward's hook), not only when DCLF's forward epoch runs, so this
-		// window is open for the sun's query in a frame before DCLF draws too. Under water the engine's blended draw comes first in
-		// FinishAccumulatingPostResolveDepth (its call at +0x51, before the water), so the deferred+water stage commits before the water: the
-		// kMAIN copy, the water's draws, the water targets' clears and the water blend are this stage's steps then (the same clients as the
-		// deferred+water stage's, after the precipitation). Above water that stage takes them, and these steps skip.
+		// Sun: precipitation draws, then the sun occlusion query, which must reach the GPU before first-person geometry occludes the sun.
+		// Commits before the first-person epoch. Under water the engine's blended draw comes first, so the water steps land here instead.
 		{ .id = StageId::Sun,
 			.owner = Owner::Cs,
 			.name = "sun",
@@ -304,17 +255,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work; at the latest RenderWorldPostProcess' entry (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Sun)), Placed(Anchor::EngineQueries) } },
 		{ .id = StageId::FirstPerson, .owner = Owner::Dclf, .name = "first person", .commit = "Main::RenderFirstPersonView", .epochs = { Own(Segment::FirstPerson) } },
-		// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). First the first person's sun query
-		// (Main::RenderFirstPersonView, after DCLF's first-person epoch), as the sun's client's instance 0 of this stage's run. The volumetric
-		// lighting (whole: its hook runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), the PostProcessing anchor
-		// (reserved so its hook always runs; no client), the Upscale anchor (the upscaler's evaluate as a pass recorded at execution, the copy
-		// into kMAIN, the depth upscale), RenderEndOfFrameEffects (99023 / 105674) as CS passes split at the Tonemap anchor (its passes replace
-		// or follow the tonemap draw, so they sit between the HDR effect's draws and the tonemap's), and its return as the end (a point: no
-		// anchor runs there). Nothing else submits GPU work between the first tap and the end (the census counts any that does). Before the
-		// query, the engine's kMAIN copy that Main::RenderFirstPersonView makes after DCLF's first-person epoch in some cells (every frame on
-		// Solstheim, the worldspace run). Frame generation's hudless copy keeps its anchor's ticket (frame generation is off in native mode).
-		// The upscaler's evaluate is a pass recorded at execution in both modes: in guest it records into DXVK's command buffer inside the
-		// stage's block (ORGUpscaling's EvaluatePass).
+		// Post: RenderWorldPostProcess (SE 100430, AE 107148). First person's sun query, VL, the pre-tonemap composite, upscale and tonemap.
+		// Ends at a point at RenderEndOfFrameEffects' return. The upscaler's evaluate is recorded at execution in both modes.
 		{ .id = StageId::Post,
 			.owner = Owner::Cs,
 			.name = "post",
@@ -337,27 +279,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
 				Placed(Anchor::ImageSpace), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
 				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
-		// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the screen blood (a world frame's
-		// Main::RenderScreenSplatter, which Main::Draw calls after RenderWorldPostProcess returned, so after the post stage's end:
-		// docs/development/p5/blood-splatter.md), the frozen frame's composite (Main::Render; a menu over a frozen world only, which has no
-		// screen blood), the frame's first clears, displays, the shadow map's and a menu scene's clears, the scene's depth (Drawcall Limit
-		// Fix's menu depth batch), the shadow mask, the depth copy and the kMAIN copy, the scene's colour, its composite (UI3DSceneManager::
-		// Render's end-of-frame call, ImageSpace's MenuSteps.inl), the main depth's clear again, more displays, the player's face tint at a
-		// load (in a loading screen's frame), the present's clients, the overlay and the capture. A world frame's menu scene (an inventory
-		// item model, the local map) comes after the post stage, between the menu's displays, and takes the same steps.
-		// - Clears are passes at three places, each a client of the frame and shadow clear groups (Engine/Skeleton): the stage's start, the
-		//   scene's start and after the composite. The engine clears the main depth three times a loading screen's frame and kMAIN twice; the
-		//   engine's call stages each clear into the place it comes at.
-		// - Scaleform's displays: each display segment is a tap and an instance of the Scaleform client, its draw list a frame input recorded
-		//   in the late batch. The displays before a scene are instances 8 to 15; once a later step tapped, they are instances 0 to 7, after
-		//   the scene. A frame without a scene draws every display as instances 8 to 15.
-		// - The screen blood's draw list, the scene's draw lists, the composites' constants, a Bink movie's tiles (queued by the movie's tick)
-		//   and the capture (native mode's capture point is just before the stage's commit, Hooks.cpp) are frame inputs, recorded in the
-		//   stage's late batch. What a frame does not use skips at execution, its barriers folded.
-		// - The depth copy is the stage's own gated client (cs.engine.skeleton.depth-copy@ui): the pre-main stage copies the main depth in
-		//   every world frame, this one only when the engine's call asks.
-		// It ends at a point: just before the present (Hooks.cpp), or before HDR output, which follows the overlay on the GPU and keeps its
-		// anchor's ticket. (A Bink frame's clear of the main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
+		// UI, in every frame kind: screen blood, menu scenes, Scaleform displays, clears at three places, the present's clients, overlay and capture.
+		// Ends at a point just before the present, or before HDR output, which keeps its own ticket.
 		{ .id = StageId::Ui,
 			.owner = Owner::Cs,
 			.name = "UI",
@@ -415,14 +338,8 @@ namespace RenderGraph::Frame::Recipes::Table
 	inline constexpr std::array<StageId, kStages> kWorldStages{ StageId::Start, StageId::Shadows, StageId::PreDepth, StageId::Depth, StageId::PreMain, StageId::Opaque,
 		StageId::Deferred, StageId::Forward, StageId::Sun, StageId::FirstPerson, StageId::Post, StageId::Ui };
 
-	/**
-	 * @brief The frame kinds' recipes (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"). The world, and a frozen
-	 * world's capture frame, which draws the world once: every stage. Every other frame (a menu over a frozen world after its capture frame,
-	 * the main menu and any frame before the player has 3D, a loading screen's frame, a Bink movie's) has the UI stage alone. It holds, in
-	 * the engine's order: the frozen frame's composite, the first clears, the displays before a menu's scene, the scene's clears, its
-	 * depth, shadow mask, depth and kMAIN copies, colour and composite, the main depth's last clear, the displays after the scene, the
-	 * present's clients (a Bink movie's tiles), the overlay and the capture. A CS stage a kind does not list is absent from its frames.
-	 */
+	/** @brief The frame kinds' recipes. A world frame and a frozen world's capture frame have every stage.
+	*  Every other kind has the UI stage alone. A stage a kind does not list is absent from its frames. */
 	inline constexpr std::array<KindRecipe, 6> kKinds{ {
 		{ Kind::World, Capture::Any, kWorldStages, kStages },
 		{ Kind::FrozenWorld, Capture::Yes, kWorldStages, kStages },
@@ -442,16 +359,9 @@ namespace RenderGraph::Frame::Recipes::Table
 	}
 
 	/**
-	 * @brief Resources a stage reads before the stage that first writes them in the frame: the previous frame's contents, each checked by
-	 * hand against the stage that writes it. Exact graph resource names.
-	 * - written by forward or post and read earlier in the next frame: the refraction normals, the underwater mask, the water displacement
-	 *   pair and the water flow map (the water surface), kMAIN_COPY (the water surface);
-	 * - written by the deferred stages and read by the start stage's face sky: the sky's IBL and Terrain Blending's blended depth;
-	 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the UI stage);
-	 * - the dynamic cubemaps the deferred stage compresses, read by the start stage's face sky.
-	 * Drawcall Limit Fix's stages are not held to it: their graphs declare the whole binding table their shaders may read (the light lists,
-	 * the shadow mask, the luminance chain), so they "read" much that CS writes later; the check counts those apart.
-	 */
+	* @brief Resources a stage reads before the stage that writes them, so it reads the previous frame's contents. Checked by hand.
+	* DCLF's stages are exempt, since their graphs declare the whole binding table their shaders may read.
+	*/
 	inline constexpr std::array<std::string_view, 11> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
 		"Engine::kMAIN_COPY", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY" };
@@ -529,8 +439,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				if (static_cast<std::uint32_t>(stage.segment) != cs++)
 					return false;
 				const auto steps = StepCount(stage);
-				// Every anchor step names its clients (a whole step with no client is a hook that only ends nothing: the PostProcessing anchor),
-				// and the last step ends the stage.
+				// Every anchor step names its clients, and the last step ends the stage.
 				if (steps == 0 || (!stage.steps[steps - 1].point && stage.steps[steps - 1].anchor == Anchor::Count))
 					return false;
 				for (std::uint32_t k = steps; k < kMaxSteps; ++k)

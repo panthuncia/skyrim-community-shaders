@@ -21,7 +21,7 @@ namespace RenderGraph::Frame::Resources
 			return entries;
 		}
 
-		/** @brief Everything but the size: what a new version of a versioned texture must keep. */
+		/** @brief Everything but the size, which a new version of a versioned texture must keep. */
 		bool SameClass(const D3D11_TEXTURE2D_DESC& a_left, const D3D11_TEXTURE2D_DESC& a_right)
 		{
 			return a_left.Format == a_right.Format && a_left.MipLevels == a_right.MipLevels && a_left.ArraySize == a_right.ArraySize &&
@@ -39,13 +39,12 @@ namespace RenderGraph::Frame::Resources
 			auto& texture = *found->second.texture;
 			const auto& desc = texture.Desc();
 			if (SameClass(desc, a_desc) && desc.Width == a_desc.Width && desc.Height == a_desc.Height) {
-				// Its own size again drops a size it asked for before.
+				// Asking for its own size again drops an earlier size request.
 				if (versioned)
 					texture.RequestSize(a_desc.Width, a_desc.Height);
 				return { found->second.texture, false };
 			}
-			// A new size of a versioned texture is the slot's next version from the next frame boundary, before the new registration's
-			// build can switch in.
+			// A new size becomes the slot's next version at the next frame boundary, before the new registration's build can switch in.
 			if (versioned && SameClass(desc, a_desc)) {
 				texture.RequestSize(a_desc.Width, a_desc.Height);
 				logger::info("[ORG] frame resources: {} takes {}x{} at the next frame boundary (a new version of its slot)", a_name, a_desc.Width, a_desc.Height);

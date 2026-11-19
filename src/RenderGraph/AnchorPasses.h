@@ -37,33 +37,20 @@ namespace RenderGraph
 }
 
 /**
- * @brief The common passes of a frame anchor client, made from plain descriptions: a fullscreen draw, a compute dispatch, a whole
- * texture copy, a UAV clear and a buffer-to-texture upload. Generalised from Post Processing's chain builder (ORGPostEffect.h), with
- * the anchor, the pass names and the order keys as parameters, so a port lists its steps instead of writing a pass class for each.
- *
- * Each pass is made from an immutable spec when its anchor's graph is built; its revision is that spec, so its recording is kept.
- * Per-frame values reach a pass through the client's latch (Bind::Latch) and its run gate (Draw::gate, Dispatch::gate): the commit
- * writes them, the recording stays the same.
- *
- * Use: a client's Setup makes a Builder, adds its steps, and registers ClientDesc{ .passes = builder.Take(), ... } with
- * .sharedConstants = builder.ReadsSharedConstants() and its gate in .gates. Render thread, at setup or a rebuild.
- *
- * Translation units that include this header include <rhi_interop_vulkan.h> first (volk before any Vulkan header).
- */
+* @brief Common passes for frame anchor clients, made from plain descriptions: fullscreen draw, dispatch, copy, UAV clear and upload.
+*
+* A port lists its steps instead of writing a pass class for each. Each pass is made from an immutable spec at its anchor's build,
+* and its revision is that spec, so its recording is kept. Per-frame values arrive through the client's latch and run gate.
+* Use a Builder in the client's Setup and register ClientDesc{ .passes = builder.Take() } with its shared constants and gate.
+* Include <rhi_interop_vulkan.h> before this header.
+*/
 namespace RenderGraph::AnchorPasses
 {
 	/** @brief A Bind or target that covers every mip of its texture (the texture's default view). */
 	inline constexpr std::uint32_t kAllMips = UINT32_MAX;
 
-	/**
-	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): Srv and Uav are declared
-	 * resources (the whole texture or one mip), Published a read of a published resource by its id (PublishedResources.h: the
-	 * default view, ordered after its producer's writes in any epoch), Handle a sampler or another descriptor index, Latch a LATCH
-	 * entry's two words (an offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h). An Srv or a
-	 * Published read may ask for a view variant (a texture array's whole-array view: its default view is its first slice).
-	 * Srv and Uav take a FrameAnchors::Texture: an import's slot (declared as the slot, so a new version needs no build) or any graph
-	 * resource (a shared_ptr converts to a plain one).
-	 */
+	/** @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h).
+	*  Srv and Uav declare a texture or one mip. Published reads by id. Handle, Latch and Shared pass descriptor indices or offsets. */
 	struct Bind
 	{
 		enum class Kind : std::uint8_t
@@ -82,7 +69,7 @@ namespace RenderGraph::AnchorPasses
 		std::uint32_t mip = kAllMips;        // Srv and Uav: the one mip the view covers, or the default view
 		std::string id;                      // Published: the id (PublishedResources::IsDeclarable at the build)
 		std::uint32_t variant = UINT32_MAX;  // Srv and Published: the view variant (org::SRVViewType), UINT32_MAX for the default view
-		// Srv and Uav of a versioned twin: its slot, declared in place of resource, so a resize is a new version (GraphResources.h).
+		// A versioned twin's slot, declared in place of resource, so a resize is a new version.
 		std::shared_ptr<org::VersionedTexture> slot;
 
 		static Bind Srv(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip = kAllMips) { return Of(Kind::Srv, a_texture, a_mip); }
@@ -94,10 +81,7 @@ namespace RenderGraph::AnchorPasses
 		{
 			return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id), a_variant };
 		}
-		/**
-		 * @brief An Srv or Uav of a graph twin: its slot when it is versioned (GraphResources::Options::versioned), else its graph
-		 * resource. A versioned twin's passes declare it this way, never through Graph().
-		 */
+		/** @brief An Srv or Uav of a graph twin, its slot when versioned, else its graph resource. Versioned twins never use Graph(). */
 		static Bind Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips);
 		static Bind Uav(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips);
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
@@ -115,10 +99,7 @@ namespace RenderGraph::AnchorPasses
 		}
 	};
 
-	/**
-	 * @brief A fullscreen raster pass: a_program's pixel stage over the viewport, into one target (or one mip of it), with an
-	 * optional depth-stencil attachment, scissor and viewport of its own.
-	 */
+	/** @brief A fullscreen raster pass into one target or mip, with an optional depth-stencil attachment, scissor and viewport. */
 	struct Draw
 	{
 		std::string name;  // the step: the pass is "<prefix>.<name>"
@@ -132,13 +113,12 @@ namespace RenderGraph::AnchorPasses
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		std::array<float, 4> clear{};  // with LoadOp::Clear
 		std::optional<std::uint32_t> gate;  // the builder's run gate entry: the draw happens only on runs whose commit opened it
-		// The depth-stencil attachment (an import's slot or any graph resource), for a program with a depth format. Loaded and
-		// stored. Read only (PassBuilder::DepthRead) unless the program's depth state writes depth or stencil.
+		// The depth-stencil attachment, for a program with a depth format. Loaded and stored.
+		// Read-only unless the program's depth state writes depth or stencil.
 		FrameAnchors::Texture depth;
 		bool depthReadOnly = true;
 		std::uint32_t stencilReference = 0;  // the stencil test's and REPLACE's reference (RasterProgram::DrawDesc)
-		// The draw's own viewport and scissor inside the render area (RasterProgram::DrawDesc::dynamicViewport and scissor). The
-		// viewport may reach past the target: TEXCOORD0 then spans it as the engine's viewport would.
+		// The draw's own viewport and scissor inside the render area. The viewport may reach past the target, as the engine's would.
 		std::optional<rhi::Viewport> dynamicViewport;
 		std::optional<rhi::ScissorRect> scissor;
 	};
@@ -154,10 +134,8 @@ namespace RenderGraph::AnchorPasses
 		std::optional<std::uint32_t> latchArgs;  // three uints at this offset of the builder's latch (replace groups)
 	};
 
-	/**
-	 * @brief A copy of a whole texture's first mip into another of the same size and format. With a gate entry, the copy happens only on
-	 * runs whose commit opened it (any Open call with work): the pass is recorded at execution and records nothing else (gated).
-	 */
+	/** @brief A copy of a whole texture's first mip into another of the same size and format.
+	*  With a gate entry it copies only on runs whose commit opened it, and is recorded at execution. */
 	struct Copy
 	{
 		std::string name;
@@ -175,27 +153,18 @@ namespace RenderGraph::AnchorPasses
 		std::optional<std::array<std::uint32_t, 4>> uintValue;  // set: a uint clear instead (integer formats)
 	};
 
-	/** @brief A graph twin as a handle: its slot when it is versioned (GraphResources::Options::versioned), else its graph resource. */
+	/** @brief A graph twin as a handle, its slot when versioned, else its graph resource. */
 	FrameAnchors::Texture TextureOf(const GraphResources::Resource& a_twin);
 
-	/**
-	 * @brief A Clear of a graph twin: its slot when it is versioned (GraphResources::Options::versioned), else its graph resource.
-	 * The caller sets the value. A versioned twin's clears are made this way, never with Graph().
-	 */
+	/** @brief A Clear of a graph twin, declared as its slot when versioned. The caller sets the value. */
 	Clear ClearOf(std::string a_name, const GraphResources::Resource& a_twin);
 
-	/**
-	 * @brief A Copy between two graph twins, each declared as its slot when it is versioned. The size is baked into the pass: a
-	 * resize of either twin needs the client registered again.
-	 */
+	/** @brief A Copy between two graph twins, each declared as its slot when versioned. The size is baked in, so a resize needs a new registration. */
 	Copy CopyOf(std::string a_name, const GraphResources::Resource& a_source, const GraphResources::Resource& a_target, std::uint32_t a_width,
 		std::uint32_t a_height);
 
-	/**
-	 * @brief A copy from a host-written staging buffer into one subresource of a texture, laid out by a_footprint (rows at the
-	 * copy's pitch). The staging buffer is the pass's to keep alive; it is not a graph resource, so the client writes it once, before
-	 * registering, and never while a run with the pass may read it.
-	 */
+	/** @brief A copy from a host-written staging buffer into one texture subresource. The pass keeps the buffer alive.
+	*  It is not a graph resource, so write it once before registering and never while a run may read it. */
 	struct Upload
 	{
 		std::string name;
@@ -205,12 +174,8 @@ namespace RenderGraph::AnchorPasses
 		std::uint32_t mip = 0, slice = 0;
 	};
 
-	/**
-	 * @brief Collects one client's passes for one anchor: names "<prefix>.<step>", order keys from a_orderBase upward in the order
-	 * the steps are added. The latch (Bind::Latch, Dispatch::latchArgs) and the run gate (Draw::gate, Dispatch::gate) are the
-	 * client's; either may be null when no step uses it. A step that cannot be made fails the builder (logged by the caller through
-	 * Failure); Take returns what was added.
-	 */
+	/** @brief Collects one client's passes for one anchor, named "<prefix>.<step>" with rising order keys.
+	*  A step that cannot be made fails the builder. Take returns what was added. */
 	class Builder
 	{
 	public:
@@ -227,10 +192,7 @@ namespace RenderGraph::AnchorPasses
 		/** @brief An upload, always a one-shot pass: it runs at the anchor's next run, and again after FrameAnchors::Rearm. */
 		void Add(Upload a_upload);
 
-		/**
-		 * @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. a_atExecution: recorded
-		 * after the run's commit (FrameAnchors::PassDesc::atExecution), where its SkipsAtExecution may leave the run out.
-		 */
+		/** @brief A custom pass, made at each graph build of the anchor. a_atExecution records it after the run's commit. */
 		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once = false,
 			bool a_atExecution = false);
 

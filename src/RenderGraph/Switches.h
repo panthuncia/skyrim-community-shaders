@@ -6,41 +6,33 @@
 #include <vector>
 
 /**
- * @brief CS's environment switches (CS_ORG_*, CS_GPU_*, the diagnostics), read once.
+ * @brief CS's environment switches, read once.
  *
- * Each switch is read from the process environment the first time any accessor asks for it, and that value is kept for the
- * session: a later change to the environment is not seen. CommunityShaders.env sets the environment before any switch is read
- * (XSEPlugin.cpp), so the file and the real environment both reach these accessors. Every switch is listed in
- * docs/development/render-graph.md, "Switches".
- *
- * Callable from any thread. A switch read on a hot path should still be kept in a local static: each call takes a lock.
+ * Each switch keeps the value it had when first read, so later environment changes are not seen.
+ * CommunityShaders.env is applied before any switch is read. Every switch is listed in docs/development/render-graph.md.
+ * Any thread. Each call takes a lock, so keep a hot-path switch in a local static.
  */
 namespace Switches
 {
-	/** @brief The switch's value as it was first read, whole at any length; empty when it is unset. */
+	/** @brief The value as first read, empty when unset. */
 	std::string Value(std::string_view a_name);
 
-	/** @brief Whether the switch is set to a non-empty value. */
 	bool IsSet(std::string_view a_name);
 
-	/** @brief Whether the switch's value is exactly a_value. */
 	bool Equals(std::string_view a_name, std::string_view a_value);
 
-	/** @brief Whether the switch's value is a_value, ignoring ASCII case. */
+	/** @brief Whether the value is a_value, ignoring ASCII case. */
 	bool EqualsNoCase(std::string_view a_name, std::string_view a_value);
 
-	/** @brief Whether the switch is "1": an opt-in diagnostic or path. */
+	/** @brief Whether the switch is "1", an opt-in. */
 	inline bool On(std::string_view a_name) { return Equals(a_name, "1"); }
 
-	/** @brief Whether the switch is "0": an opt-out of a default. */
+	/** @brief Whether the switch is "0", an opt-out of a default. */
 	inline bool Off(std::string_view a_name) { return Equals(a_name, "0"); }
 
-	/** @brief The switch as an unsigned number; a_default when it is unset or not a number. */
+	/** @brief a_default when unset or not a number. */
 	std::uint64_t Number(std::string_view a_name, std::uint64_t a_default = 0);
 
-	/**
-	 * @brief The switch as a comma-separated list: each item with the white space around it removed, empty items left out, case
-	 * kept. Empty when the switch is unset. For lists of names or numbers ("CS_DISABLE_FEATURES=Skylighting, SSGI").
-	 */
+	/** @brief A comma-separated list with items trimmed and empty items dropped. Empty when unset. */
 	std::vector<std::string> List(std::string_view a_name);
 }

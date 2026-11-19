@@ -14,35 +14,25 @@
 /**
  * @brief The C++ side of dual-target shaders (package/Shaders/Common/OrgResources.hlsli).
  *
- * Under ORG such a shader reads its resources through handles in its push block (a cbuffer at b0). A pass mirrors that block in a
- * struct: one Handle per SRV, UAV, SAMPLER, CBUFFER and EXTERN entry of the shader's list and one Latch per LATCH entry, in list
- * order (a SHARED entry is SharedConstants::Handles, four words), then each PUSH struct as an alignas(16) member. At record time
- * it fills the handles from its declared views (RecordingContext::Index) and pushes the block with ComputeProgram::Dispatch or
- * RasterProgram::DrawDesc::constants:
+ * Under ORG a shader reads its resources through handles in its push block. A pass mirrors that block in a struct, in the
+ * shader's list order, and pushes it at record time:
  *
  *     struct DiffuseIBLBlock { ShaderBindings::Handle envTexture, iblTexture, linearSampler; };
  *     program = ComputeProgram::Load(device, { .source = "IBL/DiffuseIBLCS.hlsl", .constantWords = ShaderBindings::Words<DiffuseIBLBlock>() });
  *     DiffuseIBLBlock block{ a_recording.Index(env), a_recording.Index(ibl), sampler.Index() };
  *     program->Dispatch(a_recording, ShaderBindings::Data(block), 1, 1, 1);
  *
- * Samplers are not graph resources: create one per program with CreateSampler at setup and keep the binding while the program lives.
- *
- * Values that change every frame go in a LATCH entry: the client's commit writes them into its org::LatchBlock at the host's current
- * run (GraphHost::CurrentRun), and Record names the run's region with LatchOf(block, a_recording.Run()). The recording does not depend
- * on the values, so it can be prepared ahead.
+ * Per-frame values go in a LATCH entry, so the recording does not depend on them and can be prepared ahead.
  */
 namespace ShaderBindings
 {
-	/**
-	 * @brief The largest push block, in 32-bit words: 128 bytes, Vulkan's guaranteed maxPushConstantsSize. D3D12's root signature
-	 * holds 64, so the same block fits there as root constants.
-	 */
+	/** @brief The largest push block in 32-bit words. 128 bytes is Vulkan's guaranteed minimum, and D3D12 root constants hold 64. */
 	inline constexpr std::uint32_t kMaxPushWords = 32;
 
-	/** @brief A descriptor-heap index: what a shader's OrgHandle_<name> reads. */
+	/** @brief A descriptor-heap index, read by a shader's OrgHandle_<name>. */
 	using Handle = std::uint32_t;
 
-	/** @brief The words of a push block. A compile error when the block is not whole words or is above kMaxPushWords. */
+	/** @brief A compile error when the block is not whole words or is above kMaxPushWords. */
 	template <class Block>
 	constexpr std::uint32_t Words()
 	{
@@ -52,51 +42,37 @@ namespace ShaderBindings
 		return sizeof(Block) / sizeof(std::uint32_t);
 	}
 
-	/** @brief A LATCH entry's two words: the latch block's raw view, then the byte offset of the struct in it. */
+	/** @brief The latch block's raw view, then the byte offset of the struct in it. */
 	struct Latch
 	{
 		Handle handle = 0;
 		std::uint32_t offset = 0;
 	};
 
-	/**
-	 * @brief A LATCH entry for a latch block's region of a run (Record: a_recording.Run()), a_offset bytes into it: the view of the
-	 * arena chunk the region is in, and the region's offset there. The offset must be a multiple of 4.
-	 */
+	/** @brief A LATCH entry for a latch block's region of a run, a_offset bytes in. The offset must be a multiple of 4. */
 	inline Latch LatchOf(const org::LatchBlock& a_block, const org::RunRef& a_run, std::uint32_t a_offset = 0)
 	{
 		const auto region = a_block.At(a_run);
 		return { region.srvIndex, static_cast<std::uint32_t>(region.offset) + a_offset };
 	}
 
-	/** @brief A push block as the words ComputeProgram::Dispatch and RasterProgram::DrawDesc::constants take. */
 	template <class Block>
 	std::span<const std::uint32_t> Data(const Block& a_block)
 	{
 		return { reinterpret_cast<const std::uint32_t*>(&a_block), Words<Block>() };
 	}
 
-	/**
-	 * @brief A sampler in the graph's sampler heap, for a SAMPLER entry: its Index() is the handle. Render thread, with the runtime
-	 * active. Empty, logged, when there is no descriptor service or the backend cannot create the sampler.
-	 */
+	/** @brief A sampler in the graph's sampler heap. Render thread, with the runtime active. Empty and logged on failure. */
 	org::OwnedDescriptorBinding CreateSampler(const rhi::SamplerDesc& a_desc);
 
-	/**
-	 * @brief The rhi sampler a D3D11 sampler description makes: filters (point, linear, anisotropic, comparison, minimum and
-	 * maximum), address modes, LOD bias and range, and the border colour (a BorderPreset when it is transparent black, opaque
-	 * black or opaque white, else Custom). The one converter for every port whose D3D11 path made a D3D11_SAMPLER_DESC.
-	 */
+	/** @brief Converts a D3D11 sampler description, the one converter for every port. */
 	rhi::SamplerDesc SamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc);
 
-	/** @brief CreateSampler of SamplerFromD3D11(a_desc): a sampler described as D3D11 describes it. */
 	inline org::OwnedDescriptorBinding CreateSamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
 
 	/**
-	 * @brief A shader resource view of a resource the graph does not track (a_resource stays alive through a_owner), in the graph's
-	 * descriptor heap: its Index() is the handle. The descriptor names the resource's shader-read layout, so the caller keeps the
-	 * resource there whenever a shader may read it. Render thread, with the runtime active. Empty, logged, when there is no
-	 * descriptor service or the backend cannot create the view.
+	 * @brief An SRV in the graph's heap for a resource the graph does not track. a_owner keeps the resource alive.
+	 * The caller must keep the resource in its shader-read layout whenever a shader may read it. Render thread. Empty on failure.
 	 */
 	org::OwnedDescriptorBinding CreateShaderResourceView(rhi::Resource a_resource, std::shared_ptr<const void> a_owner, const rhi::SrvDesc& a_desc);
 }

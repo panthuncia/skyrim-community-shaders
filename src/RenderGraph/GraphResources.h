@@ -22,42 +22,15 @@ namespace org
 }
 
 /**
- * @brief Graph-backed twins of Buffer.h's wrappers, for features whose GPU work moves onto the render graph (docs/development/render-graph.md,
- * "Graph-backed feature resources").
- *
- * Each twin owns an ORG resource named as the D3D11 wrapper would name its resource ("Feature::Name"). A feature's anchor client registers
- * it (Register, from ClientDesc::registerResources) and its passes declare Graph() as they declare any graph resource. While a D3D11 reader
- * remains (an engine draw binding it as a PS SRV, a feature not ported yet), the twin also exports D3D11 views of the same memory, named
- * "Feature::Name SRV" / "UAV" / "RTV" as Buffer.h names them.
- *
- * Rules:
- * - A transient resource is aliasable: the graph may place it in memory it shares with others whose lifetimes do not overlap. Its first use
- *   in each frame must be a write, and nothing may read it in a later frame.
- * - An exported resource is never aliasable, whatever its lifetime: D3D11's use of it lies outside the graph, which would otherwise reuse
- *   its memory across that use. A resource becomes aliasable again when its last D3D11 reader is ported and the export is dropped.
- * - An exported texture is a host-owned graph texture whose home state is the layout DXVK rests it in: every epoch gives it back in
- *   that layout, as for DXVK's own images (DxvkImageImport).
- * - Teardown and Resize release the D3D11 views and texture first, then hand the graph resource to RenderGraphRuntime::ReleaseAfterD3D11,
- *   which frees it once the GPU is past every D3D11 command issued until then. Graph builds still holding it keep it alive themselves.
- * - A versioned texture (Options::versioned) keeps one org::VersionedTexture, its slot (Versioned()), for its whole life. Its passes
- *   declare the slot, never Graph(). A Resize of the same shape class (format, mip count, slice count) publishes the new texture as a
- *   new version of the slot: nothing is built again, and the passes keep declaring the same slot. The D3D11 export is made again
- *   with the texture, so a D3D11 reader takes SRV(), UAV() or D3D11() again after a Resize.
- * - Any other Resize (a twin that is not versioned, an aliasable one, or another mip count) bumps the resize generation
- *   (ResizeGeneration). At their next run the frame anchors see it and build their graphs again (RequestStructuralRebuild), and
- *   PublishedResources publishes the new resource under the twin's id: the owner calls nothing. Passes read Graph() when they
- *   are made (ClientDesc's make), never keep one across builds.
- * - A new version may be published only at a frame boundary, because a stage's recording binds the versions current at the
- *   frame's Begin. During a frame a feature calls RequestSize, which Frame::Driver::AtNextBegin applies as a Resize.
- *   Until then the twin keeps its size and Desc(), and that frame takes its sizes from Desc(). A failed resize there stops the game.
- *
- * Everything here runs on the render thread. Constructors never throw: a twin that could not be created is false (logged), and the feature
- * keeps its D3D11 path.
- *
- * Constant buffers have no twin here: a pass's constants are a LatchBlock (org::LatchBlock) or push constants, as in ORGLightCulling.cpp.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Graph-backed twins of Buffer.h's wrappers, for features whose GPU work moved onto the render graph.
+*
+* Each twin owns an ORG resource named "Feature::Name". Passes declare Graph(), or Versioned() for a versioned texture.
+* While a D3D11 reader remains, the twin also exports D3D11 views of the same memory, and an exported resource is never aliased.
+* A transient's first use each frame must be a write, and nothing may read it in a later frame.
+* Teardown and Resize release the D3D11 side first, then free the graph resource after D3D11's last use.
+* A same-shape Resize of a versioned texture is a new version. Any other Resize triggers a graph rebuild by itself.
+* New versions are published only at a frame boundary, so during a frame use RequestSize. Everything runs on the render thread.
+*/
 namespace GraphResources
 {
 	/** @brief How long a resource's contents live (docs/development/org-aliasing-port-priorities.md, "Lifetime classes"). */
@@ -87,41 +60,27 @@ namespace GraphResources
 	{
 		Lifetime lifetime = Lifetime::Transient;
 		Export d3d11 = Export::None;
-		// A transient's own alias pool (ORG's manual pool id): aliased only with the resources that name the same pool, never with
-		// another graph's. Unset: the shared automatic pool. A diagnostic (CS_ORG_SSGI_DEBUG=17).
+		// A transient's own alias pool, aliased only with resources naming the same pool. Unset means the shared pool. A diagnostic.
 		std::optional<std::uint64_t> aliasPool;
-		// A texture whose passes declare only its slot (Resource::Versioned) or its published id, never Graph(). A Resize of the same
-		// shape class is then a new version, not a graph build. Not for a transient: the graph places those at its builds.
+		// Passes declare only the slot or published id, so a same-shape Resize is a new version, not a graph build. Not for transients.
 		bool versioned = false;
 	};
 
-	/**
-	 * @brief The one way a resource identity change asks for a structural graph build: a new resource, or a resource of another shape
-	 * class (format, mip count, slice count), that no version can stand for. Logged as "[ORG] structural rebuild". a_epochs empty:
-	 * every epoch. Render thread. Phase 4 moves these builds off the render thread; this is where that switch goes.
-	 */
+	/** @brief The one way to ask for a structural graph build after a resource identity change no version covers. Render thread.
+	*  An empty a_epochs means every epoch. */
 	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs = {});
 
 	/** @brief How many structural rebuilds RequestStructuralRebuild asked for this session. */
 	std::uint64_t StructuralRebuilds();
 
-	/**
-	 * @brief Whether a live aliasable twin (Lifetime::Transient, not exported) has this graph resource name: written before any read in the
-	 * frame, its memory shared with others otherwise. The recipe's
-	 * check finds a present pass that reads one no present pass of its stage writes. Any thread.
-	 */
+	/** @brief Whether a live aliasable twin has this graph resource name. Any thread. */
 	bool IsTransientName(std::string_view a_name);
 
 	/** @brief Notes a transient twin's name while it lives (Resource's constructor and destructor). */
 	void NoteTransientName(const std::string& a_name, bool a_live);
 
-	/**
-	 * @brief What ExportTexture makes an image from: the D3D11 texture's shape and format, and the format of each view the graph
-	 * makes of it. DXGI_FORMAT_UNKNOWN leaves that view out.
-	 *
-	 * The texture's format may be typeless when a view gives the typed one, as the engine's depth targets do (R24G8_TYPELESS with a
-	 * D24_UNORM_S8_UINT DSV). The image is made in the DSV's format when there is one, else in the texture's own.
-	 */
+	/** @brief What ExportTexture makes an image from. DXGI_FORMAT_UNKNOWN leaves a view out.
+	*  A typeless texture takes its DSV's format, as the engine's R24G8_TYPELESS depth targets need. */
 	struct ExportDesc
 	{
 		D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
@@ -147,14 +106,8 @@ namespace GraphResources
 		std::uint64_t image = 0;  // the VkImage, for readers that hold DXVK's description of it
 	};
 
-	/**
-	 * @brief The exported-texture path of the twins, for an owner that makes its own D3D11 views (the engine's render targets,
-	 * RenderGraph/Engine/Targets). A BasicRHI image the graph sees as a host-owned texture whose home is the layout DXVK rests it in,
-	 * wrapped for D3D11 by the DXVK fork (dxvkCreateTextureFromVkImage).
-	 *
-	 * The caller keeps the image alive while D3D11 may use it: it hands the graph resource to RenderGraphRuntime::ReleaseAfterD3D11
-	 * once the D3D11 texture and its views are gone. Render thread, with the runtime active. Logged and empty on any failure.
-	 */
+	/** @brief Exports a graph texture for an owner that makes its own D3D11 views, such as engine targets. Render thread. Empty on failure.
+	*  The caller keeps the image alive while D3D11 may use it, then hands it to ReleaseAfterD3D11. */
 	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name);
 
 	/** @brief One subresource's bytes for an upload (Texture2D::Stage, Texture3D::Stage): rows of texels, or of 4x4 blocks. */
@@ -165,18 +118,10 @@ namespace GraphResources
 		UINT slicePitch = 0;  // rowPitch times the rows
 	};
 
-	/**
-	 * @brief A twin texture's contents staged for a copy: a host-visible buffer the CPU filled once and never writes again, and the
-	 * subresource copies out of it. Immutable. MakeUploadPass makes the pass that copies it.
-	 */
+	/** @brief A twin texture's contents in a host-visible buffer, written once by the CPU. Immutable. */
 	struct StagedUpload;
 
-	/**
-	 * @brief A copy pass for a client's make: each staged upload's buffer declared as a copy source and its texture as a copy
-	 * destination, so the graph orders and tracks the write, in guest and native mode alike. It copies on every run it is in, so a
-	 * client gives it as a one-shot pass (FrameAnchors::PassDesc::once), or keeps it only until a run with it was submitted. Null
-	 * entries are left out.
-	 */
+	/** @brief A copy pass for staged uploads. It copies on every run it is in, so give it as a one-shot pass. Null entries are skipped. */
 	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads);
 
 	/** @brief What every twin shares: the graph resource, its name and its exported views. */
@@ -192,16 +137,10 @@ namespace GraphResources
 		/** @brief The graph resource passes declare; null when the twin could not be created. */
 		const std::shared_ptr<org::Resource>& Graph() const { return graph; }
 
-		/**
-		 * @brief The slot a versioned texture's passes declare (Options::versioned); null for any other twin, and when the twin could
-		 * not be created. The same object across every Resize of the same shape class.
-		 */
+		/** @brief The slot a versioned texture's passes declare, the same across same-shape Resizes. Null otherwise. */
 		const std::shared_ptr<org::VersionedTexture>& Versioned() const { return slot; }
 
-		/**
-		 * @brief Registers the graph resource by name with a graph being built (ClientDesc::registerResources). A versioned texture
-		 * registers its slot as the name's resolver, so a declaration by name follows its versions.
-		 */
+		/** @brief Registers the graph resource by name with a graph being built. A versioned texture registers its slot as the resolver. */
 		void Register(org::RenderGraph& a_graph) const;
 
 		Lifetime GetLifetime() const { return options.lifetime; }
@@ -222,19 +161,13 @@ namespace GraphResources
 		/** @brief Releases the D3D11 export, then the graph resource once D3D11's last use is done (ReleaseAfterD3D11). */
 		void Reset();
 
-		/**
-		 * @brief A token that expires when the twin is destroyed: a holder of a pointer to the twin (PublishedResources) checks it
-		 * before reading the twin again.
-		 */
+		/** @brief A token that expires when the twin is destroyed, for holders of a pointer to it. */
 		std::weak_ptr<const void> Alive() const { return alive; }
 
 		/** @brief Bumped by every Resize of any twin: what the anchors and PublishedResources compare to notice one. */
 		static std::uint64_t ResizeGeneration();
 
-		/**
-		 * @brief The names of what bumped the resize generation past a_since, joined with commas, for the anchors' log line.
-		 * Only the last few bumps are kept. "unknown" when none of them is newer than a_since.
-		 */
+		/** @brief What bumped the resize generation past a_since, for the log. Only the last few are kept. */
 		static std::string ResizeCauses(std::uint64_t a_since);
 
 	protected:
@@ -257,17 +190,11 @@ namespace GraphResources
 		/** @brief Called by a Resize that made a new resource. a_who names it in the anchors' log line (ResizeCauses). */
 		static void BumpResizeGeneration(std::string_view a_who);
 
-		/**
-		 * @brief RequestSize's work. a_size becomes the twin's next size and a_resize runs at the next frame boundary if the twin lives.
-		 * With a_current set a_size is the size the twin has, which drops an earlier request.
-		 */
+		/** @brief RequestSize's work. a_resize runs at the next frame boundary if the twin lives. a_current drops an earlier request. */
 		void RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize);
 
-		/**
-		 * @brief After Create: the slot of a versioned texture. With a_previous (the slot before a Resize) and a_sameShape, the new
-		 * texture is published as its next version and true is returned: nothing needs a build. Otherwise a new slot is made (or none,
-		 * for a twin that is not versioned) and false is returned: the caller bumps the resize generation.
-		 */
+		/** @brief After Create, sets up a versioned texture's slot. Returns true when the new texture became a_previous's next version.
+		*  False means the caller must bump the resize generation. */
 		bool AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape);
 
 		/** @brief AdoptSlot's work, without telling the made-image registry (RenderGraph::SetMadeImageSlot) about the slot. */
@@ -288,17 +215,9 @@ namespace GraphResources
 	};
 
 	/**
-	 * @brief A graph texture, the twin of Buffer.h's Texture2D.
-	 *
-	 * The D3D11 description says what the graph texture is: its size, mips, array size, typed format, and views (SRV always, UAV, RTV,
-	 * DSV from the bind flags; D3D11_RESOURCE_MISC_TEXTURECUBE for a cube). Usage must be DEFAULT, without CPU access. An exported
-	 * texture's D3D11 views are the whole texture in its own format.
-	 *
-	 * A depth texture (D3D11_BIND_DEPTH_STENCIL) is a single 2D texture with one sample, in a typeless format as the engine's depth
-	 * targets are: R16, R24G8, R32 or R32G8X24_TYPELESS. The graph image and the DSV take the depth format (D16_UNORM, D24_UNORM_S8_UINT,
-	 * D32_FLOAT, D32_FLOAT_S8X24_UINT), the SRV the format that reads the depth (R16_UNORM, R24_UNORM_X8_TYPELESS, R32_FLOAT,
-	 * R32_FLOAT_X8X24_TYPELESS). It has no RTV or UAV. Export::DSV exports its depth-stencil view, for D3D11 draws into it.
-	 */
+	* @brief A graph texture, the twin of Buffer.h's Texture2D. The D3D11 description defines it. Usage must be DEFAULT.
+	* A depth texture uses a typeless format such as R24G8_TYPELESS. The image and DSV take the depth format, the SRV the read format.
+	*/
 	class Texture2D : public Resource
 	{
 	public:
@@ -310,32 +229,18 @@ namespace GraphResources
 		ID3D11Texture2D* D3D11() const { return static_cast<ID3D11Texture2D*>(d3d11.get()); }
 		ID3D11RenderTargetView* RTV() const { return rtv.get(); }
 
-		/**
-		 * @brief Stages the texture's contents for a copy pass (MakeUploadPass), in place of a D3D11 UpdateSubresource or
-		 * CopyResource beside the graph.
-		 *
-		 * One entry per subresource, slice-major (D3D11CalcSubresource's order: slice * mips + mip); an entry without data is left
-		 * as it is. a_width and a_height are mip 0's extent the entries hold, written at the top-left corner (each mip's halves);
-		 * 0 takes the texture's. The bytes are copied before this returns. Any thread. Null, logged, without a graph or when the
-		 * texture or the staging buffer could not be made.
-		 */
+		/** @brief Stages contents for MakeUploadPass, one entry per subresource in D3D11CalcSubresource order. Empty entries are skipped.
+		*  a_width and a_height default to the texture's mip 0 size. Bytes are copied before return. Any thread. Null on failure. */
 		std::shared_ptr<const StagedUpload> Stage(std::span<const SubresourceData> a_subresources, UINT a_width = 0, UINT a_height = 0) const;
 
 		/** @brief Stage of zeros into every subresource: texels or blocks of zero bytes, as DXVK's new images hold. */
 		std::shared_ptr<const StagedUpload> StageZeros() const;
 
-		/**
-		 * @brief Recreates the texture at a new size (a resolution change), the export first released. A versioned texture of the same
-		 * mip count becomes the slot's next version: nothing else to call. Otherwise call FrameAnchors::Refresh. Only at a frame
-		 * boundary. During a frame use RequestSize.
-		 * @return Whether it was recreated; false, with nothing changed, when the size is the same.
-		 */
+		/** @brief Recreates the texture at a new size. Same-shape versioned textures become a new version, else call FrameAnchors::Refresh.
+		*  Only at a frame boundary. Returns false when the size is unchanged. */
 		bool Resize(UINT a_width, UINT a_height);
 
-		/**
-		 * @brief The size the texture takes at the next frame boundary through Resize. Until then it keeps its size and Desc().
-		 * Its own size drops an earlier request. Render thread, at any point of a frame.
-		 */
+		/** @brief The size the texture takes at the next frame boundary. Render thread, at any point of a frame. */
 		void RequestSize(UINT a_width, UINT a_height);
 
 	private:
@@ -367,10 +272,7 @@ namespace GraphResources
 		D3D11_TEXTURE3D_DESC desc;
 	};
 
-	/**
-	 * @brief A graph structured buffer, the twin of Buffer.h's StructuredBuffer: a_count elements of a_desc.StructureByteStride bytes,
-	 * with a UAV when a_desc's bind flags have one. Its exported views are structured views of every element.
-	 */
+	/** @brief A graph structured buffer, the twin of Buffer.h's StructuredBuffer. Exported views cover every element. */
 	class StructuredBuffer : public Resource
 	{
 	public:
@@ -383,10 +285,7 @@ namespace GraphResources
 		UINT count = 0;
 	};
 
-	/**
-	 * @brief A graph buffer of a_desc.ByteWidth bytes, the twin of Buffer.h's Buffer (raw or typed). The graph sees a plain buffer; an
-	 * exported one takes D3D11 views as Buffer.h's do (CreateSRV, CreateUAV).
-	 */
+	/** @brief A graph buffer, the twin of Buffer.h's raw or typed Buffer. An exported one takes D3D11 views through CreateSRV and CreateUAV. */
 	class Buffer : public Resource
 	{
 	public:
@@ -399,11 +298,7 @@ namespace GraphResources
 		bool CreateUAV(const D3D11_UNORDERED_ACCESS_VIEW_DESC& a_desc);
 	};
 
-	/**
-	 * @brief The twins' self-test (CS_ORG_GRAPHRES_SELFTEST=1): a compute pass at the DeferredPasses anchor writes an exported graph
-	 * texture, D3D11 copies it into a staging texture right after the epoch, and the value read back is logged once. Then the texture is
-	 * resized and checked again, which also releases the first one through ReleaseAfterD3D11. Render thread.
-	 */
+	/** @brief The twins' self-test, CS_ORG_GRAPHRES_SELFTEST=1. Writes, reads back, resizes and checks an exported texture. */
 	namespace SelfTest
 	{
 		/** @brief Whether CS_ORG_GRAPHRES_SELFTEST=1 is set. */
@@ -412,10 +307,7 @@ namespace GraphResources
 		/** @brief Before the render graph initializes: when requested, reserves DeferredPasses. */
 		void Reserve();
 
-		/**
-		 * @brief At a frame's end with the runtime active (RenderGraphRuntime::SignalFramePace), once: when requested, makes the test's program and texture and registers its client, an
-		 * ordinary one. Its executed callback copies the texture through its export after each run and checks the last copy.
-		 */
+		/** @brief Once at a frame's end, makes the test's program and texture and registers its client. */
 		void Setup();
 	}
 }

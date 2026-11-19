@@ -56,13 +56,12 @@ namespace RenderGraph::AnchorPasses
 			return std::ranges::any_of(a_bindings, [](const Bind& a_bind) { return a_bind.kind == Bind::Kind::Shared; });
 		}
 
-		/** @brief One mip of a texture, for a pass that reads or writes that mip alone. */
 		org::ResourcePtrAndRange MipOf(const std::shared_ptr<org::Resource>& a_texture, std::uint32_t a_mip)
 		{
 			return org::Subresources(a_texture, org::Mip(a_mip, 1));
 		}
 
-		/** @brief A versioned twin's slot as a declaration: the whole texture, or one mip of it. */
+		/** @brief A versioned twin's slot as a declaration, of the whole texture or one mip. */
 		org::ResourceResolverAndRange SlotOf(const org::VersionedTexture& a_slot, std::uint32_t a_mip)
 		{
 			org::ResourceResolverAndRange declared(a_slot);
@@ -73,7 +72,7 @@ namespace RenderGraph::AnchorPasses
 			return declared;
 		}
 
-		/** @brief A pass's declared entries: a view for each Srv and Uav entry (empty for the others), and the shared buffers. */
+		/** @brief A view for each Srv and Uav entry, empty for the others, and the shared buffers. */
 		struct DeclaredBindings
 		{
 			std::vector<org::DeclaredViewToken> views;
@@ -148,7 +147,7 @@ namespace RenderGraph::AnchorPasses
 			return words;
 		}
 
-		/** @brief What a pass is made from at a build: the step and the client's latch and gate. Immutable. */
+		/** @brief What a pass is made from at a build. Immutable. */
 		template <class Step>
 		struct Spec
 		{
@@ -180,7 +179,7 @@ namespace RenderGraph::AnchorPasses
 			DrawBindings Declare(org::PassBuilder& a_builder)
 			{
 				const auto& draw = spec->step;
-				// An import's slot is declared as the slot (one mip of it through its range), a plain resource as itself.
+				// An import's slot is declared as the slot, a plain resource as itself.
 				auto view = draw.mip == kAllMips ? a_builder.RenderTarget(draw.target).View() :
 				            draw.target.Slot()   ? a_builder.RenderTarget(SlotOf(*draw.target.Slot(), draw.mip), org::RtvView{ .mip = draw.mip }).View() :
 				                                   a_builder.RenderTarget(MipOf(draw.target.Plain(), draw.mip), org::RtvView{ .mip = draw.mip }).View();
@@ -198,8 +197,7 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Draw> Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
-			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated draw whose entry the run's commit left closed does
-			// nothing, so it is not recorded. A clear of its target is work of its own, so a draw that clears is always recorded.
+			// A gated draw left closed this run is not recorded. A draw that clears its target is always recorded.
 			static bool SkipsAtExecution(const DrawBindings&, const SpecFrame<Draw>& a_frame, const org::PassRecordContext& a_recording)
 			{
 				const auto& spec = *a_frame.spec;
@@ -260,8 +258,7 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Dispatch> Prepare(const DispatchBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
-			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated dispatch whose entry the run's commit left closed is
-			// not recorded.
+			// A gated dispatch left closed this run is not recorded.
 			static bool SkipsAtExecution(const DispatchBindings&, const SpecFrame<Dispatch>& a_frame, const org::PassRecordContext& a_recording)
 			{
 				const auto& spec = *a_frame.spec;
@@ -307,11 +304,10 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Copy> Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
-			// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+			// Its commands depend on the run only through SkipsAtExecution, so a kept late batch keeps its list.
 			static constexpr bool kRecordKeyedBySkip = true;
 
-			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated copy whose entry the run's commit left closed is not
-			// recorded.
+			// A gated copy left closed this run is not recorded.
 			static bool SkipsAtExecution(const CopyBindings&, const SpecFrame<Copy>& a_frame, const org::PassRecordContext& a_recording)
 			{
 				const auto& spec = *a_frame.spec;
@@ -330,10 +326,7 @@ namespace RenderGraph::AnchorPasses
 			std::shared_ptr<const Spec<Copy>> spec;
 		};
 
-		/**
-		 * @brief The depth format a copy into a_texture draws with: its depth-stencil view's format when it is a single-sample 2D depth
-		 * texture, else Unknown.
-		 */
+		/** @brief The depth-stencil view's format for a single-sample 2D depth texture, else Unknown. */
 		rhi::Format DepthCopyFormat(const FrameAnchors::Texture& a_texture)
 		{
 			const auto current = a_texture.Current();
@@ -364,10 +357,7 @@ namespace RenderGraph::AnchorPasses
 			return a_depthFormat == rhi::Format::D24_UNorm_S8_UInt || a_depthFormat == rhi::Format::D32_Float_S8X24_UInt;
 		}
 
-		/**
-		 * @brief The depth copy program for a depth format (RenderGraph/DepthCopy.hlsl), made once per format. Null when the device
-		 * cannot write stencil from a shader and the format has stencil: such a copy stays a transfer copy.
-		 */
+		/** @brief The depth copy program for a format, made once. Null when the format has stencil and shaders cannot write stencil. */
 		std::shared_ptr<const RasterProgram> DepthCopyProgram(rhi::Format a_depthFormat)
 		{
 			static std::mutex mutex;
@@ -415,9 +405,8 @@ namespace RenderGraph::AnchorPasses
 		};
 
 		/**
-		 * @brief A whole depth texture's copy as a fullscreen draw (Copy between depth textures). The source is read through its depth
-		 * and stencil views and the target is the depth attachment, so neither leaves a depth layout. A transfer copy into or out of a
-		 * depth image makes AMD's driver decompress it and rebuild its compression after (about 60 us a copy on the RX 6600).
+		 * @brief A depth copy as a fullscreen draw, so neither texture leaves a depth layout.
+		 * A transfer copy makes AMD's driver decompress and recompress the depth image, about 60 us a copy on the RX 6600.
 		 */
 		class DepthCopyPass final : public org::TypedRenderGraphPass<DepthCopyPass, DepthCopyFrame, DepthCopyBindings>
 		{
@@ -640,9 +629,9 @@ namespace RenderGraph::AnchorPasses
 			return;
 		}
 		const std::string step = a_copy.name;
-		// A gated copy is recorded at execution, where it skips a run that did not open its entry. A copy cannot take its work from the gate.
+		// A gated copy is recorded at execution, since a copy cannot take its work from the gate.
 		const bool atExecution = a_copy.gate.has_value();
-		// A copy between depth textures is drawn where the device can (DepthCopyPass), so both stay in depth layouts.
+		// Draw depth copies where the device can, so both textures stay in depth layouts.
 		const auto depthFormat = DepthCopyFormat(a_copy.target);
 		auto program = depthFormat != rhi::Format::Unknown && DepthCopyFormat(a_copy.source) == depthFormat ? DepthCopyProgram(depthFormat) : nullptr;
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });

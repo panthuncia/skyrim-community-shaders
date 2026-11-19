@@ -43,10 +43,9 @@ namespace SharedConstants
 		struct Buffers
 		{
 			std::array<std::shared_ptr<org::Buffer>, kBlocks> buffers;
-			std::array<std::uint32_t, kBlocks> bytes{};    // each block's size
-			std::array<std::uint32_t, kBlocks> offsets{};  // each block's offset in a latch region
-			// One latch block per upload point. A run's region in a block is allocated only when something asks for it, so a point
-			// only declared segments use costs nothing elsewhere.
+			std::array<std::uint32_t, kBlocks> bytes{};
+			std::array<std::uint32_t, kBlocks> offsets{};  // offset in a latch region
+			// One latch block per upload point. A run's region is allocated only on request, so unused points cost nothing.
 			std::array<std::shared_ptr<org::LatchBlock>, kUploadPoints> latches;
 		};
 
@@ -82,7 +81,7 @@ namespace SharedConstants
 			if (auto* state = globals::state) {
 				sources[kSharedData] = std::as_bytes(std::span(&state->lastSharedData, 1));
 				sources[kFeatureData] = state->lastFeatureData;
-				// What permutationCB holds: the last block it uploaded.
+				// permutationCB holds the last block it uploaded.
 				sources[kPermutation] = std::as_bytes(std::span(&state->permutationDataPrevious, 1));
 			}
 			return sources;
@@ -99,7 +98,6 @@ namespace SharedConstants
 			std::uint32_t point = 0;
 		};
 
-		// The execution's latch region into the four buffers.
 		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, UploadFrame, UploadBindings>
 		{
 		public:
@@ -127,7 +125,6 @@ namespace SharedConstants
 			{
 				if (!a_frame.buffers)
 					return;
-				// The run's region of the latch: its arena chunk and its offset there.
 				const auto region = a_frame.buffers->latches[a_frame.point]->At(a_recording.Run());
 				const auto source = region.buffer->GetAPIResource().GetHandle();
 				for (std::uint32_t i = 0; i < kBlocks; ++i)
@@ -140,7 +137,7 @@ namespace SharedConstants
 			std::uint32_t point = 0;
 		};
 
-		/** @brief A staging copy of a D3D11 buffer's contents now (stalls). Empty on failure. */
+		/** @brief A staging copy of a D3D11 buffer's contents now, which stalls. Empty on failure. */
 		std::vector<std::byte> ReadBack(ID3D11Buffer* a_buffer)
 		{
 			std::vector<std::byte> bytes;
@@ -195,7 +192,7 @@ namespace SharedConstants
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto* cs = globals::state;
 		if (!host || !RenderGraphRuntime::Get().IsActive() || !cs || !cs->featureDataBytes) {
-			// Asked again at each anchor run until CS's first upload sizes FeatureData: said once.
+			// Asked at each anchor run until CS's first upload sizes FeatureData, so log once.
 			static std::atomic_flag s_logged;
 			if (!s_logged.test_and_set())
 				logger::info("[ORG] Shared constants: not available yet (render graph inactive, or FeatureData not sized); their clients wait");
@@ -210,7 +207,7 @@ namespace SharedConstants
 			for (std::uint32_t i = 0; i < kBlocks; ++i) {
 				buffers->offsets[i] = regionBytes;
 				regionBytes += Align256(buffers->bytes[i]);
-				// A CBV's range is whole 256-byte rows on D3D12; the shader reads only the block.
+				// A CBV's range is whole 256-byte rows on D3D12. The shader reads only the block.
 				const std::uint32_t size = Align256(buffers->bytes[i]);
 				auto buffer = org::Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, size);
 				org::BufferBase::DescriptorRequirements views{};
@@ -268,15 +265,14 @@ namespace SharedConstants
 		if (!state.buffers || a_point >= kUploadPoints)
 			return;
 		const auto& buffers = *state.buffers;
-		// This run's region: its own, which nothing else reads.
+		// This run's own region, which nothing else reads.
 		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		const auto sources = Sources();
 		for (std::uint32_t i = 0; i < kBlocks; ++i) {
-			// A block CS has not uploaded yet stays as it was; one that grew is cut to the buffer.
+			// A block CS has not uploaded yet stays as it was. One that grew is cut to the buffer.
 			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
 			if (!bytes.empty())
 				buffers.latches[a_point]->Write(run, buffers.offsets[i], bytes);
-			// Kept for the check (a few KiB).
 			state.committed[i].assign(bytes.begin(), bytes.end());
 		}
 		state.committedThisRun = true;

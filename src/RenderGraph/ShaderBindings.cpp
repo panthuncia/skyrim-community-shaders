@@ -22,9 +22,8 @@ namespace ShaderBindings
 	namespace
 	{
 		/**
-		 * @brief The active service inside a graph callback, else the runtime's (setup, on the render thread); null without a host.
-		 * The runtime's is the one every graph uses. It exists from the host's start, before any graph is built: with synchronous
-		 * epochs no graph is built yet when the ports set up, and the first epoch's graph may be built last.
+		 * @brief The active service inside a graph callback, else the runtime's. Null without a host.
+		 * The runtime's exists from the host's start, since ports may set up before any graph is built.
 		 */
 		org::runtime::IDescriptorService* Service(std::shared_ptr<org::runtime::IDescriptorService>& a_retained)
 		{
@@ -58,7 +57,7 @@ namespace ShaderBindings
 			}
 		};
 		rhi::SamplerDesc desc{};
-		// D3D11_FILTER's bits: mip linear 0x1, mag linear 0x4, min linear 0x10, anisotropic 0x40, then the reduction in 0x180.
+		// D3D11_FILTER bits: mip linear 0x1, mag linear 0x4, min linear 0x10, anisotropic 0x40, reduction in 0x180.
 		const auto filter = static_cast<std::uint32_t>(a_desc.Filter);
 		const bool anisotropic = (filter & 0x40) != 0;
 		desc.mipFilter = (filter & 0x1) || anisotropic ? rhi::MipFilter::Linear : rhi::MipFilter::Nearest;
@@ -69,7 +68,7 @@ namespace ShaderBindings
 		case 0x80:
 			desc.compareEnable = true;
 			desc.reduction = rhi::ReductionMode::Comparison;
-			// D3D11_COMPARISON_NEVER is 1, rhi::CompareOp::Never 0, in the same order.
+			// D3D11_COMPARISON_NEVER is 1 and rhi::CompareOp::Never is 0, in the same order.
 			desc.compareOp = static_cast<rhi::CompareOp>(std::clamp<int>(a_desc.ComparisonFunc, 1, 8) - 1);
 			break;
 		case 0x100:

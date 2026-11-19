@@ -16,56 +16,43 @@
 
 namespace RenderGraph
 {
-	/** @brief Where a key of a ProgramCache is. */
 	enum class ProgramStatus : std::uint8_t
 	{
-		Missing,   // never asked for
+		Missing,
 		Building,  // queued or compiling on the build thread
-		Ready,     // built: Get returns it
-		Failed,    // the build failed (logged once); never built again
+		Ready,
+		Failed,    // logged once and never built again
 	};
 
 	namespace ProgramCacheDetail
 	{
-		/** @brief The desc's defines resolved now (CS's common defines read State: the caller's thread, never the build thread). */
+		/** @brief Resolves the desc's defines on the caller's thread, since CS's common defines read State. Never the build thread. */
 		void ResolveDefines(RasterProgram::Desc& a_desc);
 		void ResolveDefines(ComputeProgram::Desc& a_desc);
 
-		/** @brief A desc's name for the logs: its sources, entry and own defines. */
+		/** @brief A desc's name for the logs. */
 		std::string Label(const RasterProgram::Desc& a_desc);
 		std::string Label(const ComputeProgram::Desc& a_desc);
 
-		/** @brief The program built from a_desc on the calling thread (RasterProgram::Load / ComputeProgram::Load); null when it failed. */
+		/** @brief Builds a_desc on the calling thread. Null when it failed. */
 		std::shared_ptr<const RasterProgram> Load(const RasterProgram::Desc& a_desc);
 		std::shared_ptr<const ComputeProgram> Load(const ComputeProgram::Desc& a_desc);
 
-		/** @brief Queues a_job on the one program build thread (started at the first job). False after StopProgramBuilds. Any thread. */
+		/** @brief Queues a_job on the one program build thread. False after StopProgramBuilds. Any thread. */
 		bool Post(std::function<void()> a_job);
 
-		/** @brief Whether the render graph runs (a build has a device and a compiler). */
+		/** @brief Whether the render graph runs, with a device and a compiler. */
 		bool Available();
 	}
 
-	/**
-	 * @brief RenderGraphRuntime::Shutdown, before the device goes: the queued builds are dropped and the one in progress finishes.
-	 * Their keys stay Building, so nothing draws with them.
-	 */
+	/** @brief Drops queued builds before the device goes. Their keys stay Building, so nothing draws with them. */
 	void StopProgramBuilds();
 
 	/**
-	 * @brief A keyed cache of graph programs (RasterProgram or ComputeProgram) built off the render thread.
+	 * @brief A keyed cache of graph programs built off the render thread.
 	 *
-	 * Get returns the key's program once it is built, and null until then: the caller keeps the engine's (or D3D11's) draw for that
-	 * key meanwhile, and never withholds work it cannot draw yet. The first Get of a key makes its desc (a_describe, on the calling
-	 * thread, with CS's common defines resolved there) and queues the build on the one program build thread, which compiles the
-	 * shaders (or finds them in the shader store) and creates the pipeline. A failed build is logged once (with the program's
-	 * label; the compile's own error is logged by Load), and the key stays Failed: it is not built again on every call.
-	 *
-	 * Hot reload is the programs' own (RasterProgram/ComputeProgram register with the pipeline registry): a built program's pipeline
-	 * is swapped in place.
-	 *
-	 * Threads: Get, StatusOf and Clear on the render thread (the cache's map is under a mutex anyway). The build thread
-	 * only fills the key's entry.
+	 * Get returns null until the key's program is built, and the caller keeps the engine's draw meanwhile.
+	 * A failed key stays Failed and is not built again. Get, StatusOf and Clear run on the render thread.
 	 *
 	 * Usage:
 	 *   RenderGraph::ProgramCache<RasterProgram, MyKey> programs{ "Sky" };
@@ -80,10 +67,7 @@ namespace RenderGraph
 		explicit ProgramCache(std::string a_name) :
 			name(std::move(a_name)) {}
 
-		/**
-		 * @brief The key's program when built; null while it builds, when it failed, or without a render graph. The first call for a
-		 * key calls a_describe once and queues the build.
-		 */
+		/** @brief The key's program when built, else null. The first call for a key calls a_describe once and queues the build. */
 		std::shared_ptr<const Program> Get(const Key& a_key, const std::function<Desc()>& a_describe)
 		{
 			std::shared_ptr<Entry> entry;
@@ -105,10 +89,8 @@ namespace RenderGraph
 		}
 
 		/**
-		 * @brief The key's program now, for a caller that cannot go on without it (a pass made at a graph build): a built one is
-		 * returned, one queued or building is waited for, and a missing one is built on the calling thread. Null when the build
-		 * failed or without a render graph. a_builtHere is set when this call built it (the caller logs it: a program its setup
-		 * did not ask for in time). Render thread. Never call it after StopProgramBuilds: a dropped build is never finished.
+		 * @brief The key's program now, waiting for or building it on this thread. a_builtHere is set when this call built it.
+		 * Render thread. Never call it after StopProgramBuilds, since a dropped build never finishes.
 		 */
 		std::shared_ptr<const Program> GetNow(const Key& a_key, const std::function<Desc()>& a_describe, bool* a_builtHere = nullptr)
 		{
@@ -137,10 +119,7 @@ namespace RenderGraph
 			return entry->program.load(std::memory_order_acquire);
 		}
 
-		/**
-		 * @brief GetNow for the primary path's last resort (docs/development/p5/primary-path.md, rule 2): a key setup did not
-		 * queue is built on the calling thread and logged, so missing enumerations are found. Render thread.
-		 */
+		/** @brief GetNow that logs a key setup did not queue, so missing enumerations are found. Render thread. */
 		std::shared_ptr<const Program> Require(const Key& a_key, const std::function<Desc()>& a_describe)
 		{
 			bool builtHere = false;
@@ -150,7 +129,6 @@ namespace RenderGraph
 			return program;
 		}
 
-		/** @brief Where the key is: Missing, Building, Ready or Failed. */
 		ProgramStatus StatusOf(const Key& a_key) const
 		{
 			std::scoped_lock lock(mutex);
@@ -158,7 +136,7 @@ namespace RenderGraph
 			return found == entries.end() ? ProgramStatus::Missing : found->second->status.load(std::memory_order_acquire);
 		}
 
-		/** @brief Every key forgotten. A build in progress completes into an entry nobody reads. Programs callers hold stay valid. */
+		/** @brief Forgets every key. Programs callers hold stay valid. */
 		void Clear()
 		{
 			std::scoped_lock lock(mutex);
@@ -172,7 +150,7 @@ namespace RenderGraph
 			std::atomic<ProgramStatus> status{ ProgramStatus::Building };
 		};
 
-		/** @brief The entry's final state: Ready with a_program, or Failed without one. Wakes every GetNow waiting on it. */
+		/** @brief Marks the entry Ready or Failed and wakes every GetNow waiting on it. */
 		static void Finish(Entry& a_entry, std::shared_ptr<const Program> a_program)
 		{
 			const bool built = a_program != nullptr;
@@ -182,7 +160,6 @@ namespace RenderGraph
 			a_entry.status.notify_all();
 		}
 
-		/** @brief Builds a_desc into a_entry on the calling thread (the build thread, or GetNow's caller). */
 		static void Build(Entry& a_entry, const Desc& a_desc, const std::string& a_cacheName)
 		{
 			std::shared_ptr<const Program> program;

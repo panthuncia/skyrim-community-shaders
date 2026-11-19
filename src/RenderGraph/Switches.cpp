@@ -12,7 +12,7 @@ namespace Switches
 {
 	namespace
 	{
-		/** @brief The variable's whole value. A list switch can be long, so nothing is cut: the buffer grows to the value's size. */
+		/** @brief The variable's whole value, however long. */
 		std::string ReadEnvironment(const std::string& a_name)
 		{
 			std::string value(256, '\0');
@@ -24,7 +24,7 @@ namespace Switches
 					value.resize(length);
 					return value;
 				}
-				// Too small: length is the size it needs, with the terminator. The value may change between the calls.
+				// Too small. length is the size it needs with the terminator, and the value may change between calls.
 				value.assign(length, '\0');
 			}
 			logger::warn("[Switches] {} kept changing size while it was read; it is treated as unset", a_name);

@@ -20,22 +20,12 @@ namespace org
 namespace RenderGraph
 {
 	/**
-	 * @brief Host-visible staging buffers for a client's per-run CPU data (vertices, indices, constants, decoded pixels) that its pass
-	 * copies from or reads, reused instead of made and freed every run.
+	 * @brief A pool of host-visible staging buffers for a client's per-run CPU data, reused instead of made every run.
 	 *
-	 * Acquire hands out a dedicated LatchBlock (a buffer of its own, LatchBlock::CreateDedicated) of at least the size asked for. It
-	 * comes back to the pool when its last holder lets it go, and the holder that lets it go last is the recording that used it
-	 * (PassRecordContext::Retain, or a frame object the recording retains): so it returns once the GPU is done with it, never
-	 * earlier. The pool keeps up to kGameFramesInFlight times runsPerFrame spare blocks (plus one being filled), which is how many
-	 * are in flight when the anchor runs that often: a steady frame makes no block. A pool that had to make more than it keeps logs
-	 * it once (raise runsPerFrame; CS_ORG_EPOCH_STATS=1 logs each anchor's peak runs a frame).
-	 *
-	 * Sizes: a new block is the next power of two at or above max(bytes asked, minimumBytes); Acquire takes the smallest spare
-	 * block that fits. With maxBlocks set, Acquire returns null once that many exist and none is spare: the caller keeps the
-	 * engine's path for that run (Bink's decoded frames: a few blocks of one large size).
-	 *
-	 * Threads: Acquire on the render thread (a commit). Blocks come back on any thread. The pool may be destroyed with blocks still
-	 * out: they are then released when their holders let them go.
+	 * A block returns to the pool when its last holder lets it go. That holder must be the recording that used it, so the block
+	 * comes back only once the GPU is done with it. The pool keeps kGameFramesInFlight times runsPerFrame spares, so a steady
+	 * frame makes no block. With maxBlocks set, Acquire returns null when none is spare and the caller keeps the engine's path.
+	 * Acquire runs on the render thread. Blocks come back on any thread, and may outlive the pool.
 	 *
 	 * Usage: `auto staging = RenderGraph::FrameStaging::Create({ .name = "cs.scaleform.staging", .minimumBytes = 256u << 10,
 	 * .runsPerFrame = 6 });` then, in the commit,
@@ -46,16 +36,16 @@ namespace RenderGraph
 	public:
 		struct Desc
 		{
-			std::string name;                        // the blocks' debug name
+			std::string name;
 			std::uint32_t minimumBytes = 64u << 10;  // the smallest block made
-			std::uint32_t runsPerFrame = 1;          // the client's runs a frame, each holding one block (spares kept: kGameFramesInFlight times this, plus one)
-			std::uint32_t maxBlocks = 0;             // 0: no limit
+			std::uint32_t runsPerFrame = 1;          // each run holds one block
+			std::uint32_t maxBlocks = 0;             // 0 means no limit
 		};
 
 		/** @brief A pool. Any thread. */
 		static std::shared_ptr<FrameStaging> Create(Desc a_desc);
 
-		/** @brief A block of at least a_bytes, given back when its last holder lets it go; null when it cannot be made or maxBlocks are out. */
+		/** @brief A block of at least a_bytes. Null when it cannot be made or maxBlocks are out. */
 		std::shared_ptr<org::LatchBlock> Acquire(std::uint64_t a_bytes);
 
 		/** @brief Blocks that exist now, out or spare. */
@@ -77,10 +67,7 @@ namespace RenderGraph
 		std::atomic_flag churnLogged;
 	};
 
-	/**
-	 * @brief Every RunSlots alive, so a stage's commit can move what its taps stored for the frame slot's staging run onto the run that
-	 * submits it (FrameAnchors: a stage's taps commit into its staging run, org::GraphHost::EpochStagingRun). Thread-safe.
-	 */
+	/** @brief Every live RunSlots, so a stage's commit can move its staging run's values onto the run it submits. Thread-safe. */
 	class RunSlotsRegistry
 	{
 	public:
@@ -89,7 +76,6 @@ namespace RenderGraph
 			virtual void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const = 0;
 		};
 
-		/** @brief Each live RunSlots' value stored at a_from is stored at a_to instead. */
 		static void MoveAll(const org::RunRef& a_from, const org::RunRef& a_to)
 		{
 			auto& registry = Get();
@@ -115,7 +101,7 @@ namespace RenderGraph
 	private:
 		static RunSlotsRegistry& Get()
 		{
-			// Never destroyed: RunSlots in static objects remove themselves during static destruction.
+			// Never destroyed, since RunSlots in static objects remove themselves during static destruction.
 			static auto* registry = new RunSlotsRegistry;
 			return *registry;
 		}
@@ -125,12 +111,8 @@ namespace RenderGraph
 	};
 
 	/**
-	 * @brief One value per run, handed from a client's commit to the pass that records that run: the commit Stores at the host's
-	 * CurrentRun, the pass Takes at its PassRecordContext::Run. A pass without a revision is never current, so its ticket is prepared
-	 * again after the commit, for the same run: that preparation's Take finds the value. A value is found only by its own run (lease
-	 * and generation): a later run of the same lease index takes nothing. A run left unread is replaced by the next Store at its lease
-	 * index; Clear empties every entry (a pass of an older build that still holds this object then records nothing).
-	 * Thread-safe. The entries grow with the host's lease indices (the most runs in flight).
+	 * @brief One value per run, stored by a client's commit and taken by the pass that records that run.
+	 * A value is found only by its own run, so a later run of the same lease index takes nothing. Thread-safe.
 	 */
 	template <class T>
 	class RunSlots final : public RunSlotsRegistry::Entry
@@ -141,7 +123,6 @@ namespace RenderGraph
 		RunSlots(const RunSlots&) = delete;
 		RunSlots& operator=(const RunSlots&) = delete;
 
-		/** @brief A stage's commit: the value stored at a_from (its staging run) is stored at a_to (the run that submits it). */
 		void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const override
 		{
 			std::scoped_lock lock(mutex);
@@ -160,7 +141,7 @@ namespace RenderGraph
 				entries.resize(static_cast<std::size_t>(a_run.lease) + 1);
 			entries[a_run.lease] = { a_run, std::move(a_value) };
 		}
-		/** @brief The run's value, left in place: for a pass that reads it more than once (SkipsAtExecution, then Record). */
+		/** @brief The run's value, left in place for a pass that reads it more than once. */
 		std::shared_ptr<const T> Find(const org::RunRef& a_run) const
 		{
 			std::scoped_lock lock(mutex);

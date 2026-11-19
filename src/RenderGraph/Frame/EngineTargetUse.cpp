@@ -15,12 +15,11 @@ namespace RenderGraph::Frame::EngineTargetUse
 		struct Colour
 		{
 			std::uint32_t target;
-			bool dropClears;    // the engine still clears it; the clear is declared dropped
+			bool dropClears;    // the engine still clears it, and the clear is declared dropped
 			const char* users;  // who would use it, and what they use instead
 		};
 
-		// The engine targets nothing in native mode uses. Each line names what replaced the engine's use. Every target not listed
-		// here is backed: the stages and DCLF declare it, or an old native path still reaches it ("State of the native frame").
+		// The engine targets nothing in native mode uses, each with what replaced it. Every target not listed is backed.
 		constexpr std::array kColours{
 			Colour{ T::kSAO, false, "none: the image-space port draws SAO into ImageSpace::SAO (Frame::Resources)" },
 			Colour{ T::kSAO_RAWAO, false, "none: the raw AO history is ImageSpace::SAORawAO0/1 (Frame::Resources)" },
@@ -39,7 +38,7 @@ namespace RenderGraph::Frame::EngineTargetUse
 			Colour{ T::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, true, "the engine's frame clear only (dropped); SSR reads ImageSpace::SSRMaskDownsampled" },
 		};
 
-		/** @brief An engine 3D target native mode keeps without memory, by the name the engine gives it. */
+		/** @brief An engine 3D target native mode keeps without memory, by its engine name. */
 		struct Volume
 		{
 			std::string_view label;

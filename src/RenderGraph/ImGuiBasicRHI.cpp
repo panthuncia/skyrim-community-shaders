@@ -41,16 +41,15 @@ namespace ImGuiBasicRHI
 	{
 		constexpr const char* kShader = "RenderGraph/ImGui.hlsl";
 		constexpr const char* kBackendName = "imgui_impl_basicrhi";
-		// What a texture's ImTextureID is: this bit and the texture's address. A D3D11 view's address (the old backend's ids, which
-		// CS's own textures still are) never has it: user-mode addresses are below 2^47.
+		// An own texture's ImTextureID is this bit plus its address. D3D11 view addresses never have it, being below 2^47.
 		constexpr std::uint64_t kOwnTag = 1ull << 63;
 		// D3D12's copy rules, which Vulkan's satisfy: rows of a texture copy 256-byte aligned, a copy's start 512.
 		constexpr std::uint32_t kRowAlignment = 256;
 		constexpr std::uint64_t kPlacementAlignment = 512;
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		constexpr std::size_t kSpareStaging = 4;
-		// ImGui's textures the passes declare: its font atlas pages. A font atlas has one page; a resize makes a new one while the old
-		// is still drawn for a frame. A texture past the last page is not drawn (logged once).
+		// The font atlas pages the passes declare. A resize makes a new page while the old one is drawn for a frame.
+		// A texture past the last page is not drawn.
 		constexpr std::size_t kAtlasPages = 4;
 
 		// Must match DrawConstants in ImGui.hlsl.
@@ -81,11 +80,11 @@ namespace ImGuiBasicRHI
 		std::shared_ptr<org::Resource> resource;          // twin's, kept by the views and the frames
 		std::shared_ptr<org::PixelBuffer> image;          // the same resource, as a texture
 		std::uint32_t width = 0, height = 0, mips = 1;
-		// MakeTexture's: the exempt immutable class, never declared. Set before the texture is shared.
+		// MakeTexture's exempt immutable class, never declared. Set before the texture is shared.
 		bool exempt = false;
-		// ImGui's: the atlas page it is a version of (kAtlasPages: none, a placeholder). Set before the texture is shared.
+		// The atlas page it is a version of, kAtlasPages for none. Set before the texture is shared.
 		std::size_t page = kAtlasPages;
-		// The exempt class's reads: views[0] every level; views[1 + m] level m alone (with more than one level).
+		// Exempt reads. views[0] covers every level, views[1 + m] level m alone.
 		std::vector<org::OwnedDescriptorBinding> views;
 		std::vector<std::vector<std::byte>> pixels;  // render thread: MakeTexture's levels, until uploaded
 		std::atomic<bool> uploaded{ false };         // a recorded upload pass copied its whole contents
@@ -136,11 +135,8 @@ namespace ImGuiBasicRHI
 		/** @brief The frames Commit stored, one per run; each pass takes its run's from its own slots. */
 		using Slots = ::RenderGraph::RunSlots<Frame>;
 
-		/**
-		 * @brief The font atlas pages both passes declare: a fixed set of versioned textures. Each ImGui texture is a version of one
-		 * page; a page no ImGui texture holds is its own 1x1 placeholder (never drawn). Every version is RGBA8 with one level, the
-		 * pages' shape class. Made once, before the passes; the versions change at frame boundaries (PublishPages).
-		 */
+		/** @brief The font atlas pages, a fixed set of versioned RGBA8 textures. Each ImGui texture is a version of one page.
+		*  An unused page holds a 1x1 placeholder. Versions change only at frame boundaries. */
 		struct Atlas
 		{
 			std::array<std::shared_ptr<org::VersionedTexture>, kAtlasPages> pages;
@@ -241,10 +237,7 @@ namespace ImGuiBasicRHI
 			});
 		}
 
-		/**
-		 * @brief A persistent RGBA8 graph texture (GraphResources' twin, graph-only). a_views: with the views the exempt class reads
-		 * through.
-		 */
+		/** @brief A persistent graph-only RGBA8 texture. a_views adds the views the exempt class reads through. */
 		std::shared_ptr<Texture> CreateTexture(std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_mips, const std::string& a_name, bool a_views)
 		{
 			if (!a_width || !a_height)
@@ -285,7 +278,7 @@ namespace ImGuiBasicRHI
 			return texture;
 		}
 
-		/** @brief The atlas made (once per Shared): each page's placeholder as its first version. Render thread. False, logged. */
+		/** @brief Makes the atlas once, with each page's placeholder as its first version. Render thread. */
 		bool EnsureAtlas(State& a_state)
 		{
 			if (a_state.shared->atlas)
@@ -329,10 +322,7 @@ namespace ImGuiBasicRHI
 			}
 		}
 
-		/**
-		 * @brief Page a_page's next version: a_texture, or its placeholder when null. It is published at the next frame boundary, and
-		 * until then a copy into the page or a draw from it of a texture the page does not bind is left out. Render thread.
-		 */
+		/** @brief Sets a page's next version, published at the next frame boundary. Until then, work on a texture the page does not bind is skipped. */
 		void SetPage(State& a_state, std::size_t a_page, const std::shared_ptr<Texture>& a_texture)
 		{
 			a_state.nextPages[a_page] = a_texture;
@@ -353,8 +343,7 @@ namespace ImGuiBasicRHI
 
 		void DestroyTexture(State& a_state, ImTextureData& a_texture)
 		{
-			// The frames still in flight own what they draw with, and their preparations the version they bound: the texture goes
-			// when the last of them retired. Its page takes the placeholder.
+			// Frames in flight own what they draw with, so the texture goes when the last retires. Its page takes the placeholder.
 			if (const auto found = a_state.textures.find(a_texture.GetTexID()); found != a_state.textures.end()) {
 				if (const std::size_t page = found->second->page; page < kAtlasPages && a_state.pages[page] == found->second)
 					SetPage(a_state, page, nullptr);
@@ -365,10 +354,7 @@ namespace ImGuiBasicRHI
 			a_texture.SetStatus(ImTextureStatus_Destroyed);
 		}
 
-		/**
-		 * @brief An ImGui texture request answered: created, updated by rectangle, or destroyed. A texture whose whole contents no
-		 * recorded upload pass copied yet takes no rectangles: StageWholeTextures stages its whole contents, which hold them.
-		 */
+		/** @brief Answers an ImGui texture request. A texture not yet fully uploaded takes no rectangles, since StageWholeTextures restages it whole. */
 		void UpdateTexture(State& a_state, ImTextureData& a_texture, std::vector<PendingUpload>& a_uploads)
 		{
 			if (a_texture.Status == ImTextureStatus_WantCreate) {
@@ -416,10 +402,7 @@ namespace ImGuiBasicRHI
 				DestroyTexture(a_state, a_texture);
 		}
 
-		/**
-		 * @brief The whole contents of every texture no recorded upload pass copied yet, staged again each frame until one did (an
-		 * upload pass copies into a page only when the run binds that version). MakeTexture's textures leave the list once uploaded.
-		 */
+		/** @brief Restages each texture's whole contents until a recorded upload pass copied them, since a page copy needs the run to bind that version. */
 		void StageWholeTextures(State& a_state, ImDrawData& a_drawData, std::vector<PendingUpload>& a_uploads)
 		{
 			if (a_drawData.Textures)
@@ -499,10 +482,7 @@ namespace ImGuiBasicRHI
 			std::shared_ptr<const Slots> slots;
 		};
 
-		/**
-		 * @brief An exempt texture's transfer barrier: into a copy destination before its whole contents are copied (what it held
-		 * is dropped), or from there into the shader-read state it rests in after.
-		 */
+		/** @brief An exempt texture's barrier into a copy destination, or from there into the shader-read state it rests in. */
 		rhi::TextureBarrier ExemptBarrier(const Texture& a_texture, bool a_toCopy)
 		{
 			rhi::TextureBarrier barrier{};
@@ -530,13 +510,9 @@ namespace ImGuiBasicRHI
 		};
 
 		/**
-		 * @brief The frame's texture copies from its staging buffer. A static pass: it declares every atlas page as a copy
-		 * destination (the graph makes the barriers) and records nothing on a run whose frame has no upload (its run slot is empty).
-		 * A copy into a page whose bound version is not the texture's is left out; Commit stages that texture's whole contents
-		 * again until a copy of them was recorded. An exempt texture is not declared: its whole contents are copied between its own
-		 * transfer barriers, and it rests in the shader-read state after. Both passes declare every page, so the graph orders the
-		 * draw pass after this one, and a draw of the same run reads what it copied.
-		 */
+		* @brief The frame's texture copies. It declares every atlas page as a copy destination and skips copies into a page bound to another version.
+		* Exempt textures are copied between their own barriers. Both passes declare every page, so draws follow the copies.
+		*/
 		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, PassFrame, UploadBindings>
 		{
 		public:
@@ -615,12 +591,8 @@ namespace ImGuiBasicRHI
 			std::vector<org::DeclaredViewToken> pages;  // by page
 		};
 
-		/**
-		 * @brief The frame's draws onto the target. A static pass: it declares every atlas page as a shader resource (after the
-		 * upload pass) and reads ImGui's textures through those views; a draw of a texture its page does not bind this run is left
-		 * out. Exempt textures are read through their own views (Commit draws one only once its upload was recorded, or in the run
-		 * that uploads it).
-		 */
+		/** @brief The frame's draws. It reads atlas pages through its declarations and skips a texture its page does not bind this run.
+		*  Exempt textures are read through their own views once their upload was recorded. */
 		class OverlayPass final : public org::TypedRenderGraphPass<OverlayPass, PassFrame, DrawBindings>
 		{
 		public:
@@ -821,7 +793,7 @@ namespace ImGuiBasicRHI
 					UpdateTexture(state, *texture, pending);
 
 		auto frame = std::make_shared<Frame>();
-		// Every texture the draws name, before staging: the resolver may make textures (MakeTexture) whose first upload is this frame's.
+		// Resolve every texture the draws name first, since the resolver may make textures whose first upload is this frame's.
 		struct Resolved
 		{
 			std::uint32_t index = kNoIndex;
@@ -849,8 +821,7 @@ namespace ImGuiBasicRHI
 			}
 		// The whole contents of the textures not copied yet (MakeTexture's included).
 		StageWholeTextures(state, *a_drawData, pending);
-		// What the draws may read: a texture whose whole contents a recorded upload pass copied, or that this run's upload pass
-		// copies before them. Nothing reads a texture before its first upload.
+		// Draws may read only textures already uploaded, or uploaded by this run's pass.
 		std::unordered_set<const Texture*> staged;
 		for (const auto& upload : pending)
 			if (upload.whole)
@@ -952,7 +923,7 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!a_target || !RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		// The draw list is the run's: recorded after its commit, by the anchor's epoch or by the UI stage's late batch at each submission.
+		// The draw list is the run's, so it records after the commit.
 		const bool late = FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay) || FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
 		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, late);
 	}

@@ -14,7 +14,7 @@ namespace RenderGraph::RunShapes
 {
 	namespace
 	{
-		/** @brief A 64-bit mix (splitmix64's finalizer): sums of mixed values make an order-free set hash. */
+		/** @brief splitmix64's finalizer. Sums of mixed values make an order-free set hash. */
 		std::uint64_t Mix(std::uint64_t a_value)
 		{
 			a_value += 0x9E3779B97F4A7C15ull;
@@ -26,14 +26,12 @@ namespace RenderGraph::RunShapes
 		constexpr std::size_t kMaxWindowShapes = 4096;
 		constexpr std::size_t kMaxWindowSequences = 4096;
 
-		/** @brief One ordered run sequence of an anchor: the frames that ran it, and how many runs it has. */
 		struct Sequence
 		{
 			std::uint64_t frames = 0;
 			std::uint32_t runs = 0;
 		};
 
-		/** @brief One anchor in one window. */
 		struct AnchorWindow
 		{
 			const char* name = "?";
@@ -41,9 +39,9 @@ namespace RenderGraph::RunShapes
 			std::map<std::uint32_t, std::uint64_t> runsPerFrame;  // runs a frame -> frames
 			std::uint32_t peak = 0;
 			std::uint64_t framesVaried = 0;            // frames whose runs had more than one shape
-			std::size_t mostShapesInFrame = 0;         // the most distinct shapes in one frame
-			std::unordered_set<std::uint64_t> shapes;  // distinct shapes in the window (the first kMaxWindowShapes)
-			// Frames with more than one run, by the ordered sequence of their run shapes (the first kMaxWindowSequences).
+			std::size_t mostShapesInFrame = 0;
+			std::unordered_set<std::uint64_t> shapes;  // the first kMaxWindowShapes
+			// Frames with more than one run, by their ordered shape sequence.
 			std::uint64_t framesRepeated = 0;
 			std::unordered_map<std::uint64_t, Sequence> sequences;
 		};
@@ -53,7 +51,6 @@ namespace RenderGraph::RunShapes
 			std::map<std::uint32_t, AnchorWindow> anchors;  // by anchor index
 		};
 
-		/** @brief One anchor's runs in the frame so far. */
 		struct AnchorFrame
 		{
 			const char* name = "?";
@@ -102,8 +99,7 @@ namespace RenderGraph::RunShapes
 					window, anchor.name, anchor.framesRan, anchor.peak, Median(anchor.runsPerFrame, anchor.framesRan), varies ? "varies" : "same",
 					anchor.framesVaried, anchor.mostShapesInFrame, anchor.shapes.size() >= kMaxWindowShapes ? "at least " : "", anchor.shapes.size());
 			}
-			// Run order: whether an anchor that runs several times a frame runs the same shapes in the same order every frame. Static
-			// gated passes in a fixed order can match the engine only when one sequence covers (almost) every frame.
+			// Fixed-order gated passes can match the engine only when one sequence covers almost every frame.
 			for (const auto& [index, anchor] : a_data.anchors) {
 				if (!anchor.framesRepeated)
 					continue;
@@ -154,7 +150,7 @@ namespace RenderGraph::RunShapes
 		auto& frame = state.frame[a_anchor];
 		frame.name = a_name;
 		++frame.runs;
-		// Order matters here, unlike the shape's own gate entries: each run folds into the hash of the runs before it.
+		// Order matters here, so each run folds into the hash of the runs before it.
 		frame.sequence = Mix(frame.sequence * 0x100000001B3ull ^ shape);
 		if (std::ranges::find(frame.shapes, shape) == frame.shapes.end())
 			frame.shapes.push_back(shape);

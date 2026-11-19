@@ -29,10 +29,9 @@ namespace RenderGraph::UndeclaredAccess
 	namespace
 	{
 		thread_local const char* t_epoch = nullptr;
-		thread_local bool t_declaredIndex = false;  // DeclaredIndexScope
-		thread_local bool t_declaredView = false;   // DeclaredViewScope
+		thread_local bool t_declaredIndex = false;
+		thread_local bool t_declaredView = false;
 
-		/** @brief Why an access is reported. */
 		enum class Class : std::uint8_t
 		{
 			Graph,      // an ORG resource the graph manages
@@ -43,13 +42,12 @@ namespace RenderGraph::UndeclaredAccess
 		};
 		constexpr const char* kClassNames[] = { "graph-managed", "mutable D3D11 resource", "published twin", "BasicRHI buffer by handle" };
 
-		/** @brief The resource an access names. */
 		struct Subject
 		{
-			std::uint64_t key = 0;  // identity for the tallies (a pointer, a serial, a handle or an id's hash)
+			std::uint64_t key = 0;  // identity for the tallies
 			Class type = Class::Mutable;
 			std::string name;
-			std::string detail;  // its description, for the first line
+			std::string detail;  // for the first line
 		};
 
 		struct SiteResource
@@ -67,31 +65,27 @@ namespace RenderGraph::UndeclaredAccess
 			std::unordered_map<std::uint64_t, SiteResource> resources;
 		};
 
-		/** @brief Why an access was skipped, or that it is reported. */
 		enum class Outcome : std::uint8_t
 		{
-			Report,     // undeclared: counted by site
+			Report,     // counted by site
 			Exempt,     // immutable by its description or ORG's ownership
-			Immutable,  // an ORG resource its creator noted immutable after creation (NoteImmutable)
-			Feedback,   // a host feedback buffer (NoteHostFeedback): written without order, read only by the CPU
+			Immutable,  // noted immutable by its creator
+			Feedback,   // written without order, read only by the CPU
 			Unknown,    // nothing could describe it
 		};
 
 		struct Window
 		{
 			std::map<std::string, Site> sites;                       // by source location
-			std::uint64_t exempt = 0;                                // exempt accesses skipped (Immutable ones too)
-			std::uint64_t immutable = 0;                             // of those, ORG resources noted immutable after creation
-			std::uint64_t unknown = 0;                               // accesses to a resource nothing could describe (skipped)
-			std::uint64_t feedback = 0;                              // refs of host feedback buffers (skipped)
-			std::unordered_map<std::string, std::uint64_t> interim;  // declared (interim index) lookups, by published id (or raw view source)
+			std::uint64_t exempt = 0;                                // Immutable ones too
+			std::uint64_t immutable = 0;
+			std::uint64_t unknown = 0;
+			std::uint64_t feedback = 0;
+			std::unordered_map<std::string, std::uint64_t> interim;  // interim index lookups, by published id
 			std::uint64_t interimCount = 0;
 		};
 
-		/**
-		 * @brief ORG resources noted by their creators (NoteImmutable, NoteHostFeedback), weakly: an entry whose resource is gone answers
-		 * no, so a new resource at the same address is not taken for it. Pruned of gone entries when it doubles.
-		 */
+		/** @brief ORG resources noted by their creators, held weakly so a new resource at the same address is not taken for one. */
 		struct NotedRegistry
 		{
 			std::mutex lock;
@@ -138,7 +132,7 @@ namespace RenderGraph::UndeclaredAccess
 			}
 		}
 
-		/** @brief Whether native mode's write census saw the immediate context write the resource behind a_object since it was made. */
+		/** @brief Whether native mode's write census saw the immediate context write a_object's resource since it was made. */
 		bool WrittenSince(const void* a_object)
 		{
 			if (!a_object || !Engine::Native::Active())
@@ -181,7 +175,6 @@ namespace RenderGraph::UndeclaredAccess
 			return "on another thread (scene workers, the import thread or the graph host's recording)";
 		}
 
-		/** @brief A D3D11 object's debug name: a handle's, else its private data's. */
 		std::string NameOf(ID3D11DeviceChild* a_object)
 		{
 			if (!a_object)
@@ -195,7 +188,6 @@ namespace RenderGraph::UndeclaredAccess
 			return {};
 		}
 
-		/** @brief a_typed's description's bind flags and usage. */
 		template <class Desc, class Typed>
 		void TakeDesc(Typed* a_typed, std::uint32_t& a_bind, std::uint32_t& a_usage)
 		{
@@ -205,13 +197,12 @@ namespace RenderGraph::UndeclaredAccess
 			a_usage = static_cast<std::uint32_t>(desc.Usage);
 		}
 
-		/** @brief The D3D11 description's bind flags, usage and dimension (any mode). False when it has none. */
+		/** @brief False when the resource has no D3D11 description. */
 		bool DescriptionOf(ID3D11Resource* a_resource, std::uint32_t& a_bind, std::uint32_t& a_usage, std::uint32_t& a_dimension)
 		{
 			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 			a_resource->GetType(&dimension);
 			a_dimension = static_cast<std::uint32_t>(dimension);
-			// A resource of a dimension is that interface: the casts are COM's single inheritance.
 			switch (dimension) {
 			case D3D11_RESOURCE_DIMENSION_BUFFER:
 				TakeDesc<D3D11_BUFFER_DESC>(static_cast<ID3D11Buffer*>(a_resource), a_bind, a_usage);
@@ -230,7 +221,7 @@ namespace RenderGraph::UndeclaredAccess
 			}
 		}
 
-		/** @brief Whether the description is "immutable-looking": a texture bound SRV-only, or a buffer bound VB/IB-only. */
+		/** @brief Whether the description looks immutable, a texture bound SRV-only or a buffer bound VB/IB-only. */
 		bool ShapeExempt(std::uint32_t a_bind, std::uint32_t a_dimension)
 		{
 			if (a_dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
@@ -240,13 +231,10 @@ namespace RenderGraph::UndeclaredAccess
 			return a_bind == D3D11_BIND_SHADER_RESOURCE;
 		}
 
-		/**
-		 * @brief The subject of an access to a D3D11 resource (a_object: the handle the site passed, a view or the resource), or why it is
-		 * skipped.
-		 */
+		/** @brief The subject of an access to a D3D11 resource, or why it is skipped. */
 		Outcome SubjectOf(ID3D11Resource* a_resource, const void* a_object, Subject& a_out)
 		{
-			// An ORG resource behind the handle: the graph's own rule, then its creator's note, which the write census overrides.
+			// For an ORG resource, the graph's rule first, then its creator's note. The write census overrides the note.
 			for (const void* object : { a_object, static_cast<const void*>(a_resource) }) {
 				if (const auto graph = object ? Engine::Tripwire::GraphResourceOf(object) : nullptr) {
 					if (!graph->IsRenderGraphManaged())
@@ -266,7 +254,7 @@ namespace RenderGraph::UndeclaredAccess
 				Engine::Native::ResourceFacts facts;
 				if (!Engine::Native::DescribeForCensus(a_object, facts))
 					return Outcome::Unknown;
-				// D3D11 refuses every write to an IMMUTABLE resource, whatever its binding (a structured buffer too).
+				// D3D11 refuses every write to an IMMUTABLE resource, whatever its binding.
 				if (facts.usage == D3D11_USAGE_IMMUTABLE)
 					return Outcome::Exempt;
 				if (facts.initialData && !facts.written && ShapeExempt(facts.bindFlags, facts.dimension))
@@ -280,8 +268,7 @@ namespace RenderGraph::UndeclaredAccess
 			} else {
 				if (!a_resource || !DescriptionOf(a_resource, bind, usage, dimension))
 					return Outcome::Unknown;
-				// Guest mode does not know the initial data: an SRV-only or VB/IB-only DEFAULT resource is taken as immutable. An IMMUTABLE
-				// one is, whatever its binding: D3D11 refuses every write to it.
+				// Guest mode does not know the initial data, so an SRV-only or VB/IB-only DEFAULT resource is taken as immutable.
 				if (usage == D3D11_USAGE_IMMUTABLE || (usage == D3D11_USAGE_DEFAULT && ShapeExempt(bind, dimension)))
 					return Outcome::Exempt;
 				a_out.key = reinterpret_cast<std::uintptr_t>(a_resource);
@@ -385,7 +372,7 @@ namespace RenderGraph::UndeclaredAccess
 		if (!a_view)
 			return;
 		if (t_declaredView) {
-			// The caller's pass declares the read and binds its declared view; the raw index is only the fallback until that build is attached.
+			// The raw index is only the fallback until the build that declares the read is attached.
 			auto& state = Get();
 			std::lock_guard guard(state.lock);
 			auto& window = state.windows.Active();
@@ -394,7 +381,7 @@ namespace RenderGraph::UndeclaredAccess
 			return;
 		}
 		winrt::com_ptr<ID3D11Resource> resource;
-		// A native view keeps its resource (no tripwire call); DXVK's answers it as D3D11 does.
+		// A native view keeps its resource with no tripwire call. DXVK's answers as D3D11 does.
 		a_view->GetResource(resource.put());
 		Subject subject;
 		const auto outcome = SubjectOf(resource.get(), a_view, subject);
@@ -420,7 +407,7 @@ namespace RenderGraph::UndeclaredAccess
 			Count(a_where, a_what, nullptr, Outcome::Immutable);
 			return;
 		}
-		// Written without order and read only by the CPU: no GPU pass reads it, so there is nothing for a declaration to order.
+		// No GPU pass reads it, so there is nothing for a declaration to order.
 		if (Noted(Feedbacks(), &a_resource)) {
 			Count(a_where, a_what, nullptr, Outcome::Feedback);
 			return;
@@ -436,7 +423,7 @@ namespace RenderGraph::UndeclaredAccess
 	void NotePublished(std::string_view a_id, std::source_location a_where)
 	{
 		if (t_declaredIndex) {
-			// The reader declared the id: the graph orders the read; only the index is not the declared view's yet.
+			// The graph already orders the declared read. Only the index is not the declared view's yet.
 			auto& state = Get();
 			std::lock_guard guard(state.lock);
 			auto& window = state.windows.Active();

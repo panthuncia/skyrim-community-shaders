@@ -95,8 +95,7 @@ namespace PrefixSum
 				commands.BindPipeline(scan.Pipeline());
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.Dispatch(constants.blocks, 1, 1);
-				// The block sums and local offsets must be complete before the second dispatch reads them. One pass with a barrier
-				// rather than two passes: the second dispatch reads and writes the offsets the first wrote.
+				// One pass with a barrier rather than two passes, since the second dispatch reads and writes the offsets the first wrote.
 				const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 				commands.Barriers(rhi::BarrierBatch{ {}, {}, { &global, 1 } });
 				const auto& offsets = *a_frame.programs->blockOffsets;

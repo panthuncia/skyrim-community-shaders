@@ -22,10 +22,9 @@
 
 namespace DCLF
 {
-	// Features/DrawcallLimitFix/Core/Scene/FrameView: whether Drawcall Limit Fix draws the world now. Render thread.
+	// Whether DCLF draws the world now. Render thread.
 	bool DrawsWorld();
-	// Features/DrawcallLimitFix/Core/Render/FrameDriver: Drawcall Limit Fix's build point, run at Renderer::Begin before the frame's
-	// description, so a build attaches before the schedule is chosen. Its scene-frame start then skips it for this frame.
+	// DCLF's build point. It runs before the frame's description so a build attaches before the schedule is chosen.
 	void BuildPointAtFrameStart(std::uint64_t a_frame);
 }
 
@@ -38,53 +37,51 @@ namespace RenderGraph::Frame::Driver
 
 		constexpr std::uint32_t kScheduled = static_cast<std::uint32_t>(Scheduled::Count);
 
-		/** @brief Per segment, since the last report: taps, recordings asked for, the schedule's switches and how frames ran. */
+		/** @brief Per segment counts since the last report. */
 		struct SegmentCounts
 		{
-			std::uint64_t declared = 0;    // frames whose description contained the segment
-			std::uint64_t taps = 0;        // end taps that fired in such a frame
-			std::uint64_t recordings = 0;  // recordings asked for (a description with none yet), all at a Begin
-			std::uint64_t late = 0;        // recordings asked for after a Begin (mid-frame re-records: the rule says none)
-			std::uint64_t switches = 0;    // schedule switches (per frame slot)
-			std::array<std::uint64_t, kScheduled> scheduled{};  // frames by how the segment ran (Scheduled)
+			std::uint64_t declared = 0;
+			std::uint64_t taps = 0;        // end taps that fired in a declared frame
+			std::uint64_t recordings = 0;  // all asked at a Begin
+			std::uint64_t late = 0;        // mid-frame re-records, which should never happen
+			std::uint64_t switches = 0;    // per frame slot
+			std::array<std::uint64_t, kScheduled> scheduled{};
 			std::uint64_t absentTaps = 0;  // taps in frames without a schedule
 			std::uint64_t lagged = 0;      // work left out because the schedule lagged
 			std::uint64_t buildSwitches = 0;  // staged builds switched in whole with their recordings
-			std::uint64_t keyBuilds = 0;      // builds asked for because the stage's key changed (absent passes)
-			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran (a build or a switch blanked it)
-			std::uint64_t stagedAskedAgain = 0;  // the most recordings of one staged build asked for again (the starvation rule's count)
+			std::uint64_t keyBuilds = 0;      // builds asked for because the stage's key changed
+			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran
+			std::uint64_t stagedAskedAgain = 0;  // the starvation rule's count
 		};
 
-		/** @brief The switches' lag, in frames since a slot began to wait for the description: 0, 1, 2, 3, 4-7, 8-15, 16 and more. */
+		/** @brief Lag buckets in frames since a slot began to wait for the description. */
 		constexpr std::array<std::uint64_t, 7> kLagBuckets{ 0, 1, 2, 3, 4, 8, 16 };
 
 		struct State
 		{
 			bool installed = false;
-			// The frame being drawn and the one before it. OnBegin writes them inside Renderer::Lock, the render owner reads them.
+			// OnBegin writes these inside Renderer::Lock, the render owner reads them.
 			Description current{};
 			Description previous{};
 			bool began = false;
 			std::array<bool, kSegments> tapped{};
-			bool captured = false;  // the engine's frozen background is drawn (its gIsInMenuMode2): no more capture until no menu freezes it
-			// The freeze test's answer at Begin, for the main thread's frame (FreezeTestAtBegin). Main thread only.
+			bool captured = false;  // gIsInMenuMode2, so no more capture until no menu freezes the background
+			// The freeze test's answer at Begin. Main thread only.
 			bool freezes = false;
-			std::uint64_t freezesFrame = ~0ull;  // the frame number it was decided for
-			std::uint64_t freezeChanges = 0;     // frames where the engine's own test differed from Begin's (session)
-			std::atomic<bool> loading{ false };  // between SetLoadingScreenActive(true) and the end of SetLoadingScreenActive(false)
-			// The census since the last report, and the totals.
+			std::uint64_t freezesFrame = ~0ull;
+			std::uint64_t freezeChanges = 0;     // frames where the engine's own test differed from Begin's
+			std::atomic<bool> loading{ false };  // held until the end of SetLoadingScreenActive(false)
 			std::mutex mutex;
 			std::array<std::uint64_t, kKinds> frames{};
 			std::array<SegmentCounts, kSegments> segments{};
 			std::array<std::uint64_t, kErrors> errors{};
-			std::vector<std::pair<const char*, std::uint64_t>> hosted;  // NoteHosted, by host name, since the last report
-			std::atomic<std::uint64_t> currentFrame{ 0 };  // current.frame, for other threads
-			std::atomic<std::uint64_t> loadStart{ 0 };     // the frame a loading screen started in, plus one (0: none yet)
+			std::vector<std::pair<const char*, std::uint64_t>> hosted;  // by host name, since the last report
+			std::atomic<std::uint64_t> currentFrame{ 0 };  // for other threads
+			std::atomic<std::uint64_t> loadStart{ 0 };     // the frame a loading screen started in plus one, 0 for none
 			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
-			std::vector<std::function<void()>> atNextBegin;  // AtNextBegin's work, run by the next OnBegin (render owner)
-			// NoteRecording's log lines per segment in the current window: its start, the lines logged and those left out.
+			std::vector<std::function<void()>> atNextBegin;  // run by the next OnBegin
 			struct RecordingLog
 			{
 				std::chrono::steady_clock::time_point start{};
@@ -93,15 +90,15 @@ namespace RenderGraph::Frame::Driver
 			};
 			std::array<RecordingLog, kSegments> recordingLog{};
 			std::array<RecordingLog, kSegments> switchLog{};
-			std::array<std::uint64_t, kLagBuckets.size()> lags{};       // since the last report
-			std::array<std::uint64_t, kLagBuckets.size()> lagsTotal{};  // the session's
-			std::array<bool, kErrors> errorLogged{};  // the mismatch policy's one line per kind for the session
-			std::array<bool, kSegments> everPresent{};  // the segment ran on a schedule once (session)
-			std::array<std::uint64_t, kSegments> absentAfterTotal{};  // absent frames after that (session)
-			std::unordered_map<std::string, std::uint64_t> untappable;  // NoteStepLag: per client, the frame its work last lagged with nothing on its way
+			std::array<std::uint64_t, kLagBuckets.size()> lags{};
+			std::array<std::uint64_t, kLagBuckets.size()> lagsTotal{};
+			std::array<bool, kErrors> errorLogged{};  // one line per kind for the session
+			std::array<bool, kSegments> everPresent{};  // session
+			std::array<std::uint64_t, kSegments> absentAfterTotal{};  // session
+			std::unordered_map<std::string, std::uint64_t> untappable;  // per client, the frame its work last lagged with nothing on its way
 		};
 
-		/** @brief Logs a line within a_log's window (16 a segment in 5 s), else counts it; the count is logged once the window passes. */
+		/** @brief Logs up to 16 lines a segment in 5 s and counts the rest, logging the count once the window passes. */
 		void WindowedLine(State::RecordingLog& a_log, std::string_view a_what, std::uint64_t a_frame, const std::function<void()>& a_line)
 		{
 			constexpr std::uint32_t kLines = 16;
@@ -127,10 +124,7 @@ namespace RenderGraph::Frame::Driver
 
 		thread_local bool t_inMovieTick = false;
 
-		/**
-		 * @brief BSMoviePlayer::Tick (SE 87890, AE 90259), when the Bink hooks do not detour it (CS_ORG_BINK and CS_ORG_BINK_SHOT off):
-		 * a frame it begins (no frame open: the startup logo, a blocking movie) is a Bink movie's.
-		 */
+		/** @brief BSMoviePlayer::Tick (SE 87890, AE 90259) when the Bink hooks do not detour it. A frame it begins is a Bink frame. */
 		struct PlayerTick
 		{
 			static std::uint64_t thunk(std::uintptr_t a_player, std::uintptr_t a_arg2, std::uintptr_t a_arg3, std::uintptr_t a_arg4)
@@ -142,9 +136,8 @@ namespace RenderGraph::Frame::Driver
 		};
 
 		/**
-		 * @brief The engine's own test for a frozen background: MenuManager (SE 79938, AE 82075) scans the menu stack under its lock for
-		 * a menu with kFreezeFrameBackground (IMenu flag 0x20). Main's frame (SE 35556 / AE 36555) calls it right after Begin to choose
-		 * between drawing the world and compositing the frozen frame.
+		 * @brief The engine's own frozen-background test. MenuManager (SE 79938, AE 82075) looks for kFreezeFrameBackground (0x20).
+		 * Main's frame (SE 35556 / AE 36555) calls it right after Begin.
 		 */
 		bool FreezesBackground()
 		{
@@ -157,10 +150,8 @@ namespace RenderGraph::Frame::Driver
 		}
 
 		/**
-		 * @brief The kind of the frame Begin starts on this thread. The callers of Begin (Ghidra, SE): Main's frame (35556), the loading
-		 * loop (ServingThread::RunLoadingScreen, 38085) and BSMoviePlayer::Tick when no frame is open. Main's frame draws the world
-		 * when no menu freezes the background and the player's Get3D2 (vtable +0x380) is set. With a freezing menu it draws the world
-		 * once (SE 35558 / AE 36558: also needs the player's cell) and composites that frame after.
+		 * @brief The kind of frame Begin starts on this thread. Begin is called by Main's frame (SE 35556), the loading loop (38085)
+		 * and BSMoviePlayer::Tick. The world draws when no menu freezes it and the player's Get3D2 (vtable +0x380) is set.
 		 */
 		Kind DecideKind(State& a_state, bool& a_capture)
 		{
@@ -191,10 +182,8 @@ namespace RenderGraph::Frame::Driver
 	}
 
 	/**
-	 * @brief Main's frame (SE 35556 / AE 36555) runs the freeze test again right after Begin, and its answer picks the frame's work: the
-	 * world, or the capture and the frozen composite. The menu stack can change between the two tests: a menu shown through the UI message
-	 * queue is pushed by another thread. The frame was then described as a world frame and drew the capture. This call answers what Begin
-	 * decided, so the engine draws the frame the description has. A menu pushed after Begin is seen at the next frame's Begin.
+	 * @brief Makes Main's second freeze test return what Begin decided, so the engine draws the frame the description has.
+	 * Another thread can push a menu between the two tests through the UI message queue.
 	 */
 	struct FreezeTestAtBegin
 	{
@@ -218,7 +207,7 @@ namespace RenderGraph::Frame::Driver
 		state.installed = true;
 		if (!REL::Module::IsVR())
 			stl::write_thunk_call<FreezeTestAtBegin>(REL::RelocationID(35556, 36555).address() + REL::Relocate(0x211, 0x217));
-		// The Bink hooks mark their ticks themselves; without them the driver detours the tick for the kind alone.
+		// The Bink hooks mark their own ticks. Without them this detour only reads the kind.
 		if (!REL::Module::IsVR() && !Engine::Bink::TickHooked())
 			stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
 		logger::info("[ORG] frame driver: each Renderer::Begin builds the frame's description (kind, slot, segments)");
@@ -242,7 +231,7 @@ namespace RenderGraph::Frame::Driver
 	{
 		auto& state = Get();
 		state.loading.store(a_active, std::memory_order_release);
-		// A load that starts inside a world frame ends that frame's world work where it is (LoadStartedThisFrame).
+		// A load that starts inside a world frame ends that frame's world work where it is.
 		if (a_active)
 			state.loadStart.store(state.currentFrame.load(std::memory_order_acquire) + 1, std::memory_order_release);
 	}
@@ -268,10 +257,10 @@ namespace RenderGraph::Frame::Driver
 		auto& state = Get();
 		if (!state.installed)
 			return;
-		// Work that waited for a frame boundary, before the frame's kind and schedules are decided.
+		// Work that waited for a frame boundary runs before the frame's kind and schedules are decided.
 		for (auto& work : std::exchange(state.atNextBegin, {}))
 			work();
-		// The frame before it: a declared segment whose tap never fired is a tap error.
+		// A declared segment of the last frame whose tap never fired is a tap error.
 		if (state.began)
 			for (std::uint32_t s = 0; s < kSegments; ++s) {
 				const auto& fields = state.current.segments[s];
@@ -283,21 +272,19 @@ namespace RenderGraph::Frame::Driver
 		next.slot = static_cast<std::uint32_t>(next.frame % RenderGraphRuntime::kGameFramesInFlight);
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
 		next.kind = DecideKind(state, next.capture);
-		// Native mode with segments: every build attaches at a frame boundary before the frame's schedule is chosen. Drawcall Limit
-		// Fix's build point (where its graph builds attach and are handed out) runs here for a frame that draws the world, not at
-		// Main::Draw's start after Begin. Guest keeps it at Main::Draw: its stages' builds switch in only here at Begin (staged), and the
-		// anchors' own epochs there may take a build mid-frame.
+		// In native mode every build attaches here before the schedule is chosen, so DCLF's build point runs here for a world frame.
+		// Guest mode keeps it at Main::Draw, where the anchors' own epochs may take a build mid-frame.
 		if (Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
 			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			DCLF::BuildPointAtFrameStart(next.frame);
 		next.dclfDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && DCLF::DrawsWorld();
-		// Hosted clears and copies the last frame left waiting are tap errors. Before the new frame is current: they are the last frame's.
+		// Clears and copies the last frame left waiting are its tap errors, so this runs before the new frame is current.
 		RenderGraph::Engine::Skeleton::BeginFrame();
 		{
 			const std::lock_guard lock(state.mutex);
 			++state.frames[static_cast<std::size_t>(next.kind)];
 			if (state.began && (next.kind != state.current.kind || next.dclfDraws != state.current.dclfDraws)) {
-				// Kinds change at a menu, a load or a movie: rare, but a flapping test would flood the log.
+				// Kind changes are rare, but a flapping test would flood the log.
 				if (++state.kindChanges <= 256 || state.kindChanges % 1000 == 0) {
 					const auto recipe = Recipes::DiffKinds(state.current.kind, state.current.capture, next.kind, next.capture);
 					logger::info("[ORG] frame kind: {} (frame {}{}){}{}", DiffFrame(state.current, next), next.frame, next.capture ? ", draws the frozen background" : "",
@@ -307,16 +294,14 @@ namespace RenderGraph::Frame::Driver
 			if (!state.began)
 				logger::info("[ORG] frame kind: {} (frame {}, the first frame described)", KindName(next.kind), next.frame);
 		}
-		// The new frame is current from here: what the description reads per frame slot (the post chain's and the world scopes' last
-		// fields for this slot) reads this frame's slot. The frame number other threads see (LoadStartedThisFrame) moves at the end.
+		// The new frame is current from here, so per-slot reads use this frame's slot. Other threads see the new frame number at the end.
 		state.previous = state.current;
 		state.current = next;
 		state.tapped.fill(false);
 		if (FrameAnchors::IsRenderOwner())
 			RenderGraphRuntime::Get().NoteFrameBegin(next.frame);
-		// The post chain's fields (read again at the chain's decision event), then each segment's schedule for the frame.
 		PostChain::OnBegin(state.current);
-		// The recipe is checked again when a build of one of its epochs attached (render owner, before the stages' schedules).
+		// Recheck the recipe when a build of one of its epochs attached.
 		if (Engine::Native::GraphMode() && FrameAnchors::IsRenderOwner())
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				Recipes::Check(*host);
@@ -411,7 +396,7 @@ namespace RenderGraph::Frame::Driver
 		}
 		const std::lock_guard lock(state.mutex);
 		++state.errors[static_cast<std::size_t>(a_error)];
-		// One line per kind for the session; the census line has the counts. A test greps "[ORG] frame tap error".
+		// One line per kind for the session. A test greps "[ORG] frame tap error".
 		if (!std::exchange(state.errorLogged[static_cast<std::size_t>(a_error)], true))
 			logger::error("[ORG] frame tap error ({}): {}, {}; frame {} ({}, slot {}); its work is not drawn (later errors of this kind are counted, not logged)",
 				TapErrorName(a_error), where, a_what, state.current.frame, KindName(state.current.kind), state.current.slot);
@@ -460,7 +445,7 @@ namespace RenderGraph::Frame::Driver
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
 		++state.segments[static_cast<std::size_t>(a_segment)].recordings;
-		// Every request names what changed. A steady scene asks for none, so this line is rare; a flapping field would show here.
+		// A steady scene asks for no recordings, so a flapping field shows up here.
 		WindowedLine(state.recordingLog[static_cast<std::size_t>(a_segment)], fmt::format("recordings of the {} segment", SegmentName(a_segment)), a_frame, [&] {
 			logger::info("[ORG] declared frame: the {} segment is recorded for a new description (frame {}): {}", SegmentName(a_segment), a_frame, a_reason);
 		});
@@ -526,8 +511,8 @@ namespace RenderGraph::Frame::Driver
 			NoteLaggedWork(a_segment);
 			return;
 		}
-		// The first frame the engine draws a pass the stage's build left out asks the next description for it, and the next Begin asks
-		// the stage's key for a build. So the work lags one frame. Still nothing on its way in the next frame: it would never be drawn.
+		// Work a build left out lags one frame while the next description asks for it.
+		// If nothing is on its way by the next frame, it would never be drawn.
 		const auto frame = state.current.frame;
 		if (seen + 1 != frame) {
 			if (seen != frame)

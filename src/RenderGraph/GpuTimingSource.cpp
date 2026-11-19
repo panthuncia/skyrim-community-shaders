@@ -25,12 +25,11 @@ namespace GpuTimingSource
 {
 	namespace
 	{
-		// Host frames whose submission is remembered until their timestamps come back. The host completes a frame a few game
-		// frames after it ran, and a game frame runs at most one host frame per epoch.
+		// The host completes a frame a few game frames after it ran, and a game frame runs at most one host frame per epoch.
 		constexpr std::size_t kEpochRing = 512;
-		// A Present whose epochs have not all completed this many Presents later is given up (an epoch of a failed graph).
+		// A Present whose epochs have not all completed this many Presents later is given up, such as an epoch of a failed graph.
 		constexpr std::uint64_t kPatiencePresents = 32;
-		// Ranges below this average inclusive time a frame are left out of the event log.
+		// Ranges below this average time a frame are left out of the event log.
 		constexpr double kMinLoggedMs = 0.003;
 
 		struct Submitted
@@ -56,14 +55,14 @@ namespace GpuTimingSource
 			std::uint64_t count = 0;
 		};
 
-		// The event timers' graph view (CS_GPU_EVENT_TIMERS with CS_GPU_TIMERS=graph). Render thread only.
+		// The event timers' graph view. Render thread only.
 		struct Events
 		{
 			std::uint32_t interval = 0;
 			std::vector<std::string> names;  // in the order first seen
 			std::unordered_map<std::string, std::size_t> index;
 			std::vector<Totals> totals;
-			// Per stage (the epoch's label), every queue: self time along its queue, and the ranges' summed time.
+			// Per stage and queue, the self time along the queue and the summed range time.
 			std::vector<std::string> stageNames;
 			std::unordered_map<std::string, std::size_t> stageIndex;
 			std::vector<Totals> stageTotals;
@@ -71,14 +70,14 @@ namespace GpuTimingSource
 			double graphicsSpanMs = 0.0;
 			std::uint32_t frames = 0;
 			std::uint64_t dropped = 0;
-			// Windows (StartWindow), as GpuEventTimers keeps them: window 0 is the interval's.
+			// Window 0 is the interval's, as in GpuEventTimers.
 			std::vector<std::string> labels{ std::string{} };
 			std::uint32_t collecting = 0;
 		};
 
 		struct State
 		{
-			std::mutex mutex;  // epochs, pending, present, window: the host thread reads them at completion
+			std::mutex mutex;  // the host thread reads these at completion
 			std::array<Submitted, kEpochRing> epochs{};
 			std::map<std::uint64_t, Pending> pending;
 			std::uint64_t present = 0;
@@ -112,7 +111,7 @@ namespace GpuTimingSource
 			}
 		}
 
-		/** @brief The ms per tick of one queue's ranges, from a range with a length, or a_fallback. */
+		/** @brief From a range with a length, else a_fallback. */
 		double MsPerTick(const std::vector<const Range*>& a_ranges, double a_fallback)
 		{
 			for (const auto* range : a_ranges)
@@ -146,7 +145,6 @@ namespace GpuTimingSource
 				"compute queue {:.2f} ms, copy queue {:.2f} ms in graph ranges; per frame, inclusive / self ms, calls:",
 				label.empty() ? std::string{} : fmt::format("window '{}': ", label), a_events.frames, a_events.dropped, a_events.graphicsSpanMs / frames,
 				a_events.busyMs[0] / frames, a_events.busyMs[1] / frames, a_events.busyMs[2] / frames);
-			// Stages first: self ms along the queue (what the queue spent there), summed range ms, ranges a frame.
 			double stageSelf = 0.0;
 			for (std::size_t i = 0; i < a_events.stageNames.size(); ++i) {
 				const auto& total = a_events.stageTotals[i];
@@ -168,7 +166,6 @@ namespace GpuTimingSource
 			ResetEvents(a_events);
 		}
 
-		/** @brief Adds one Present's ranges: per range its time and its self time along its queue, and each queue's busy time. */
 		void AddEventFrame(Events& a_events, const Frame& a_frame)
 		{
 			auto totalOf = [&](const Range& a_range) -> Totals& {
@@ -188,7 +185,7 @@ namespace GpuTimingSource
 				if (ranges.empty())
 					continue;
 				const double msPerTick = MsPerTick(ranges, a_frame.graphicsMsPerTick);
-				// Sub-ranges sit inside their pass's range: they have their own row, and stay out of the queue's walk.
+				// Sub-ranges sit inside their pass's range, so they get their own row and stay out of the queue's walk.
 				std::vector<const Range*> top;
 				for (const auto* range : ranges) {
 					if (range->kind == RangeKind::Sub) {
@@ -245,7 +242,7 @@ namespace GpuTimingSource
 			}
 			events.dropped += a_dropped;
 			for (const auto& frame : a_state.completed) {
-				// The first frame of a later window: the window before is complete (frames come in order), so it is logged.
+				// Frames come in order, so a later window's first frame means the one before is complete.
 				if (frame.window != events.collecting) {
 					if (events.labels[events.collecting] != "-")
 						LogEvents(events);
@@ -262,7 +259,7 @@ namespace GpuTimingSource
 
 	Timers SelectedTimers()
 	{
-		// Native mode has no D3D11 timestamp: its context's queries answer 0. The graph is the only source there, whatever the switch says.
+		// Native mode's D3D11 queries answer 0, so the graph is the only source there.
 		static const Timers timers = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return Switches::EqualsNoCase("CS_GPU_TIMERS", "graph") ? Timers::Graph : Timers::D3D11;
@@ -276,7 +273,7 @@ namespace GpuTimingSource
 
 	bool IdleFromGraph()
 	{
-		// Native mode has no DXVK submission trace: the graph's ranges are the only source there.
+		// Native mode has no DXVK submission trace.
 		static const bool graph = RenderGraph::Engine::Native::Requested() || Switches::EqualsNoCase("CS_GPU_IDLE_SOURCE", "graph");
 		return graph;
 	}
@@ -327,7 +324,7 @@ namespace GpuTimingSource
 		auto& state = Get();
 		std::lock_guard lock(state.mutex);
 		auto& slot = state.epochs[a_hostFrame % kEpochRing];
-		// A host frame no epoch submission named (not one of the runtime's epochs), or one whose Present was given up.
+		// Not one of the runtime's epochs, or its Present was given up.
 		if (slot.hostFrame != a_hostFrame)
 			return;
 		slot.hostFrame = ~0ull;
@@ -347,8 +344,7 @@ namespace GpuTimingSource
 
 	namespace
 	{
-		// CS_RHI_CENSUS=<frames>: BasicRHI's command census (rhi::census), logged every that many Presents, per frame, by list label
-		// (ORG labels a list with its first pass). Render thread.
+		// CS_RHI_CENSUS=<frames> logs BasicRHI's command census by list label every that many Presents. Render thread.
 		void CensusOnPresent()
 		{
 #if defined(CS_HAS_RENDER_GRAPH)

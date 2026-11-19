@@ -12,7 +12,7 @@ namespace RenderGraph::FrameSequence
 {
 	namespace
 	{
-		/** @brief CS_ORG_FRAME_SEQUENCE: frames between logged frames, 0 when off. */
+		/** @brief Frames between logged frames, 0 when off. */
 		std::uint64_t Every()
 		{
 			static const std::uint64_t every = [] {
@@ -47,7 +47,7 @@ namespace RenderGraph::FrameSequence
 		{
 			std::mutex lock;
 			std::vector<std::string> events;  // this frame's, in order
-			std::uint64_t hash = 0;           // this frame's anchors and epochs in order (not clients or targets)
+			std::uint64_t hash = 0;           // this frame's anchors and epochs in order
 			std::uint64_t frame = 0;
 			std::uint64_t ownTickets = 0;  // in the session
 			bool ownThisFrame = false;
@@ -124,8 +124,7 @@ namespace RenderGraph::FrameSequence
 		++state.frame;
 		auto& window = state.windows.Active();
 		window.sequences.insert(state.hash);
-		// One frame's list every Every() frames of the world, the menu, the map or a loading screen, and every frame with an own ticket
-		// (the first ones of the session).
+		// One frame every Every() frames of each window, and every frame with an own ticket early in the session.
 		const auto kind = state.windows.ActiveKind();
 		const auto print = [&](const char* a_window, std::size_t a_distinct, std::uint64_t a_frames) {
 			logger::info("[ORG] frame sequence ({}, frame {}, {} distinct sequences in {} frames, {} own tickets in the session): {} events", a_window, state.frame,

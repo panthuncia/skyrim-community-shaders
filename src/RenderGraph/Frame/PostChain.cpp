@@ -20,80 +20,68 @@ namespace RenderGraph::Frame::PostChain
 {
 	namespace
 	{
-		// The engine's globals the chain reads (Ghidra, SE 1.5.97 and AE 1.6.1170; docs, "The post stage"). Each is the
-		// value the engine's own test reads.
-		// gEnableEOFImageSpace: RenderEndOfFrameEffects (99023 / 105674) counts the active end-of-frame slots only when it is set.
+		// Engine globals the chain reads, each the value the engine's own test reads (SE 1.5.97 / AE 1.6.1170).
+		// RenderEndOfFrameEffects (99023 / 105674) counts the active end-of-frame slots only when this is set.
 		constexpr REL::RelocationID kEnableEndOfFrame{ 513299, 391055 };
-		// The HDR switch: RenderEndOfFrameEffects renders the HDR effect (effects[30]) when it is set, else a copy (effects[34]).
+		// When set the HDR effect (effects[30]) renders, else a copy (effects[34]).
 		constexpr REL::RelocationID kHdrEnabled{ 513463, 391301 };
-		// The volumetric lighting switch: RenderWorldPostProcess (100430 / 107148) and the VL composite (100493) test it with the VL
-		// effect's active flag.
+		// Tested with the VL effect's active flag by RenderWorldPostProcess (100430 / 107148) and the VL composite (100493).
 		constexpr REL::RelocationID kVolumetricEnabled{ 527940, 414913 };
-		// Dynamic resolution: its lock and the two scale factors. The upsample (100548) and RenderEndOfFrameEffects run it when
-		// unlocked and a scale is not 1.
+		// The upsample (100548) runs when unlocked and a scale is not 1.
 		constexpr REL::RelocationID kDynamicLock{ 525027, 411509 };
 		constexpr REL::RelocationID kDynamicScaleX{ 525023, 411505 };
 		constexpr REL::RelocationID kDynamicScaleY{ 525024, 411506 };
-		// ImageSpaceEffectHDR::Render (100465 / 107183): last frame's adapted luminance (its target index, below 0 when there is none),
-		// the flag that drops it at the next render, the option and override that stop the luminance chain at 2x2, and the chain's
-		// last-level parity, which each render flips.
+		// ImageSpaceEffectHDR::Render (100465 / 107183) state. The adapt target is below 0 when there is none.
+		// The last-level parity flips on each render.
 		constexpr REL::RelocationID kAdaptTarget{ 513465, 391303 };
 		constexpr REL::RelocationID kAdaptReset{ 528108, 415053 };
 		constexpr REL::RelocationID kLuminanceStopAt2{ 513488, 391336 };
 		constexpr REL::RelocationID kLuminanceStopOverride{ 528106, 415051 };
 		constexpr REL::RelocationID kLuminanceParity{ 528109, 415054 };
-		// The volumetric lighting's frame state (a static object, made on first use by its getter, SE 100297 / AE 107014): its counter at
-		// +0x88 picks the target the VL writes and the composite reads, 43 + (~counter & 1) (RenderWorldPostProcess and 100493 on SE;
-		// 107148 on AE).
+		// The VL frame state (SE 100297 / AE 107014). Its counter at +0x88 picks the VL target as 43 + (~counter & 1).
 		constexpr REL::RelocationID kVolumetricState{ 100297, 107014 };
 		constexpr std::uintptr_t kVolumetricCounter = 0x88;
-		// The depth of field's blur takes the compute form (the CS blur helper at manager +0x188, 100488) when this option is set.
+		// When set the depth of field blurs through the compute helper at manager +0x188 (100488).
 		constexpr REL::RelocationID kDofComputeBlur{ 513727, 391684 };
 
-		// The RenderWorld scopes' state (Ghidra, SE 1.5.97 and AE 1.6.1170; docs, "The declared frame, stage 5"). Each is what the engine's
-		// own test reads.
-		// The camera-Z chain's level count (the minify loop in RenderSSAO, 100520 / 107245, runs levels 1 to count - 1).
+		// RenderWorld scope state. The minify loop in RenderSSAO (100520 / 107245) runs levels 1 to count - 1.
 		constexpr REL::RelocationID kSaoLevels{ 528105, 415050 };
-		// The option that draws the first level at most 16 pixels high with ISMinifyContrast.
 		constexpr REL::RelocationID kSaoContrast{ 528124, 415069 };
-		// The SAO targets' half-resolution set: every SAO target index + 1.
+		// When set every SAO target index is one higher.
 		constexpr REL::RelocationID kSaoHalf{ 528122, 415067 };
-		// The fog flag the composite tests with the portal graph (GetPortalGraph, 98984 / 105637, of the shader state index below).
+		// Tested by the composite together with GetPortalGraph (98984 / 105637).
 		constexpr REL::RelocationID kSaoFog{ 528125, 415070 };
 		constexpr REL::RelocationID kGetPortalGraph{ 98984, 105637 };
 		constexpr REL::RelocationID kPortalIndex{ 513241, 390982 };
-		// The temporal raw AO setting (its value byte): ISSAORawAO, else ISSAORawAONoTemporal.
+		// ISSAORawAO when set, else ISSAORawAONoTemporal.
 		constexpr REL::RelocationID kSaoTemporal{ 513569, 391450 };
-		// The reflections' blur: the reflections pass (100428 / 107146) blurs its ray march through the compute blur helper (manager +0x188,
-		// 100487) when it is set, and the SAO composite then reads kSSR_BLURRED0 instead of kSSR_RAW.
+		// When set the SSR pass (100428 / 107146) blurs through the compute helper (100487).
+		// The SAO composite then reads kSSR_BLURRED0 instead of kSSR_RAW.
 		constexpr REL::RelocationID kSsrBlur{ 528114, 415059 };
-		// The normal mask's downsample before the ray march: on with this setting when the mode is above 1; mode 4 is the compute form.
+		// The normal mask is downsampled when this is set and the mode is above 1. Mode 4 is the compute form.
 		constexpr REL::RelocationID kSsrDownsample{ 513568, 391448 };
 		constexpr REL::RelocationID kSsrDownsampleMode{ 513454, 391287 };
-		// gFrameCounter: GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP (100460) returns (~counter & 1) | 4 while the reflections helper
-		// is active, else 4 (kNORMAL_TAAMASK_SSRMASK).
+		// GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP (100460) returns (~counter & 1) | 4 while SSR is active, else 4.
 		constexpr REL::RelocationID kFrameCounter{ 525008, 411489 };
-		// The snow setting Main::RenderWorld (100424 / 107142) tests with the snow helper's active flag: the snow pass, else the copy of
-		// kMAIN into its copy.
+		// Main::RenderWorld (100424 / 107142) runs the snow pass when this and the helper are on, else copies kMAIN.
 		constexpr REL::RelocationID kSnow{ 513332, 391105 };
-		constexpr std::uintptr_t kReflections = 0x1c0;  // the reflections helper: the ray march at +0x00, active at +0x10
-		// The SAO helper: blur H, blur V, camera Z, the composites (SAO, fog, SAO and fog), minify, minify contrast, raw AO, raw AO without
-		// temporal; +0x50 the SAO composites' flag, +0x54 its counter.
+		constexpr std::uintptr_t kReflections = 0x1c0;  // ray march at +0x00, active at +0x10
+		// The SAO helper. +0x50 is the composites' flag and +0x54 its counter.
 		constexpr std::uintptr_t kSao = 0x1c8;
-		constexpr std::uintptr_t kSnowHelper = 0x1e8;     // the snow pass: ISSnowSSS at +0x00, active at +0x08
+		constexpr std::uintptr_t kSnowHelper = 0x1e8;     // ISSnowSSS at +0x00, active at +0x08
 
-		// ImageSpaceManager members, the same on SE and AE (RUNTIME_DATA; raw offsets where CommonLib's names are wrong).
-		constexpr std::uintptr_t kBloomRadius = 0xcc;        // ImageSpaceData: the bloom blur radius (float)
-		constexpr std::uintptr_t kFade = 0x118;              // the cinematic fade amount: above 0 picks the tonemap's fade form
-		constexpr std::uintptr_t kVolumetricEffect = 0x170;  // the VL effect (active at +0x08)
-		constexpr std::uintptr_t kLensFlares = 0x180;        // the image-based lens flares (active at +0x30)
-		constexpr std::uintptr_t kSil = 0x1d8;               // the SIL composite: composite, raw indirect, active at +0x10, counter at +0x14
-		constexpr std::uintptr_t kTemporal = 0x1f0;          // TAA: shader, UI form, water form; enabled +0x18, form +0x2c, history +0x34, water +0x38
-		constexpr std::uintptr_t kUpsample = 0x1f8;          // the dynamic-resolution upsample: its shader, active at +0x08
+		// ImageSpaceManager members, the same on SE and AE. Raw offsets where CommonLib's names are wrong.
+		constexpr std::uintptr_t kBloomRadius = 0xcc;        // float
+		constexpr std::uintptr_t kFade = 0x118;              // above 0 picks the tonemap's fade form
+		constexpr std::uintptr_t kVolumetricEffect = 0x170;  // active at +0x08
+		constexpr std::uintptr_t kLensFlares = 0x180;        // active at +0x30
+		constexpr std::uintptr_t kSil = 0x1d8;               // active at +0x10, counter at +0x14
+		constexpr std::uintptr_t kTemporal = 0x1f0;          // enabled +0x18, form +0x2c, history +0x34, water +0x38
+		constexpr std::uintptr_t kUpsample = 0x1f8;          // active at +0x08
 		constexpr std::uintptr_t kUsesLdr = 0x210;
 		constexpr std::uintptr_t kScreenshot = 0x211;
 
-		constexpr std::uint32_t kDownsampleTarget = 26;  // kHDR_DOWNSAMPLE0: the luminance chain's level count follows its size
+		constexpr std::uint32_t kDownsampleTarget = 26;  // kHDR_DOWNSAMPLE0, whose size sets the luminance chain's level count
 
 		template <class T>
 		T Member(std::uintptr_t a_object, std::uintptr_t a_offset)
@@ -110,15 +98,14 @@ namespace RenderGraph::Frame::PostChain
 		struct State
 		{
 			bool installed = false;
-			bool inChain = false;     // the world chain now: from RenderWorldPostProcess's entry to its return
-			bool endOfFrame = false;  // RenderEndOfFrameEffects of the world chain is running
-			// Each slot's description from four frames before: a change against it is a new recording for that slot's copy.
+			bool inChain = false;     // from RenderWorldPostProcess's entry to its return
+			bool endOfFrame = false;
+			// Each slot's fields from four frames before. A change is a new recording for that slot.
 			std::array<PostFields, RenderGraphRuntime::kGameFramesInFlight> bySlot{};
 			std::array<bool, RenderGraphRuntime::kGameFramesInFlight> haveSlot{};
-			// The census since the last report.
 			std::mutex mutex;
 			std::uint64_t frames = 0, changedFrames = 0;
-			std::map<std::string, std::uint64_t> changes;  // fields that changed against the same slot four frames before, by name
+			std::map<std::string, std::uint64_t> changes;  // fields that changed against the same slot, by name
 		};
 
 		State& Get()
@@ -138,7 +125,7 @@ namespace RenderGraph::Frame::PostChain
 		/** @brief The luminance chain's levels from kHDR_DOWNSAMPLE0's size, as ImageSpaceEffectHDR::Render loops over them. */
 		std::uint32_t Levels()
 		{
-			// The manager is a static object at this ID (CommonLib's GetSingleton reads it as a pointer, which it is not).
+			// The manager is a static object at this ID, not the pointer CommonLib's GetSingleton reads.
 			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> manager{ REL::RelocationID(524970, 411451) };
 			const auto& size = manager.get()->renderTargetData[kDownsampleTarget];
 			const std::int32_t least = Global<bool>(kLuminanceStopAt2) && !Global<bool>(kLuminanceStopOverride) ? 2 : 1;
@@ -157,7 +144,6 @@ namespace RenderGraph::Frame::PostChain
 			return a_effect && const_cast<RE::ImageSpaceEffect*>(a_effect)->IsActive();
 		}
 
-		/** @brief Counts each field a DiffPost names ("bloom 2 -> 3" counts as "bloom"). */
 		void CountFields(std::map<std::string, std::uint64_t>& a_counts, const std::string& a_diff)
 		{
 			std::size_t start = 0;
@@ -173,10 +159,8 @@ namespace RenderGraph::Frame::PostChain
 		}
 
 		/**
-		 * @brief ImageSpaceManager::RenderEndOfFrameEffects (SE 99023, AE 105674). Inside the world chain it runs within Upscaling's
-		 * wrapper (Upscaling::Main_PostProcessing), after the upscaler set TAA and dynamic resolution for the frame: ImageSpace plans the
-		 * chain's targets at its entry, and its return ends the post stage (a point step). UI3DSceneManager::Render (51855)
-		 * calls it for a menu's 3D scene too, outside the chain: its draws are the menu composites' steps there (ImageSpace's MenuSteps.inl).
+		 * @brief ImageSpaceManager::RenderEndOfFrameEffects (SE 99023, AE 105674). In the world chain its return ends the post stage.
+		 * UI3DSceneManager::Render (51855) also calls it for a menu's 3D scene, outside the chain.
 		 */
 		struct RenderEndOfFrameEffects
 		{
@@ -188,7 +172,7 @@ namespace RenderGraph::Frame::PostChain
 					state.endOfFrame = true;
 					Engine::ImageSpace::OnEndOfFrame(true, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final));
 				}
-				// A menu scene's call: its draws are the menu composites' steps.
+				// A menu scene's call. Its draws are the menu composites' steps.
 				const bool menu = !world && !state.endOfFrame && FrameAnchors::IsRenderOwner();
 				if (menu)
 					Engine::ImageSpace::OnMenuEndOfFrame(true, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final));
@@ -204,7 +188,7 @@ namespace RenderGraph::Frame::PostChain
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148): the world post chain. */
+		/** @brief ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148), the world post chain. */
 		struct RenderWorldPostProcess
 		{
 			static void thunk(std::uint32_t a_target)
@@ -213,9 +197,7 @@ namespace RenderGraph::Frame::PostChain
 				const bool owner = FrameAnchors::IsRenderOwner();
 				if (owner) {
 					state.inChain = true;
-					// Main::RenderFirstPersonView came before: every step of the sun stage has tapped (its last, the first person's query in a frame
-					// without Drawcall Limit Fix's first-person epoch). The stage ends here at the latest, before the chain's D3D11 work (the
-					// upscalers' separator in guest mode) reaches the GPU.
+					// End the sun stage here at the latest, before the chain's D3D11 work reaches the GPU.
 					(void)FrameAnchors::TapPoint(SegmentId::Sun);
 				}
 				func(a_target);
@@ -278,8 +260,7 @@ namespace RenderGraph::Frame::PostChain
 		if (const auto upsample = Member<std::uintptr_t>(base, kUpsample); !upsample || !Member<bool>(upsample, 0x08))
 			fields.dynres = false;
 		fields.screenshot = Member<bool>(base, kScreenshot);
-		// TAA is CS's decision: Upscaling turns the engine's TAA on for its TAA method just before the end-of-frame effects
-		// (Util::SetTemporal in Upscaling::Main_PostProcessing) and off after them, so the engine flag at Begin says nothing.
+		// Upscaling turns the engine's TAA on just before the end-of-frame effects and off after, so the flag at Begin says nothing.
 		auto& upscaling = globals::features::upscaling;
 		const auto method = upscaling.GetUpscaleMethod();
 		if (upscaling.loaded)
@@ -319,7 +300,7 @@ namespace RenderGraph::Frame::PostChain
 		a_frame.post = Read();
 		const std::lock_guard lock(state.mutex);
 		++state.frames;
-		// A slot's copy is recorded again when its description changes: compare with the same slot's last one.
+		// A slot's copy is recorded again when its fields change from the same slot's last ones.
 		auto& kept = state.bySlot[a_frame.slot];
 		if (state.haveSlot[a_frame.slot]) {
 			if (const auto diff = DiffPost(kept, a_frame.post); !diff.empty()) {
@@ -342,7 +323,7 @@ namespace RenderGraph::Frame::PostChain
 		fields.read = true;
 		const auto reflections = Member<std::uintptr_t>(base, kReflections);
 		const bool ssr = reflections && Member<bool>(reflections, 0x10);
-		// The SSR mask target every scope reads (GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP, 100460): it follows the frame counter.
+		// Follows the frame counter (100460).
 		fields.normals = static_cast<std::uint8_t>(ssr ? ((~Global<std::uint32_t>(kFrameCounter) & 1u) | 4u) : 4u);
 		fields.ssrBlur = Global<bool>(kSsrBlur);
 		fields.saoHalf = Global<bool>(kSaoHalf);
@@ -357,12 +338,12 @@ namespace RenderGraph::Frame::PostChain
 			{
 				fields.saoLevels = static_cast<std::uint8_t>(Global<std::uint32_t>(kSaoLevels));
 				fields.saoTemporal = Global<bool>(kSaoTemporal);
-				// RenderSSAO adds one to its counter and wraps it at 2 before it draws: the raw AO's target is 62 + 2 * counter.
+				// RenderSSAO increments its counter and wraps it at 2 before drawing. The raw AO target is 62 + 2 * counter.
 				if (const auto sao = Member<std::uintptr_t>(base, kSao)) {
 					const auto counter = Member<std::int32_t>(sao, 0x54) + 1;
 					fields.saoParity = static_cast<std::uint8_t>(counter > 1 ? 0 : counter);
 				}
-				// The minify loop draws the first level whose height (kMAIN's, halved per level) is at most 16 with the contrast form.
+				// The first level whose height is at most 16 draws with the contrast form. Heights halve from kMAIN's.
 				fields.saoContrast = 0;
 				if (Global<bool>(kSaoContrast)) {
 					// A static object, not the pointer CommonLib's GetSingleton reads.

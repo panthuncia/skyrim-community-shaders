@@ -144,7 +144,7 @@ namespace GpuLoadPass
 		client.registerResources = [resources](org::RenderGraph& a_graph) {
 			a_graph.RegisterResource(org::ResourceIdentifier(resources->output->GetName()), resources->output);
 		};
-		// Armed for one Present at a time: a frame that did not arm it submits nothing.
+		// Armed for one Present at a time, so a frame that did not arm it submits nothing.
 		client.active = [] { return std::exchange(Get().armed, false); };
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;

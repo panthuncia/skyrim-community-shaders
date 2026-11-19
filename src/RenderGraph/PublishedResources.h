@@ -25,42 +25,19 @@ namespace FrameAnchors
 }
 
 /**
- * @brief Graph resources a producer shares with the passes of every epoch: published resources (docs/development/render-graph.md,
- * "Publishing a graph resource to other epochs").
- *
- * A feature on its ORG path writes its output in an anchor epoch (FrameAnchors). A client's registerResources registers its twins with
- * the anchor graphs only, so no other epoch's graph can name them. Publishing a twin registers it under its id with every epoch's graph
- * the host builds: the anchors' and Drawcall Limit Fix's alike. A pass of any epoch then declares a read of it by that id, and ORG's one
- * sequencer orders the read after the producer's write, whatever epoch each runs in. Nothing is copied: every graph sees the same
- * resource.
- *
- * Rules:
- * - Only a resource the graph never aliases is published (GraphResources::Resource::Aliasable false: History, Persistent, or exported).
- *   An aliased transient keeps no contents across executions, and another epoch's read is another execution.
- * - A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
- * - The id is the twin's name ("Feature::Name") unless the producer gives another. Readers name the same id.
- * - A versioned twin (GraphResources::Options::versioned) is published as its slot: every graph registers the slot as the id's resolver,
- *   so a Resize of the twin is a new version that readers declaring the id follow, with no graph build. Its export and its
- *   ShaderResourceIndex follow the current version.
- * - Publishing a new resource under an id (the first time, a new twin, or a Resize of a twin that is not versioned) rebuilds every
- *   graph, once (a replacement through GraphResources::RequestStructuralRebuild). A twin's Resize is published again by Refresh, which
- *   the frame anchors call when the resize generation moves: the producer need not publish it again.
- * - Withdraw marks the resource as no longer written: ShaderResourceIndex answers false and readers return to their D3D11 view. It
- *   stays registered, because a graph built earlier may still declare it, until the producer publishes again under that id.
- * - An id stays registered once published (IsRegistered), so a reader may declare it in every build from then on.
- *
- * Everything here runs on the render thread (graph builds too: GraphHost builds on its owner thread). The lookups log once if
- * called from another thread.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Published resources: graph resources a producer shares with the passes of every epoch.
+*
+* Publishing a twin registers it under its id with every epoch's graph, so a pass in any epoch declares a read by that id and
+* ORG's sequencer orders it after the producer's write. Nothing is copied.
+* Only resources the graph never aliases may be published. A reader earlier in the frame than the producer reads the previous frame.
+* A versioned twin is published as its slot, so its resizes need no build. A new resource under an id rebuilds every graph once.
+* An id stays registered once published, even after Withdraw, since older graphs may still declare it.
+* Everything here runs on the render thread.
+*/
 namespace PublishedResources
 {
-	/**
-	 * @brief Publishes a_resource under a_id, registered with every epoch's graph from the next build on. Call after creating the twin and
-	 * after every Resize. Again with the same resource: nothing. False, logged, when the twin is empty, aliasable, or the runtime is not
-	 * active.
-	 */
+	/** @brief Publishes a_resource under a_id for every epoch's graph from the next build on. Call after creating the twin and after each Resize.
+	*  False, logged, when the twin is empty, aliasable or the runtime is inactive. */
 	bool Publish(std::string_view a_id, const GraphResources::Resource& a_resource);
 
 	/** @brief Publish for a 2D texture, whose shape picks the whole-resource view (ShaderResourceIndex). */
@@ -70,65 +47,40 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Resource& a_resource);
 	bool Publish(const GraphResources::Texture2D& a_texture);
 
-	/**
-	 * @brief Publishes a_import, a FrameAnchors import of a D3D11 texture (FrameAnchors::D3D11Texture, never aliased), under a_id, its
-	 * import's id ("cs.d3d11.<name>"), so every epoch's readers declare the resource its writers' passes use. a_srv is the view readers
-	 * find bound, for ExportedId (as unwrapped as they unwrap theirs); its dimension picks the whole-resource view (a 2D texture, a 2D
-	 * array or a cube). The import's slot is published: a new version of it (an import of a new texture of the same shape class) needs
-	 * no build. Import it again on a resize and publish again. False, logged, without an active runtime or such a view.
-	 */
+	/** @brief Publishes a FrameAnchors import of a D3D11 texture under its import id, so every epoch's readers use the writers' resource.
+	*  a_srv is the view readers find bound. Import and publish again on a resize. */
 	bool PublishImport(std::string_view a_id, const FrameAnchors::Texture& a_import, const ID3D11ShaderResourceView* a_srv);
 
-	/**
-	 * @brief Publishes again every published twin whose graph resource changed since (a Resize), while the twin lives. Render thread;
-	 * FrameAnchors::Run calls it when GraphResources::Resource::ResizeGeneration moved.
-	 */
+	/** @brief Publishes again every live twin whose graph resource changed in a Resize. Render thread. */
 	void Refresh();
 
-	/** @brief The producer left its ORG path: readers return to D3D11. The resource stays registered (see the rules). */
+	/** @brief The producer left its ORG path, so readers return to D3D11. The resource stays registered. */
 	void Withdraw(std::string_view a_id);
 
 	/** @brief Whether a_id is published and not withdrawn. */
 	bool IsPublished(std::string_view a_id);
 
-	/**
-	 * @brief Whether a_id was ever published, so every graph built since registers it (withdrawn or not). A reader may declare it then.
-	 */
+	/** @brief Whether a_id was ever published, so every graph built since registers it. */
 	bool IsRegistered(std::string_view a_id);
 
-	/**
-	 * @brief A pass's Declare, at a graph build: IsRegistered. An id not registered yet is remembered, and its first publish builds every
-	 * graph again: this build skipped it without looking it up, so nothing else names the graph that wants it. Declare with this, not
-	 * IsRegistered, an id that is published later.
-	 */
+	/** @brief IsRegistered for a pass's Declare at a build. An unregistered id is remembered, and its first publish rebuilds every graph.
+	*  Use this, not IsRegistered, for an id published later. */
 	bool IsDeclarable(std::string_view a_id);
 
-	/**
-	 * @brief Whether a_view is the D3D11 export of a_id's twin while a_id is published. Does not allocate.
-	 */
+	/** @brief Whether a_view is the D3D11 export of a_id's twin while a_id is published. Does not allocate. */
 	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id);
 
-	/**
-	 * @brief The bindless index of a_id's whole-resource shader resource view (every mip; a cube's TextureCube view, a 2D array's full
-	 * array view, a buffer's structured view), for a shader that reads it from the descriptor heap. The index is not a declaration:
-	 * the undeclared-access validator (CS_ORG_VALIDATE_UNDECLARED=1) logs each lookup with a_where, its caller.
-	 * @return False when a_id is not published, withdrawn, or has no such view.
-	 */
+	/** @brief The bindless index of a_id's whole-resource SRV. Not a declaration, so the undeclared-access validator logs it with a_where.
+	*  False when a_id is not published, withdrawn or has no such view. */
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where = std::source_location::current());
 
-	/**
-	 * @brief The view variant (org::SRVViewType) of the view ShaderResourceIndex hands out for a_id, for a pass that declares its read
-	 * with that view (org::SrvView::variant), so the declaration covers the descriptor it reads. UINT32_MAX for the resource's
-	 * primary view (a buffer's), and for an id never published. Render thread (a graph build).
-	 */
+	/** @brief The view variant ShaderResourceIndex hands out for a_id, so a declaration covers the descriptor it reads.
+	*  UINT32_MAX for a primary view or an unknown id. Render thread. */
 	std::uint32_t ShaderResourceVariant(std::string_view a_id);
 
-	/**
-	 * @brief The id whose twin exports a_view as its D3D11 SRV, while that id is published; empty otherwise. A diagnostic for readers
-	 * that import D3D11 views: a graph pass reading the export through an import of its own is not ordered after the producer's
-	 * writes, so it should read the id instead. Allocates: use IsExportOf on hot paths.
-	 */
+	/** @brief The id whose twin exports a_view, or empty. A pass reading the export through its own import is not ordered after the producer.
+	*  Allocates, so use IsExportOf on hot paths. */
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view);
-	/** @brief Whether a_view is a published resource's export (ExportedId not empty), without copying the id. */
+	/** @brief Whether a_view is a published resource's export. */
 	bool IsExport(const ID3D11ShaderResourceView* a_view);
 }

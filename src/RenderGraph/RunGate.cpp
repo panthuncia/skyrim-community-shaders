@@ -30,14 +30,14 @@ namespace RenderGraph
 			logger::warn("[ORG] run gate {}: not made (no render graph host, or no entries)", a_name);
 			return nullptr;
 		}
-		// Closed in every run until a commit opens an entry: a run's region is zeroed when it is allocated.
+		// A run's region is zeroed when allocated, so every run starts closed.
 		auto latch = org::LatchBlock::Create(std::string(a_name), a_entries * kEntryBytes);
 		return std::make_shared<RunGate>(std::move(latch), a_entries);
 	}
 
 	namespace
 	{
-		// Every live gate, so a stage's commit can move each one's record of its staging run (CopyOpenAll).
+		// Every live gate, so a stage's commit can move each one's record.
 		std::mutex& GatesMutex()
 		{
 			static auto* mutex = new std::mutex;
@@ -48,8 +48,7 @@ namespace RenderGraph
 			static auto* gates = new std::vector<const RunGate*>;
 			return *gates;
 		}
-		// By lease index: the gates whose record a commit opened an entry of there since the index's last ClearOpenAll, so a stage's
-		// commit copies only those. Under GatesMutex.
+		// Per lease index, the gates a commit opened since the last ClearOpenAll, so a commit copies only those. Under GatesMutex.
 		std::vector<std::unordered_set<const RunGate*>>& Touched()
 		{
 			static auto* touched = new std::vector<std::unordered_set<const RunGate*>>;
@@ -90,7 +89,7 @@ namespace RenderGraph
 		const auto size = static_cast<std::size_t>((std::max)(a_from.lease, a_to.lease)) + 1;
 		if (touched.size() < size)
 			touched.resize(size);
-		// A gate the target's last run had open and the source does not is copied closed; then the target's list is the source's.
+		// A gate open in the target's last run but not in the source is copied closed.
 		for (const auto* gate : touched[a_to.lease])
 			if (!touched[a_from.lease].contains(gate))
 				gate->CopyOpen(a_from, a_to);

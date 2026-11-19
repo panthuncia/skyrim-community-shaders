@@ -22,7 +22,7 @@ namespace RenderGraph
 {
 	namespace
 	{
-		/** @brief The one program build thread: builds one program at a time, in the order they were asked for. */
+		/** @brief The one program build thread. Builds one program at a time, in request order. */
 		struct Builder
 		{
 			std::mutex mutex;

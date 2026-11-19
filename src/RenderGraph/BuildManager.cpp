@@ -32,17 +32,16 @@ namespace RenderGraph
 			return std::chrono::duration<double, std::milli>(Clock::now() - a_start).count();
 		}
 
-		/** @brief What a build's extensions deferred to its attach or its failure (Builds::Defer). */
+		/** @brief What a build's extensions deferred to its attach or its failure. */
 		struct BuildContext
 		{
 			std::vector<std::function<void()>> attached;
 			std::vector<std::function<void(const std::string&)>> failed;
-			std::vector<std::function<void()>> staged;  // Builds::DeferStaged: run when the graph is staged
+			std::vector<std::function<void()>> staged;  // run when the graph is staged
 		};
 
 		thread_local BuildContext* t_context = nullptr;
 
-		/** @brief Sets the calling thread's build context for one build. */
 		class ContextScope
 		{
 		public:
@@ -70,10 +69,9 @@ namespace RenderGraph
 			Kind kind = Kind::All;
 			std::uint32_t epoch = 0;
 			std::string id, reason;
-			std::function<void()> change;  // Kind::Change
+			std::function<void()> change;
 		};
 
-		/** @brief Running totals over one statistics window. */
 		struct Window
 		{
 			std::uint64_t builds = 0, synchronous = 0, attached = 0, superseded = 0, rejected = 0, failed = 0, stale = 0;
@@ -93,9 +91,9 @@ namespace RenderGraph
 		{
 			std::uint32_t epoch = 0;
 			std::uint64_t group = 0;
-			std::uint64_t requests = 0;    // the epoch's request count when the job was handed out (GraphHost::RebuildRequests)
-			std::uint64_t generation = 0;  // the epoch's build generation then (GraphHost::BuildGeneration)
-			std::uint64_t frame = 0;       // the frame it was handed out at
+			std::uint64_t requests = 0;    // the epoch's request count when the job was handed out
+			std::uint64_t generation = 0;  // the epoch's build generation then
+			std::uint64_t frame = 0;
 			std::string reason;
 		};
 
@@ -110,11 +108,11 @@ namespace RenderGraph
 		struct Group
 		{
 			std::size_t remaining = 0;
-			bool external = false;  // the external builder's epochs: attached only at Attach::All and Attach::External polls
+			bool external = false;  // attached only at Attach::All and Attach::External polls
 			std::vector<std::unique_ptr<Done>> done;
 		};
 
-		/** @brief What a build posted to the external builder checks before it runs: the manager may be gone by then. */
+		/** @brief Checked by a posted external build before it runs, since the manager may be gone by then. */
 		struct ExternalLife
 		{
 			std::mutex mutex;
@@ -127,7 +125,7 @@ namespace RenderGraph
 		std::unordered_set<std::uint32_t> ownerBuilt;
 		std::unordered_set<std::uint32_t> external;
 		std::unordered_set<std::uint32_t> staged;
-		// Owner thread: what each staged build deferred to its attach (Builds::Defer), run by SwitchStaged.
+		// Owner thread. Run by SwitchStaged.
 		std::unordered_map<std::uint32_t, std::vector<std::function<void()>>> stagedAttach;
 		ExternalBuilder externalBuilder;  // owner thread
 		std::shared_ptr<ExternalLife> externalLife = std::make_shared<ExternalLife>();
@@ -139,15 +137,14 @@ namespace RenderGraph
 		std::deque<Job> queue;
 		std::vector<std::unique_ptr<Done>> finished;
 		bool stop = false;
-		// Held around every build the manager makes, on either thread: the extensions' build-time state (the contributor host's
-		// compile, for one) assumes one build at a time.
+		// Held around every build on either thread. Extensions' build-time state assumes one build at a time.
 		std::mutex buildMutex;
 
 		// Owner thread.
-		std::atomic<std::thread::id> owner{ std::this_thread::get_id() };  // the thread that polls; read by Submit on any thread
+		std::atomic<std::thread::id> owner{ std::this_thread::get_id() };  // read by Submit on any thread
 		std::map<std::uint64_t, Group> groups;
 		std::unordered_set<std::uint32_t> inFlight;
-		std::unordered_map<std::uint32_t, std::uint64_t> failedAt;  // epoch -> the request count its last build failed at
+		std::unordered_map<std::uint32_t, std::uint64_t> failedAt;  // the request count its last build failed at
 		std::unordered_map<std::uint32_t, std::uint32_t> supersededInARow;
 		std::unordered_map<std::uint32_t, std::uint32_t> rejectedInARow;
 		std::uint64_t groupSerial = 0;
@@ -194,7 +191,6 @@ namespace RenderGraph
 			}
 		}
 
-		/** @brief One epoch's graph, built on the calling thread with a context of its own. */
 		std::unique_ptr<Done> Build(Job a_job)
 		{
 			auto done = std::make_unique<Done>();
@@ -203,10 +199,9 @@ namespace RenderGraph
 			ContextScope scope(done->context);
 			try {
 				done->graph = desc.host->BuildEpochGraph(done->job.epoch, done->job.reason);
-				// The recipe check reads the schedule the build made, here on the build thread; the recipe takes it at the attach.
+				// The recipe check reads the schedule on the build thread and takes it at the attach.
 				if (done->graph && done->graph->Built() && Frame::Recipes::Traced(done->job.epoch))
 					if (auto trace = Frame::Recipes::TraceEpochGraph(*done->graph->Graph(), done->job.epoch)) {
-						// Checked with the rest of the recipe before it attaches.
 						Frame::Recipes::Accept(done->job.epoch, trace);
 						auto* host = desc.host;
 						const auto epoch = done->job.epoch;
@@ -222,13 +217,12 @@ namespace RenderGraph
 			return done;
 		}
 
-		/** @brief What the external builder holds around a build on the owner thread (null: nothing). */
 		std::shared_ptr<void> OwnerScope() const
 		{
 			return externalBuilder.ownerScope ? externalBuilder.ownerScope() : nullptr;
 		}
 
-		/** @brief Whether the owner thread builds a_epoch at the poll: an owner-built epoch, or an external one with no builder to post to. */
+		/** @brief Whether the owner thread builds a_epoch, which includes an external one with no builder to post to. */
 		bool BuiltOnOwner(std::uint32_t a_epoch) const
 		{
 			return ownerBuilt.contains(a_epoch) || (external.contains(a_epoch) && !externalBuilder.post);
@@ -253,8 +247,7 @@ namespace RenderGraph
 				synchronousReason = a_request.reason;
 				break;
 			case PendingRequest::Kind::Change:
-				// No build may capture what the change edits while it runs; a build handed out before sees the request below and
-				// is dropped at its attach, then built again.
+				// No build may capture what the change edits while it runs. A build handed out before is dropped at its attach and built again.
 				if (a_request.change) {
 					std::scoped_lock lock(buildMutex);
 					a_request.change();
@@ -266,7 +259,7 @@ namespace RenderGraph
 
 		void Submit(PendingRequest a_request)
 		{
-			// A change always waits for the poll: run here it could meet a build this thread holds.
+			// A change always waits for the poll, since here it could meet a build this thread holds.
 			if (OnOwner() && a_request.kind != PendingRequest::Kind::Change) {
 				Apply(a_request);
 				return;
@@ -286,13 +279,13 @@ namespace RenderGraph
 				Apply(request);
 		}
 
-		/** @brief The epoch is asked for, has a graph to keep running meanwhile, and is not being built or known to fail as asked. */
+		/** @brief The epoch is asked for, has a graph to keep running, and is not being built or known to fail. */
 		bool Due(std::uint32_t a_epoch) const
 		{
 			auto& host = *desc.host;
 			if (!host.RebuildRequested(a_epoch) || inFlight.contains(a_epoch))
 				return false;
-			// No graph yet: the host builds it at its first submission (the startup build).
+			// No graph yet means the host builds it at its first submission.
 			if (!host.Graph(a_epoch))
 				return false;
 			const auto failed = failedAt.find(a_epoch);
@@ -314,7 +307,6 @@ namespace RenderGraph
 			return job;
 		}
 
-		/** @brief Collects the build thread's finished builds into their groups. */
 		void Collect()
 		{
 			std::vector<std::unique_ptr<Done>> taken;
@@ -330,10 +322,7 @@ namespace RenderGraph
 			}
 		}
 
-		/**
-		 * @brief A build that failed: logged once per request count, the old graph kept. a_notify: its extensions or the epoch's owner
-		 * hear of it (not for a build the host kept rejecting, which says nothing against its clients).
-		 */
+		/** @brief Logs a failed build once per request count and keeps the old graph. a_notify is false for repeated host rejections. */
 		void Fail(Done& a_done, const std::string& a_error, bool a_notify = true)
 		{
 			const auto epoch = a_done.job.epoch;
@@ -357,7 +346,7 @@ namespace RenderGraph
 			}
 		}
 
-		/** @brief Attaches one finished build, or drops it (superseded, rejected, failed). Returns whether it was attached. */
+		/** @brief Attaches one finished build or drops it. Returns whether it was attached. */
 		bool Finish(Done& a_done, bool a_synchronous)
 		{
 			auto& host = *desc.host;
@@ -366,22 +355,22 @@ namespace RenderGraph
 				Fail(a_done, a_done.graph ? a_done.graph->Error() : a_done.error);
 				return false;
 			}
-			// Read now: an attach takes the graph.
+			// Read now, since an attach takes the graph.
 			const double buildMs = a_done.graph->BuildMilliseconds();
 			if (!a_synchronous) {
 				++window.builds;
 				window.buildMs += buildMs;
 				window.buildMaxMs = (std::max)(window.buildMaxMs, buildMs);
 			}
-			// A request since it was handed out: drop it and build again, unless that keeps happening (then it goes in, being newer than
-			// the graph that runs, and the epoch is built again after).
+			// Requested again since it was handed out, so drop it and rebuild.
+			// After too many in a row it goes in anyway, since it is newer than the running graph.
 			if (!a_synchronous && host.RebuildRequests(epoch) != a_done.job.requests && supersededInARow[epoch] < kMaxSupersededInARow) {
 				++supersededInARow[epoch];
 				++window.superseded;
 				return false;
 			}
 			const auto begin = Clock::now();
-			// A staged epoch: the host's thread records the graph before it runs, and its owner switches it in (SwitchStaged).
+			// A staged epoch is recorded by the host's thread first, and its owner switches it in.
 			if (staged.contains(epoch) && !a_synchronous) {
 				const auto stagedResult = host.StageEpochGraph(a_done.graph);
 				if (stagedResult.staged) {
@@ -403,14 +392,12 @@ namespace RenderGraph
 					host.RequestRebuild(epoch, "its last build was rejected at its staging");
 					return false;
 				}
-				// Attached at once (nothing ran that a staging would keep): as an attach below.
 			}
 			const auto result = a_done.graph ? host.AttachEpochGraph(a_done.graph) : org::GraphHost::AttachResult{ true, {} };
 			const double attachMs = MillisecondsSince(begin);
 			if (!result.attached) {
 				++window.rejected;
-				// Not answered by another build meanwhile (the epoch still runs the graph it ran when this one was handed out): asked for
-				// again, so the next poll builds it against the host as it is now. Rejected that often in a row, it counts as failed.
+				// If no other build answered meanwhile, ask again so the next poll builds against the host as it is now.
 				const bool replaced = host.BuildGeneration(epoch) != a_done.job.generation;
 				logger::info("[ORG] build manager: {}'s build rejected at the attach ({}){}", Label(epoch), result.reason,
 					replaced ? "; another build replaced the graph meanwhile" : "; built again");
@@ -441,7 +428,7 @@ namespace RenderGraph
 			return true;
 		}
 
-		/** @brief Attaches every group whose builds have all finished and that a_attach names. a_external: an external group was attached. */
+		/** @brief Attaches every group whose builds have all finished and that a_attach names. */
 		bool AttachFinished(Attach a_attach, bool* a_external = nullptr)
 		{
 			Collect();
@@ -464,7 +451,7 @@ namespace RenderGraph
 			return attached;
 		}
 
-		/** @brief Epochs whose alias placements are in a pool generation another graph's build replaced: asked for again. */
+		/** @brief Asks again for epochs whose alias placements are in a pool generation another build replaced. */
 		void RequestStale()
 		{
 			auto& host = *desc.host;
@@ -476,7 +463,7 @@ namespace RenderGraph
 			}
 		}
 
-		/** @brief A build on the render thread after the first world frame, logged (rate-limited). */
+		/** @brief Logs a render-thread build after the first world frame, rate-limited. */
 		void WarnSynchronous(std::string_view a_what, std::string_view a_caller)
 		{
 			if (!worldStarted)
@@ -487,8 +474,8 @@ namespace RenderGraph
 		}
 
 		/**
-		 * @brief The epochs the owner thread builds at a poll (BuiltOnOwner), built now. a_all: every owner-built and external epoch asked
-		 * for, even one being built elsewhere (its build is rejected at its attach: this one started later).
+		 * @brief Builds the owner thread's epochs now. With a_all it also builds epochs being built elsewhere.
+		 * Those other builds are then rejected at their attach, since this one started later.
 		 */
 		bool BuildOwnerEpochs(std::string_view a_caller, bool a_all = false)
 		{
@@ -512,7 +499,7 @@ namespace RenderGraph
 			return built;
 		}
 
-		/** @brief Hands a_jobs (one group's external epochs) to the external builder. Returns the jobs it refused. */
+		/** @brief Hands one group's external epochs to the external builder. Returns the jobs it refused. */
 		std::vector<Job> PostExternal(std::vector<Job> a_jobs)
 		{
 			std::vector<Job> refused;
@@ -561,7 +548,7 @@ namespace RenderGraph
 		void Dispatch(std::string_view a_point)
 		{
 			auto& host = *desc.host;
-			// The external builder's epochs first, a group of their own (attached at a frame's end).
+			// The external builder's epochs form their own group, attached at a frame's end.
 			if (externalBuilder.post) {
 				std::vector<Job> posted;
 				const auto group = ++groupSerial;
@@ -576,7 +563,7 @@ namespace RenderGraph
 					auto& entry = groups[group];
 					entry.external = true;
 					entry.remaining = posted.size();
-					// Refused: built here instead, on the owner thread, and attached with the group.
+					// Refused jobs are built here on the owner thread and attached with the group.
 					auto refused = PostExternal(std::move(posted));
 					if (!refused.empty()) {
 						auto scope = OwnerScope();
@@ -634,13 +621,13 @@ namespace RenderGraph
 			wake.notify_all();
 			if (thread.joinable())
 				thread.join();
-			// Builds posted to the external builder: ones not started return at once, running ones are waited for.
+			// Posted builds that have not started return at once. Running ones are waited for.
 			{
 				std::unique_lock lock(externalLife->mutex);
 				externalLife->stopped = true;
 				externalLife->idle.wait(lock, [&] { return externalLife->running == 0; });
 			}
-			// Never attached, so never run: dropped here, on the owner thread.
+			// Never attached, so never run. Dropped here on the owner thread.
 			finished.clear();
 			groups.clear();
 			inFlight.clear();
@@ -731,8 +718,7 @@ namespace RenderGraph
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		bool changed = false;
-		// The host's safe point first (shader reload): every graph built here, with the host's thread held. Builds handed out before
-		// are rejected at their attach (the epochs run graphs built later).
+		// Shader reload's safe point builds every graph here with the host's thread held. Earlier builds are rejected at attach.
 		if (std::exchange(m.synchronousAll, false)) {
 			WarnSynchronous(fmt::format("every graph asked for ({})", m.synchronousReason), a_point);
 			++m.window.synchronous;
@@ -745,7 +731,7 @@ namespace RenderGraph
 		m.RequestStale();
 		changed = m.BuildOwnerEpochs(a_point) || changed;
 		m.Dispatch(a_point);
-		// The external builder hears of every boundary that may attach its epochs, attached or not (it settles its state there).
+		// The external builder hears of every boundary that may attach its epochs, attached or not.
 		if (a_attach != Attach::Live && m.externalBuilder.boundary)
 			m.externalBuilder.boundary(externalAttached);
 		return changed;

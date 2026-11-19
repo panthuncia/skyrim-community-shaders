@@ -20,13 +20,9 @@ namespace org
 /**
  * @brief The exclusive prefix sum of a uint buffer on the GPU, as one render-graph pass (PrefixSumCS.hlsl).
  *
- * BasicRenderer's two-level block scan, which its material and raster-bucket binning use: a group per block of kBlockSize
- * elements scans its block, then one group scans the block sums and adds each block's prefix back. The usual pairing is a
- * counting sort: a pass counts keys into `counts` with atomics (keeping each item's rank from the atomic's return), this pass
- * turns the counts into each key's first slot, and a scatter writes item i to offsets[key] + rank.
- *
- * The owner creates the buffers (raw or structured uint, with unordered access), registers them with the graph, and adds the
- * pass (ExternalPassDesc::Compute) between the counting pass and the pass that reads the offsets; the graph orders the three.
+ * A two-level block scan, as in BasicRenderer's binning. The usual pairing is a counting sort. A pass counts keys with atomics
+ * and keeps each item's rank, this pass turns counts into each key's first slot, and a scatter writes item i to offsets[key] + rank.
+ * The owner creates and registers the uint buffers with unordered access, and the graph orders the three passes.
  */
 namespace PrefixSum
 {
@@ -40,25 +36,23 @@ namespace PrefixSum
 		std::shared_ptr<const ComputeProgram> blockScan, blockOffsets;
 	};
 
-	/** @brief The two dispatches' programs; null when either could not be created. Share them between passes. */
+	/** @brief Null when either program could not be created. Share them between passes. */
 	std::shared_ptr<const Programs> Load(rhi::Device a_device);
 
 	struct Desc
 	{
 		std::shared_ptr<const Programs> programs;
 		std::shared_ptr<org::Buffer> counts;     // uint[elements]
-		std::shared_ptr<org::Buffer> offsets;    // uint[elements]: counts' exclusive prefix sum
-		std::shared_ptr<org::Buffer> blockSums;  // uint[Blocks(elements)]: scratch
-		std::shared_ptr<org::Buffer> total;      // optional: uint, the sum of every count
+		std::shared_ptr<org::Buffer> offsets;    // uint[elements], counts' exclusive prefix sum
+		std::shared_ptr<org::Buffer> blockSums;  // uint[Blocks(elements)], scratch
+		std::shared_ptr<org::Buffer> total;      // optional uint, the sum of every count
 		std::uint32_t elements = 0;              // at most kMaxElements
-		// Zero the counts as they are read, so that the next accumulation needs no clear of its own. The counts must then be
-		// zero before the first accumulation, and every accumulation must be followed by this pass.
+		// Zero the counts as they are read so the next accumulation needs no clear. The counts must start at zero,
+		// and every accumulation must be followed by this pass.
 		bool clearCounts = false;
-		// Whether an execution scans, when not every one does (null: every one). Called while the pass prepares, which can be
-		// on a worker, so it must read state published for that (the preparation's, as a pass's Prepare would).
+		// Whether an execution scans, null for every one. It may run on a worker, so it must read state published for preparation.
 		std::function<bool(const org::PassPrepareContext&)> active;
-		// Appended to the pass's revision (what its kept recordings depend on): whatever `active` depends on besides the
-		// preparation's host data, which a revision does not see.
+		// Added to the pass's revision. Anything `active` depends on beyond the preparation's host data.
 		std::function<void(std::vector<std::uint64_t>&)> revision;
 	};
 

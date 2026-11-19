@@ -34,12 +34,11 @@ namespace PublishedResources
 		{
 			std::string id;
 			std::shared_ptr<org::Resource> resource;
-			// A versioned twin's slot (GraphResources::Options::versioned): every graph registers it as the id's resolver, and a
-			// resize of the twin is a new version of it, not a new resource.
+			// A versioned twin's slot. Every graph registers it as the id's resolver, so a resize is a new version, not a new resource.
 			std::shared_ptr<org::VersionedTexture> slot;
-			std::optional<org::SRVViewType> view;  // none: the resource's primary view
-			bool published = false;                // false: withdrawn, still registered
-			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export while published; compared, never used
+			std::optional<org::SRVViewType> view;  // none means the primary view
+			bool published = false;                // false when withdrawn but still registered
+			const ID3D11ShaderResourceView* srv = nullptr;  // compared, never used
 			const GraphResources::Resource* twin = nullptr;  // read again by Refresh while alive has not expired
 			std::weak_ptr<const void> alive;
 		};
@@ -59,17 +58,14 @@ namespace PublishedResources
 		struct State
 		{
 			std::vector<Entry> entries;
-			// Ids a build skipped before they were published (IsDeclarable): their publish builds every graph again. Under skippedMutex:
-			// builds run on the build manager's thread.
+			// Ids a build skipped before they were published. Their publish rebuilds every graph. Locked, since builds run on another thread.
 			std::vector<std::string> skipped;
 			std::mutex skippedMutex;
-			// Stays atomic although every call is on the render thread: it is cheap, and an extension made off that thread (a build
-			// on another owner thread) would still read a whole snapshot.
+			// Atomic so an extension made off the render thread still reads a whole snapshot.
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 		};
 
-		// The snapshot the graph being built on this thread registers (PublishedExtension::PrepareForBuild, before any pass declares): what
-		// IsDeclarable answers from during a build. Weak, so a thread's last build pins nothing.
+		// The snapshot the graph being built on this thread registers. Weak, so a thread's last build pins nothing.
 		thread_local std::weak_ptr<const Snapshot> t_building;
 
 		State& Published()
@@ -78,10 +74,7 @@ namespace PublishedResources
 			return s_state;
 		}
 
-		/**
-		 * @brief Logs once when called off the render thread: the entries are not locked. That is the thread that first used them, or
-		 * with CS_ORG_LOADING_THREAD=1 the render owner (FrameAnchors::IsRenderOwner), which a loading screen's thread may be.
-		 */
+		/** @brief Logs once when called off the owning thread, since the entries are not locked. A loading screen's thread may own them. */
 		void CheckThread()
 		{
 			if (RenderGraph::Engine::LoadingScreen::Requested()) {
@@ -134,19 +127,13 @@ namespace PublishedResources
 			std::shared_ptr<const Snapshot> snapshot;
 		};
 
-		/** @brief How an entry changed: what Store rebuilds for it. */
 		enum class Change
 		{
-			Added,     // a new id: only the graphs that looked it up need it
-			Replaced,  // another resource under the id: every graph holds the old one
+			Added,     // only the graphs that looked it up need it
+			Replaced,  // every graph holds the old one
 		};
 
-		/**
-		 * @brief Stores the entries for the next builds (a_what: the ids changed, quoted). The extension, added once, registers the latest
-		 * snapshot at every build. A new id (the last entry)
-		 * rebuilds only the graphs that looked it up (a reader registering with it builds its own epoch again); a replaced resource
-		 * rebuilds every graph, since each holds the old one until it is built again.
-		 */
+		/** @brief Stores the entries for the next builds. A new id rebuilds only the graphs that looked it up, a replaced one rebuilds all. */
 		void Store(State& a_state, org::GraphHost& a_host, Change a_change, std::string_view a_what)
 		{
 			auto snapshot = std::make_shared<Snapshot>();
@@ -173,7 +160,7 @@ namespace PublishedResources
 				GraphResources::RequestStructuralRebuild(fmt::format("published resource {} replaced by a new resource", a_what));
 		}
 
-		/** @brief The D3D11 export of an entry's twin: a versioned twin's current one (a resize makes it again), else the one stored. */
+		/** @brief The D3D11 export of an entry's twin. A versioned twin's export changes on resize. */
 		const ID3D11ShaderResourceView* ExportOf(const Entry& a_entry)
 		{
 			if (!a_entry.published)
@@ -183,13 +170,12 @@ namespace PublishedResources
 			return a_entry.srv;
 		}
 
-		/** @brief The resource an entry stands for now: its slot's current version, or the resource stored. */
 		std::shared_ptr<org::Resource> CurrentOf(const Entry& a_entry)
 		{
 			return a_entry.slot ? a_entry.slot->CurrentResource() : a_entry.resource;
 		}
 
-		/** @brief The view a whole-resource read takes of a 2D texture: a cube's TextureCube, a 2D array's full array, else Texture2D. */
+		/** @brief A cube gets TextureCube, a 2D array its full array, else Texture2D. */
 		std::optional<org::SRVViewType> WholeView(const D3D11_TEXTURE2D_DESC& a_desc)
 		{
 			if (a_desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)
@@ -197,7 +183,7 @@ namespace PublishedResources
 			return a_desc.ArraySize > 1 ? std::optional(org::SRVViewType::Texture2DArrayFull) : std::optional(org::SRVViewType::Texture2D);
 		}
 
-		/** @brief What an entry is published from: a twin (Refresh follows its resizes) or a resource alone (an import). */
+		/** @brief What an entry is published from, either a twin whose resizes Refresh follows or an import. */
 		struct Source
 		{
 			std::string_view name;
@@ -205,7 +191,7 @@ namespace PublishedResources
 			const ID3D11ShaderResourceView* srv = nullptr;
 			const GraphResources::Resource* twin = nullptr;
 			std::weak_ptr<const void> alive;
-			std::shared_ptr<org::VersionedTexture> slot;  // a versioned twin's slot: a new version of it is not a new resource
+			std::shared_ptr<org::VersionedTexture> slot;  // a new version of it is not a new resource
 		};
 
 		bool PublishEntry(std::string_view a_id, const Source& a_source, std::optional<org::SRVViewType> a_view)
@@ -213,7 +199,7 @@ namespace PublishedResources
 			auto& state = Published();
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto* entry = Find(state, a_id);
-			// The same resource, or a new version of the same slot (a versioned twin's resize): nothing to build.
+			// The same resource or a new version of the same slot needs no build.
 			if (entry && (entry->resource == a_source.resource || (entry->slot && entry->slot == a_source.slot))) {
 				entry->resource = a_source.resource;
 				entry->srv = a_source.srv;
@@ -257,7 +243,7 @@ namespace PublishedResources
 				a_view);
 		}
 
-		/** @brief The whole-resource view of a 2D texture's SRV (ShaderResourceIndex): its own dimension's. None for another dimension. */
+		/** @brief The whole-resource view matching a 2D SRV's own dimension. None for another dimension. */
 		std::optional<org::SRVViewType> WholeViewOf(const ID3D11ShaderResourceView* a_srv)
 		{
 			if (!a_srv)
@@ -324,7 +310,7 @@ namespace PublishedResources
 			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
 				continue;
 			if (entry.slot && entry.twin->Versioned() == entry.slot) {
-				// A new version of the same slot: every graph already resolves it.
+				// A new version of the same slot, which every graph already resolves.
 				entry.resource = entry.twin->Graph();
 				entry.srv = entry.published ? entry.twin->SRV() : nullptr;
 				continue;
@@ -344,7 +330,6 @@ namespace PublishedResources
 		auto* entry = Find(Published(), a_id);
 		if (!entry)
 			return;
-		// No export to match until the next Publish.
 		entry->srv = nullptr;
 		if (std::exchange(entry->published, false))
 			logger::info("[ORG] '{}' withdrawn: its readers return to D3D11", a_id);
@@ -352,7 +337,7 @@ namespace PublishedResources
 
 	namespace
 	{
-		/** @brief During a graph build on this thread: whether the snapshot that graph registers holds a_id. Empty outside a build. */
+		/** @brief During a graph build on this thread, whether its snapshot holds a_id. Empty outside a build. */
 		std::optional<bool> InBuildingSnapshot(std::string_view a_id)
 		{
 			const auto snapshot = t_building.lock();
@@ -364,8 +349,7 @@ namespace PublishedResources
 
 	bool IsPublished(std::string_view a_id)
 	{
-		// A pass made while a graph is built, possibly on the build manager's thread, reads the snapshot that graph registers, never the
-		// entries the render thread changes.
+		// During a build, possibly on another thread, read the snapshot that graph registers, never the live entries.
 		if (const auto building = InBuildingSnapshot(a_id))
 			return *building && RenderGraphRuntime::Get().IsActive();
 		const auto* entry = Find(Published(), a_id);
@@ -381,8 +365,7 @@ namespace PublishedResources
 
 	bool IsDeclarable(std::string_view a_id)
 	{
-		// Called by passes as a graph is built, which may be on the build manager's thread: it reads the snapshot that graph registers
-		// (the latest published one outside a build), never the entries the render thread changes.
+		// Builds may run on another thread, so read the building snapshot or the latest one, never the live entries.
 		auto& state = Published();
 		auto snapshot = t_building.lock();
 		if (!snapshot)
@@ -462,7 +445,7 @@ namespace PublishedResources
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: nothing is ever published, and every reader stays on D3D11.
+// Without OpenRenderGraph nothing is published and every reader stays on D3D11.
 #	include "RenderGraph/PublishedResources.h"
 
 namespace PublishedResources

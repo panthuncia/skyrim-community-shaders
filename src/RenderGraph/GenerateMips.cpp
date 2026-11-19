@@ -22,16 +22,16 @@
 
 namespace
 {
-	// ORG's shader, under Data/Shaders (org::kBuiltinShaderPrefix).
+	// ORG's shader, under Data/Shaders.
 	constexpr const char* kShader = "OpenRenderGraph/GenerateMips.hlsl";
-	// The shader's GenerateMipsConstants, in order: source and destination views, their sizes, the flags.
+	// The shader's GenerateMipsConstants: source and destination views, their sizes, the flags.
 	constexpr std::uint32_t kConstantWords = 7;
 	constexpr std::uint32_t kSrgbFlag = 1u;
 	constexpr std::uint32_t kGroupSize = 8;
 
 	struct MipsBindings
 	{
-		std::vector<org::DeclaredViewToken> mips;  // an unordered-access view of each mip, all slices
+		std::vector<org::DeclaredViewToken> mips;  // a UAV of each mip, all slices
 		std::uint32_t slices = 1;
 	};
 
@@ -66,7 +66,7 @@ namespace
 			const std::uint32_t mips = desc.texture.mipLevels;
 			if (mips < 2)
 				return bindings;
-			// One declaration for the whole chain: a dispatch reads one mip and writes the next, through unordered-access views.
+			// One declaration for the whole chain. Each dispatch reads one mip and writes the next.
 			std::vector<org::UavView> views(mips);
 			for (std::uint32_t mip = 0; mip < mips; ++mip)
 				views[mip] = { array ? static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) : UINT32_MAX, mip, 0 };
@@ -87,7 +87,7 @@ namespace
 			MipsFrame frame{ program, gate.latch, gate.offset };
 			if (a_bindings.mips.size() < 2)
 				return frame;
-			// The frame's backing, which may differ from the one the pass was declared with.
+			// The frame's backing may differ from the one the pass was declared with.
 			const auto& desc = a_preparation.Describe(a_bindings.mips.front()).texture;
 			frame.steps = org::PlanGenerateMips(desc.width, desc.height,
 				(std::min)(static_cast<std::uint32_t>(desc.mipLevels), static_cast<std::uint32_t>(a_bindings.mips.size())));
@@ -113,7 +113,6 @@ namespace
 						(step.destinationHeight + kGroupSize - 1) / kGroupSize, a_bindings.slices);
 					continue;
 				}
-				// The gate's group counts for this step, in the run's region.
 				const auto offset = static_cast<std::uint32_t>(a_frame.offset + i * sizeof(GraphPasses::DispatchGroups));
 				compute.DispatchIndirect(a_recording, constants, *a_frame.latch, offset);
 			}

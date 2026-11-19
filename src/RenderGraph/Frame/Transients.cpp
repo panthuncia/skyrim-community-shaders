@@ -70,9 +70,8 @@ namespace RenderGraph::Frame::Transients
 			logger::info("[ORG] frame arena off (CS_ORG_FRAME_ARENA=0): each CS stage keeps its transients in pools of its own");
 			return false;
 		}
-		// Every world recipe epoch at its stage's position: the frame transients' spans count Drawcall Limit Fix's graphs too (they
-		// bind the G-buffer from the Z-prepass to first person). Only CS's stages put their own transients in the arena: Drawcall
-		// Limit Fix's epochs run a varying number of times a frame and keep the shared arena.
+		// Every world recipe epoch gets a position, DCLF's too, since they bind the G-buffer from the Z-prepass to first person.
+		// Only CS's stages put their own transients in the arena, since DCLF's epochs run a varying number of times a frame.
 		std::vector<org::GraphHost::FramePosition> positions;
 		std::string list;
 		for (const auto& entry : Recipes::PositionedEpochs()) {

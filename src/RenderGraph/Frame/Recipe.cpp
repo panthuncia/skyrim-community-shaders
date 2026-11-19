@@ -29,7 +29,7 @@ namespace RenderGraph::Frame::Recipes
 
 		namespace Table = Recipes::Table;
 
-		/** @brief Calls a_visit(stage index, epoch) for each epoch of the recipe check: every stage's own graphs and the tickets after them. */
+		/** @brief Visits every stage's own graphs and the tickets after them. */
 		template <class F>
 		void ForCheckedEpochs(F&& a_visit)
 		{
@@ -56,11 +56,11 @@ namespace RenderGraph::Frame::Recipes
 		{
 			std::mutex mutex;
 			std::map<std::uint32_t, Traced> traces;  // by epoch
-			std::map<std::uint32_t, std::uint64_t> checked;  // by epoch: the generation the last check saw
+			std::map<std::uint32_t, std::uint64_t> checked;  // by epoch, the generation the last check saw
 			std::uint64_t printedHash = 0;
 			std::uint32_t prints = 0, unprinted = 0;
 			std::uint32_t passes = 0, previousInputs = 0, outsideInputs = 0, findings = 0, fallbackTraces = 0;
-			std::uint32_t dclfLater = 0;  // resources Drawcall Limit Fix's stages declare and only later stages write
+			std::uint32_t dclfLater = 0;  // resources DCLF's stages declare and only later stages write
 			std::uint32_t accepted = 0;   // builds the check accepted before their attach
 			std::set<std::string> loggedFindings;
 			bool complete = false;  // a check has seen every epoch's build traced
@@ -79,7 +79,6 @@ namespace RenderGraph::Frame::Recipes
 
 		std::uint32_t EpochOfSegment(Segment a_segment) { return RenderGraphRuntime::EpochOf(a_segment); }
 
-		/** @brief One pass of the recipe as the check reads it. */
 		struct Pass
 		{
 			std::uint32_t stage = 0;
@@ -95,7 +94,7 @@ namespace RenderGraph::Frame::Recipes
 			return resource.name.empty() ? fmt::format("#{}", resource.id) : resource.name;
 		}
 
-		/** @brief The passes of a_trace in their plan order (batch, then position). */
+		/** @brief The passes of a_trace in plan order, by batch then position. */
 		void AppendPasses(std::uint32_t a_stage, const org::ScheduleTrace& a_trace, std::vector<Pass>& a_out)
 		{
 			std::vector<const org::ScheduleTrace::Pass*> ordered;
@@ -116,7 +115,7 @@ namespace RenderGraph::Frame::Recipes
 			}
 		}
 
-		/** @brief The recipe's passes in recipe order, from the traces held; epoch a_epoch's from a_trace instead when given. */
+		/** @brief The recipe's passes in order. Epoch a_epoch's come from a_trace when given. */
 		std::vector<Pass> RecipePasses(const State& a_state, std::uint32_t a_epoch, const org::ScheduleTrace* a_trace)
 		{
 			std::vector<Pass> passes;
@@ -133,7 +132,7 @@ namespace RenderGraph::Frame::Recipes
 			return passes;
 		}
 
-		/** @brief Each finding logged once; in a development build the first one stops the game (Frame::Driver::MismatchFatal). */
+		/** @brief Logs each finding once. In a development build the first one stops the game. */
 		void Report(State& a_state, const std::vector<std::string>& a_findings, std::string_view a_when)
 		{
 			for (const auto& finding : a_findings) {
@@ -159,13 +158,9 @@ namespace RenderGraph::Frame::Recipes
 		}
 
 		/**
-		 * @brief The check (BasicRenderer's PipelineRecipe::Validate): walks the passes in recipe order. Within one stage the stage's
-		 * graph orders its own passes by what they declare, so the check is between stages. A read whose resource a stage written
-		 * earlier in the recipe (or the reading stage itself) writes is fine. One with no writer anywhere in the frame comes from outside
-		 * the graphs (uploads, files, the engine). One whose writers are all in later stages is the previous frame's: it must be declared
-		 * so (kPreviousFrame), else it is a finding. A pass of a CS stage that reads a CS transient (GraphResources::IsTransientName) no
-		 * pass of its stage writes is a finding too: with absent passes, the transient's writer may be left out of the build while its
-		 * reader is present, and the reader would read memory nothing wrote this frame.
+		 * @brief Checks read order between stages, since a stage's graph orders its own passes.
+		 * A read with no writer comes from outside the graphs. One whose writers are all later must be declared in kPreviousFrame.
+		 * A CS transient read with no writer in its own stage is a finding, since absent passes may drop the writer.
 		 */
 		void Validate(State& a_state, const std::vector<Pass>& a_passes, std::vector<std::string>& a_findings)
 		{
@@ -213,10 +208,8 @@ namespace RenderGraph::Frame::Recipes
 						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
 						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
 				}
-			// The frame transients (Frame/Transients.h): resources several stages use, whose memory other stages' transients share
-			// outside their span. ORG derives the span from the graphs that declare them, so this checks the derivation against the
-			// traces: a pass outside the span would use bytes another resource holds then. The first pass of the frame that uses one
-			// must write it: the bytes come in holding another resource's data.
+			// Check ORG's derived frame-transient spans against the traces, since a pass outside the span uses bytes another resource holds.
+			// The first pass that uses one must write it, since the bytes hold another resource's data.
 			std::set<std::string> groupFindings, groupSeen;
 			for (const auto& pass : a_passes) {
 				const auto check = [&](const std::string& a_name, bool a_write) {
@@ -311,8 +304,7 @@ namespace RenderGraph::Frame::Recipes
 	std::vector<PositionedEpoch> PositionedEpochs()
 	{
 		std::vector<PositionedEpoch> out;
-		// A stage's own graphs only: HDR output and frame generation keep tickets of their own, and what they use stays outside the frame
-		// arena.
+		// A stage's own graphs only. HDR output and frame generation keep their own tickets and stay outside the frame arena.
 		ForCheckedEpochs([&](std::uint32_t a_stage, const Table::Epoch& a_epoch) {
 			if (a_epoch.role == Table::Role::Graph && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_epoch.segment)))
 				out.push_back({ EpochOfSegment(a_epoch.segment), Table::kStageTable[a_stage].id, Table::kStageTable[a_stage].owner });
@@ -322,7 +314,7 @@ namespace RenderGraph::Frame::Recipes
 
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph& a_graph, std::uint32_t a_epoch)
 	{
-		// A host epoch's own graph holds that epoch's passes alone: its whole executable is the epoch's when it has no split for it.
+		// Without a split, a host epoch's whole executable is the epoch's.
 		if (auto trace = a_graph.TraceSelectedSchedule(a_epoch))
 			return trace;
 		return a_graph.TraceSelectedSchedule(UINT32_MAX);
@@ -346,10 +338,7 @@ namespace RenderGraph::Frame::Recipes
 		state.traces[a_epoch] = { a_generation, std::move(a_trace) };
 	}
 
-	/**
-	 * @brief CS_ORG_GRAPH_RESOURCES_FRAME=<n> (a diagnostic): at frame n, logs every attached epoch graph's resources, as its schedule
-	 * names them. With a memory dump of the same run it shows which graphs hold which image.
-	 */
+	/** @brief CS_ORG_GRAPH_RESOURCES_FRAME=<n> logs every attached epoch graph's resources at frame n, to match with a memory dump. */
 	static void LogGraphResources(org::GraphHost& a_host)
 	{
 		static const auto at = Switches::Number("CS_ORG_GRAPH_RESOURCES_FRAME", 0);
@@ -379,10 +368,9 @@ namespace RenderGraph::Frame::Recipes
 		LogGraphResources(a_host);
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
-		// The epochs whose build changed since the last check. One without a trace of its build (a build the host made itself, at
-		// setup) is traced here, at most two a frame.
+		// Epochs whose build changed since the last check. A build the host made itself is traced here, at most two a frame.
 		bool changed = false;
-		bool complete = true;  // every epoch's current build is traced: the recipe is checked only whole
+		bool complete = true;  // the recipe is checked only whole
 		std::uint32_t traced = 0;
 		ForCheckedEpochs([&](std::uint32_t, const Table::Epoch& a_entry) {
 			if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_entry.segment)))
@@ -398,7 +386,7 @@ namespace RenderGraph::Frame::Recipes
 			if (entry.generation != generation || !entry.trace) {
 				auto trace = traced < 2 ? TraceEpochGraph(*graph, epoch) : nullptr;
 				if (!trace) {
-					complete = false;  // no schedule selected yet, or two traced this frame already: the next frame tries again
+					complete = false;  // the next frame tries again
 					return;
 				}
 				++traced;
@@ -415,7 +403,7 @@ namespace RenderGraph::Frame::Recipes
 		std::vector<std::string> findings;
 		Validate(state, passes, findings);
 		Report(state, findings, "");
-		// Printed when its passes changed: every stage, its passes in order, what each reads and writes.
+		// Printed when its passes changed.
 		std::uint64_t hash = 1469598103934665603ull;
 		for (const auto& pass : passes)
 			for (const char c : pass.name)
@@ -450,7 +438,7 @@ namespace RenderGraph::Frame::Recipes
 			return;
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
-		// Before the first whole check the other stages' builds are not all known: a later stage's writer could look like the first one.
+		// Before the first whole check a later stage's writer could look like the first one.
 		if (!state.complete)
 			return;
 		State scratch;

@@ -16,23 +16,14 @@ namespace org
 }
 
 /**
- * @brief The recipe: CS's frame as a fixed, ordered list of stages, one recipe per frame kind (docs/development/org-native-frame-graph.md,
- * "The recipe"). The table itself is Frame/RecipeTable.h; this is what reads it. The shape follows BasicRenderer's PipelineRecipe: recipe
- * order is pass order, and a check proves that every resource a pass reads is written earlier in the recipe, or comes from the previous
- * frame or from outside the graphs.
- *
- * - A **stage** is one or more graph epochs at a fixed place in the frame. A CS stage is one revision-driven epoch: one graph built off
- *   the render thread, one kept recording per frame slot, one ticket a frame, submitted at its commit point. Drawcall Limit Fix's stages
- *   are its own graphs. No anchor runs an epoch of its own in native mode but HDR output and frame generation, which the table lists
- *   after the stage they follow.
- * - A **pass** is contributed by a feature (a FrameAnchors client's PassDesc) to the step that names the client at the pass's anchor. Its
- *   order in the stage is the stage's graph order: the step, then the order key.
- * - The check reads each epoch's schedule as its graph was built (org::RenderGraph::TraceSelectedSchedule, traced on the build thread
- *   when the build manager builds it, else once on the render owner when the frame starts), so the recipe printed and checked is the
- *   one the frames run. A build the build manager makes is checked with the rest of the recipe before it attaches (Accept).
- *
- * Header deliberately free of ORG includes.
- */
+* @brief The recipe: CS's frame as a fixed, ordered list of stages, one recipe per frame kind. The table is in Frame/RecipeTable.h.
+*
+* Recipe order is pass order. A check proves every resource a pass reads is written earlier in the recipe, or comes from the
+* previous frame or from outside the graphs. A CS stage is one revision-driven epoch with one ticket a frame.
+* A pass's order in its stage is its step, then its order key. The check reads each epoch's schedule as its graph was built,
+* so what is printed and checked is what the frames run.
+* The header stays free of ORG includes.
+*/
 namespace RenderGraph::Frame::Recipes
 {
 	/** @brief The world recipe's stages, in frame order. */
@@ -49,8 +40,7 @@ namespace RenderGraph::Frame::Recipes
 		Sun,          // CS: the precipitation, under water the water, the sun's occlusion query (the first person's query is the post stage's)
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
-		Ui,           // CS: the UI stage, in every frame kind (Scaleform's displays, a menu's scene, the movie tiles, the overlay, the capture);
-		              // HDR output keeps its ticket
+		Ui, // CS: the UI stage, in every frame kind. HDR output keeps its own ticket
 		Count
 	};
 	// The table (RecipeTable.h) lists the stages in this order.
@@ -73,19 +63,10 @@ namespace RenderGraph::Frame::Recipes
 		StageId stage = StageId::Count;
 		Owner owner = Owner::Cs;
 	};
-	/**
-	 * @brief Every epoch of the world recipe's stages, CS's and Drawcall Limit Fix's, with its stage. HDR output's and frame
-	 * generation's anchors are left out: they keep tickets of their own outside the stages. Any thread, after the render graph
-	 * initialized.
-	 */
+	/** @brief Every epoch of the world recipe's stages with its stage. HDR output and frame generation are left out. Any thread, after init. */
 	std::vector<PositionedEpoch> PositionedEpochs();
 
-	/**
-	 * @brief The recipes of the other frame kinds (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"). Each kind
-	 * has its own ordered list of stages, all built ahead: the world (and a frozen world's capture frame), a menu over a frozen world,
-	 * the main menu, a loading screen, a Bink movie. A CS stage a kind does not list is absent from its frames.
-	 * Whether kind a_kind's recipe (a_capture: a frozen world's capture frame) has CS stage a_segment.
-	 */
+	/** @brief Whether kind a_kind's recipe has CS stage a_segment. a_capture means a frozen world's capture frame. */
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment);
 	/** @brief The kind's recipe as one line: "menu scene (tickets) | UI". */
 	std::string DescribeKind(Kind a_kind, bool a_capture);
@@ -95,31 +76,18 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief An epoch graph's schedule as it was built: its split for a_epoch, or its whole executable. Null before one is selected. */
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph& a_graph, std::uint32_t a_epoch);
 
-	/**
-	 * @brief Whether the recipe check reads epoch a_epoch's schedule: an epoch of a world-recipe stage. Any thread, after the render graph
-	 * initialized.
-	 */
+	/** @brief Whether the recipe check reads epoch a_epoch's schedule. Any thread, after init. */
 	bool Traced(std::uint32_t a_epoch);
 
-	/**
-	 * @brief On the build thread, before a build of epoch a_epoch attaches: the recipe with that build's schedule in place of the epoch's
-	 * current one is checked, so a build that reads a resource before its writer stops a development build before any frame runs it. Only
-	 * once a whole check has seen every epoch's build (before that, the frame's first check at Begin covers it). Any thread.
-	 */
+	/** @brief On the build thread, checks the recipe with a new build in place before it attaches. A bad read order stops development builds early.
+	*  Only once a whole check has seen every epoch's build. */
 	void Accept(std::uint32_t a_epoch, const std::shared_ptr<const org::ScheduleTrace>& a_trace);
 
-	/**
-	 * @brief An epoch's schedule as a build made it (a_generation: the build generation the epoch runs once the build is attached).
-	 * The build manager calls it when it attaches the build. Any thread.
-	 */
+	/** @brief Records an epoch's schedule as a build made it. The build manager calls it at attach. Any thread. */
 	void NoteTrace(std::uint32_t a_epoch, std::uint64_t a_generation, std::shared_ptr<const org::ScheduleTrace> a_trace);
 
-	/**
-	 * @brief At Renderer::Begin, on the render owner (the frame driver, before the stages' schedules): when an epoch of the world recipe
-	 * runs a build the recipe has not seen, its schedule is read, the recipe is checked again, and the recipe is printed when its passes
-	 * changed. A finding (a read whose only producers come later in the frame, and that is not declared as the previous frame's) is a
-	 * mismatch: fatal in development builds, logged once in release builds (Frame::Driver::MismatchFatal).
-	 */
+	/** @brief At Renderer::Begin, rechecks and prints the recipe when an epoch runs a build not seen yet.
+	*  A read whose only producers come later in the frame is a mismatch. */
 	void Check(org::GraphHost& a_host);
 
 	/** @brief The census line for CS_ORG_EPOCH_STATS: the recipe's passes, its inputs by kind, and its findings. */

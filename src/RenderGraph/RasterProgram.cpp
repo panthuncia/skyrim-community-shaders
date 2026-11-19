@@ -30,7 +30,7 @@ namespace
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 	namespace Build = RenderGraph::ProgramBuild;
 
-	// The state Load builds the pipeline from, kept for the registry's rebuilds.
+	// Kept for the registry's rebuilds.
 	struct PipelineState
 	{
 		rhi::RasterState raster{};
@@ -54,7 +54,7 @@ namespace
 		for (std::size_t i = 0; i < a_desc.targets.size(); ++i) {
 			state.targets.formats[i] = a_desc.targets[i].format;
 			state.blend.attachments[i] = a_desc.targets[i].blend;
-			// Independent blending only when the targets differ: one state for all is what every backend supports.
+			// Independent blending only when the targets differ, since one state for all works on every backend.
 			const auto& a = state.blend.attachments[i];
 			const auto& b = state.blend.attachments[0];
 			if (a.enable != b.enable || a.srcColor != b.srcColor || a.dstColor != b.dstColor || a.colorOp != b.colorOp || a.srcAlpha != b.srcAlpha ||
@@ -64,7 +64,7 @@ namespace
 		return state;
 	}
 
-	// a_label: what the pipeline's debugging dumps go under (BASICRHI_VK_DUMP_ISA, DXVK_PIPELINE_STATS).
+	// a_label names the pipeline's debugging dumps.
 	rhi::PipelinePtr CreatePipeline(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, const PipelineState& a_state, const std::vector<std::byte>& a_vertex,
 		const std::string& a_vertexEntry, const std::vector<std::byte>& a_pixel, const std::string& a_pixelEntry, const std::string& a_label)
 	{
@@ -78,7 +78,7 @@ namespace
 		const rhi::SubobjRTVs targets{ a_state.targets };
 		const rhi::SubobjDSV depthFormat{ a_state.depthFormat };
 		const rhi::SubobjPrimitiveTopology topology{ a_state.topology };
-		const rhi::SubobjInputLayout input{};  // no vertex buffers: the vertex stage makes its positions from SV_VertexID
+		const rhi::SubobjInputLayout input{};  // no vertex buffers, positions come from SV_VertexID
 		const rhi::PipelineStreamItem items[] = {
 			rhi::Make(layout),
 			rhi::Make(vertex),
@@ -100,7 +100,6 @@ namespace
 		return pipeline;
 	}
 
-	/** @brief What Load and the rebuild compile: both stages' sources (or generated text), entries and defines. */
 	struct Stages
 	{
 		std::string vertexSource, pixelSource;
@@ -111,7 +110,7 @@ namespace
 		std::wstring languageVersion = L"2021";
 	};
 
-	/** @brief A stage's bytes: its generated text when it has one, else its file. */
+	/** @brief A stage's generated text when it has one, else its file. */
 	std::vector<std::byte> StageBytes(const std::filesystem::path& a_path, const std::string& a_text)
 	{
 		if (a_text.empty())
@@ -135,9 +134,8 @@ namespace
 	}
 
 	/**
-	 * @brief The program's registry rebuild: both stages compiled again as they are now (off the owner thread; an unchanged one is a
-	 * memory cache hit), the pixel stage once the vertex stage is in, and a new pair's pipeline made under the program's own layout,
-	 * on the compile's thread. The program is held weakly: one released meanwhile has nothing to rebuild.
+	 * @brief Recompiles both stages off the owner thread and makes a new pipeline under the program's own layout.
+	 * The program is held weakly, so one released meanwhile is skipped.
 	 */
 	org::services::LiveRebuild Rebuild(std::weak_ptr<const RasterProgram> a_program, rhi::Device a_device, PipelineState a_state, Stages a_stages)
 	{
@@ -150,7 +148,7 @@ namespace
 			auto pixelSource = std::make_shared<std::vector<std::byte>>(StageBytes(pixelPath, a_stages.pixelText));
 			if (!compiler || vertexSource->empty() || pixelSource->empty())
 				return a_done({ .error = compiler ? fmt::format("missing shader source for {}", a_stages.label) : std::string("no runtime shader compiler") });
-			// The compiler copies each source; a memory-cache hit (nothing changed) completes inline, on this thread.
+			// A memory-cache hit completes inline on this thread.
 			(void)compiler->CompileAsync(StageRequest(vertexPath, *vertexSource, a_stages.vertexEntry, L"vs_6_6", a_stages),
 				[compiler, a_program, a_device, a_state, a_stages, a_request, a_done, pixelPath, pixelSource](const org::services::ShaderArtifact& a_vertex) {
 					if (!a_vertex)
@@ -164,7 +162,7 @@ namespace
 								return a_done({ .fingerprint = fingerprint });
 							const auto program = a_program.lock();
 							if (!program)
-								return a_done({ .fingerprint = a_request.fingerprint });  // released: nothing binds it
+								return a_done({ .fingerprint = a_request.fingerprint });  // released, nothing binds it
 							auto pipeline = CreatePipeline(a_device, program->layout->GetHandle(), a_state, vertex, Util::WStringToString(a_stages.vertexEntry), a_pixel.binary,
 								Util::WStringToString(a_stages.pixelEntry), a_stages.label);
 							if (!pipeline)
@@ -175,7 +173,7 @@ namespace
 		};
 	}
 
-	/** @brief One stage compiled now (blocking); empty, logged, on failure. */
+	/** @brief Compiles one stage now, blocking. Empty and logged on failure. */
 	std::vector<std::byte> CompileStage(org::services::ShaderCompiler& a_compiler, const std::string& a_source, const std::string& a_text, const std::wstring& a_entry,
 		const wchar_t* a_target, const Stages& a_stages, spdlog::level::level_enum a_level = spdlog::level::err)
 	{
@@ -193,7 +191,7 @@ namespace
 		return artifact.binary;
 	}
 
-	/** @brief What a desc compiles: its sources, entries and each stage's defines, resolved now (CS's common defines read State). */
+	/** @brief Resolves the desc's defines now, since CS's common defines read State. */
 	Stages StagesOf(const RasterProgram::Desc& a_desc)
 	{
 		return { a_desc.vertexSource, a_desc.pixelSource, a_desc.vertexEntry, a_desc.pixelEntry,
@@ -216,7 +214,7 @@ bool RasterProgram::CompileStages(const Desc& a_desc)
 	if (!compiler)
 		return false;
 	const Stages stages = StagesOf(a_desc);
-	// A precompile's failure is a warning: the caller names the permutation, and a Load that needs it logs its own error.
+	// A precompile failure is only a warning. A Load that needs it logs its own error.
 	return !CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages, spdlog::level::warn).empty() &&
 	       !CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages, spdlog::level::warn).empty();
 #	else
@@ -228,7 +226,7 @@ bool RasterProgram::CompileStages(const Desc& a_desc)
 rhi::PipelineHandle RasterProgram::Pipeline() const
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// Non-owning: the registry holds the payload it replaced until every submission that may use it has completed.
+	// Non-owning. The registry keeps a replaced payload until every submission that may use it has completed.
 	return (*static_cast<const rhi::PipelinePtr*>(slot->Peek()))->GetHandle();
 #	else
 	return {};
@@ -238,7 +236,7 @@ rhi::PipelineHandle RasterProgram::Pipeline() const
 std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
 #	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// A depth-only program (no colour target, a depth format) is allowed: the engine skeleton's depth clears draw one.
+	// A depth-only program is allowed, since the engine skeleton's depth clears draw one.
 	if ((a_desc.targets.empty() && a_desc.depthFormat == rhi::Format::Unknown) || a_desc.targets.size() > 8) {
 		logger::error("[ORG] {}: a raster program needs 1 to 8 colour targets, or none with a depth format, not {}", a_desc.pixelSource, a_desc.targets.size());
 		return {};
@@ -249,9 +247,9 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 		return {};
 	}
 	auto& registry = *RenderGraphRuntime::PipelineRegistry();
-	// Before the sources are read: a reload that starts after rebuilds it (PipelineRegistry::Register).
+	// Read before the sources, so a reload that starts after rebuilds it.
 	const std::uint64_t builtFor = registry.SourcesGeneration();
-	// The defines resolved once, here: a hot reload compiles the same permutation.
+	// Resolved once here, so a hot reload compiles the same permutation.
 	const Stages stages = StagesOf(a_desc);
 	const auto vertex = CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages);
 	const auto pixel = vertex.empty() ? std::vector<std::byte>{} : CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages);
@@ -283,7 +281,6 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 		logger::error("[ORG] {}: the draw signature could not be created", stages.label);
 		return {};
 	}
-	// Live while an owner holds the program (the slot is its).
 	org::services::LivePipelineDesc live;
 	live.id = fmt::format("{} + {}", a_desc.vertexSource, stages.label);
 	// Generated stages have no file a reload could name.
@@ -303,7 +300,7 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 
 bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const
 {
-	// A draw this program cannot record is skipped, and its reason logged once: a skipped draw leaves its targets as they were.
+	// A skipped draw leaves its targets as they were, and its reason is logged once.
 	static Util::ReasonLog skipped("[ORG] raster program: a draw was not recorded", spdlog::level::warn);
 	const auto skip = [&](std::string_view a_reason) {
 		skipped.Report(a_reason, a_draw.debugName ? a_draw.debugName : "");
@@ -341,8 +338,7 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 		depth.readOnly = a_draw.depth->readOnly;
 		depth.depthLoad = a_draw.depth->load;
 		depth.depthStore = a_draw.depth->readOnly ? rhi::StoreOp::DontCare : rhi::StoreOp::Store;
-		// The stencil is loaded and stored: a program that writes it (Desc::depth's stencil ops) keeps what it wrote. Depth::clearStencil
-		// clears it to 0 with a depth clear.
+		// The stencil is loaded and stored so a program that writes it keeps what it wrote. clearStencil clears it to 0.
 		depth.stencilLoad = a_draw.depth->load == rhi::LoadOp::Clear && a_draw.depth->clearStencil ? rhi::LoadOp::Clear : rhi::LoadOp::Load;
 		depth.stencilStore = rhi::StoreOp::Store;
 		depth.clear.type = rhi::ClearValueType::DepthStencil;
@@ -364,13 +360,13 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 	commands.BindLayout(layout->GetHandle());
 	commands.BindPipeline(Pipeline());
-	// Set every draw: the reference holds across the list's passes, so a draw that wants 0 must not inherit another's.
+	// Set every draw, since the reference holds across the list's passes.
 	commands.SetStencilRef(a_draw.stencilReference);
-	// BeginPass set viewport 0 and the scissor to the render area; a draw with its own replaces them inside this pass.
+	// BeginPass set viewport 0 and the scissor to the render area. A draw's own replace them inside this pass.
 	if (a_draw.dynamicViewport)
 		commands.SetViewports({ &*a_draw.dynamicViewport, 1 });
 	if (a_draw.scissor) {
-		// Clipped to the render area, as the render area would clip it: nothing outside the pass's area is drawn either way.
+		// Clipped to the render area, which would clip it anyway.
 		const auto& area = a_draw.viewport;
 		const auto& rect = *a_draw.scissor;
 		const std::int64_t left = (std::max)(static_cast<std::int64_t>(rect.x), static_cast<std::int64_t>(area.x));
@@ -385,12 +381,11 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	}
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
-	// Inside the render pass: Vulkan ends a query begun inside a pass in that same pass, and the count is this draw's alone.
+	// Vulkan ends a query begun inside a pass in that same pass, so the count is this draw's alone.
 	const bool counted = a_draw.occlusionPool.valid();
 	if (counted)
 		commands.BeginQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
 	if (a_draw.indirect && drawSignature) {
-		// The run's region of the latch: its arena chunk and its offset there.
 		const auto region = a_draw.indirect->At(a_recording.Run());
 		commands.ExecuteIndirect(drawSignature->GetHandle(), region.buffer->GetAPIResource().GetHandle(), region.offset + a_draw.indirectOffset, {}, 0, 1);
 	} else

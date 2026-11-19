@@ -38,13 +38,12 @@ namespace GraphResources
 {
 	namespace
 	{
-		// A texture's description, 2D or 3D alike.
 		struct Shape
 		{
 			D3D11_RESOURCE_DIMENSION dimension;
 			UINT width, height;
 			UINT depthOrArraySize;  // depth of a 3D texture, array size of a 2D one
-			UINT mips;              // 0: the whole chain, as in D3D11
+			UINT mips;              // 0 means the whole chain, as in D3D11
 			DXGI_FORMAT format;
 			UINT samples;
 			UINT bindFlags;
@@ -63,7 +62,7 @@ namespace GraphResources
 
 		bool IsDepth(const Shape& a_shape) { return (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0; }
 
-		/** @brief The formats of a texture's image and views: its own for each, or a typeless depth texture's (Texture2D's rule). */
+		/** @brief A texture's image and view formats. A typeless depth texture gets its view formats from Texture2D's rule. */
 		struct Formats
 		{
 			DXGI_FORMAT image = DXGI_FORMAT_UNKNOWN;
@@ -71,7 +70,7 @@ namespace GraphResources
 			DXGI_FORMAT dsv = DXGI_FORMAT_UNKNOWN;  // depth textures only
 		};
 
-		/** @brief a_shape's formats; all unknown for a depth texture whose format is not one of the typeless depth formats. */
+		/** @brief All unknown for a depth texture whose format is not a typeless depth format. */
 		Formats FormatsOf(const Shape& a_shape)
 		{
 			if (!IsDepth(a_shape))
@@ -98,10 +97,7 @@ namespace GraphResources
 			return static_cast<UINT>(std::bit_width(largest));
 		}
 
-		/**
-		 * @brief The graph's description of the texture. A PixelBuffer reads its mips from one entry per slice and mip (slice-major),
-		 * an external texture from one entry per mip.
-		 */
+		/** @brief A PixelBuffer reads mips from one entry per slice and mip, an external texture from one entry per mip. */
 		org::TextureDescription Describe(const Shape& a_shape, bool a_external)
 		{
 			const bool cube = (a_shape.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
@@ -121,7 +117,7 @@ namespace GraphResources
 			desc.srvFormat = rhi::helpers::ToRHI(formats.srv);
 			desc.hasUAV = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			desc.uavFormat = format;
-			// A CPU-side UAV too, so a pass can clear it (PassBuilder::UnorderedAccessClear), as D3D11 clears its UAVs.
+			// A CPU-side UAV too, so a pass can clear it as D3D11 clears its UAVs.
 			desc.hasNonShaderVisibleUAV = desc.hasUAV;
 			desc.hasRTV = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 			desc.rtvFormat = format;
@@ -135,7 +131,7 @@ namespace GraphResources
 			return desc;
 		}
 
-		/** @brief A graph-only texture: aliasable (placed by the graph) when transient, materialized now otherwise. */
+		/** @brief A graph-only texture. Transient ones are placed by the graph, others are made now. */
 		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
 			std::optional<std::uint64_t> a_pool = std::nullopt)
 		{
@@ -148,7 +144,7 @@ namespace GraphResources
 			return texture;
 		}
 
-		/** @brief An exported twin texture: every view in the texture's own format, the SRV always (Describe's rule). */
+		/** @brief An exported twin texture with every view in its own format. */
 		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
 		{
 			const auto formats = FormatsOf(a_shape);
@@ -197,9 +193,8 @@ namespace GraphResources
 		}
 
 		/**
-		 * @brief The exported texture's views of the whole texture; false when D3D11 refuses one. A depth texture's (a_depth: its
-		 * Formats) are 2D views in its read and depth formats, which a typeless texture cannot default to. Only a depth texture
-		 * exports a DSV.
+		 * @brief The exported texture's whole-texture views, false when D3D11 refuses one.
+		 * Depth views are 2D views in explicit formats, since a typeless texture cannot default to them.
 		 */
 		bool CreateTextureViews(ID3D11Resource* a_texture, Export a_export, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
 			winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav, winrt::com_ptr<ID3D11RenderTargetView>& a_rtv, winrt::com_ptr<ID3D11DepthStencilView>& a_dsv,
@@ -229,7 +224,7 @@ namespace GraphResources
 			return true;
 		}
 
-		/** @brief A graph buffer: aliasable (placed by the graph) when transient and not exported, materialized now otherwise. */
+		/** @brief A graph buffer. Transient and unexported ones are placed by the graph, others are made now. */
 		void PlaceBuffer(org::Buffer& a_buffer, const std::string& a_name, bool a_aliasable)
 		{
 			a_buffer.SetName(a_name);
@@ -252,7 +247,7 @@ namespace GraphResources
 			return true;
 		}
 
-		/** @brief A 2D texture's mip count: 0 in the description is the whole chain, as in D3D11. */
+		/** @brief 0 in the description means the whole chain, as in D3D11. */
 		UINT MipsOf(const D3D11_TEXTURE2D_DESC& a_desc)
 		{
 			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, 1u })));
@@ -267,16 +262,13 @@ namespace GraphResources
 			rhi::CopyableFootprint footprint{};
 		};
 		std::shared_ptr<org::Resource> target;
-		std::shared_ptr<org::Resource> staging;  // an upload-heap buffer, written once before any copy
+		std::shared_ptr<org::Resource> staging;  // upload heap, written once before any copy
 		std::vector<Copy> copies;
 	};
 
 	namespace
 	{
-		/**
-		 * @brief A texture's subresources in a new host-visible buffer, at the copy's pitches. Slice-major entries, as
-		 * rhi::helpers::PlanTextureUploadSubresources reads them. Null, logged, without a texture or when the buffer cannot be made.
-		 */
+		/** @brief Copies a texture's subresources into a new host-visible buffer, slice-major. Null and logged on failure. */
 		std::shared_ptr<const StagedUpload> StageTexture(const std::shared_ptr<org::Resource>& a_texture, const std::string& a_name, DXGI_FORMAT a_format,
 			UINT a_width, UINT a_height, UINT a_depth, UINT a_mips, UINT a_arraySize, std::span<const SubresourceData> a_subresources)
 		{
@@ -330,7 +322,6 @@ namespace GraphResources
 			std::shared_ptr<const StagedUploads> uploads;
 		};
 
-		/** @brief MakeUploadPass's pass: the staged copies, declared on both ends. */
 		class UploadCopyPass final : public org::TypedRenderGraphPass<UploadCopyPass, UploadFrame, UploadBindings>
 		{
 		public:
@@ -401,7 +392,7 @@ namespace GraphResources
 		const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
 			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0 };
 		const UINT mips = MipCount(shape);
-		// A depth image is made in its DSV's format: a typeless texture format names no image format of its own.
+		// A typeless format names no image format, so a depth image uses its DSV's format.
 		const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
 		if (imageFormat == rhi::Format::Unknown) {
 			logger::error("[ORG] {}: not exported, format {} has no image format", a_name, static_cast<int>(a_desc.format));
@@ -450,12 +441,11 @@ namespace GraphResources
 			if (!home) {
 				if (exported.d3d11)
 					logger::error("[ORG] {}: DXVK rests it in layout {}, which the graph has no equivalent of", a_name, static_cast<int>(info.image.layout));
-				// DXVK's stream may still initialize the image: it goes once D3D11 is past this point.
+				// DXVK's stream may still initialize the image, so it goes once D3D11 is past this point.
 				exported.d3d11 = nullptr;
 				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
 				return {};
 			}
-			// The graph's description: the twins' (Describe) with each view in the format the owner asked for.
 			auto graphDesc = Describe(shape, true);
 			graphDesc.format = imageFormat;
 			graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
@@ -470,10 +460,8 @@ namespace GraphResources
 			graphDesc.initialLayout = *home;
 			std::shared_ptr<org::ExternalTextureResource> texture;
 			if (*home == rhi::ResourceLayout::Common) {
-				// Resting in Common (native mode). The import is exclusive and the graph moves the image between layouts. Its other
-				// users follow: the native context's work on the D3D11 wrap goes through ORG's external client (this resource is its
-				// ledger: MadeImageOf), and DCLF's views of it are made on this resource. The import does not own the image, so the
-				// graph texture keeps it: the import goes first, then the image.
+				// Native mode keeps the image in Common and the graph moves it between layouts. Other users go through this resource.
+				// The import does not own the image, so the import is released first and then the image.
 				struct Kept
 				{
 					rhi::ResourcePtr image;
@@ -489,14 +477,14 @@ namespace GraphResources
 				auto kept = std::make_shared<Kept>(Kept{ std::move(image), std::move(imported) });
 				texture = std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
 			} else {
-				// Resting in a layout of its own (guest mode): the graph moves the texture into each pass's layout and back.
+				// Guest mode rests the texture in its own layout and the graph moves it into each pass's layout and back.
 				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, false);
 				texture->SetName(a_name);
-				// The image's graph resource, for the duplicate check (the GENERAL branch's import notes itself).
+				// For the duplicate-image check.
 				RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(info.image.image), texture, a_name);
 			}
 			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
-			// An import of the D3D11 texture finds this resource and returns it (or the twin's slot) instead of importing it again.
+			// An import of the D3D11 texture finds this resource instead of importing it again.
 			RenderGraph::RegisterMadeImage(exported.image, texture, graphDesc, a_name);
 			exported.graph = std::move(texture);
 			return exported;
@@ -510,16 +498,13 @@ namespace GraphResources
 	{
 		std::atomic<std::uint64_t> resizeGeneration{ 0 };
 
-		// The last bumps of the resize generation, with what made each: the anchors name them when they build again.
+		// The last resize generation bumps with their causes, named when the anchors build again.
 		constexpr std::size_t kResizeCauses = 16;
 		std::mutex resizeCauseLock;
 		std::deque<std::pair<std::uint64_t, std::string>> resizeCauses;
 		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
 
-		/**
-		 * @brief Register (a graph build, possibly on the build manager's thread) reads a twin's resource and slot while a Resize (the
-		 * render thread) replaces them. Register holds it shared, Resize exclusively: a resize waits only for a registration in progress.
-		 */
+		/** @brief Register may run on the build thread while Resize replaces a twin on the render thread. Register holds it shared. */
 		std::shared_mutex& RegisterMutex()
 		{
 			static std::shared_mutex s_mutex;
@@ -529,7 +514,7 @@ namespace GraphResources
 
 	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs)
 	{
-		// Built off the render thread by the build manager, attached at a frame boundary.
+		// The build manager builds this off the render thread and attaches it at a frame boundary.
 		if (!RenderGraphRuntime::Get().Host())
 			return;
 		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -551,7 +536,7 @@ namespace GraphResources
 
 	namespace
 	{
-		/** @brief The live transient twins' names, counted (two twins may share a name across a resize). */
+		/** @brief The live transient twins' names, counted, since two twins may share a name across a resize. */
 		struct TransientNames
 		{
 			std::mutex mutex;
@@ -560,7 +545,7 @@ namespace GraphResources
 
 		TransientNames& Transients()
 		{
-			// Never destroyed: twins are destroyed during static destruction too.
+			// Never destroyed, since twins are destroyed during static destruction too.
 			static auto* names = new TransientNames;
 			return *names;
 		}
@@ -586,7 +571,7 @@ namespace GraphResources
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape)
 	{
 		const bool joined = JoinSlot(std::move(a_previous), a_sameShape);
-		// An import of the export returns the slot, which its passes follow across versions, rather than this version.
+		// An import of the export returns the slot, which passes follow across versions.
 		if (slot && graph)
 			RenderGraph::SetMadeImageSlot(graph.get(), slot);
 		return joined;
@@ -602,14 +587,14 @@ namespace GraphResources
 			if (a_previous && a_sameShape) {
 				a_previous->PublishImage(std::move(image));
 				slot = std::move(a_previous);
-				// Tickets prepared before resolved the old version: they are prepared again.
+				// Tickets prepared before resolved the old version, so they are prepared again.
 				if (auto* host = RenderGraphRuntime::Get().Host())
 					host->NoteNewVersions();
 				return true;
 			}
 			slot = org::VersionedTexture::CreateImage(std::move(image));
 		} catch (const std::exception& e) {
-			// Another shape class than the first version: a new slot, which the passes declare again after a build.
+			// A different shape class needs a new slot, which passes declare again after a build.
 			logger::warn("[ORG] {}: not a new version ({}); a new slot instead", name, e.what());
 			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph));
 		}
@@ -650,7 +635,7 @@ namespace GraphResources
 	{
 		std::shared_lock lock(RegisterMutex());
 		if (slot) {
-			// PublishedResources may have registered the same slot under the same id already: a graph takes one resolver an id.
+			// PublishedResources may have registered the same id already, and a graph takes one resolver per id.
 			const org::ResourceIdentifier id(name);
 			if (!a_graph._resolverMap.contains(id))
 				a_graph.RegisterResolver(id, slot);
@@ -662,14 +647,13 @@ namespace GraphResources
 
 	void Resource::Reset()
 	{
-		// The D3D11 side first: nothing of D3D11 may outlive the memory it views.
+		// Release the D3D11 side first, since nothing of D3D11 may outlive the memory it views.
 		srv = nullptr;
 		uav = nullptr;
 		rtv = nullptr;
 		dsv = nullptr;
 		const bool exported = d3d11 != nullptr;
 		d3d11 = nullptr;
-		// No import can find the export any more.
 		RenderGraph::ForgetMadeImage(graph.get());
 		if (exported && graph)
 			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
@@ -726,7 +710,7 @@ namespace GraphResources
 		const auto format = rhi::helpers::ToRHI(desc.Format);
 		const bool blocks = rhi::helpers::IsBlockCompressed(format);
 		const UINT bytes = rhi::helpers::BytesPerBlock(format);
-		// One buffer of zeros as large as mip 0: every subresource reads it with its own row pitch.
+		// One zero buffer as large as mip 0. Every subresource reads it with its own row pitch.
 		const auto rowBytes = [&](UINT a_mip) { const UINT width = (std::max)(desc.Width >> a_mip, 1u); return (blocks ? (width + 3) / 4 : width) * bytes; };
 		const auto rows = [&](UINT a_mip) { const UINT height = (std::max)(desc.Height >> a_mip, 1u); return blocks ? (height + 3) / 4 : height; };
 		const std::vector<std::uint8_t> zeros(static_cast<std::size_t>(rowBytes(0)) * rows(0), 0);
@@ -758,7 +742,6 @@ namespace GraphResources
 
 	namespace
 	{
-		/** @brief A twin's resize waiting for the next frame boundary. */
 		struct SizeRequest
 		{
 			std::weak_ptr<const void> alive;
@@ -771,7 +754,7 @@ namespace GraphResources
 			return s_requests;
 		}
 
-		/** @brief Every waiting resize, at the frame boundary. A twin destroyed since has none. */
+		/** @brief Applies every waiting resize at the frame boundary. A twin destroyed since has none. */
 		void ApplySizeRequests()
 		{
 			for (auto& request : std::exchange(SizeRequests(), {}))
@@ -971,7 +954,7 @@ namespace GraphResources
 
 #	include "RenderGraph/GraphResources.h"
 
-// Built without OpenRenderGraph: no twin is ever created, and every feature keeps its D3D11 path.
+// Without OpenRenderGraph no twin is created and every feature keeps its D3D11 path.
 namespace GraphResources
 {
 	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
