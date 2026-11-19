@@ -330,6 +330,7 @@ void TreeWind::Reset()
 	data.Detail = { settings.FlutterShare, settings.FlutterSpeed, settings.NearScale, settings.NearRampEnd };
 	data.Gusts = { gustStrength, gustRarity, 0.0f, 0.0f };
 	windOnCB->Update(data);
+	frameWind = data;
 
 	data.Params.z = 0.0f;
 	windOffCB->Update(data);

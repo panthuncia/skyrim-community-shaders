@@ -6,6 +6,14 @@
 // (DistantTree) draw.
 namespace TreeWind
 {
+#if defined(TREE_WIND_ROWS)
+	// Drawcall Limit Fix binds no b3: its draws fill these from their draw row before any use.
+	static float4 Wind;
+	static float4 Params;
+	static float4 Shape;
+	static float4 Detail;
+	static float4 Gusts;
+#else
 	cbuffer TreeWindCB : register(b3)
 	{
 		float4 Wind;    // phase, previous phase, wind speed 0-1, wind angle (radians)
@@ -14,9 +22,13 @@ namespace TreeWind
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
 		float4 Gusts;   // gust strength, gust rarity, unused, unused
 	};
+#endif
 
+#if !defined(TREE_WIND_ROWS)
 	// Per vertex: bend weight, tree random, tree scale, distance from the trunk
 	Buffer<float4> VertexData : register(t120);
+#	define TREE_WIND_VERTEX_DATA(a_vertex) VertexData.Load(a_vertex)
+#endif
 
 	bool IsEnabled()
 	{
@@ -44,9 +56,10 @@ namespace TreeWind
 		return lerp(Detail.z, 1.0, saturate((dist - Params.y) / max(Detail.w - Params.y, 1.0)));
 	}
 
+#if defined(TREE_WIND_VERTEX_DATA)
 	float2 GetOffset(float3 positionMS, float phase, uint vertexID, float nearScale)
 	{
-		float4 data = VertexData.Load(vertexID);
+		float4 data = TREE_WIND_VERTEX_DATA(vertexID);
 		float bend = Shape.y > 0.5 ? pow(saturate(data.x), max(Shape.x, 0.05)) : 1.0;
 		float scale = bend * data.z * nearScale;
 		float2 offset = Sway(positionMS, phase + data.y * Shape.w) * scale;
@@ -60,6 +73,7 @@ namespace TreeWind
 		float flutter = (frac(data.y * 7.31) < Detail.x) ? sin(phase * Detail.y + h) * Params.x * Shape.z * saturate(data.w) * scale : 0.0;
 		return offset + float2(sin(h), cos(h)) * flutter;
 	}
+#endif
 
 	// Standard tree LOD: one billboard per tree, so the instance gives the tree's foot and size directly.
 	// a_heightMS is the vertex height above the foot and a_cameraDistance its distance from the camera.
