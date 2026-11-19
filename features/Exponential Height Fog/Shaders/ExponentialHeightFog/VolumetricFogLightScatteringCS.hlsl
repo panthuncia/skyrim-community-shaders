@@ -1,7 +1,8 @@
 // Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and the included headers'
 // resources (SharedData's depth, IBL, Skylighting, Terrain and Cloud Shadows, Light Limit Fix) are heap reads
 // through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES): the EXTERN entries below. Light Limit
-// Fix's strict lights are never read here: an UNREAD_LATCH entry.
+// Fix's strict lights are never read here: an UNREAD_LATCH entry. With PHYSICAL_SKY the scattering reads Physical
+// Sky's transmittance LUT, cloud shadow volume and its mean (EXTERN). The rest of Physical Sky's header is UNREAD.
 #define ORG_SHARED_CONSTANTS
 #define ORG_HEADER_RESOURCES
 #include "Common/OrgResources.hlsli"
@@ -33,12 +34,27 @@ struct DirectionalShadowLightData
 	X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 50)                              \
 	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)                             \
 	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                            \
+	X(EXTERN, Texture2D<float4>, TexTrLut, 61)                                        \
+	X(EXTERN, Texture3D<float>, TexShadowVolume, 112)                                 \
+	X(EXTERN, Texture2D<float4>, MeanProfile, 69)                                     \
 	X(EXTERN, StructuredBuffer<Light>, lights, 35)                                    \
 	X(EXTERN, StructuredBuffer<uint>, lightList, 36)                                  \
 	X(EXTERN, StructuredBuffer<LightGrid>, lightGrid, 37)                             \
 	X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                   \
 	X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)                            \
-	X(UNREAD_LATCH, StrictLightDataValues, StrictLightData, 3)
+	X(UNREAD_LATCH, StrictLightDataValues, StrictLightData, 3)                        \
+	X(UNREAD, Texture2D<float4>, TexSvLut, 62)                                        \
+	X(UNREAD, Texture3D<float4>, TexApLut, 63)                                        \
+	X(UNREAD, Texture2D<unorm float>, TexApShadow, 64)                                \
+	X(UNREAD, Texture2D<float4>, TexSkyTail, 66)                                      \
+	X(UNREAD, TextureCube<float4>, TexVolCubeDepth, 67)                               \
+	X(UNREAD, Texture2D<float4>, TexDiskPhaseLut, 106)                                \
+	X(UNREAD, TextureCube<float4>, TexLightningReflection, 109)                       \
+	X(UNREAD, Texture2D<float>, TexVolTr, 110)                                        \
+	X(UNREAD, Texture2D<float4>, TexVolLum, 111)                                      \
+	X(UNREAD, Texture2D<float4>, TexLightningChannels, 113)                           \
+	X(UNREAD, TextureCube<float>, TexVolCubeTr, 114)                                  \
+	X(UNREAD, TextureCube<float4>, TexVolCubeLum, 115)
 
 // The engine's local shadow maps, with Light Limit Fix only. Last in the push block, so the block's start is the
 // same in every permutation.

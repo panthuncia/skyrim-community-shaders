@@ -757,7 +757,12 @@ ORG_HEADER_SRV(Texture2D<float4>, TexSkyTail, 66)
 
 	// Clouded / clear incident radiance, computed before reflection fog. This
 	// diffuse transport estimate is independent of the finite direct-shadow box.
+	// An ORG pass that lists it as an EXTERN entry defines PS_CLOUD_TRANSPORT_EXTERN (LutGen's SKY_TAIL).
+#if defined(CS_ORG_BINDLESS) && defined(PS_CLOUD_TRANSPORT_EXTERN)
+	static Texture2D<float4> TexCloudDiffuseTransport = ResourceDescriptorHeap[OrgHandle_TexCloudDiffuseTransport];
+#else
 	Texture2D<float4> TexCloudDiffuseTransport : register(t70);
+#endif
 	float3 GetCloudDiffuseTransmittance(float3 worldPosAbs)
 	{
 		const SharedData::PhysSkyData data = SharedData::physSkyData;

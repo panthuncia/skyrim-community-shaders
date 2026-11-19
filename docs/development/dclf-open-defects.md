@@ -623,10 +623,19 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
     and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
     **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
--   **Physical Sky's aerial perspective will be its own full-screen pass.** The ORG deferred composite's push block holds 32
-    words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. Decided: run the aerial perspective as
-    `cs.physical-sky.composite` right after `cs.deferred`. Minor cost: one more full-screen read and write of kMAIN and a second
-    fp16 rounding. **Next:** fold it back into the composite when the composite takes a handle table.
+-   **Physical Sky's aerial perspective is its own full-screen pass.** The ORG deferred composite's push block holds 32
+    words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. So the aerial perspective runs as
+    `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
+    read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
+    handle table.
+-   **Guest: Physical Sky's volumetric clouds keep the AP shadow and the fog's scattering on D3D11.** The cloud shadow volume
+    and mean are D3D11 textures until phase 4 of `physical-sky-port.md`, and the graph cannot read a D3D11 3D texture. With the
+    clouds on, the log says once (when it starts) "the AP shadow runs on D3D11 this frame (the volumetric clouds are on D3D11)"
+    and the fog's "Physical Sky's cloud shadows are on D3D11". The sky tail stays on D3D11 too.
+-   **Native: no volumetric clouds and no lightning.** `PhysicalSky::VolumetricCloudsEnabled` is false in native mode until
+    phase 4 of `physical-sky-port.md` (the cloud passes, about 12,000 lines of shaders and 60 resources; its Status section
+    lists the order of work). The lightning query reads the clouds' resources, so it lands with them; the replayable readback
+    it uses is in place (`RenderGraph::RunReadback`).
 -   **Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
     black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
     Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
@@ -642,9 +651,9 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     thread building the UI stage. The likely caller is DCLF's `DeclarePublishedRead` (`FrameBindings.cpp:136`), which calls
     `ShaderResourceVariant` and `ShaderResourceIndex` during a pass's declare; they read live, unlocked entries. **Next:** carry
     each entry's published state and view in the build snapshot and serve these two calls from it during a build.
--   **Physical Sky's `PHYSICAL_SKY` define is still stripped from graph builds.** Removing the strip broke DCLF Lighting and
-    Effect pipelines (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and
-    the ORG `ISSAOComposite` build in guest. Reverted on the integration branch; phase 3 of `physical-sky-port.md` maps them.
+-   **Physical Sky's `PHYSICAL_SKY` define in graph builds.** Removing the strip had broken DCLF Lighting and Effect pipelines
+    (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and the ORG
+    `ISSAOComposite` build in guest. Phase 3 of `physical-sky-port.md` maps them and removes the strip; not yet run in the game.
 
 ## Accepted differences
 

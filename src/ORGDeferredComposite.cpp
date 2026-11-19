@@ -516,6 +516,13 @@ bool ORGDeferredComposite::Lagged() const
 	return impl && !impl->failed && impl->registered && impl->frameReady && !impl->composited;
 }
 
+std::optional<ORGDeferredComposite::GraphFrame> ORGDeferredComposite::GraphComposite() const
+{
+	if (!impl || impl->failed || !impl->registered || !impl->frameReady)
+		return std::nullopt;
+	return GraphFrame{ impl->frame.main, impl->frame.interior };
+}
+
 void ORGDeferredComposite::ClearShaderCache()
 {
 	if (impl)
@@ -534,6 +541,7 @@ void ORGDeferredComposite::Setup() {}
 void ORGDeferredComposite::SetFrame(const Frame&) {}
 bool ORGDeferredComposite::Composited() const { return false; }
 bool ORGDeferredComposite::Lagged() const { return false; }
+std::optional<ORGDeferredComposite::GraphFrame> ORGDeferredComposite::GraphComposite() const { return std::nullopt; }
 void ORGDeferredComposite::ClearShaderCache() {}
 
 #endif

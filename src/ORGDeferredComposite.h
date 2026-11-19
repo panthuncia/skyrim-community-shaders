@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 struct ID3D11ShaderResourceView;
 
@@ -47,6 +48,19 @@ public:
 
 	/** @brief After the anchor ran. The schedule does not hold the composite yet, so nothing composites and Deferred must not run D3D11's either. */
 	bool Lagged() const;
+
+	/** @brief The frame the graph composite takes, as SetFrame gave it. */
+	struct GraphFrame
+	{
+		std::uint32_t main = 0;
+		bool interior = false;
+	};
+
+	/**
+	* @brief After SetFrame, before the anchor's commit. Set when the graph composites this frame, so a pass after it reads its output.
+	* The D3D11 composite runs on the other frames. Render thread.
+	*/
+	std::optional<GraphFrame> GraphComposite() const;
 
 	/** @brief Programs rebuild at the next frame. */
 	void ClearShaderCache();

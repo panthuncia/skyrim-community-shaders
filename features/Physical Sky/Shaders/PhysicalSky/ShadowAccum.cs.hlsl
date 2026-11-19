@@ -2,8 +2,31 @@
 #	define COMPUTESHADER
 #endif
 
+// Dual-target (Common/OrgResources.hlsli). The ORG pass (ORGPhysicalSky, cs.physical-sky) gives every handle. The headers'
+// own resources are EXTERN entries, and the ones this shader never reads are UNREAD. The directional shadow light is in the
+// pass's latch (ApShadowLight, PhysicalSky/ApShadow.hlsli), with a clear flag after the light count.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+
+#define SHADOW_ACCUM_RESOURCES(X)                                  \
+	X(SHARED, ConstantBuffer, Shared, 0)                           \
+	X(SRV, Texture2D<float>, TexDepth, 0)                          \
+	X(EXTERN, Texture2DArray<float4>, TexDirectShadows, 1)         \
+	X(EXTERN_LATCH, DirectionalShadowLightData, ApShadowLight, 98) \
+	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 3)           \
+	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 4)          \
+	X(SRV, Texture3D<float>, TexShadowVolume, 5)                   \
+	X(UAV, RWTexture2D<unorm float>, RWTexOutput, 0)               \
+	X(SAMPLER, SamplerState, SampTr, 0)                            \
+	X(UNREAD, TextureCube<float>, CloudSelfShadowTexture, 26)      \
+	X(UNREAD, Texture2D<float4>, DepthTexture, 17)                 \
+	X(UNREAD, Texture2D<float4>, MeanProfile, 69)                  \
+	X(UNREAD, Texture2D<float4>, TexDiskPhaseLut, 106)
+ORG_PUSH_BLOCK(SHADOW_ACCUM_RESOURCES(ORG_HANDLE))
+SHADOW_ACCUM_RESOURCES(ORG_RESOURCE)
+
 #define OMIT_PS_NAMESPACE
-#define PS_PREPASS_SAMPLERS
 #define PS_PREPASS_RSRCS
 #define PS_NO_RSRCS
 #define PS_ENABLE_DIRLIGHT_TRANSMITTANCE
@@ -11,7 +34,6 @@
 #define CLOUD_SHADOW_REGISTER t4
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Random.hlsli"
-Texture3D<float> TexShadowVolume : register(t5);
 #include "PhysicalSky/Common.hlsli"
 
 #if defined(HALF_RES)
@@ -20,10 +42,17 @@ Texture3D<float> TexShadowVolume : register(t5);
 #	define RES_MULT 1
 #endif
 
-Texture2D<float> TexDepth : register(t0);
 #include "PhysicalSky/ApShadow.hlsli"
 
-RWTexture2D<unorm float> RWTexOutput : register(u0);
+// ORG only: the latch's word after the light count. Set, the pass writes no shadow (the map menu, as D3D11 clears it).
+bool ClearsShadow()
+{
+#if defined(CS_ORG_BINDLESS)
+	return AtmosphereShadow::ShadowLightLatch.Load(OrgOffset_ApShadowLight + AtmosphereShadow::kShadowLightBytes + 4) != 0u;
+#else
+	return false;
+#endif
+}
 
 float TraceShadow(float2 pixelCenter, float depth, float jitter)
 {
@@ -42,6 +71,17 @@ float TraceShadow(float2 pixelCenter, float depth, float jitter)
 	const uint2 pxCoords = tid * RES_MULT;
 	if (any(pxCoords >= frameDim))
 		return;
+
+	[branch] if (ClearsShadow())
+	{
+		[unroll] for (uint j = 0; j < RES_MULT * RES_MULT; ++j)
+		{
+			const uint2 outputPixel = pxCoords + uint2(j % RES_MULT, j / RES_MULT);
+			if (all(outputPixel < frameDim))
+				RWTexOutput[outputPixel] = 0.0;
+		}
+		return;
+	}
 
 	const uint2 seed = Random::pcg2d(tid);
 	const float jitter = Random::R2Modified(SharedData::FrameCountAlwaysActive, seed / 4294967295.f).x;
