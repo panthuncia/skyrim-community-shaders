@@ -922,9 +922,7 @@ With `CS_ORG_IMGUI=1`, CS's ImGui frames are drawn by a render-graph pass instea
     graph's. ImGui then creates its textures again for it. If the graph fails or a frame cannot be drawn, the D3D11 backend is
     installed again for the rest of the session.
 -   **Target.** The render target bound when the overlay draws. That is the engine's framebuffer (`EngineTarget(kFRAMEBUFFER)`),
-    or HDR's UI texture, which is imported as `cs.imgui.target`. A new target refreshes the client. With the owned frame, the
-    framebuffer is the guest back buffer that `OwnedFrame` copies into the BasicRHI swap chain image, so the pass draws on the
-    final image there too.
+    or HDR's UI texture, which is imported as `cs.imgui.target`. A new target refreshes the client.
 -   **Textures.** ImGui's own textures use 1.92's protocol (`RendererHasTextures`):
     - The font atlas pages are BasicRHI textures that the backend creates, updates by rectangle and destroys. The graph does
       not track them: the pass records their copies and barriers itself, and the shaders read them by descriptor index.
@@ -962,112 +960,6 @@ On the C++ side (`src/RenderGraph/ShaderBindings.h`):
     signature has `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` and `SAMPLER_HEAP_DIRECTLY_INDEXED` (`rhi_dx12.cpp`). What P7.2 still
     needs on CS's side: the binary format as a parameter of `ProgramBuild::MakeRequest` (SPIR-V is fixed there today, with
     `BASICRHI_SHADER_API_VULKAN`).
-## Owned frame
-
-`CS_ORG_OWNED_FRAME=1` inverts who owns the device ([org-full-port.md](./org-full-port.md), Phase 1). BasicRHI creates the
-Vulkan instance and device, DXVK runs the game's D3D11 on them as a guest, and ORG owns the swap chain and Present. Off by
-default: DXVK creates the device and presents, and the graph adopts it as above. The code is in `src/RenderGraph/Engine/`.
-
-### Device creation (`GuestDevice`)
-
-At the game's `D3D11CreateDeviceAndSwapChain` (CS's hook in `Upscaling.cpp`), before DXVK's own creation:
-
-1.  `dxvkGetGuestInstanceRequirements` reports DXVK's instance extensions and its engine name ("DXVK_HDR" when HDR is configured,
-    the NVIDIA profile trick in `extern/dxvk/FORK.md`).
-2.  `rhi::CreateVulkanDevice` creates the device (Streamline's interposer off), on descriptor buffers only
-    (`DeviceCreateInfo::vulkanBindingModels`), with room left for DXVK's sampler pool and descriptor buffers, and with BasicRHI's
-    crash markers where DXVK's hang mode would be on (`DXVK_DEBUG=hang`, `CS_GPU_CRASH_ANALYSIS`).
-3.  BasicRHI's creation hooks (`DeviceCreateInfo::vulkanCreateHooks`) add DXVK's needs. The instance hook adds the extensions. The
-    device hook asks `dxvkGetGuestDeviceRequirements` on the chosen physical device, with BasicRHI's binding model, and merges the
-    answer: its extensions, its core features, each feature struct ORed into BasicRHI's of the same sType or copied into the
-    chain, and its queue counts.
-4.  `dxvkSetGuestDevice` hands the device over, with the feature chain the device was created with (guest version 2).
-    `dxvkGetInteropDeviceInfo` reports those features, so the graph's binding model check sees the mutable descriptors
-    BasicRHI enabled and DXVK did not. Before this, the graph disabled itself and DCLF was forced off in the owned frame.
-    BasicRHI likewise records what its device hook added (DXVK's `nullDescriptor`): without that it reported null
-    descriptors unsupported and DCLF logged that warning for every texture. DXVK submits all its work (graphics, transfer, sparse) to the graphics family's
-    first queue, the one BasicRHI's graphics queue is. The graph keeps the compute queue, the copy queue and the copy family's
-    second queue (the uploader's, which BasicRHI's `CreateQueue` hands out); `dxvkGetInteropDeviceInfo` reports them as
-    `computeQueue`, `copyQueue` and `uploadQueue`, so `RenderGraphRuntime::Initialize` runs as it does on an adopted device.
-5.  After the game's device exists, `rhi::vulkan::ShareVulkanDevice` puts BasicRHI's queue accesses under DXVK's submission lock and
-    turns its whole-device waits into waits on its own timelines. `RenderGraphRuntime::Initialize` shares the device instead of
-    calling `AdoptVulkanDevice`, with the same submission hooks.
-
-Any failure before the hand-over leaves the owned frame off, logged, and DXVK creates its own device: `Prepare` first checks every
-DXVK export the owned frame calls later (the guest-device exports, `dxvkEmitExternalCommands`, `dxvkGetInteropResourceInfo`,
-`dxvkEnqueueQueueCallback`), so a missing one never gets as far as BasicRHI's device. `Abandon` then releases the device and frees
-its state. A failure after the game's device was made on BasicRHI's (sharing the device, resolving the present's exports) is
-fatal, with a message that names `CS_ORG_OWNED_FRAME`: the guest's swap chain is headless, so going on would show a black screen.
-
-### The frame tail (`OwnedFrame`)
-
-DXVK's DXGI swap chain on a guest device is headless: no surface, no Vulkan swap chain. Its back buffer is an ordinary D3D11
-texture that the engine, HDRDisplay and ImGui draw into as before. CS's Present chain ends in `OwnedFrame::Present` instead of
-DXVK's Present:
-
-1.  **Guest frame done.** An external command with no commands signals the guest-frame timeline in DXVK's stream. DXVK's headless
-    Present ends the frame (`EndFrame`) and flushes, so the signal is on the submission that holds the frame's last D3D11 work.
-2.  **Queue callback.** `dxvkEnqueueQueueCallback` queues the tail behind that submission, on DXVK's submission thread with its queue
-    lock held (BasicRHI's lock hook knows that, `GuestDevice::QueueHeldScope`).
-3.  **Copy.** The tail records a blit from the guest back buffer (in its resting layout, from `dxvkGetInteropResourceInfo`) into the
-    swap chain image BasicRHI acquired, waits for the guest-frame point and signals the host timeline.
-4.  **Present.** `rhi::Swapchain::Present(vsync, PresentSyncDesc{graphics queue, host point})` presents and acquires the next image.
-    Its frame-latency limit blocks DXVK's submission thread, which holds the next frame's command lists back from the GPU, so it
-    is set to `kGameFramesInFlight` and only backs up the render thread's own pacing (`CS_FRAME_LATENCY`). At 2 Whiterun ran
-    about 12% slower (50 against 57 fps, Dev-Fast).
-
-Every failure path of `OwnedFrame::Present` still calls DXVK's Present once and returns its result, so the game's frame ends;
-the frame is then not shown (logged once). A swap chain format the owned frame has no match for is logged and shown as
-R8G8B8A8_UNORM through the blit.
-
-**Teardown.** `RenderGraphRuntime::Shutdown` (DXVK's device teardown callback) calls `OwnedFrame::Shutdown` first: no new frame is
-taken, the queued tails drain, the host timeline is waited for, then the swap chain, the guest-frame semaphore and the command pool
-are destroyed, all before DXVK's device goes. Both waits are bounded; a tail that never runs leaves the objects to the process exit.
-
-The caller's thread does no Vulkan work and holds no BasicRHI lock, so the main frame, the loading screen's job thread
-(`JobListManager::ServingThread`, under `Renderer::Lock`) and Bink present the same way. A resize (the guest back buffer's size
-changed, or a present asked for a rebuild) and HDRDisplay's colour space are applied at the next Present, after every queued tail
-has run. With HDR on, HDRDisplay's output texture is what the tail copies into the swap chain image
-(`OwnedFrame::SetFrameSource`): no `CopyResource` into the guest back buffer first. A frame whose output a clean
-screenshot composite overwrites goes through the back buffer as before, and screenshots read the shown texture. The
-compute shader does not write the swap chain image itself: the image is acquired on DXVK's submission thread after the
-previous frame's present, up to 8 frames after the D3D11 work that would write it was recorded. SDR output is
-unchanged (HDRDisplay does not run). HDR is untested: the test display reports no HDR10 or scRGB support
-(`output supports HDR10 false, scRGB false`). The surface state comes from BasicRHI's swap chain
-(`OwnedFrame::GetSurfaceState`, read by `DXVKInterop::RefreshPresenterSurfaceState`). Frame generation is unavailable in the
-owned frame (logged once): no frame-generation presenter wraps BasicRHI's swap chain yet (P1.4). Upscalers that run inside the
-frame through DXVK's interop are unchanged.
-
-### Status (2026-11-09, RX 6600, Dev-Fast)
-
--   With the feature fixes above, the graph runs in the owned frame (`[ORG] Binding model: descriptor buffer`, no
-    `Render graph disabled`, no `Forced off`).
--   **Open: a stall with DCLF on.** The owned frame stops presenting at the main menu or the first loading screen, every
-    run (runs `1109-1233..`, `1245..`, `1253..`, `1306..`, `1322..` `p1fix-owned-frame-*`). It does not happen with DCLF
-    off (`owned-frame-nodclf`) or with the owned frame off. It still happens with every graph queue on graphics
-    (`owned-frame-onequeue`) and with the epochs outside DXVK's stream (`owned-frame-nostream`). A dump shows DXVK's
-    submission thread asleep in `submitCmdLists` with 33 entries queued and no waiter on its condition variable, the
-    CS thread blocked on the full queue, and the presenting thread waiting for a frame slot. The CS hang watchdog's dump
-    (which suspends and resumes every thread) once released it.
--   Because of the stall there is no owned-on frame rate with DCLF on yet. The earlier 20-30% slower result compared DCLF
-    on against DCLF off and does not count. Owned off, DCLF on, `DXVK_DEBUG=hang`: Whiterun 72.8, Dragonsreach 84.4 fps
-    (`1109-122526-p1fix-owned-frame-off-off`).
--   Window cases: `owned-frame-window` drives focus loss, minimize/restore and a resize with `dclf:window=...` (no key
-    presses). Not run yet; the Bethesda logo's Bink presents and loading screens ran in every owned run before the stall.
-
-### What becomes unnecessary later
-
-The graph's epochs still run inside DXVK's stream as external commands, so everything above in "Ordering against D3D11" stays
-for now. As later phases move work out of DXVK:
-
--   **Queue boundaries** and **external home states** go once no DXVK image is imported (the guest back buffer included: the copy
-    becomes a graph pass when the frame's last writer is ORG, P1.6 and P5).
--   **Segment splits** and the **stream point** go once the compute and copy queues order against ORG's own graphics work.
--   **The guest-frame signal and the queue callback** become an ordinary graph present (`SetPresentPass`, `GetLastPresentDependency`)
-    once the frame's graphics work is ORG's.
--   **The binding model negotiation** (`dxvkSetBindingModelCallback`) and `dxvkRequestDeviceFeatures` are already unused in the owned
-    frame: the host decides.
-
 ## Native mode
 
 `CS_ORG_NATIVE=1` runs without DXVK ([org-full-port.md](./org-full-port.md), Phase 6). CS creates a BasicRHI Vulkan device
@@ -1080,7 +972,7 @@ Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that 
 
 1.  **switches** (`SKSEPlugin_Load`, right after `CommunityShaders.env`): every port switch native mode needs is turned on
     in the process environment (the set of `latch-census-short.env`, without its diagnostics, and the flush latch). A port
-    switch set to `0`, or a conflicting one (`CS_NATIVE_D3D11=1`, `CS_ORG_OWNED_FRAME=1`, `CS_ORG=0`, `CS_ORG=features`), is a
+    switch set to `0`, or a conflicting one (`CS_NATIVE_D3D11=1`, `CS_ORG=0`, `CS_ORG=features`), is a
     startup error. So is a switch that narrows a port (`CS_ORG_WATER_PARTS`, `CS_ORG_SHADOW_MASK_VIEWS`,
     `CS_ORG_IMAGESPACE_EFFECTS` set to less than every part), and Drawcall Limit Fix off (`CS_DISABLE_FEATURES` naming
     `DrawcallLimitFix`, or `CS_DCLF=0`): the parts left out would be engine draws, which native mode drops. So is a switch
@@ -1180,8 +1072,7 @@ mode's records (`Native::DescribeResource`), and `FrameAnchors`' engine imports 
 engine's lock: wait until the slot's last copy is done, record a copy of the back buffer into the acquired swap chain image
 (Common to CopySource and back, Undefined to CopyDest to Present), submit it on the graphics queue with a timeline signal,
 and `rhi::Swapchain::Present` on that point. The graph gives the back buffer back in Common on the graphics queue, so the
-copy is ordered after the frame's last write by submission order. No DXVK queue is involved: there is no queue callback
-and no submission thread, so the owned frame's lost wake (P6.0) cannot happen here.
+copy is ordered after the frame's last write by submission order. No DXVK queue is involved.
 
 ### The host
 
@@ -1296,7 +1187,6 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | Variable | Effect |
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. Native mode and guest mode run every engine and CS port; there is no switch per port. |
-| `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
 | `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). Turns on every port switch it needs; a conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
 | `CS_ORG_NATIVE_VALIDATION=1` | With `CS_ORG_NATIVE=1`, BasicRHI creates the device with Vulkan validation (P6.4). |
 | `CS_ORG_NATIVE_BACKEND=d3d12` | Native mode's device: `vulkan` (default) or `d3d12` ("Native mode on D3D12"). It needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. With `CS_ORG_NATIVE_VALIDATION=1` the D3D12 debug layer is on, and `SARP_D3D12_GPU_VALIDATION=1` adds GPU-based validation. |
@@ -1305,7 +1195,7 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_D3D12_SELFTEST=1` | Beside the game, on a D3D12 device of its own: builds `RenderGraph/D3D12SelfTest.hlsl` to DXIL, runs one dispatch through the descriptor heap and root constants and checks the readback, then presents 120 frames to a small window. Logs `[ORG] D3D12 self-test: passed` or the step that failed. `CS_ORG_D3D12_SELFTEST_HDR=1` asks the window for HDR10. Needs no native mode. |
 | `CS_ORG_D3D12_DEBUG=1` | The D3D12 debug layer on the self-test's device (and DRED with it). |
 | `CS_ORG_D3D12_SDK=<version>` | With `CS_ORG_NATIVE_BACKEND=d3d12`: load the Agility SDK of that `D3D12SDKVersion` through a device factory. Its `D3D12Core.dll` comes from `CS_ORG_D3D12_SDK_PATH`, else `Data/SKSE/Plugins/CommunityShaders/D3D12`. Unset: the system's D3D12 runtime. |
-| `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
+| `CS_ORG_CRASH_MARKERS=0` | Native mode: BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `BASICRHI_VK_CRASH_MARKERS=1` | BasicRHI's native crash markers and fault reports (`VK_AMD_buffer_marker`, `VK_NV_device_diagnostic_checkpoints`, `VK_EXT_device_fault`, whichever the device has) on any BasicRHI device, also the one adopted from DXVK, where `DeviceCreateInfo::enableCrashMarkers` is not set. Read by BasicRHI (`rhi.h`). They mark BasicRHI's own lists; DXVK's markers (`DXVK_DEBUG=hang`, which also enables `VK_AMD_buffer_marker`) cover only DXVK's commands. On device loss the first timeline that reads `UINT64_MAX` dumps them. A test run adds it with `-Env BASICRHI_VK_CRASH_MARKERS=1`. |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |

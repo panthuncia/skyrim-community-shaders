@@ -276,14 +276,13 @@ objects, so the engine draws none of them and nothing pops in. No frame is black
     (`[DCLF] load hold: released after ...`). It hands nothing back: what is not ready is withheld until it is (below).
 -   **A load with no loading menu** (the coordinator showed none: TES +0x137/+0x138) holds the presents instead: the frame before the
     load stays on screen, the frame's work flushed as a present would send it (`DrawcallLimitFix::LoadHoldsPresents`, `Hooks.cpp`);
-    not with frame generation or the owned frame. A loading screen that starts during a hold ends it
+    not with frame generation. A loading screen that starts during a hold ends it
     (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
 -   **A re-entry** holds the presents the same way (`LoadHold::BeginReentry`): a frame outside a load whose shadow views DCLF would
     draw but cannot yet, because the graph has a rebuild requested (re-imported shadow maps, as after a `coc` into an interior or a
     closed map: `IndirectDraws::ShadowViewCapacity`) or the shadow epoch is not recorded yet (`DecideShadowCoverage`). The engine
     would draw every caster otherwise. It ends as a load's hold does, the frame with no such condition counting as covered; one
-    that ended at a stall or the cap is not started again until a frame without its condition. With the owned frame the guest
-    frame ends and nothing is queued (`OwnedFrame::EndGuestFrame`); frame generation is not held.
+    that ended at a stall or the cap is not started again until a frame without its condition. Frame generation is not held.
 -   **The settled signal** is the coordinator's (`ScenePublication::settled`: its pass built the scene and no slot waits on a
     transient reason); the render thread adds the draw families, the views' coverage and the claims.
 -   **Grass stands down** during a hold (`GrassShared::SetDclfOwned`, from the family's `Owned` callback), whether or not DCLF

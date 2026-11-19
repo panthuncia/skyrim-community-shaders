@@ -18,9 +18,7 @@ Lane `par-hdr-tooling`, branch `org-native/par-hdr-tooling`, based on `ababbdf09
   methods) for three calls, and HDR Display is the only caller.
 - **Resize.** BasicRHI keeps the colour space across `ResizeBuffers` on both backends. Native mode's resize passes the same
   swap chain format, so no change was needed there.
-- **The output reaching the present.** In guest mode with the owned frame, `OwnedFrame::SetFrameSource` lets the owned frame
-  present HDR Display's output texture directly, which saves the copy into the back buffer. Native mode already has a path:
-  `ApplyHDR` finds no owned frame and gives `ORGHDRDisplay::Compose` the native back buffer. The composite's copy pass then writes
+- **The output reaching the present.** `ApplyHDR` gives `ORGHDRDisplay::Compose` the back buffer. The composite's copy pass then writes
   the output into the back buffer on the graph, and `Native::Present` copies the back buffer into the swap chain image. So HDR
   output reaches the present without a native `SetFrameSource`. The only gain from one would be a full-screen copy fewer. It
   would also mean editing `Native::Present`, which another lane owns. Line:

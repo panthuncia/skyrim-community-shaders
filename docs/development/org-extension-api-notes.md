@@ -95,7 +95,7 @@ Each anchor's rule:
   only on frames where CS's overlay draws (the menu, an editor, notifications, the performance overlay), not every frame. The
   target is the render target bound for the overlay: the framebuffer, or HDR's UI texture when HDR composites the UI.
 - **Capture.** At the end of HDRDisplay's present chain (`ScreenshotFeature::ProcessCaptureRequest`), just before the native
-  Present or frame generation's present. After Overlay and HDR output: the back buffer (or the owned frame's source) holds
+  Present or frame generation's present. After Overlay and HDR output: the back buffer holds
   what the display will show. Reserved only by the Screenshot feature's ORG path (`CS_ORG_SCREENSHOT=1`) and the self-test.
 - **HDROutput.** In `HDRDisplay::ApplyHDR`, inside HDRDisplay's present chain: after Overlay and, when HDR composites the UI
   after the present hooks (the deferred composite), after other mods' Present hooks and frame generation's hudless capture.
@@ -146,7 +146,7 @@ Keys used so far:
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The engine skeleton (`CS_ORG_ENGINE_SKELETON`): its gate entry (0 to 127) at EngineShadowClear, EngineCubeClear and
   EngineFrameClear; 0 (the copy) at EngineDepthCopy and EngineCopy.
-- HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
+- HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer)
   and 102 (the UI texture's clear) at HDROutput.
 - Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
   the depth upscale, the underwater mask copy and its upscale) at Upscale; 100 (the hudless copy) at FrameGeneration.
@@ -300,8 +300,7 @@ Keys used so far:
 - **Need:** present a frame from a thread other than the render thread, under the engine's lock.
 - **Who:** the engine itself (the loading-screen loop on `JobListManager::ServingThread`, Bink) and plugins that draw
   their own loading or splash screens.
-- **Where it fits:** the owned frame's tail (P1.3) already runs on DXVK's submission thread whatever thread called
-  Present. An API present call must likewise not tie Vulkan work to the caller's thread.
+- **Where it fits:** an API present call must not tie Vulkan work to the caller's thread.
 - **Found by:** P1 ownership inversion (2026-11-09).
 
 ### Anchors on the thread that holds the renderer's lock
@@ -1603,16 +1602,15 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
 - **Need:** know the real swap chain's size, format, colour space and present mode, and see a resize or colour space
   change before drawing.
 - **Who:** HDR and colour-grading plugins that read `IDXGISwapChain4` state, and overlays that size to the back buffer.
-- **Where it fits:** in the owned frame the DXGI swap chain is headless: its back buffer and `CheckColorSpaceSupport`
-  no longer describe what reaches the display (CS reads `OwnedFrame::GetSurfaceState`). The API needs a query and a
-  change notification for the ORG swap chain.
+- **Where it fits:** when ORG presents (native mode), the engine's swap chain handle no longer describes what reaches the
+  display. The API needs a query and a change notification for the ORG swap chain.
 - **Found by:** P1 ownership inversion (2026-11-09).
 
 ### Choosing the image a frame presents
 
 - **Need:** hand the present stage the frame's final image when it is not the back buffer (an HDR or colour-grading
   output), so it is copied once into the swap chain image instead of into the back buffer and again from it.
-- **Who:** CS's HDRDisplay (`OwnedFrame::SetFrameSource`); plugins that do their own output transform after the engine.
+- **Who:** CS's HDRDisplay; plugins that do their own output transform after the engine.
 - **Where it fits:** the Present anchor: a per-frame "present source" a client sets, read by the present pass. A
   screenshot or capture reads the same source.
 - **Found by:** P1.5 (2026-11-09).
@@ -1625,7 +1623,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   chain has one image. With a sequential swap effect and several buffers DXVK rotates the images under the D3D11 objects at
   each present (`D3D11SwapChain::RotateBackBuffers`, on its own thread), so an import made once writes the wrong image after
   the first present. HDRDisplay's FLIP_DISCARD swap chain has one, and the pass falls back to D3D11 otherwise. A plugin API
-  wants a "back buffer" resource the present stage resolves per frame (in the owned frame, the present source above).
+  wants a "back buffer" resource the present stage resolves per frame.
 - **Found by:** P3 W3, HDRDisplay (2026-11-09).
 
 ### Reading back a frame without waiting

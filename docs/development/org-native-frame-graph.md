@@ -8616,3 +8616,64 @@ Plan piece C3. CS on `org-native/phases`.
 - **Scaleform's D3D11 handoff.** It is reached off the render thread (loading screens), before the graph initializes, or when the
   Interface anchor is not held by a stage. Its `Scheduled` branch stays for the reason C4 gave.
 - **BuildManager's `onFailed`**, the plumbing that feeds the anchors' failure handling.
+
+## The black world with an upscaler (2026-11-18)
+
+A user's native D3D12 session with HDR Display on (DLL `fda691f4d7e2`) stayed black on loading screens and in the world. The UI
+drew and left trails. From the first world frame, every frame logged "absent passes" for `cs.engine.imagespace.world.scopes` and
+the post clients and registered the world and chain steps again: 357 chain registrations in 40 seconds.
+
+**Cause.** Upscaling sets the engine's dynamic-resolution ratios at its jitter update inside each frame (0.667 for the saved
+setting, FSR at ratio 1.5) and resets them to 1 at `PostDisplay`. Since `RegisterAtBoundary` the steps register at the next
+Begin, so they read ratio 1 there and size their passes for it. Every frame's check then saw 0.667 against the registered 1 and asked
+again. No build ever switched in, so the stages had no ImageSpace steps and nothing reached the back buffer. The earlier
+`upscale-burst` runs had the same loop (169 chain registrations) but passed, since nothing checked the image.
+
+**Fix.** A registration at a boundary reads the ratios of the frame that asked for it, the value the next check compares against
+(`g_registrationRatios` in `ImageSpace.cpp`). FrameAnchors now warns when a client registers again on 8, 16, 32 or more
+consecutive frames: such a client never gets a build that switches in.
+
+**Checks.** On DLL `7443b456d89e`, all with `--set features.HDRDisplay=true` except guest: the old build reproduced the black world
+in `native-d3d12-quick` (189 chain registrations). The fixed build in `native-d3d12-quick`, `native-quick` and `guest-quick` had
+2 (ratio 1 on the loading screen, then 0.667) and the world shows. `native-d3d12+upscale-burst` had 7, with its shots matching
+the earlier run apart from the CS menu window's layout. No streak warnings. The `[E]`/`[C]` line kinds are unchanged. 5 launches.
+
+## Cleanup C5: the owned frame (2026-11-18)
+
+Plan piece C5. CS on `org-native/phases`.
+
+### Why it was dead
+
+`CS_ORG_OWNED_FRAME=1` made BasicRHI create the Vulkan device (`Engine/GuestDevice`), ran DXVK as its guest with a headless swap
+chain and presented through ORG (`Engine/OwnedFrame`). Nothing else turned it on. With it set, `Native::GraphMode()` was false
+(guest mode required it unset) and native mode refused it as a conflicting switch. So it was a fourth mode with no ports and no
+stages, and none of the supported modes (guest, native Vulkan, native D3D12, plain D3D11) reached it.
+
+### Deleted
+
+- `OwnedFrame.{h,cpp}` (802 lines) and BasicRHI's guest device `Engine/GuestDevice.{h,cpp}` (566), with DXVK's guest-device
+  declarations in `DxvkOrgInterop.h`, the switch and its conflict entry, and the owned frame's branches in Upscaling (device
+  creation, frame generation off, the presenter's surface state), HDR Display (the frame source and the colour space), Screenshot,
+  `Hooks.cpp`'s present and the runtime's shared device and teardown. Each of these branches was off in the supported modes, so
+  they behave as before.
+- The eight `owned-frame*` cs-ab scenarios and the switch's lines in six others. The schema lost `org.owned_frame` and the C4
+  leftovers that only those scenarios kept (`org.async_epochs`, `org.in_stream`). `gen_schema.py` now types the queue and crash
+  marker switches itself, which those scenarios had done.
+- The "Owned frame" section of `render-graph.md` and the owned frame's text in the DCLF, HDR and extension API docs.
+- Functions with no callers: the flush latch's engine rest of a batch (its only user, the draw families' partial refusal, went
+  with C3) and `Vouching`, the epoch body's join time, `BuildPoints`, `ClearFailed`, `DiffWorld`, `ScopeName`, `TapErrors`,
+  `ExternalWork::Submissions`, `BuildManager::WorldStarted`, the Tripwire guest handles, `IndexFormatOf` and
+  `EngineTexture::Served`. Three files had `Native.h` as their one include out of order.
+
+About 1,800 lines net.
+
+### Stayed
+
+- **The anchor self-test** (`CS_ORG_ANCHOR_SELFTEST`). It tests no deleted machinery: it reserves every anchor and registers one
+  client with a draw, a read and a readback at each anchor that has an epoch, so the stage that holds the anchor runs them
+  (`kDiagnosticClients` lets the steps hold it). That is live code, so it stays as it is, with no rewrite for stages.
+- **The engine pipeline description's** `PipelineStates`, `PipelineSource` and `AssignLocations` (`Engine/Pipeline/Descriptions`,
+  about 80 lines with their helpers) have no callers. Whether the description registry still has a user needs a look of its own.
+- **The legacy cs-ab scenarios** still feed `gen_schema.py`, which keeps old switches that only they name in the schema. Dropping
+  them, or reading them only for types, is a cs-test change of its own.
+- `org-full-port.md` and the frame revision plans still name the owned frame: they are history and plans.
