@@ -90,7 +90,8 @@ It reads DCLF's registry and `RegisterSwitch` calls, every other `CS_*` switch n
 1. Takes `C:\Modding\CS-AB\cs-test.lock`. A lock whose PID is gone is taken over. A live one refuses, or waits with `--wait`.
 2. Undoes any journal a killed run left.
 3. Records each change in `C:\Modding\CS-AB\journal.json` before making it:
-   - the variant swap (the stage's mod enabled, its shader cache moved in);
+   - the variant swap (the stage's mod enabled). Every stage shares one shader cache, `overwrite\ShaderCache`;
+   - with `build.shader_cache = cold`, the shared cache set aside to `C:\Modding\CS-AB\ShaderCache.cold-hold` and put back after;
    - the mods turned off;
    - a stray `CommunityShaders.env` moved aside;
    - `CommunityShaders-Test.json` written.

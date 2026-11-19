@@ -222,10 +222,15 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         journal.add({"do": "variant", "from": previous, "to": stage})
         mo2.use_variant(paths, stage)
         if harness["shader_cache"] == "cold":
+            # The cache is shared by every stage, so a cold run sets it aside and the journal puts it back.
             cache = paths.overwrite / "ShaderCache"
+            held = paths.root / "ShaderCache.cold-hold"
+            if held.exists():
+                raise RuntimeError(f"{held} already exists: a cold run left the shared shader cache there. Move it back to {cache} first")
+            journal.add({"do": "cold_cache", "live": str(cache), "held": str(held)})
             if cache.exists():
-                log(f"Clearing {stage}'s shader cache (build.shader_cache = cold)")
-                shutil.rmtree(cache)
+                log(f"Setting the shared shader cache aside for this run (build.shader_cache = cold): {held}")
+                shutil.move(str(cache), str(held))
 
         wanted = harness["mods_off"]
         current = mo2.mods_state(paths.modlist, wanted)

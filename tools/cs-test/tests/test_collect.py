@@ -1,8 +1,10 @@
 import os
 import time
 
+import pytest
+
 from cstest import collect
-from cstest.stage import mirror_map, stage, tree
+from cstest.stage import StageError, mirror_map, stage, tree
 
 
 def test_bounded_copy_small_is_whole(tmp_path):
@@ -88,9 +90,21 @@ def test_stage_from_worktree(fake, tmp_path):
     mod = fake.mods / "CS AB p35"
     (mod / "Shaders" / "Common").mkdir(parents=True)
     (mod / "Shaders" / "Common" / "DeviceAddress.hlsli").write_text("stale")
+    (mod / "TerrainHelper.esp").write_bytes(b"TES4")  # an existing stage has the AIO's plugin
     manifest = stage(fake, wt, "p35", log=lambda *_: None)
     assert (mod / "SKSE" / "Plugins" / "CommunityShaders.dll").read_bytes() == b"MZdll"
     assert (mod / "Shaders" / "Features" / "GrassLighting.ini").exists()
     assert not (mod / "Shaders" / "Common" / "DeviceAddress.hlsli").exists()
     assert manifest["mode"] == "worktree" and len(manifest["dll"]["sha256"]) == 64
     assert (fake.stages / "p35.json").exists()
+
+
+def test_stage_refuses_without_terrain_helper(fake, tmp_path):
+    wt = tmp_path / "wt"
+    (wt / "src").mkdir(parents=True)
+    (wt / "build" / "Dev-Fast").mkdir(parents=True)
+    (wt / "build" / "Dev-Fast" / "CommunityShaders.dll").write_bytes(b"MZdll")
+    (wt / "package" / "Shaders").mkdir(parents=True)
+    (fake.mods / "CS AB p35").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(StageError, match="TerrainHelper.esp"):
+        stage(fake, wt, "p35", log=lambda *_: None)

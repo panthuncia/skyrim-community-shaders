@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 
 import pytest
 
@@ -34,20 +35,32 @@ def test_disable_and_enable_touch_only_named_lines(fake):
     assert "+Skyrim Engine Telemetry" in lines(fake) and "-Already Off" in lines(fake)
 
 
-def test_use_variant_stashes_and_restore(fake):
+def test_use_variant_shares_the_shader_cache(fake):
     previous = mo2.use_variant(fake, "p35")
     assert previous == "_original"
-    assert (fake.variants / "_original" / "ShaderCache" / "original.bin").exists()
-    assert not (fake.overwrite / "ShaderCache").exists()
+    # Every variant uses the one shader cache under overwrite: a swap leaves it in place.
+    assert (fake.overwrite / "ShaderCache" / "original.bin").exists()
+    assert not (fake.variants / "_original" / "ShaderCache").exists()
     state = mo2.get_state(fake)
     assert state == {"live": "p35", "originalMod": "CommunityShaders_ORG_Staging"}
-    (fake.overwrite / "ShaderCache").mkdir()
     (fake.overwrite / "ShaderCache" / "p35.bin").write_text("p35")
     assert mo2.restore_original(fake) == "CommunityShaders_ORG_Staging"
     assert (fake.overwrite / "ShaderCache" / "original.bin").exists()
-    assert (fake.variants / "p35" / "ShaderCache" / "p35.bin").exists()
+    assert (fake.overwrite / "ShaderCache" / "p35.bin").exists()
+    assert not (fake.variants / "p35" / "ShaderCache").exists()
     assert mo2.enabled_cs_mod(fake.modlist) == "CommunityShaders_ORG_Staging"
     assert not fake.state.exists()
+
+
+def test_undo_puts_back_a_cold_runs_shared_cache(fake):
+    live = fake.overwrite / "ShaderCache"
+    held = fake.root / "ShaderCache.cold-hold"
+    shutil.move(str(live), str(held))
+    live.mkdir()
+    (live / "cold.bin").write_text("cold")
+    data = {"entries": [{"do": "cold_cache", "live": str(live), "held": str(held)}]}
+    assert journal_mod.undo(fake, data, log=lambda *_: None, running=lambda: [])
+    assert (live / "original.bin").exists() and not (live / "cold.bin").exists() and not held.exists()
 
 
 def test_unknown_variant(fake):
