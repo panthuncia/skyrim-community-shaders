@@ -544,6 +544,16 @@ with no edits should be zero after load.
 **Size.** Medium to large. 5a and 5d can run in parallel (OMS vs `src/Utils`, `cmake/`); 5b and 5c after 5a, in parallel with each
 other (disjoint files except `Feature.h`, which only 5c touches).
 
+**As built (2026-11-19, `org-native/rev-step5`).** 5a: OMS `rev-step5` (`d48c924`, `Variables.h`: `VariableSet`, `Variable<T>`,
+`VariableSnapshot`, `Derive`, `RequireSizes`; tests in `tests/Variables/`). 5b: `Frame/Variables.{h,cpp}` (typed `Set...`/`Adopted...`
+per variable, `RaiseFeatureSettings`, `RaiseSetting`), `Frame/VariablesLane.h`; a revision carries the snapshot it started with in
+`kRevisionInputs`, and a variables-only revision is adopted in the Begin that starts it. 5c: `Feature::ProjectSizeSettings`,
+`SettingsWritten`, `ApplySettings`/`ApplyDefaults`, `SettingsWriteBatch`; the check is `CS_ORG_MISSED_WRITER_CHECK` (on by default).
+5d: `Utils/Setting.{h,cpp}` (`CS::Setting<T>`, `CS::SettingRegistry`), widget overloads in `Utils/UI.h`, the generator unwraps
+`CS::Setting<T>`, the interceptor's `Guard::Finish` calls `RaiseAt`; pilot in `GraphResourcesSelfTest.cpp`. Nested cs-test keys in
+`Testing/Commands.cpp:SetSetting`. Native frame generation step 9 (`PresentationConfig` as a variable, input producers) landed with
+it. See "Decided by the agent (step 5)" in section 9.
+
 ---
 
 ### Step 6. Migrate features, one at a time
@@ -1219,6 +1229,47 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   each is a DCLF reader.
 - **Native self-test.** `CS_ORG_GRAPHRES_SELFTEST=1` fails its first (old) part in native, `16x16 MISMATCH: D3D11 read 0`, on the base
   stage too, so the prepared part is tested in guest only.
+
+**Decided by the agent (step 5, 2026-11-19), to confirm:**
+- **Q6 answered.** `kSHADOWMAPS` is made once, in `BSShaderRenderTargets::Create` (through `CreateDepthStencilTarget`, which
+  `EngineTargets` hooks). A second `Create` is fatal (Q4), so `EngineShadowMap` has one event per session, at `EngineTargets.cpp:EndSet`.
+  Its size following `iShadowMapResolution` is inferred.
+- **Variables are typed setters and getters, not handles.** `Frame/Variables.h` exposes `SetDisplaySize(value, writer)` and
+  `AdoptedDisplaySize()` and so on, so features never see OMS types. Writers pass a `std::string_view` writer name.
+- **Declaring a variable is a change** (OMS): it wakes and bumps the set's serial, so late-declared per-feature variables reach the
+  lane. `Derive` rejects a `sizes = true` result over a `sizes = false` input. A throwing derive function is fatal through `Take`.
+- **Setters record in every runtime mode** when the graph is compiled in, so `CS_ORG=0` logs `[ORG] variable` lines too. Only the
+  compile-time stub is a no-op. Variables-only revisions also run without a graph host.
+- **A variables-only revision is adopted in the Begin that starts it.** A change while a revision is in preparation waits for the
+  next one. A value set A to B and back to A before a revision starts still lists the variable as changed (its serial moved).
+- **`HdrOutputTarget` is written each frame from `BeginRenderFrame`** (address, size and format of `PostChainTarget()`).
+  `UpscalerOptions.hdr` is the HDR display state; the SDK's `colorBuffersHDR` is always true today.
+- **`CS::Setting<T>` needs a trivially copyable `T`.** `RaiseAt` and the check compare raw bytes with the last raised bytes. Every 6.4
+  field fits. `SettingRegistry::Declare` returns the existing id for a name declared again. A bound setting's destructor detaches it.
+  The raise hook takes `(id, name)` and is wired to `Vars::RaiseSetting` in `Revision::Install`. Widget overloads cover `bool`,
+  `int`, `uint32_t` and `float` only.
+- **The setting pilot is the graph resource self-test** (`CS_ORG_GRAPHRES_SELFTEST=1`, `setting pilot OK`), since it has a switch and
+  log lines cs-test reads. The generator path is covered by a Python test.
+- **Nested keys** match a member with its spaces dropped (`CODBloom` finds `"COD Bloom"`) and look inside an object's `"settings"`
+  member, where PostProcessing keeps each effect's settings. The flat form is tried first.
+- **The projection is a list of named fields** (`Feature::SizeProjection`, integer, real or text), kept in a side table in
+  `Feature.cpp` so the `Feature` layout is unchanged. The first projection of a feature is its baseline and raises nothing.
+  Derived fields project the derived value (EHF `fogDensity > 0`, CODBloom used mips, PhysicalLens `Intensity > 0`,
+  `volumetricFogExtinctionScale > 0`).
+- **The fog grid fields are projected under ViewAtmosphere**, where they live now (`nearSlices` and the rest). EHF keeps its toggles.
+- **`SettingsWriteBatch`** holds a feature's events while a scene layer is suspended (`SceneLayerGuard`, `RestoreFeatureLayers`), so a
+  round trip raises nothing. The menu's per-frame `SettingsWritten("menu")` after `DrawSettings` covers the scene widget
+  interceptor's copies.
+- **The missed-writer check reports a field only when two checks in a row see it**, so a writer on another thread caught between
+  its write and its `SettingsWritten` is no miss. Its tap error (`TapError::MissedSettingsWriter`) is fatal under
+  `CS_ORG_MISMATCH_FATAL`, as tap errors are. The check found writers the 6.2 table lacks, now routed: cs-test's `hdr` command and
+  the native menu's HDR and SSGI rows (`NativeMenu/Rows_HDR.cpp`, `Rows_SSGI.cpp`). The FG fault teardown
+  (`Upscaling::PresentWithFrameGeneration`) raises too.
+- **Writers left on purpose.** `LoadSettings`/`RestoreDefaultSettings` calls inside a feature's own `LoadSettings` (the outer
+  wrapper covers them), `PostProcessing::SyncPipelineResources` (covered by the call after `UpdatePipeline`), CSEditor widgets.
+- **Upscaler options are not read from the adopted revision yet.** `ConfigureUpscaling` computes the render size from the live
+  `qualityMode` in the evaluate's frame. Reading only the options from the adopted revision would pair an old mode with a new
+  render size. It moves with `RenderSize`/`DynamicRatios` in 6.14.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

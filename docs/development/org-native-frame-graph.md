@@ -8984,3 +8984,52 @@ volumetric lighting accumulation pair, as before step 4.
 - `CS_ORG_GRAPHRES_SELFTEST=1`: the prepared part passes in guest. Native stops in the self-test's old part (mismatch, same on the
   base stage).
 - Version lags outside revisions: `TerrainShadows::ShadowHeight` and `ImGui::Texture N`, both intermediates for step 6.
+
+## Frame revisions, step 5 (2026-11-19)
+
+Step 5 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): variables and event sources, with step 9 of
+[plans/native-frame-generation-plan.md](plans/native-frame-generation-plan.md). CS on `org-native/rev-step5` from `integ/hard-ports`
+`f3f292c80`; OMS `rev-step5` (`d48c924`) on `d2ec1c6`. Decisions to confirm are in the revision plan's section 9, "Decided by the agent
+(step 5)", and the frame generation plan's table, rows 43 to 50.
+
+- **5a (OMS).** `Variables.h`: a lock-free `VariableSet` (one atomic entry per variable holds value and serial together), derived
+  variables evaluated at `Take`, `RequireSizes` for constants-only variables. Unit tests in `tests/Variables/`.
+- **5b (frame-wide variables).** `Frame/Variables.{h,cpp}`: `DisplaySize`, `RenderSize` and `DynamicRatios` (constants only),
+  `UpscaleMethod`, `HdrEnabled`, `HdrOutputTarget`, `EngineShadowMap`, `ReflectionCubemap`, `UpscalerOptions`, `PresentationConfig`,
+  `FeatureSettings.<feature>` and `Setting.<name>`. Each change logs `[ORG] variable <name>: <old> -> <new> (<writer>)`; the census
+  adds `[ORG] variables: events ...`. The revision lane carries the snapshot it started with; a variables-only revision is adopted in
+  the Begin that starts it.
+- **5c (settings events).** Features project their size and shape fields (`ProjectSizeSettings`); every writer goes through
+  `ApplySettings`/`ApplyDefaults` or calls `SettingsWritten`. The missed-writer check (`CS_ORG_MISSED_WRITER_CHECK`, on by default in
+  development builds) runs at `OnBegin` and is a tap error.
+- **5d (`CS::Setting<T>`).** `Utils/Setting.{h,cpp}`, JSON serializer, widget overloads, the catalog generator and the scene widget
+  interceptor's `RaiseAt`. No real field is ported; the pilot is in the graph resource self-test.
+- **cs-test.** The `setting` step takes nested keys (`PostProcessing.CODBloom.MipBlendFactor[3]=0.2`).
+- **Frame generation step 9.** `PresentationConfig` is a variable. A revision that changes it waits for an input producer
+  (`Revision::RegisterInputProducer`): the presenter's replacement for that config. Native takes the presentation at adoption
+  (`Native::AdoptPresentation`, which replaced `OnFrameBegin`). `hdrEnabledForFrame` is the adopted `HdrEnabled`, and the colour space
+  follows it on the adopting frame.
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv5`, the missed-writer check on in every run). About 22 launches.
+
+| Run | Result | Notes |
+|---|---|---|
+| `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick` | passed | 8 events each, all at start-up; 0 missed writers |
+| `native-vulkan+resize`, `native-d3d12+resize`, `guest+resize` | passed | 21 to 22 revisions, 0 superseded; each `FeatureSettings.ViewAtmosphere` event followed by one twin revision |
+| `guest+resize-drag` | passed | 30 `ViewAtmosphere` events for 30 steps |
+| `native-vulkan+upscalers` | passed | one `UpscaleMethod` event and one adoption per change (FSR to XeSS, XeSS to TAA; DLSS falls back to FSR on AMD) |
+| `native-d3d12+hdr`, `guest+hdr` | passed | one `HdrEnabled` event each way, each adopted with `PresentationConfig`; native replaces the swap chain (requests 2 and 3) before the adoption |
+| `menu` | passed | 0 events after load, menu open and font changes included |
+| `latch-census-short` | passed | 8 events, all at start-up |
+| `native-vulkan+fg-hdr` | passed | 2x (45 rendered, 90 FSR-FG presents a second); HDR10 and back adopted through the revision |
+| `native-d3d12-fg` | passed | 2x (53 rendered, 106 presents) |
+| `fg` (guest) | passed | 2x (76 rendered, 148 presents) |
+
+- **Writers the check found.** The first `hdr` runs stopped on `HDRDisplay.enableHDR changed with no settings event`: cs-test's `hdr`
+  command, and the native menu's HDR and SSGI rows, wrote settings directly. All three now raise.
+- **Not explained.** Two runs (`guest-quick`, `native-d3d12+hdr`), each the first launch after a staged DLL change, never left the
+  loading screen: the main thread logged nothing after `load-start` while the loading screen kept rendering. Their reruns passed, and
+  so did a run right after a restage of the same DLL. No dump was taken (the stall watcher missed both). Other stages had the same
+  outcome earlier the same day (`rv1`, 6 runs).
+- `native-vulkan+fg-hdr` hung once on a cold shader store (the render thread waiting on a DCLF grass program's compile). It passed after
+  a warm-up run.
