@@ -1154,7 +1154,8 @@ void Upscaling::CreateHudlessTexture()
 		// calls this every frame and copes with a null texture, so a later frame picks it up.
 		// Reporting it as an error put a spurious "Unsupported HUD-less presenter format 0 for
 		// encoding 0" in every session's log.
-		if (surface.format != rhi::Format::Unknown) {
+		// So is a surface still in the other encoding in the frame HDR turns off: its replacement comes after this frame.
+		if (surface.format != rhi::Format::Unknown && surface.hdr10 == hdrActive) {
 			logger::error("[Upscaling] Unsupported HUD-less presenter format {} (HDR10 {})",
 				static_cast<int>(surface.format), surface.hdr10);
 		}
