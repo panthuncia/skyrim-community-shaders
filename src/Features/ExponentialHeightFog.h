@@ -105,7 +105,7 @@ public:
 		float4 gridZParams = {};
 		float4x4 clipToWorld = {};
 		float4 frameJitterOffsets[16] = {};
-		float4 historyParameters = {};  // x = near weight, y = miss sample count, z = far weight, w = unused
+		float4 historyParameters = {};  // x = near weight, y = miss sample count, z = far weight, w = 1 turns off the scattering's history check (a CS_ORG_FOG_DEBUG diagnostic)
 		float4 jitterParameters = {};   // x = LightScatteringSampleJitterMultiplier, y = StateFrameIndexMod8, zw = unused
 		// The far grid continues from the near grid to the shared local range.
 		DirectX::XMUINT4 farGridSizeAndFlags = {};

@@ -122,6 +122,9 @@ uint4 Rand4DPCG32(int4 p)
 	return v;
 }
 
+// The largest history value the scattering keeps. Above it the integrated volume, in half floats, would overflow.
+static const float kMaxHistoryValue = 65504.0f;
+
 // Matches UE's MakePositiveFinite - ensures no NaN/Inf propagates into history chain
 float4 MakePositiveFinite(float4 v)
 {
@@ -154,7 +157,8 @@ float3 ComputeHistoryVolumeUVAndDepth(float3 positionWS, out bool validHistory, 
 
 	float historyZ = ExponentialHeightFog::ComputeVolumetricNormalizedSlice(previousViewDepth);
 	float3 volumeUV = float3(historyUV, historyZ);
-	validHistory = !any(volumeUV < 0.0f) && !any(volumeUV >= 1.0f);
+	// Written so a NaN coordinate fails too: a NaN would pass "not below 0 and not at or above 1".
+	validHistory = all(volumeUV >= 0.0f) && all(volumeUV < 1.0f);
 	return saturate(volumeUV);
 }
 
@@ -235,7 +239,7 @@ float2 FixupHistoryUV(float2 uv, float previousCellDepth, out bool validHistory)
 	}
 
 	float historyAlpha = VolumetricFogHistoryWeight;
-	[flatten] if (!validHistory || any(historyUV < 0.0f) || any(historyUV >= 1.0f))
+	[flatten] if (!validHistory || !all(historyUV >= 0.0f) || !all(historyUV < 1.0f))
 	{
 		historyAlpha = 0.0f;
 	}
@@ -258,9 +262,12 @@ float2 FixupHistoryUV(float2 uv, float previousCellDepth, out bool validHistory)
 	[branch] if (historyAlpha > 0.0f)
 	{
 		float4 history = LightScatteringHistory.SampleLevel(LinearSampler, historyUV, 0);
-		// Sanitize history to prevent NaN/Inf propagation in the temporal chain
+		// A texel that is not finite or is too large is not history. It can only be memory no pass wrote, and the blend
+		// would keep it for thousands of frames. HistoryParameters.w turns this check off for CS_ORG_FOG_DEBUG 9 and 10.
+		const bool usable = (all(isfinite(history)) && all(abs(history) <= kMaxHistoryValue)) || VolumetricFogHistoryParameters.w > 0.5f;
+		// Sanitize history to prevent NaN/Inf propagation in the temporal chain. An unusable texel then has weight 0.
 		history = MakePositiveFinite(history);
-		scatteringAndExtinction = lerp(scatteringAndExtinction, history, historyAlpha);
+		scatteringAndExtinction = lerp(scatteringAndExtinction, history, usable ? historyAlpha : 0.0f);
 	}
 
 	LightScattering[dispatchID] = MakePositiveFinite(scatteringAndExtinction);
