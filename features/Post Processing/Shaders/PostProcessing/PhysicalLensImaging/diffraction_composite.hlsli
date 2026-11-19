@@ -1,12 +1,7 @@
-#define WAVE_PARAMETER_REGISTER b4
+// Composite's resource list declares TexWaveKernel, TexWaveRegions, TexWaveSources, TexWaveTiles and TexWaveTail (t10-t14).
+#define WAVE_PARAMETER_REGISTER 4
 #include "PostProcessing/PhysicalLensImaging/diffraction_parameters.hlsli"
 #include "PostProcessing/PhysicalLensImaging/diffraction_sampling.hlsli"
-
-StructuredBuffer<float4> TexWaveKernel : register(t10);
-StructuredBuffer<float4> TexWaveRegions : register(t11);
-StructuredBuffer<float4> TexWaveSources : register(t12);
-StructuredBuffer<uint> TexWaveTiles : register(t13);
-Texture2DArray<float> TexWaveTail : register(t14);
 
 float3 SamplePhysicalLensWave(Texture2D<float4> scene, Texture2DArray<float4> mappingTexture,
 	SamplerState linearSampler, float2 uv, out float2 greenUV)
