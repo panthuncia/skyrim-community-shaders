@@ -22,9 +22,11 @@ frames = 300
 do = "shot"
 arg = "flat"
 
+# On the render graph a run's first shot is copied only once a build that holds the copy switches in, some frames after the
+# shot step (22 capture points on native Vulkan). The next setting must come after that, or the "flat" shot shows the lens.
 [[steps]]
 at = "previous"
-frames = 1
+frames = 60
 do = "setting"
 arg = 'PostProcessing.Physical Lens={"enabled":true,"settings":{"LensPreset":5,"ZoomPosition":0.0,"FNumber":1.0,"FocusDistanceM":0,"Intensity":0.0,"Diffraction":false,"ImageEffects":true}}'
 
