@@ -27,6 +27,7 @@
 #include "SceneWidgetInterceptor.h"
 #include "State.h"
 #include "Utils/Game.h"
+#include "Utils/Setting.h"
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "cs_editor."
@@ -1513,6 +1514,9 @@ void SceneWidgetBinding::Guard::SetTombstoned(bool a_tombstoned)
 
 bool SceneWidgetBinding::Guard::Finish(bool a_changed)
 {
+	// The widget and this guard write the bound address directly, which Setting::Set never sees.
+	// A setting bound there raises its event once its bytes differ from the ones last raised.
+	const SKSE::stl::scope_exit raiseSettingWrite([this]() noexcept { CS::SettingRegistry::RaiseAt(value.data); });
 	if (mixedFlagPushed) {
 		ImGui::PopItemFlag();
 		mixedFlagPushed = false;

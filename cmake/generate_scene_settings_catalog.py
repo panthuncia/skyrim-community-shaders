@@ -637,10 +637,18 @@ def collect_struct_bodies(paths: list[Path]) -> dict[str, list[str]]:
     return bodies
 
 
+# A CS::Setting<T> member is its T to the catalog. Its value is its first member, so the
+# member's address is the value's address, and the JSON holds the plain value.
+SETTING_WRAPPER_RE = re.compile(r"(?:::)?CS\s*::\s*Setting\s*<\s*(.+?)\s*>")
+
+
 def clean_type(type_name: str) -> str:
     type_name = re.sub(r"\b(const|volatile|mutable|static|inline|constexpr)\b", "", type_name)
     type_name = type_name.replace("&", "").replace("*", "").strip()
     type_name = re.sub(r"\s+", " ", type_name)
+    wrapped = SETTING_WRAPPER_RE.fullmatch(type_name)
+    if wrapped:
+        type_name = clean_type(wrapped.group(1))
     return type_name
 
 

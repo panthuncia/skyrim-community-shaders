@@ -1,0 +1,159 @@
+#include "Utils/Setting.h"
+
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+namespace CS
+{
+	namespace
+	{
+		struct SettingBinding
+		{
+			const void* address = nullptr;
+			std::size_t size = 0;
+			std::vector<std::byte> raised;  // the bytes last raised
+		};
+
+		struct SettingTable
+		{
+			std::mutex mutex;
+			std::deque<std::string> names;  // id n at n - 1. A deque, so names never move.
+			std::unordered_map<std::string_view, SettingVariableId> idsByName;
+			std::unordered_map<SettingVariableId, SettingBinding> bindings;
+			std::unordered_map<const void*, SettingVariableId> idsByAddress;
+			SettingRegistry::RaiseHook hook = nullptr;
+		};
+
+		SettingTable& Settings()
+		{
+			static SettingTable s_table;
+			return s_table;
+		}
+
+		bool SettingBytesRaised(const SettingBinding& a_binding)
+		{
+			return std::memcmp(a_binding.address, a_binding.raised.data(), a_binding.size) == 0;
+		}
+
+		void RecordSettingBytes(SettingBinding& a_binding)
+		{
+			std::memcpy(a_binding.raised.data(), a_binding.address, a_binding.size);
+		}
+
+		void CallSettingHook(SettingRegistry::RaiseHook a_hook, SettingVariableId a_id, std::string_view a_name)
+		{
+			if (a_hook)
+				a_hook(a_id, a_name);
+		}
+	}
+
+	SettingVariableId SettingRegistry::Declare(std::string_view a_name)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		if (const auto found = table.idsByName.find(a_name); found != table.idsByName.end())
+			return found->second;
+		const auto& name = table.names.emplace_back(a_name);
+		const auto id = static_cast<SettingVariableId>(table.names.size());
+		table.idsByName.emplace(name, id);
+		return id;
+	}
+
+	std::string_view SettingRegistry::Name(SettingVariableId a_id)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		if (a_id == 0 || a_id > table.names.size())
+			return {};
+		return table.names[a_id - 1];
+	}
+
+	SettingRegistry::RaiseHook SettingRegistry::SetRaiseHook(RaiseHook a_hook)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		const auto previous = table.hook;
+		table.hook = a_hook;
+		return previous;
+	}
+
+	void SettingRegistry::Attach(SettingVariableId a_id, const void* a_address, std::size_t a_size)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		// One address per id. Binding an id again moves it.
+		if (const auto old = table.bindings.find(a_id); old != table.bindings.end())
+			table.idsByAddress.erase(old->second.address);
+		if (const auto other = table.idsByAddress.find(a_address); other != table.idsByAddress.end())
+			table.bindings.erase(other->second);
+		auto& binding = table.bindings[a_id];
+		binding.address = a_address;
+		binding.size = a_size;
+		binding.raised.resize(a_size);
+		RecordSettingBytes(binding);
+		table.idsByAddress[a_address] = a_id;
+	}
+
+	void SettingRegistry::Detach(const void* a_address)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		const auto found = table.idsByAddress.find(a_address);
+		if (found == table.idsByAddress.end())
+			return;
+		table.bindings.erase(found->second);
+		table.idsByAddress.erase(found);
+	}
+
+	void SettingRegistry::Raise(SettingVariableId a_id)
+	{
+		auto& table = Settings();
+		RaiseHook hook = nullptr;
+		std::string_view name;
+		{
+			std::scoped_lock lock(table.mutex);
+			if (const auto found = table.bindings.find(a_id); found != table.bindings.end())
+				RecordSettingBytes(found->second);
+			if (a_id != 0 && a_id <= table.names.size())
+				name = table.names[a_id - 1];
+			hook = table.hook;
+		}
+		CallSettingHook(hook, a_id, name);
+	}
+
+	void SettingRegistry::RaiseAt(const void* a_address)
+	{
+		auto& table = Settings();
+		RaiseHook hook = nullptr;
+		SettingVariableId id = 0;
+		std::string_view name;
+		{
+			std::scoped_lock lock(table.mutex);
+			const auto found = table.idsByAddress.find(a_address);
+			if (found == table.idsByAddress.end())
+				return;
+			auto& binding = table.bindings[found->second];
+			if (SettingBytesRaised(binding))
+				return;
+			RecordSettingBytes(binding);
+			id = found->second;
+			name = table.names[id - 1];
+			hook = table.hook;
+		}
+		CallSettingHook(hook, id, name);
+	}
+
+	std::vector<SettingVariableId> SettingRegistry::Unraised()
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		std::vector<SettingVariableId> ids;
+		for (const auto& [id, binding] : table.bindings)
+			if (!SettingBytesRaised(binding))
+				ids.push_back(id);
+		return ids;
+	}
+}

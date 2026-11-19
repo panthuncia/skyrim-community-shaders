@@ -13,6 +13,7 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
 #	include "Utils/D3D.h"
+#	include "Utils/Setting.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -200,6 +201,100 @@ namespace GraphResources::SelfTest
 		}
 	}
 
+	// The CS::Setting pilot. A test-only settings struct takes the paths a ported feature field takes.
+	namespace SettingPilot
+	{
+		struct PilotSettings
+		{
+			CS::Setting<std::uint32_t> gridSizeZ{ 64 };
+			float plain = 1.0f;
+		};
+		NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PilotSettings, gridSizeZ, plain)
+
+		struct PilotRaises
+		{
+			CS::SettingVariableId id = 0;
+			std::uint32_t count = 0;
+			CS::SettingRegistry::RaiseHook previous = nullptr;
+		};
+
+		PilotRaises& Raises()
+		{
+			static PilotRaises s_raises;
+			return s_raises;
+		}
+
+		// Counts the pilot's raises and passes every raise on to the hook it replaced.
+		void CountPilotRaise(std::uint32_t a_id, std::string_view a_name)
+		{
+			auto& raises = Raises();
+			if (a_id == raises.id)
+				++raises.count;
+			if (raises.previous)
+				raises.previous(a_id, a_name);
+		}
+
+		/** @brief Runs the pilot's checks once. @return The first failed check, or empty when every one held. */
+		std::string Run()
+		{
+			auto& raises = Raises();
+			raises.id = CS::SettingRegistry::Declare("SelfTest.SettingPilot.gridSizeZ");
+			raises.count = 0;
+			raises.previous = CS::SettingRegistry::SetRaiseHook(CountPilotRaise);
+			const SKSE::stl::scope_exit restoreHook([]() noexcept { CS::SettingRegistry::SetRaiseHook(Raises().previous); });
+
+			PilotSettings settings;
+			settings.gridSizeZ.Bind(raises.id);
+
+			// The JSON holds the plain value.
+			json saved = settings;
+			if (!saved["gridSizeZ"].is_number_unsigned() || saved["gridSizeZ"].get<std::uint32_t>() != 64)
+				return fmt::format("saved JSON is {}, not a plain 64", saved.dump());
+
+			// LoadSettings assigns the whole struct. The member keeps its binding and raises once.
+			saved["gridSizeZ"] = 96;
+			settings = saved.get<PilotSettings>();
+			if (settings.gridSizeZ.Get() != 96 || settings.gridSizeZ.Id() != raises.id || raises.count != 1)
+				return fmt::format("loading 96 left value {} id {} raises {}", settings.gridSizeZ.Get(), settings.gridSizeZ.Id(), raises.count);
+
+			// The same value again raises nothing.
+			settings = saved.get<PilotSettings>();
+			if (raises.count != 1)
+				return fmt::format("loading the same value raised ({} raises)", raises.count);
+
+			// A key missing from the JSON takes the default object's value.
+			settings = json::object().get<PilotSettings>();
+			if (settings.gridSizeZ.Get() != 64 || raises.count != 2)
+				return fmt::format("loading defaults left value {} raises {}", settings.gridSizeZ.Get(), raises.count);
+
+			// A copy is unbound, so its writes raise nothing.
+			auto copy = settings.gridSizeZ;
+			copy = 32u;
+			if (copy.Id() != 0 || raises.count != 2)
+				return fmt::format("a copy raised or kept the binding (id {} raises {})", copy.Id(), raises.count);
+
+			// A raw write raises once through the address, as the scene widget interceptor reports it.
+			*settings.gridSizeZ.Raw() = 128;
+			const auto pilotUnraised = [&] { return std::ranges::contains(CS::SettingRegistry::Unraised(), raises.id); };
+			if (!pilotUnraised())
+				return "a raw write was not listed as unraised";
+			CS::SettingRegistry::RaiseAt(settings.gridSizeZ.Raw());
+			CS::SettingRegistry::RaiseAt(settings.gridSizeZ.Raw());
+			if (raises.count != 3 || pilotUnraised())
+				return fmt::format("a raw write raised {} times", raises.count - 2);
+			return {};
+		}
+	}
+
+	void CheckSettingPilot()
+	{
+		const auto failure = SettingPilot::Run();
+		if (failure.empty())
+			logger::info("[ORG] graph resource self-test: setting pilot OK (JSON round trip, whole-struct assign, copy, raw write)");
+		else
+			logger::error("[ORG] graph resource self-test: setting pilot FAILED: {}", failure);
+	}
+
 	bool Requested()
 	{
 		static const bool requested = Switches::On("CS_ORG_GRAPHRES_SELFTEST");
@@ -217,6 +312,7 @@ namespace GraphResources::SelfTest
 		auto& test = Test();
 		if (!Requested() || std::exchange(test.attempted, true))
 			return;
+		CheckSettingPilot();
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses))
 			return;

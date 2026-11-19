@@ -1010,6 +1010,57 @@ namespace Util
 		return retval;
 	}
 
+	namespace
+	{
+		/** @brief Draws a control over a copy of a_setting held as Shown, and sets the setting on an edit. */
+		template <class Shown, class T, class Draw>
+		bool EditSettingCopy(CS::Setting<T>& a_setting, Draw&& a_draw)
+		{
+			// The control binds a copy, so name the setting it stands for or scene authoring misses it.
+			SceneWidgetInterceptor::ProxyScope sceneProxy(a_setting.Raw(), 1.0f);
+			Shown shown = static_cast<Shown>(a_setting.Get());
+			const bool changed = a_draw(shown);
+			// A scene replica edits its scene entry, not the setting.
+			if (changed && !SceneWidgetInterceptor::IsArmed()) {
+				if constexpr (std::is_unsigned_v<T> && std::is_signed_v<Shown>)
+					a_setting.Set(static_cast<T>(std::max<Shown>(shown, 0)));
+				else
+					a_setting.Set(static_cast<T>(shown));
+			}
+			return changed;
+		}
+	}
+
+	bool Checkbox(const char* label, CS::Setting<bool>& setting)
+	{
+		return EditSettingCopy<bool>(setting, [&](bool& a_value) { return ImGui::Checkbox(label, &a_value); });
+	}
+
+	bool SliderInt(const char* label, CS::Setting<int>& setting, int min, int max, const char* format, ImGuiSliderFlags flags)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::SliderInt(label, &a_value, min, max, format, flags); });
+	}
+
+	bool SliderInt(const char* label, CS::Setting<std::uint32_t>& setting, int min, int max, const char* format, ImGuiSliderFlags flags)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::SliderInt(label, &a_value, min, max, format, flags); });
+	}
+
+	bool SliderFloat(const char* label, CS::Setting<float>& setting, float min, float max, const char* format, ImGuiSliderFlags flags)
+	{
+		return EditSettingCopy<float>(setting, [&](float& a_value) { return ImGui::SliderFloat(label, &a_value, min, max, format, flags); });
+	}
+
+	bool Combo(const char* label, CS::Setting<int>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::Combo(label, &a_value, items, itemCount, popupMaxHeightInItems); });
+	}
+
+	bool Combo(const char* label, CS::Setting<std::uint32_t>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::Combo(label, &a_value, items, itemCount, popupMaxHeightInItems); });
+	}
+
 	ImVec2 GetNativeViewportSizeScaled(float scale)
 	{
 		const auto Size = ImGui::GetMainViewport()->Size;
