@@ -59,6 +59,21 @@ public:
 
 	bool IsActive() const;
 
+	/** @brief The samplers the LUT passes made from the feature's, in this order. */
+	enum class Sampler : std::uint32_t
+	{
+		Transmittance,  // sampTr
+		SkyView,        // sampSv
+		Noise,          // sampNoise
+	};
+	static constexpr std::uint32_t kNoSampler = ~0u;
+
+	/**
+	* @brief Render thread. A sampler's heap index for graph draws, or kNoSampler while inactive.
+	* a_owner, when given, gets what keeps the descriptor alive, for a run that latches the index.
+	*/
+	std::uint32_t SamplerIndex(Sampler a_sampler, std::shared_ptr<const void>* a_owner = nullptr) const;
+
 	/**
 	* @brief At the feature's EarlyPrepass with the feature on. Queues the four LUTs, and the disk phase LUT when its constants changed.
 	* @return False means the D3D11 dispatches run this frame.

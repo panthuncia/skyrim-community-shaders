@@ -327,6 +327,16 @@ bool ORGPhysicalSky::IsActive() const
 	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
+std::uint32_t ORGPhysicalSky::SamplerIndex(Sampler a_sampler, std::shared_ptr<const void>* a_owner) const
+{
+	const auto at = static_cast<std::size_t>(a_sampler);
+	if (!IsActive() || at >= impl->samplers.size() || !impl->samplers[at])
+		return kNoSampler;
+	if (a_owner)
+		*a_owner = impl->samplers[at].Owner();
+	return impl->samplers[at].Index();
+}
+
 bool ORGPhysicalSky::GenerateLuts(PhysicalSky& a_feature)
 {
 	// Until the schedule holds the client the D3D11 dispatches write the exports.
@@ -355,6 +365,7 @@ Texture2D* ORGPhysicalSky::MakeLut2D(Lut, const D3D11_TEXTURE2D_DESC&) { return 
 Texture3D* ORGPhysicalSky::MakeLut3D(Lut, const D3D11_TEXTURE3D_DESC&) { return nullptr; }
 bool ORGPhysicalSky::Setup(const PhysicalSky&) { return false; }
 bool ORGPhysicalSky::IsActive() const { return false; }
+std::uint32_t ORGPhysicalSky::SamplerIndex(Sampler, std::shared_ptr<const void>*) const { return kNoSampler; }
 bool ORGPhysicalSky::GenerateLuts(PhysicalSky&) { return false; }
 
 #endif

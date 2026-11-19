@@ -16,6 +16,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 
 #include <array>
 #include <cstddef>
@@ -75,8 +76,9 @@ namespace DCLF::Features::Sky
 		std::uint32_t firstIndex;
 		std::uint32_t textures[4];  // t0-t2, then t26 (kSelfShadowFromOcclusion: the occlusion cubemap)
 		std::uint32_t samplers[4];  // s0-s2
+		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 352, "SkyOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 432, "SkyOrgDraw's layout");
 	static_assert(offsetof(DrawConstants, vertexRef) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
 
 	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */
@@ -133,6 +135,7 @@ namespace DCLF::Features::Sky
 		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 when not kSceneDepth: its import, or a published id's index
 		bool sceneDepthNull = false;                            // t17 is the depth target itself, or nothing: a null view
 		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
+		Integrations::PhysicalSky::OrgHandles physSky{};        // Physical Sky's resources and samplers, latched with every draw
 		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
 		// View::Sun only. Whether the depth target is kPOST_ZPREPASS_COPY rather than kMAIN's.

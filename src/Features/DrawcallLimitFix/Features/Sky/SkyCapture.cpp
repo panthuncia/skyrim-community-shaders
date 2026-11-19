@@ -230,7 +230,20 @@ namespace DCLF::Features::Sky
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
 				if (!read(kHeaderRegisters[h], a_published.headers[h], a_run.headerIndices[h]))
 					return false;
-			return read(17, a_published.sceneDepth, a_run.sceneDepthIndex);
+			if (!read(17, a_published.sceneDepth, a_run.sceneDepthIndex))
+				return false;
+			// Physical Sky's resources, which the sky's pixel stages read through the draw's latch.
+			const auto readPhysSky = [a_view](std::string_view a_id, std::uint32_t& a_index, std::string& a_why) {
+				const auto result = SkyDraws::ReadPublished(a_view, a_id, a_index);
+				a_why = Family::ReasonOf(result);
+				return result == Family::InputResult::Graph;
+			};
+			std::string why;
+			if (!Integrations::PhysicalSky::ResolveOrgHandles(a_run.physSky, a_run.owners, readPhysSky, why)) {
+				Refusals().Report(std::format("a {} batch", NameOf(a_view)), why);
+				return false;
+			}
+			return true;
 		}
 
 		/** @brief Which of t0-t2 a sky technique samples. */
@@ -282,6 +295,7 @@ namespace DCLF::Features::Sky
 			next->sceneDepthIndex = full.sceneDepthIndex;
 			next->sceneDepthNull = full.sceneDepthNull;
 			next->headerIndices = full.headerIndices;
+			next->physSky = full.physSky;
 			FlushLatched(a_capture);
 			a_capture.run = std::move(next);
 			return true;
@@ -431,6 +445,7 @@ namespace DCLF::Features::Sky
 			// The alpha test reference SetDirtyStates would write to PS b11.
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
+			constants.physSky = run.physSky;
 			// No depth bias offset. An offset left the sky short of depth 1, so the deferred pass lit and fogged it as geometry.
 			// The engine's sky also leaves the range whole.
 			draw.viewport = Family::LatchViewport(0);

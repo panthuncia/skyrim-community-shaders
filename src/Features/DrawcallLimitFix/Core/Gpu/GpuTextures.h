@@ -131,6 +131,9 @@ namespace DCLF
 		/** @brief Render thread. A zero-reading binding of a_kind for an empty slot, or kInvalid if it could not be made. */
 		Binding NullOf(ViewKind a_kind);
 
+		/** @brief Render thread. The 1x1 zero D3D11 view of a_kind that NullOf imports, or null for a buffer or when it could not be made. */
+		static ID3D11ShaderResourceView* NullView(ViewKind a_kind);
+
 		/** @brief One log line describing a refusal. */
 		static std::string DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure);
 

@@ -919,10 +919,10 @@ namespace DCLF
 		}
 	}
 
-	GpuTextures::Binding GpuTextures::NullOf(ViewKind a_kind)
+	ID3D11ShaderResourceView* GpuTextures::NullView(ViewKind a_kind)
 	{
 		if (a_kind == ViewKind::Buffer)
-			return { .index = NullBufferIndex(false) };
+			return nullptr;
 		// Made once on the render thread. The null descriptor is a 2D view.
 		struct NullViews
 		{
@@ -973,10 +973,17 @@ namespace DCLF
 				logger::error("[DCLF] textures: the null views by kind could not be made; an engine draw with an empty slot stays the engine's");
 			return out;
 		}();
-		ID3D11ShaderResourceView* view = a_kind == ViewKind::Cube           ? nulls.cube.get() :
-		                                 a_kind == ViewKind::Texture3D      ? nulls.texture3D.get() :
-		                                 a_kind == ViewKind::Texture2DArray ? nulls.texture2DArray.get() :
-		                                                                      nulls.texture2D.get();
+		return a_kind == ViewKind::Cube           ? nulls.cube.get() :
+		       a_kind == ViewKind::Texture3D      ? nulls.texture3D.get() :
+		       a_kind == ViewKind::Texture2DArray ? nulls.texture2DArray.get() :
+		                                            nulls.texture2D.get();
+	}
+
+	GpuTextures::Binding GpuTextures::NullOf(ViewKind a_kind)
+	{
+		if (a_kind == ViewKind::Buffer)
+			return { .index = NullBufferIndex(false) };
+		auto* view = NullView(a_kind);
 		return view ? ResolveBinding(view, Tag(Source::FamilyNull, static_cast<std::uint32_t>(a_kind))) : Binding{};
 	}
 
