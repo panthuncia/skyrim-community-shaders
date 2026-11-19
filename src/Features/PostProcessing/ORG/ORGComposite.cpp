@@ -58,6 +58,13 @@ namespace ORGPostChain
 				const auto localExposure = a_builder.FindLatch<LocalExposure::LocalExposureCB>(Published::kLocalExposureConstants);
 				const auto lensMapping = a_builder.Find(Published::kPhysicalLensMapping);
 				const auto lensDiffraction = a_builder.FindLatch<PhysicalLensImaging::DiffractionParameters>(Published::kPhysicalLensDiffraction);
+				// Published only while the lens builds its ghosts or starburst.
+				const auto lensGhosts = a_builder.Find(Published::kPhysicalLensGhosts);
+				const auto waveKernel = a_builder.Find(Published::kPhysicalLensWaveKernel);
+				const auto waveRegions = a_builder.Find(Published::kPhysicalLensWaveRegions);
+				const auto waveSources = a_builder.Find(Published::kPhysicalLensWaveSources);
+				const auto waveTiles = a_builder.Find(Published::kPhysicalLensWaveTiles);
+				const auto waveTail = a_builder.Find(Published::kPhysicalLensWaveTail);
 				if (a_builder.Failed())
 					return;
 
@@ -108,9 +115,11 @@ namespace ORGPostChain
 					Bind::Handle(borderSampler.Index()), hasExposure ? Bind::Latch(*autoExposure) : unusedLatch,
 					hasLocalExposure ? Bind::Latch(*localExposure) : unusedLatch, Bind::Latch(constants) };
 				if (hasPhysical) {
-					// The ghosts and the diffraction resources are not on the graph yet; their branches stay off (HasPhysicalFlare, DiffractionEnabled).
-					bindings.insert(bindings.end(), { Bind::Unused(), Bind::SrvArray(lensMapping), Bind::Unused(), Bind::Unused(), Bind::Unused(), Bind::Unused(),
-														Bind::Unused(), Bind::Latch(*lensDiffraction) });
+					// Without the lens's ghosts or starburst their branches stay off (HasPhysicalFlare, DiffractionEnabled), so they get placeholders.
+					const auto arrayOrUnused = [](const Image& a_image) { return a_image ? Bind::SrvArray(a_image) : Bind::Unused(); };
+					const auto bufferOrUnused = [](const Image& a_image) { return a_image ? Bind::Srv(a_image) : Bind::Unused(); };
+					bindings.insert(bindings.end(), { arrayOrUnused(lensGhosts), Bind::SrvArray(lensMapping), bufferOrUnused(waveKernel), bufferOrUnused(waveRegions),
+														bufferOrUnused(waveSources), bufferOrUnused(waveTiles), arrayOrUnused(waveTail), Bind::Latch(*lensDiffraction) });
 				}
 				a_builder.Draw({ .name = "draw", .program = std::move(program), .bindings = std::move(bindings), .target = image });
 				a_builder.SetCurrent(image);
