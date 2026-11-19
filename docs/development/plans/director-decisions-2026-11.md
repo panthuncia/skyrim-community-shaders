@@ -70,3 +70,13 @@ final until the user confirms it.
 14. **The shared MO2 profile was broken twice by leads** (staging without the base AIO, and a retry script deleting a live
     stage folder). cs-test's stage now refuses a mod without TerrainHelper.esp. A guard that stops a stage folder being
     deleted while it is live is not built.
+15. **Frame revision step 2 is merged** (named texture versions). The lead's calls are in the plan's section 9, marked "to
+    confirm":
+    - Misses count only the set's own kind, because DCLF's named parity check would warn otherwise.
+    - Texture sets hold textures weakly.
+    - The CS recording argument carries a serial.
+
+    ORGModuleServices `9b85a9f` (`rev-step2-named-versions`, on `0185120`) is local only. Note that `extern/ORGModuleServices`
+    has `update = none` in `.git/config`, so `git submodule update` skips it: check it out by hand after a bump.
+16. **`C:/Modding/MO2/mods/CS AB rv2` is left in place** for the user to delete. The permission check refused the lead's
+    delete, and the director did not do it in its place.
