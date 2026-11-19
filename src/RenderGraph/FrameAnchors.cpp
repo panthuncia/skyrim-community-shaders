@@ -607,13 +607,6 @@ namespace FrameAnchors
 			// The description a slot last began to wait for, per segment, and the frame it did: a switch's lag counts from it.
 			std::array<std::uint64_t, kDeclared> waitHash{};
 			std::array<std::uint64_t, kDeclared> waitFrame{};
-			// The frame a stage's staged build was first seen at Begin (0: none): its switch's lag counts from it.
-			std::array<std::uint64_t, kDeclared> stagedSince{};
-			// A staged build's recordings, for the starvation rule in Schedule. It switches in once every slot is ready,
-			// so requests that keep replacing its recordings can starve it.
-			std::array<std::uint64_t, kDeclared> stagedCounted{};
-			std::array<std::unordered_set<std::uint64_t>, kDeclared> stagedAsked{};
-			std::array<std::uint32_t, kDeclared> stagedAskedAgain{};
 			// Whether this frame's recording bound the current versions at Begin.
 			// A version published after Begin is a mismatch. One published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
@@ -2458,82 +2451,21 @@ namespace FrameAnchors
 				active = {};
 			// A schedule whose recording binds a replaced version gets a new description for the new version.
 			// The slot keeps the old schedule until that is ready, so the stage lags a frame or two but is never blank.
+			// Only slots published outside frame revisions lag (engine imports, the native back buffer), since a revision switches every
+			// stage that declares its slots. The census counts the lags by slot.
 			a_state.frameVersionsCurrent[a_declared] = true;
 			if (active.recording && !host.EpochRecordingVersionsCurrent(*active.recording, slot)) {
-				if (active.fields.versions == recordings.versionGeneration)
+				if (active.fields.versions == recordings.versionGeneration) {
 					++recordings.versionGeneration;
+					// The slot's name, without the version numbers, so the census groups by slot.
+					const auto stale = host.EpochRecordingStaleVersion(*active.recording, slot);
+					RenderGraph::Frame::Boundary::NoteVersionLag(std::string_view(stale).substr(0, stale.find(" (slot ")));
+				}
 				a_state.frameVersionsCurrent[a_declared] = false;
 			}
-			// A staged build is recorded for every slot and switches in whole here, once every slot's recording is ready.
-			// Until then every slot keeps the attached build's schedule.
+			// A staged build switches in with a frame revision, recorded for every slot (Frame::Revision). Until then the slots keep the
+			// attached build's schedule.
 			const auto epoch = EpochOfDeclared(a_declared);
-			// Recorded and switched in frames of any kind, so a build made during a load or a menu is in place for the next world frame.
-			const std::uint64_t stagedGeneration = host.StagedGeneration(epoch);
-			if (stagedGeneration)
-				if (const auto stagedBuilt = a_state.stagedSnapshots[a_declared].load(std::memory_order_acquire)) {
-					const auto stagedKey = a_state.stagedKeys[a_declared].load(std::memory_order_acquire);
-					const auto staged = DescribeDeclaredFrom(a_state, a_declared, true, stagedBuilt, a_state.stagedPasses[a_declared].load(std::memory_order_acquire),
-						stagedGeneration, stagedKey.get(), true);
-					std::array<std::shared_ptr<const org::GraphHost::EpochRecording>, RenderGraphRuntime::kGameFramesInFlight> ready{};
-					bool all = true;
-					if (a_state.stagedCounted[a_declared] != stagedGeneration) {
-						a_state.stagedCounted[a_declared] = stagedGeneration;
-						a_state.stagedAsked[a_declared].clear();
-						a_state.stagedAskedAgain[a_declared] = 0;
-					}
-					// A staged build with no client switches in at once, with the stage absent on it.
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && staged.graph; ++s) {
-						bool asked = false;
-						const auto entry = RequestDeclared(a_state, a_declared, staged, s, a_frame.frame, " (staged build)", &asked);
-						// The build's finished recording was dropped before it switched in, so this description is asked for again.
-						if (asked && !a_state.stagedAsked[a_declared].insert(RenderGraph::Frame::FieldsHash(staged) * 31 + s).second)
-							++a_state.stagedAskedAgain[a_declared];
-						const std::lock_guard lock(recordings.mutex);
-						if (entry->done && entry->recording)
-							ready[s] = entry->recording;
-						else
-							all = false;
-					}
-					if (a_state.stagedSince[a_declared] == 0)
-						a_state.stagedSince[a_declared] = a_frame.frame;
-					// The starvation rule. A staged build's recordings may be asked for again a few times, never without end.
-					// Past the limit it would never switch in. That is a schedule bug, fatal in development builds.
-					constexpr std::uint32_t kAskedAgainLimit = 4 * RenderGraphRuntime::kGameFramesInFlight;
-					if (!all && a_state.stagedAskedAgain[a_declared] > kAskedAgainLimit) {
-						Driver::NoteTapError(Driver::TapError::Starved, segment,
-							fmt::format("staged build {} was staged at frame {} and has not switched in: {} of its recordings were asked for again after "
-										"they were dropped, {} descriptions asked for in all; requests keep replacing its recordings",
-								stagedGeneration, a_state.stagedSince[a_declared], a_state.stagedAskedAgain[a_declared], a_state.stagedAsked[a_declared].size()));
-						a_state.stagedAskedAgain[a_declared] = 0;
-					}
-					Driver::NoteStagedAskedAgain(segment, a_state.stagedAskedAgain[a_declared]);
-					if (all && RenderGraph::Builds::SwitchStaged(epoch)) {
-						const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
-						// For a build asked for by a new key, how many frames its passes took to arrive.
-						std::string keyNote;
-						if (auto& use = a_state.keyUse[a_declared]; stagedKey && !stagedKey->all && stagedKey->serial >= use.requestedSerial && use.switchedSerial < use.requestedSerial) {
-							keyNote = fmt::format("; its key was asked for at frame {}, {} frames before", use.requestedFrame, a_frame.frame - use.requestedFrame);
-							use.switchedSerial = use.requestedSerial;
-						}
-						const auto what = fmt::format("build {} switched in whole with its recordings for every frame slot{}{}", stagedGeneration,
-							active.recording ? fmt::format(" ({})", RenderGraph::Frame::DiffFields(active.fields, staged)) : std::string(), keyNote);
-						for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
-							a_state.schedule[a_declared][s] = staged.graph ? State::Scheduled{ staged, ready[s], built } : State::Scheduled{};
-						// The replaced build's recordings are never used again. Each keeps that build's graph and alias pools alive.
-						{
-							const std::lock_guard lock(recordings.mutex);
-							std::erase_if(recordings.entries, [&](const auto& a_kept) {
-								return a_kept->done && a_kept->recording && a_kept->recording->buildGeneration != stagedGeneration;
-							});
-						}
-						Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.stagedSince[a_declared], what);
-						Driver::NoteBuildSwitch(segment);
-						a_state.stagedSince[a_declared] = 0;
-						a_state.stagedSnapshots[a_declared].store(nullptr, std::memory_order_release);
-						a_state.stagedPasses[a_declared].store(nullptr, std::memory_order_release);
-						a_state.stagedKeys[a_declared].store(nullptr, std::memory_order_release);
-					}
-				}
 			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
 			// The frame's description cut to the attached build's key, and the full one. Taps treat the difference as lagged work.
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
@@ -3553,6 +3485,12 @@ namespace FrameAnchors
 		{
 			std::uint32_t declared = kDeclared;
 			std::array<Slot, RenderGraphRuntime::kGameFramesInFlight> slots{};
+			// The staged build the slots are recorded on (0: the attached one), with what describes it.
+			std::uint64_t staged = 0;
+			std::uint64_t stagedSince = 0;  // the frame the revision first saw that build
+			RenderGraph::Frame::SegmentFields stagedFields;
+			std::shared_ptr<const Snapshot> stagedBuilt;
+			std::shared_ptr<const BuildKey> stagedKey;
 		};
 		RecordVersions versions;
 		std::vector<Member> members;
@@ -3565,6 +3503,17 @@ namespace FrameAnchors
 		revision->versions = { std::move(a_versions), a_serial };
 		AddRevisionMembers(*revision, a_epochs, a_others);
 		return revision;
+	}
+
+	bool StagedStages()
+	{
+		auto& state = Anchors();
+		if (!state.host)
+			return false;
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d] && state.host->StagedGeneration(EpochOfDeclared(d)) && state.stagedSnapshots[d].load(std::memory_order_acquire))
+				return true;
+		return false;
 	}
 
 	std::uint32_t AddRevisionMembers(RevisionRecordings& a_revision, std::span<const std::uint32_t> a_epochs, std::vector<std::uint32_t>& a_others)
@@ -3603,29 +3552,55 @@ namespace FrameAnchors
 			progress.ready = false;
 			note(progress.waiting, fmt::format("{} slot {}", declaredInfo[a_declared].names.label, a_slot));
 		};
+		// Every staged stage build joins the revision. Its attached graph takes no new recording until the build is attached.
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d] && host.StagedGeneration(EpochOfDeclared(d)) && state.stagedSnapshots[d].load(std::memory_order_acquire) &&
+				std::ranges::none_of(a_revision.members, [&](const RevisionRecordings::Member& a_member) { return a_member.declared == d; }))
+				a_revision.members.push_back({ d });
 		// Requests made here are Begin's, not mid-frame re-records.
 		const bool inBegin = std::exchange(state.inBegin, true);
 		for (auto& member : a_revision.members) {
 			const auto declared = member.declared;
 			const auto& label = declaredInfo[declared].names.label;
-			// The attached graph takes no new recording while a build is staged. The revision waits until it switched in.
-			if (host.StagedGeneration(EpochOfDeclared(declared))) {
-				if (progress.ready)
-					progress.missing = declared;
-				progress.ready = false;
-				note(progress.deferred, label);
-				continue;
-			}
 			auto& recordings = state.declaredRecordings[declared];
+			const std::uint64_t staged = host.StagedGeneration(EpochOfDeclared(declared));
+			auto stagedBuilt = staged ? state.stagedSnapshots[declared].load(std::memory_order_acquire) : nullptr;
+			const std::uint64_t target = stagedBuilt ? staged : 0;
+			// A new staged build replaces what was recorded for the member. It is a new input, not a drop.
+			if (member.staged != target) {
+				member.slots = {};
+				member.staged = target;
+				member.stagedSince = target ? a_frame : 0;
+				member.stagedBuilt = std::move(stagedBuilt);
+				member.stagedKey = target ? state.stagedKeys[declared].load(std::memory_order_acquire) : nullptr;
+				member.stagedFields = {};
+				if (target)
+					++progress.newBuilds;
+			}
+			if (member.staged) {
+				++progress.builds;
+				member.stagedFields = DescribeDeclaredFrom(state, declared, true, member.stagedBuilt, state.stagedPasses[declared].load(std::memory_order_acquire),
+					member.staged, member.stagedKey.get(), true);
+			}
+			const auto usable = [&](const std::shared_ptr<const org::GraphHost::EpochRecording>& a_recording) {
+				return a_recording && (member.staged ? a_recording->buildGeneration == member.staged : host.EpochRecordingCurrent(*a_recording));
+			};
 			for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
 				auto& slot = member.slots[s];
-				const auto& scheduled = state.schedule[declared][s];
-				// A slot without a current schedule binds nothing yet. After adoption Schedule records it against the adopted versions.
-				if (!scheduled.recording || !host.EpochRecordingCurrent(*scheduled.recording)) {
+				// On a staged build every slot is recorded, unless the build leaves the stage absent. On the attached one, a slot
+				// without a current schedule binds nothing yet; after adoption Schedule records it against the adopted versions.
+				const RenderGraph::Frame::SegmentFields* wanted = nullptr;
+				if (member.staged) {
+					if (member.stagedFields.graph)
+						wanted = &member.stagedFields;
+				} else if (const auto& scheduled = state.schedule[declared][s]; scheduled.recording && host.EpochRecordingCurrent(*scheduled.recording)) {
+					wanted = &scheduled.fields;
+				}
+				if (!wanted) {
 					slot = {};
 					continue;
 				}
-				if (slot.entry && slot.fields == scheduled.fields) {
+				if (slot.entry && slot.fields == *wanted) {
 					std::shared_ptr<const org::GraphHost::EpochRecording> recorded;
 					bool done = false;
 					bool dropped = false;
@@ -3641,7 +3616,7 @@ namespace FrameAnchors
 						missing(declared, s);
 						continue;
 					}
-					if (recorded && host.EpochRecordingCurrent(*recorded)) {
+					if (usable(recorded)) {
 						++progress.recordings;
 						continue;
 					}
@@ -3649,14 +3624,16 @@ namespace FrameAnchors
 						FailRecording(declared, slot.fields, s, error.empty() ? std::string("no recording") : error);
 					// Dropped by a build, or recorded on a build replaced since: asked for again.
 					++progress.askedAgain;
-					note(progress.dropReasons, fmt::format("{} slot {}: {}", label, s, recorded ? std::string("a build attached since it was recorded") : error));
+					note(progress.dropReasons, fmt::format("{} slot {}{}: {}", label, s, member.staged ? " (staged build)" : "",
+												   recorded ? std::string("a build attached since it was recorded") : error));
 				}
-				slot.fields = scheduled.fields;
-				slot.entry = RequestDeclared(state, declared, slot.fields, s, a_frame, " (frame revision)", nullptr, a_revision.versions);
+				slot.fields = *wanted;
+				slot.entry = RequestDeclared(state, declared, slot.fields, s, a_frame, member.staged ? " (frame revision, staged build)" : " (frame revision)",
+					nullptr, a_revision.versions);
 				bool ready = false;
 				{
 					const std::lock_guard entryLock(recordings.mutex);
-					ready = slot.entry->done && slot.entry->recording && host.EpochRecordingCurrent(*slot.entry->recording);
+					ready = slot.entry->done && usable(slot.entry->recording);
 				}
 				if (ready)
 					++progress.recordings;
@@ -3668,41 +3645,98 @@ namespace FrameAnchors
 		return progress;
 	}
 
+	std::vector<std::uint32_t> RevisionStagedEpochs(const RevisionRecordings& a_revision)
+	{
+		std::vector<std::uint32_t> epochs;
+		for (const auto& member : a_revision.members)
+			if (member.staged)
+				epochs.push_back(EpochOfDeclared(member.declared));
+		return epochs;
+	}
+
 	std::vector<std::string> RevisionMembers(const RevisionRecordings& a_revision)
 	{
 		std::vector<std::string> labels;
 		for (const auto& member : a_revision.members)
-			labels.emplace_back(declaredInfo[member.declared].names.label);
+			labels.emplace_back(member.staged ? fmt::format("{} (build {})", declaredInfo[member.declared].names.label, member.staged) :
+			                                    std::string(declaredInfo[member.declared].names.label));
 		return labels;
 	}
 
-	void InstallRevisionSchedules(const RevisionRecordings& a_revision)
+	void InstallRevisionSchedules(const RevisionRecordings& a_revision, std::uint64_t a_frame)
 	{
 		auto& state = Anchors();
 		if (!state.host)
 			return;
 		auto lock = Guard();
-		for (const auto& member : a_revision.members)
+		auto& host = *state.host;
+		const auto fail = [](std::uint32_t a_declared, std::uint32_t a_slot, std::string_view a_what) {
+			const auto message = fmt::format("Community Shaders: the {}'s frame slot {} {} between its frame revision's last check and its adoption",
+				declaredInfo[a_declared].names.label, a_slot, a_what);
+			logger::critical("[ORG] frame revision: {}", message);
+			stl::report_and_fail(message);
+		};
+		for (const auto& member : a_revision.members) {
+			const auto declared = member.declared;
+			auto& recordings = state.declaredRecordings[declared];
+			const auto segment = static_cast<SegmentId>(declared);
+			if (member.staged) {
+				// The staged build was attached with the revision. Every slot takes its description, or none when the stage is absent on it.
+				if (host.BuildGeneration(EpochOfDeclared(declared)) != member.staged)
+					fail(declared, 0, fmt::format("lost its staged build {}", member.staged));
+				std::array<State::Scheduled, RenderGraphRuntime::kGameFramesInFlight> next{};
+				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && member.stagedFields.graph; ++s) {
+					const auto& slot = member.slots[s];
+					std::shared_ptr<const org::GraphHost::EpochRecording> recorded;
+					if (slot.entry) {
+						const std::lock_guard entryLock(recordings.mutex);
+						recorded = slot.entry->recording;
+					}
+					if (!recorded || !host.EpochRecordingCurrent(*recorded) || !(slot.fields == member.stagedFields))
+						fail(declared, s, "lost its staged build's recording");
+					next[s] = { member.stagedFields, std::move(recorded), member.stagedBuilt };
+				}
+				// For a build asked for by a new key, how many frames its passes took to arrive.
+				std::string keyNote;
+				if (auto& use = state.keyUse[declared]; member.stagedKey && !member.stagedKey->all && member.stagedKey->serial >= use.requestedSerial &&
+														use.switchedSerial < use.requestedSerial) {
+					keyNote = fmt::format("; its key was asked for at frame {}, {} frames before", use.requestedFrame, a_frame - use.requestedFrame);
+					use.switchedSerial = use.requestedSerial;
+				}
+				const auto& before = state.schedule[declared][0];
+				const auto what = fmt::format("build {} attached with its frame revision and its recordings for every frame slot{}{}", member.staged,
+					before.recording ? fmt::format(" ({})", RenderGraph::Frame::DiffFields(before.fields, member.stagedFields)) : std::string(), keyNote);
+				state.schedule[declared] = next;
+				// The replaced build's recordings are never used again. Each keeps that build's graph and alias pools alive.
+				{
+					const std::lock_guard entryLock(recordings.mutex);
+					std::erase_if(recordings.entries,
+						[&](const auto& a_kept) { return a_kept->done && a_kept->recording && a_kept->recording->buildGeneration != member.staged; });
+				}
+				Driver::NoteSwitch(segment, a_frame, 0, a_frame - member.stagedSince, what);
+				Driver::NoteBuildSwitch(segment);
+				state.stagedSnapshots[declared].store(nullptr, std::memory_order_release);
+				state.stagedPasses[declared].store(nullptr, std::memory_order_release);
+				state.stagedKeys[declared].store(nullptr, std::memory_order_release);
+				continue;
+			}
 			for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
 				const auto& slot = member.slots[s];
 				if (!slot.entry)
 					continue;
 				std::shared_ptr<const org::GraphHost::EpochRecording> recorded;
 				{
-					const std::lock_guard entryLock(state.declaredRecordings[member.declared].mutex);
+					const std::lock_guard entryLock(recordings.mutex);
 					recorded = slot.entry->recording;
 				}
-				auto& scheduled = state.schedule[member.declared][s];
+				auto& scheduled = state.schedule[declared][s];
 				// The revision was found ready in this Begin, so nothing may have moved since.
-				if (!recorded || !scheduled.recording || !(scheduled.fields == slot.fields)) {
-					const auto message = fmt::format("Community Shaders: the {}'s frame slot {} changed between its frame revision's last check and its adoption",
-						declaredInfo[member.declared].names.label, s);
-					logger::critical("[ORG] frame revision: {}", message);
-					stl::report_and_fail(message);
-				}
+				if (!recorded || !scheduled.recording || !(scheduled.fields == slot.fields))
+					fail(declared, s, "changed");
 				// The description and its build stay. Only what the slot binds moves to the adopted versions.
 				scheduled.recording = std::move(recorded);
 			}
+		}
 	}
 
 	RunResult Run(const Point& a_point)
@@ -4406,10 +4440,12 @@ namespace FrameAnchors
 	{
 		return nullptr;
 	}
+	bool StagedStages() { return false; }
 	std::uint32_t AddRevisionMembers(RevisionRecordings&, std::span<const std::uint32_t>, std::vector<std::uint32_t>&) { return 0; }
 	RevisionProgress AdvanceRevisionRecordings(RevisionRecordings&, std::uint64_t) { return { .ready = true }; }
+	std::vector<std::uint32_t> RevisionStagedEpochs(const RevisionRecordings&) { return {}; }
 	std::vector<std::string> RevisionMembers(const RevisionRecordings&) { return {}; }
-	void InstallRevisionSchedules(const RevisionRecordings&) {}
+	void InstallRevisionSchedules(const RevisionRecordings&, std::uint64_t) {}
 }
 
 #endif

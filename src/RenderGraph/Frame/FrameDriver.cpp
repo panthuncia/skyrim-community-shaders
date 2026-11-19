@@ -53,7 +53,6 @@ namespace RenderGraph::Frame::Driver
 			std::uint64_t buildSwitches = 0;  // staged builds switched in whole with their recordings
 			std::uint64_t keyBuilds = 0;      // builds asked for because the stage's key changed
 			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran
-			std::uint64_t stagedAskedAgain = 0;  // the starvation rule's count
 		};
 
 		/** @brief Lag buckets in frames since a slot began to wait for the description. */
@@ -536,14 +535,6 @@ namespace RenderGraph::Frame::Driver
 				a_what, a_client));
 	}
 
-	void NoteStagedAskedAgain(SegmentId a_segment, std::uint32_t a_count)
-	{
-		auto& state = Get();
-		const std::lock_guard lock(state.mutex);
-		auto& counts = state.segments[static_cast<std::size_t>(a_segment)];
-		counts.stagedAskedAgain = std::max<std::uint64_t>(counts.stagedAskedAgain, a_count);
-	}
-
 	void NoteAbsentTap(SegmentId a_segment)
 	{
 		auto& state = Get();
@@ -572,11 +563,11 @@ namespace RenderGraph::Frame::Driver
 		for (std::uint32_t s = 0; s < kSegments; ++s) {
 			const auto& counts = state.segments[s];
 			segments += fmt::format("; {}: declared {}, taps {}, recordings {}, late requests {}, switches {}, current {}, lagging {}, absent {} ({} taps), "
-									"lagged work {}, build switches {}, key builds {}, staged recordings asked again {}, absent after it first ran {} (session {})",
+									"lagged work {}, build switches {}, key builds {}, absent after it first ran {} (session {})",
 				SegmentName(static_cast<SegmentId>(s)), counts.declared, counts.taps, counts.recordings, counts.late, counts.switches,
 				counts.scheduled[static_cast<std::size_t>(Scheduled::Current)], counts.scheduled[static_cast<std::size_t>(Scheduled::Lagging)],
 				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.keyBuilds,
-				counts.stagedAskedAgain, counts.absentAfter, state.absentAfterTotal[s]);
+				counts.absentAfter, state.absentAfterTotal[s]);
 		}
 		const auto lagLine = [](const auto& a_lags) {
 			std::string line;

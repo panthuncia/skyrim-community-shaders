@@ -122,9 +122,6 @@ namespace RenderGraph::Frame::Driver
 	/** @brief A client's work the running schedule leaves out. Lagged work when TapMayLag allows, else TapError::Untappable. Render owner. */
 	void NoteStepLag(SegmentId a_segment, std::string_view a_client, std::string_view a_what);
 
-	/** @brief How many of a staged build's recordings were asked for again. The census keeps the highest. */
-	void NoteStagedAskedAgain(SegmentId a_segment, std::uint32_t a_count);
-
 	/** @brief A tap of a segment with no schedule this frame. It draws nothing. Render owner. */
 	void NoteAbsentTap(SegmentId a_segment);
 

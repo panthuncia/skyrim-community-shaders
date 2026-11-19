@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,7 +52,7 @@ namespace RenderGraph
 			std::vector<std::uint32_t> ownerBuilt;
 			// Epochs the external builder builds, attached only at Attach::All and Attach::External polls.
 			std::vector<std::uint32_t> external;
-			// Epochs whose finished builds are staged, not attached. The host's thread records them, and their owner switches them in with SwitchStaged.
+			// Epochs whose finished builds are staged, not attached. Frame revisions record them and attach them with AttachStaged.
 			std::vector<std::uint32_t> staged;
 			// An epoch's name in the log lines.
 			std::function<std::string(std::uint32_t)> label;
@@ -80,8 +81,11 @@ namespace RenderGraph
 		*  For changes to what a graph captures at its build, which must not race a build in progress. */
 		void Change(std::function<void()> a_change, std::string_view a_reason);
 
-		/** @brief Owner thread, at a frame boundary. Attaches the epoch's staged graph and runs its deferred work. False when nothing is staged. */
-		bool SwitchStaged(std::uint32_t a_epoch);
+		/**
+		* @brief Owner thread, inside a frame revision's adoption. Attaches the staged graphs of a_epochs as one step
+		* (GraphHost::AttachStagedEpochGraphs) and runs their deferred work. Empty when attached, else the refused epoch and why.
+		*/
+		std::string AttachStaged(std::span<const std::uint32_t> a_epochs);
 
 		/** @brief Owner thread: the external epochs' builder (replaces the last one). */
 		void SetExternalBuilder(ExternalBuilder a_builder);
@@ -127,8 +131,8 @@ namespace RenderGraph
 		bool Defer(std::function<void()> a_attached, std::function<void(const std::string&)> a_failed = {});
 		/** @brief Inside an extension's build, runs a_staged when the graph is staged, before its attach. False outside a managed build. */
 		bool DeferStaged(std::function<void()> a_staged);
-		/** @brief Render thread, at a frame boundary. Switches in the epoch's staged graph. */
-		bool SwitchStaged(std::uint32_t a_epoch);
+		/** @brief Render thread, inside a frame revision's adoption. BuildManager::AttachStaged. Empty when attached, else why not. */
+		std::string AttachStaged(std::span<const std::uint32_t> a_epochs);
 		/** @brief Whether the calling thread is inside a build the manager makes (the build thread, or an owner-built epoch's build). */
 		bool InManagedBuild();
 	}

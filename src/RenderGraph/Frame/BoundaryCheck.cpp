@@ -122,9 +122,10 @@ namespace RenderGraph::Frame::Boundary
 			BoundaryCounts changes;
 			BoundaryCounts attaches;
 			BoundaryCounts refusals;  // by site and reason, any thread
+			BoundaryCounts lags;      // version lags by slot, any thread
 			std::uint64_t allowed = 0;
 			std::uint64_t atBegin = 0;
-			std::uint64_t sessionVersions = 0, sessionFirst = 0, sessionChanges = 0, sessionAttaches = 0, sessionAllowed = 0, sessionRefusals = 0;
+			std::uint64_t sessionVersions = 0, sessionFirst = 0, sessionChanges = 0, sessionAttaches = 0, sessionAllowed = 0, sessionRefusals = 0, sessionLags = 0;
 		};
 
 		BoundaryState& GetBoundary()
@@ -213,6 +214,14 @@ namespace RenderGraph::Frame::Boundary
 		++state.sessionRefusals;
 	}
 
+	void NoteVersionLag(std::string_view a_slot)
+	{
+		auto& state = GetBoundary();
+		const std::lock_guard lock(state.mutex);
+		state.lags.Add(a_slot.empty() ? std::string_view("(unnamed)") : a_slot);
+		++state.sessionLags;
+	}
+
 	void LogStats()
 	{
 		auto& state = GetBoundary();
@@ -221,17 +230,18 @@ namespace RenderGraph::Frame::Boundary
 			return a_counts.total ? fmt::format("{} (top: {})", a_counts.total, a_counts.Top()) : std::string("0");
 		};
 		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; new resources made late {}; allowed (dclf) adoptions {}, "
-					 "adoptions at Begin {}; build refusals {}; session: late versions {}, late changes {}, late attaches {}, new resources made late {}, "
-					 "allowed adoptions {}, build refusals {}",
+					 "adoptions at Begin {}; build refusals {}; version lags outside revisions {}; session: late versions {}, late changes {}, late attaches {}, "
+					 "new resources made late {}, allowed adoptions {}, build refusals {}, version lags {}",
 			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
-			part(state.attaches), part(state.firstVersions), state.allowed, state.atBegin, part(state.refusals), state.sessionVersions, state.sessionChanges,
-			state.sessionAttaches, state.sessionFirst, state.sessionAllowed, state.sessionRefusals);
+			part(state.attaches), part(state.firstVersions), state.allowed, state.atBegin, part(state.refusals), part(state.lags), state.sessionVersions,
+			state.sessionChanges, state.sessionAttaches, state.sessionFirst, state.sessionAllowed, state.sessionRefusals, state.sessionLags);
 		state.versions = {};
 		state.firstVersions = {};
 		state.versionCallers = {};
 		state.changes = {};
 		state.attaches = {};
 		state.refusals = {};
+		state.lags = {};
 		state.allowed = 0;
 		state.atBegin = 0;
 	}
@@ -250,6 +260,7 @@ namespace RenderGraph::Frame::Boundary
 	void NoteLateChange(std::string_view, std::string_view) {}
 	void NoteAttach(std::string_view) {}
 	void NoteRefusal(std::string_view, std::string_view) {}
+	void NoteVersionLag(std::string_view) {}
 	void LogStats() {}
 	void NoteScopeThread() {}
 }
