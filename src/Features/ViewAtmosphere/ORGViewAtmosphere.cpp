@@ -24,6 +24,7 @@ ORGViewAtmosphere& ORGViewAtmosphere::Get()
 #	include "Features/IBL.h"
 #	include "Features/IBL/ORGIBL.h"
 #	include "Features/PhysicalSky.h"
+#	include "Features/ViewAtmosphere.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
@@ -34,6 +35,7 @@ ORGViewAtmosphere& ORGViewAtmosphere::Get()
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/Switches.h"
 #	include "State.h"
 #	include "Utils/Logging.h"
 
@@ -147,6 +149,22 @@ namespace
 		bool operator==(const CompositeInputs&) const = default;
 	};
 
+	/** @brief The composite's debug view, 1 to 6, from CS_ORG_VIEW_ATMOSPHERE_DEBUG (Composite.cs.hlsl lists them). 0 when off. */
+	std::uint32_t DebugView()
+	{
+		static const std::uint32_t s_view = [] {
+			const auto view = Switches::Number("CS_ORG_VIEW_ATMOSPHERE_DEBUG", 0);
+			if (view > 6) {
+				logger::warn("[ORG] Atmosphere and Fog: CS_ORG_VIEW_ATMOSPHERE_DEBUG={} is not a debug view (1 to 6); it is off", view);
+				return 0u;
+			}
+			if (view)
+				logger::info("[ORG] Atmosphere and Fog: the post-water composite draws debug view {}", view);
+			return static_cast<std::uint32_t>(view);
+		}();
+		return s_view;
+	}
+
 	/** @brief The groups the hook asks for. Read by the commit of the same run. */
 	struct CompositeRun
 	{
@@ -174,7 +192,33 @@ struct ORGViewAtmosphere::Impl
 	bool compositeWanted = false;                    // this frame's settings ask for the composite
 	std::optional<CompositeRun> pendingRun;
 	std::uint32_t compositeFrame = UINT32_MAX;
+	bool reportedRun = false;  // the first run's inputs are logged once
 	Parameters frameParameters{};
+
+	/** @brief One line with what the first run reads, to tell its inputs apart between the modes. */
+	void ReportFirstRun(const D3D11_TEXTURE2D_DESC& a_main, std::uint32_t a_width, std::uint32_t a_height) const
+	{
+		DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN;
+		if (auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture) {
+			D3D11_TEXTURE2D_DESC depthDesc{};
+			depth->GetDesc(&depthDesc);
+			depthFormat = depthDesc.Format;
+		}
+		const auto& fog = globals::features::exponentialHeightFog.settings;
+		const auto& atmosphere = globals::features::viewAtmosphere.settings;
+		const auto& orgFog = ORGExponentialHeightFog::Get();
+		const auto slices = orgFog.Slices();
+		const auto& shared = globals::state->lastSharedData;
+		const auto& camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+		logger::info(
+			"[ORG] Atmosphere and Fog: the first post-water composite: kMAIN {}x{} format {}, groups for {}x{}, depth format {}; "
+			"fog on {}, volumetric {}, density {:.4f}/{:.4f}, start {:.0f}, volumetric start {:.0f}, local range {:.0f}, near range {:.0f}; "
+			"the fog's graph volumes {} (slices {}/{}); PostWaterComposite {}, near plane {:.2f}, camera ({:.0f}, {:.0f}, {:.0f}), debug view {}",
+			a_main.Width, a_main.Height, static_cast<int>(a_main.Format), a_width, a_height, static_cast<int>(depthFormat), fog.enabled, fog.volumetricFogEnabled,
+			fog.fogDensity, fog.fogDensity2, fog.startDistance, fog.volumetricFogStartDistance, atmosphere.localRange, atmosphere.nearRange,
+			orgFog.NearSRV() ? "ran this frame" : "did not run this frame", slices ? slices->first : 0u, slices ? slices->second : 0u,
+			shared.PostWaterComposite, shared.CameraData.y, camera.x, camera.y, camera.z, DebugView());
+	}
 
 	void MakeMedium()
 	{
@@ -267,6 +311,8 @@ struct ORGViewAtmosphere::Impl
 			defines.emplace_back("IBL", "");
 		if (globals::features::dynamicCubemaps.loaded)
 			defines.emplace_back("DYNAMIC_CUBEMAPS", "");
+		if (const auto debug = DebugView())
+			defines.emplace_back("VIEW_ATMOSPHERE_COMPOSITE_DEBUG", std::to_string(debug));
 		return { .source = kCompositeShader, .constantWords = kCompositeWords, .defines = RenderGraph::AnchorPasses::Defines(defines) };
 	}
 
@@ -416,6 +462,8 @@ void ORGViewAtmosphere::CompositeAfterWater()
 	impl->pendingRun = CompositeRun{ (width + 7u) / 8u, (height + 7u) / 8u };
 	const auto result = FrameAnchors::Run(Anchor::EngineDraws);
 	impl->pendingRun.reset();
+	if (result && !std::exchange(impl->reportedRun, true))
+		impl->ReportFirstRun(desc, width, height);
 	if (!result) {
 		static Util::ReasonLog s_missed("[ORG] Atmosphere and Fog: the post-water composite did not run this frame");
 		s_missed.Report(result.status == FrameAnchors::RunStatus::Idle ? "idle (the schedule does not hold it yet)" :
