@@ -11,13 +11,13 @@ namespace DCLF::Draws
 	};
 	struct EventReadbackPrepared
 	{
-		std::shared_ptr<HostEventRing> ring;              // holds the staging set
-		const HostEventRing::StagingSet* set = nullptr;  // the bound list's (its version the preparation's revision names)
+		std::shared_ptr<HostEventRing> ring;  // holds the staging set
+		const HostEventRing::StagingSet* set = nullptr;
 	};
 
 	/**
-	 * @brief Copies an event list (fade write-back, visibility events) whole into the frame slot's host buffer: a fixed copy, so
-	 * the recording depends on the slot alone. The depth commit harvests it when the slot comes round again.
+	 * @brief Copies an event list whole into the frame slot's host buffer. A fixed copy, so the recording depends on the slot
+	 * alone. The depth commit harvests it when the slot comes round again.
 	 */
 	class EventReadbackPass final : public org::TypedRenderGraphPass<EventReadbackPass, EventReadbackPrepared, EventReadbackBindings>
 	{
@@ -27,7 +27,6 @@ namespace DCLF::Draws
 
 		EventReadbackBindings Declare(org::PassBuilder& a_builder) { return { a_builder.CopySource(*events) }; }
 
-		// The list's version is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		EventReadbackPrepared Prepare(const EventReadbackBindings&, const org::PassPrepareContext& a_preparation) const
@@ -58,7 +57,7 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		// Each view's readback as its pass last declared it: weak, so the graph's pass alone keeps it (and its host buffers).
+		// Weak, so only the graph's pass keeps each readback and its host buffers alive.
 		std::array<std::atomic<std::weak_ptr<CounterReadback>>, static_cast<std::size_t>(CullCounterView::kCount)> counterReadbacks;
 	}
 
@@ -78,9 +77,8 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Copies each drawn source's count words and its culling latch's stamp into the host buffer of the run's range
-	 * (CounterReadback): a fixed copy, so the recording depends on the shape and the run alone. The epochs harvest it (CullCounters.cpp, the colour
-	 * commit; ShadowEngine::ReadShadowCullCounters).
+	 * @brief Copies each drawn source's count words and its latch's stamp into the run's host buffer range. A fixed copy, so
+	 * the recording depends on the shape and run alone.
 	 */
 	class CounterReadbackPass final : public org::TypedRenderGraphPass<CounterReadbackPass, CounterReadbackPrepared, CounterReadbackBindings>
 	{
@@ -101,7 +99,6 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The source's shape is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		CounterReadbackPrepared Prepare(const CounterReadbackBindings&, const org::PassPrepareContext& a_preparation) const
@@ -121,7 +118,6 @@ namespace DCLF::Draws
 				return;
 			auto& commands = a_recording.Commands();
 			const auto host = readback->buffers[range]->GetAPIResource().GetHandle();
-			// The run's region of the culling latch: its arena chunk and its offset there.
 			const auto at = latch->At(run);
 			const auto latchBuffer = at.buffer->GetAPIResource().GetHandle();
 			const std::uint64_t region = at.offset;
@@ -148,7 +144,7 @@ namespace DCLF::Draws
 
 	std::shared_ptr<org::RenderPass> MakeShadowCullCounterPass(std::shared_ptr<ShadowResources> a_resources)
 	{
-		// Every view slot's count buffer; each drawn view's culling latch at its slot within the region (as ShadowBuildDrawsPass reads it).
+		// Every view slot's count buffer, with each drawn view's latch at its slot within the region.
 		return MakeCounterReadbackPass(CullCounterView::kShadow, a_resources->count, [](const org::PassPrepareContext& a_preparation) {
 			CounterSource out;
 			const auto* shapes = RevisionShapesOf(a_preparation);

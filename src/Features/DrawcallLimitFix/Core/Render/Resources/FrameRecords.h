@@ -1,11 +1,9 @@
 #pragma once
 
-// The frame record and the frame-wide rows of a frame-constants buffer (Resources/FrameSlots.h's layout), written from this frame's
-// sources: the one writer of every commit that draws with frame constants - the main commits (Payload/Uploads.cpp), the shadow commit's
-// record (Shadow/ShadowEpochs.cpp) and a view's commit with frame constants of its own (CommitView: the reflection's faces); and the
-// frame buffers' copies of the main colour commits and that view's. Render thread. Self-contained.
+// Writes the frame record and the frame-wide rows of a frame constants buffer, using the layout in Resources/FrameSlots.h.
+// Every commit that draws with frame constants writes through here. Render thread.
 
-// volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
+// volk must come before every Vulkan header in this translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -32,71 +30,45 @@ namespace DCLF::Draws
 	struct PayloadVersions;
 	struct SceneBuffers;
 
-	/** @brief FrameValues' buffers a frame record names (FrameValues::PlacementsIndex, PalettesIndex, ShadingIndex as the commit took them). */
+	/** @brief The FrameValues buffers a frame record names, as the commit took them. */
 	struct FrameValueIndices
 	{
 		std::uint32_t placements = 0, palettes = 0, shading = 0;
 	};
 
-	/**
-	 * @brief A frame record's buffers: the installed payload's objects and extras (a_parts), FrameValues' placements, palettes and shading,
-	 * and the features' frame bindings (Extensions::FrameBindingValuesOf of a_adopted at a_frame: Features/Fades' root states and rows
-	 * among them). Every other register of a_record stands.
-	 */
+	/** @brief Writes a frame record's buffer registers. Every other register of a_record is left as is. */
 	void WriteRecordBuffers(DrawBindings& a_record, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted,
 		const SceneBuffers& a_scene, std::uint32_t a_frame);
 
-	/**
-	 * @brief A frame record: the frame slots of a_frameConstants for the registers a_vsMask and a_psMask supply, PS b3 the shared light
-	 * block and PS b13 the lighting slot, the pass-wide blocks' views (a_blocks: a_frameConstants'), a_frameTextures at their registers
-	 * (kInvalidIndex: a_nullIndex), then WriteRecordBuffers, and the backings the stages turn the record's, the push data's and the
-	 * sequences' device addresses into refs with (DrawBindings::backings: a_frameConstantsRef's buffer, a_parts' rows, the frame's animated rows).
-	 */
+	/** @brief Builds a frame record from the frame slots, block views, frame textures and the buffers WriteRecordBuffers writes.
+	 * It also fills the backings the stages use to turn device addresses into refs. */
 	DrawBindings FrameRecordOf(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t a_vsMask, std::uint32_t a_psMask, std::span<const std::uint32_t, kTextureRegisters> a_frameTextures,
 		std::uint32_t a_nullIndex, const PayloadVersions& a_parts, const FrameValueIndices& a_values, const NamedVersions& a_adopted, const SceneBuffers& a_scene,
 		std::uint32_t a_frame);
 
-	/**
-	 * @brief A record's backings (DrawBindings::backings), which the stages turn its, the push data's and the sequences' device addresses into
-	 * refs with: the buffer its blocks are in (a_constantsRef, a_constants, a_constantsBytes: the frame constants, or the shadow views'
-	 * constants), a_parts' rows and the frame's animated rows.
-	 */
+	/** @brief Writes the backings the stages use to turn the record's, push data's and sequences' device addresses into refs. */
 	void WriteRecordBackings(DrawBindings& a_record, RenderGraph::BufferRef a_constantsRef, std::uint64_t a_constants, std::uint64_t a_constantsBytes,
 		const PayloadVersions& a_parts);
 
-	/**
-	 * @brief The zero block, and the zeroed light block every bindless draw's PS b3 reads while Light Limit Fix is loaded, staged into
-	 * a_target once (a_zeroed).
-	 */
+	/** @brief Stages the zero block and the zeroed Light Limit Fix light block into a_target once. */
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed);
 
-	/**
-	 * @brief The frame-wide rows into a_target: the frame lighting (PS b13), the LOD fades' frame inputs after it, the frame fog (VS b13),
-	 * the extras' vertex part after the fog and pixel part at PS b13 c16, the frame constant rows (PS b13 c17 and up), in ascending row
-	 * order, and without Light Limit Fix the point light table (PS b3, Extensions::SamplePointLights). This frame's: sampled now.
-	 */
+	/** @brief Latches this frame's frame-wide rows into a_target, in ascending row order. */
 	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target);
-	/** @brief Each write LatchFrameRows makes, in its order: a_add(a_context, bytes, offset) (a shape's latched copies). */
+	/** @brief Calls a_add for each write LatchFrameRows makes, in its order. */
 	void FrameRowWrites(void (*a_add)(void* a_context, std::size_t a_bytes, std::uint64_t a_offset), void* a_context);
 
-	/**
-	 * @brief A frame buffer's copy (FrameBuffer: a CPU-written structured buffer the pipelines read at t16 and up) latched from a_contents,
-	 * its buffer's CPU mirror: its elements from firstElement. False when the mirror holds less (unfillable): its copy reads zero, still
-	 * written, as the shape's latched copies name it.
-	 */
+	/** @brief Latches a frame buffer's copy from its CPU mirror. Returns false when the mirror holds too little, and the copy then reads zero. */
 	bool LatchFrameBuffer(LatchedUploads& a_latched, const FrameBuffer& a_frameBuffer, std::span<const std::byte> a_contents);
-	/** @brief The buffer bound now at pixel register a_register through a buffer view (null: none). Render thread. */
+	/** @brief The buffer bound now at pixel register a_register, or null. Render thread. */
 	winrt::com_ptr<ID3D11Buffer> BoundPixelBuffer(std::uint32_t a_register);
 
-	/** @brief Community Shaders' SharedData (PS b5) and FeatureData (PS b6) as it last uploaded them (empty: none). */
+	/** @brief Community Shaders' SharedData (PS b5) and FeatureData (PS b6) as last uploaded, or empty. */
 	std::span<const std::byte> SharedDataBlock();
 	std::span<const std::byte> FeatureDataBlock();
 
-	/**
-	 * @brief A frame texture register's binding, kept while the register names the view it was resolved from (the volatile t16+ inputs
-	 * keep a live import only that long). Returns its descriptor index (a_view null: a_nullIndex, the binding dropped); the binding's
-	 * owner goes to a_owners, for the execution that reads it.
-	 */
+	/** @brief Holds a frame texture's binding while the register names the view it came from, since the t16+ imports only live that long.
+	 * Returns its descriptor index, or a_nullIndex for a null view. */
 	std::uint32_t HoldFrameTexture(ID3D11ShaderResourceView*& a_heldView, GpuTextures::Binding& a_held, ID3D11ShaderResourceView* a_view, std::uint32_t a_register,
 		std::uint32_t a_nullIndex, std::vector<std::shared_ptr<const void>>& a_owners);
 }

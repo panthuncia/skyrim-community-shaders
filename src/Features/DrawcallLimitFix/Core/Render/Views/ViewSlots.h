@@ -1,18 +1,12 @@
 #pragma once
 
-// Core's fixed slot per engine view (Api::EngineView): what Core reserves for each, whichever feature takes the view. The per-view loops
-// (the revision's latches, plans, shapes and key groups, the coverage, the views' setup) run over it, in its order. A new view is the
-// enum value, its row here, its epochs (the schedule's: Schedule/Frame.cpp, each a RenderGraphRuntime segment, a CS enum), then the
-// feature's registration.
-// Part of IndirectDraws' implementation: included by Internal.h after Impl.h (it names the producer's key groups).
+// Core's fixed slot per engine view, whichever feature takes the view. Every per-view loop runs over this table in its order.
+// Adding a view takes the enum value, a row here, its epochs in Schedule/Frame.cpp, and the feature's registration.
+// Included by Internal.h after Impl.h, because it names the producer's key groups.
 
 namespace DCLF::Draws
 {
-	/**
-	 * @brief A view's slot: the revision key group its inputs mix into (ImplProducer::ShapesKeyGroup; the shapes-made report names it)
-	 * and its graph extension's id. Its epochs and their segments are the schedule's (ViewEpochsOf: the View-shape epochs of the view, the
-	 * one recording its shape first, then the one sharing it).
-	 */
+	/** @brief A view's slot: the shapes key group its inputs mix into, and its graph extension's id. */
 	struct ViewSlot
 	{
 		ViewKind view;

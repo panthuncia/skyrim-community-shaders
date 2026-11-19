@@ -1,4 +1,4 @@
-// LoadHold: the hold after every load, until DCLF's claims settle (LoadHold.h).
+// LoadHold: the hold after every load, until DCLF's claims settle.
 
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
@@ -29,25 +29,23 @@ namespace DCLF::LoadHold
 		enum class HoldState : std::uint8_t
 		{
 			Idle,       // no hold
-			Closing,    // the menu's close is kept; the loading screen's last iterations still present
-			Holding,    // the world's frames run off the screen
-			Releasing,  // the close posted; the menu is open until the UI takes it
+			Closing,  // menu close kept, last loading screen iterations still present
+			Holding,  // world frames run off screen
+			Releasing,  // close posted, menu open until the UI takes it
 		};
 
-		// Two settled frames in a row end it. The world's first frame's culls are joined by the pass after the one that walked the load's
-		// cells, so a publication committed two frames after the first one has seen them; a load that changed nothing publishes nothing
-		// new, so after a few frames the installed one counts as well.
+		// The pass after the one that walked the load's cells joins the first frame's culls, so a publication two frames later has seen them.
+		// A load that changed nothing publishes nothing new, so after a few frames the installed one counts too.
 		constexpr std::uint32_t kSettledFrames = 2;
 		constexpr std::uint32_t kJoinFrames = 2;
 		constexpr std::uint32_t kQuietFrames = 8;
-		// No progress for this long (what waits did not shrink), or a hold this long, ends it with what still waits logged.
+		// No progress for this long, or a hold this long, ends it and logs what still waits.
 		constexpr double kStallMs = 5000.0;
 		constexpr double kCapMs = 60000.0;
 
 		std::atomic<HoldState> state{ HoldState::Idle };
 		std::atomic<bool> withMenu{ false };
-		// The coordinator's end of the Mist Menu (its fade-out or its hide), kept with the loading menu's close: the loading model is
-		// the Mist Menu's, so the held frames go on drawing it.
+		// The loading model is the Mist Menu's, so its end is kept with the loading menu's close and held frames keep drawing it.
 		enum class MistEnd : std::uint8_t
 		{
 			None,
@@ -58,7 +56,7 @@ namespace DCLF::LoadHold
 		bool mistHideArg = false;
 		void PostMistEnd();
 
-		// The test runner sees any state but Idle as a hold: the world is not ready while it lasts (Testing::Holds).
+		// The test runner treats any state but Idle as a hold.
 		void ReportHold(HoldState a_state)
 		{
 			Testing::Holds::Set("dclf:load-hold", a_state != HoldState::Idle);
@@ -78,32 +76,31 @@ namespace DCLF::LoadHold
 			ReportHold(a_state);
 			return previous;
 		}
-		// Render thread: a re-entry ended at a stall or the cap; none starts again until a frame without the condition (reentryThisFrame).
+		// A re-entry that ended at a stall or the cap does not start again until a frame without its condition.
 		bool reentryBlocked = false;
 		bool reentryThisFrame = false;
 
-		// One hold's counts. The main thread writes them in Begin, before it publishes the state; the render thread reads them after.
+		// The main thread writes these in Begin before publishing the state. The render thread reads them after.
 		struct Hold
 		{
 			std::chrono::steady_clock::time_point start, progress;
 			std::uint32_t firstFrame = 0, lastScene = 0, frames = 0, settled = 0;
 			std::uint32_t held = 0, heldSun = 0, heldOcclusion = 0, heldShadow = 0;
-			const char* reentry = nullptr;  // a re-entry's condition (BeginReentry), null for a load's hold
-			std::uint32_t best = ~0u;  // the least that waited so far: less than it is progress
-			// The last frame's claims, by object and publication frame (the pool reuses the objects).
+			const char* reentry = nullptr;  // null for a load's hold
+			std::uint32_t best = ~0u;  // fewer than this is progress
+			// The pool reuses claim objects, so compare by object and publication frame.
 			const void* claims = nullptr;
 			std::uint32_t claimsFrame = 0;
-			std::uint64_t withheld = 0;  // passes of DCLF's classes withheld (PassCapture::HeldByLoad), as the frames' drains counted them
+			std::uint64_t withheld = 0;
 			bool heldThisFrame = false;
-			// What the hold waited for: the world frames each condition was not met in, and the most objects that waited by reason.
+			// Frames each condition was unmet, and the most objects that waited by reason.
 			std::uint32_t waitedPublication = 0, waitedObjects = 0, waitedClaims = 0, waitedFamilies = 0, waitedViews = 0;
 			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
-			std::uint64_t builds = 0;  // the pipeline lane's finished builds (ready or failed), main and shadow: a build is progress
+			std::uint64_t builds = 0;  // any finished build counts as progress
 		};
 		Hold hold;
 
-		// After a hold: what of DCLF's classes is still withheld because it is not ready, or handed to the engine, logged at most every
-		// kAfterLogMs. Render thread.
+		// Render thread. After a hold, log what is still withheld or handed to the engine at most every kAfterLogMs.
 		constexpr double kAfterLogMs = 10000.0;
 		struct After
 		{
@@ -111,7 +108,7 @@ namespace DCLF::LoadHold
 			std::uint64_t pending = 0, baseMips = 0, kept = 0;
 			std::uint32_t frames = 0, familyFrames = 0;
 			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
-			bool logged = false;  // the last window logged a line: the next one logs even when quiet, to say so
+			bool logged = false;  // log the next window even when quiet, to say so
 		};
 		After after;
 
@@ -126,7 +123,7 @@ namespace DCLF::LoadHold
 			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		}
 
-		/** @brief Main thread, the coordinator's close: a hold begins while DCLF runs. True when the close is kept (a menu to keep open). */
+		/** @brief Main thread. Starts a hold while DCLF runs. True when the menu's close is kept. */
 		bool Begin()
 		{
 			if (!ShellState::Running())
@@ -135,22 +132,21 @@ namespace DCLF::LoadHold
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			withMenu.store(menu, std::memory_order_relaxed);
-			// Without a menu the main thread renders next: the hold starts now, with the presents held.
+			// Without a menu the main thread renders next, so hold the presents now.
 			StoreState(menu ? HoldState::Closing : HoldState::Holding);
 			logger::info("[DCLF] load hold: started ({})", menu ? "the loading menu kept open" : "no loading menu: the presents held, the last frame stays on screen");
 			return menu;
 		}
 
-		/** @brief Main thread, a loading screen's start: a load inside a hold ends it (the new load posts its own close). */
+		/** @brief Main thread. A load inside a hold ends it, since the new load posts its own close. */
 		void OnLoadBegin()
 		{
-			// The new load shows the Mist Menu again, so the last one's kept end is dropped.
+			// The new load shows the Mist Menu again, so drop the last one's kept end.
 			mistEndKept.store(MistEnd::None, std::memory_order_relaxed);
 			if (ExchangeState(HoldState::Idle) != HoldState::Idle)
 				logger::info("[DCLF] load hold: a load began during the hold, which ends ({} frames, {:.0f} ms)", hold.frames, MillisecondsSince(hold.start));
 		}
 
-		/** @brief The objects still waiting by reason (all of them, the waited ones marked), for the log. */
 		std::string WaitingText(const ScenePublication* a_publication)
 		{
 			std::string text;
@@ -161,7 +157,6 @@ namespace DCLF::LoadHold
 			return text.empty() ? "none" : text;
 		}
 
-		/** @brief What the hold waited for, as frames per condition and the most objects that waited by reason (for the log). */
 		std::string WaitedText()
 		{
 			std::string peaks;
@@ -174,7 +169,7 @@ namespace DCLF::LoadHold
 				hold.waitedPublication, hold.waitedObjects, peaks.empty() ? "none" : peaks, hold.waitedClaims, hold.waitedFamilies, hold.waitedViews);
 		}
 
-		/** @brief Render thread: the hold ends (a_why: what ended it; a_warn: a stall or the cap, logged with what still waits). */
+		/** @brief Render thread. Ends the hold. a_warn logs what still waits. */
 		void Release(const char* a_why, bool a_warn)
 		{
 			const double ms = MillisecondsSince(hold.start);
@@ -183,7 +178,7 @@ namespace DCLF::LoadHold
 			if (hold.reentry && a_warn)
 				reentryBlocked = true;
 			if (menu && MenuOpen()) {
-				// The coordinator's close, posted now. The menu closes at the UI's next pass over its messages.
+				// The menu closes at the UI's next pass over its messages.
 				StoreState(HoldState::Releasing);
 				if (auto* queue = RE::UIMessageQueue::GetSingleton())
 					queue->AddMessage(RE::BSFixedString(RE::LoadingMenu::MENU_NAME), RE::UI_MESSAGE_TYPE::kHide, nullptr);
@@ -192,7 +187,6 @@ namespace DCLF::LoadHold
 				StoreState(HoldState::Idle);
 				PostMistEnd();
 			}
-			// The window after the hold starts here.
 			after = {};
 			after.since = std::chrono::steady_clock::now();
 			if (!a_warn) {
@@ -215,14 +209,13 @@ namespace DCLF::LoadHold
 				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText());
 		}
 
-		/** @brief Render thread, one world frame of a hold: whether it is settled (LoadHold.h); a_waits: what still waits, as one count. */
+		/** @brief Render thread. Whether one world frame of a hold is settled. */
 		bool Settled(std::uint32_t& a_waits)
 		{
 			const auto* publication = Scene::FrameView::Get().InstalledPublication();
 			const bool fresh = publication && publication->built &&
 			                   (publication->commitFrame >= hold.firstFrame + kJoinFrames || hold.frames >= kQuietFrames);
 			const std::uint32_t transient = publication ? publication->TransientWaiting() : 0u;
-			// The coordinator's signal (ScenePublication::settled: built, nothing waiting on a transient reason).
 			const bool objectsSettled = publication && publication->settled;
 			const auto claims = PassCapture::Get().CurrentSet();
 			const bool stable = claims && claims.get() == hold.claims && claims->frame == hold.claimsFrame;
@@ -239,7 +232,7 @@ namespace DCLF::LoadHold
 				for (std::size_t why = 0; why < kSetWaitReasons; ++why)
 					if ((kSetTransientWaits >> why) & 1u)
 						hold.peakWaiting[why] = (std::max)(hold.peakWaiting[why], publication->waiting[why]);
-			// Not fresh yet: the load's objects are not in the tables, so nothing counts as progress or stall.
+			// The load's objects are not in the tables yet, so nothing counts as progress or stall.
 			if (!fresh)
 				a_waits = ~0u;
 			return fresh && objectsSettled && stable && !families && !hold.heldThisFrame;
@@ -248,10 +241,7 @@ namespace DCLF::LoadHold
 
 	namespace
 	{
-		/**
-		 * @brief Render thread, the end of a frame DCLF drew outside a load: what of DCLF's classes was withheld because it was not ready
-		 * (a waiting object, base mips, a waiting draw family) or handed to the engine, logged by reason at most every kAfterLogMs.
-		 */
+		/** @brief Render thread. Logs what of DCLF's classes was withheld or handed to the engine, at most every kAfterLogMs. */
 		void WatchAfterHold()
 		{
 			const auto& stats = PassCapture::Get().GetStats();
@@ -279,10 +269,8 @@ namespace DCLF::LoadHold
 					"frames with a draw family waiting; handed to the engine: {} passes of DCLF's classes (refused, or not bound yet); last {:.0f} ms",
 					after.pending, peaks.empty() ? "none" : peaks, after.baseMips, after.familyFrames, after.frames, after.kept, ms);
 			}
-			// The shadow views DCLF does not cover that passes went to: whose they are.
 			for (const void* accumulator : PassCapture::Get().TakeUncoveredAccumulators())
 				logger::info("[DCLF] handed to the engine: a shadow view DCLF does not cover, accumulator {}", ShadowViews::Get().DescribeAccumulator(accumulator));
-			// The geometries behind the passes handed to the engine, most first: what DCLF does not draw of its classes, and where.
 			for (const auto& sample : PassCapture::Get().TakeKeptSamples(after.kept ? 12 : 0))
 				logger::info(
 					"[DCLF] handed to the engine: '{}' ({}{}{}), {} passes into {} ({}), shader {}; set phases {:#x}, waiting phases {:#x}", sample.name,
@@ -299,7 +287,7 @@ namespace DCLF::LoadHold
 
 	namespace
 	{
-		// The map census's window: a line set every this many frames while the map menu is open, and one at its close.
+		// While the map menu is open, a census line every this many frames, and one at its close.
 		constexpr std::uint32_t kMapCensusFrames = 120;
 		constexpr std::size_t kMapCensusClasses = 24;
 
@@ -327,12 +315,9 @@ namespace DCLF::LoadHold
 		std::uint32_t mapFrames = 0;
 
 		/**
-		 * @brief Render thread, at a frame's start: the map menu opening is a camera cut. The engine's map registers the LOD land, objects
-		 * and clouds under TES::lodLandRoot in its first frames only, and DCLF's set, culled with the world camera, does not hold them yet.
-		 * So the frame is held as a re-entry (BeginReentry): DCLF's classes are withheld from the engine and the last frame stays on screen
-		 * until the set made with the map camera is installed and settled; DCLF then draws them. Closing the map is the cut back, held the
-		 * same way. CS_DCLF_MAP_HOLD=0 turns both holds off.
-		 * The map census starts here too (PassCapture::SetMapCensus).
+		 * @brief The map menu opening is a camera cut. The engine registers the map's LOD under TES::lodLandRoot only in its first frames,
+		 * and DCLF's set does not hold it yet, so the frame is held as a re-entry until the map camera's set settles.
+		 * Closing the map is held the same way. CS_DCLF_MAP_HOLD=0 turns both holds off.
 		 */
 		void WatchMapStart()
 		{
@@ -346,7 +331,7 @@ namespace DCLF::LoadHold
 				PassCapture::Get().SetMapCensus(false);
 				LogMapCensus(mapFrames, "the map closed");
 				mapFrames = 0;
-				// Closing it is the cut back: the world's objects are not in the set culled with the map camera.
+				// The world's objects are not in the set culled with the map camera.
 				if (mapHold)
 					BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
 				return;
@@ -357,7 +342,6 @@ namespace DCLF::LoadHold
 				BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
 		}
 
-		/** @brief Render thread, at a frame's end: the map census's line every kMapCensusFrames frames while the map is open. */
 		void WatchMap()
 		{
 			if (mapOpen && ++mapFrames >= kMapCensusFrames) {
@@ -391,9 +375,8 @@ namespace DCLF::LoadHold
 	{
 		reentryThisFrame = true;
 		const auto now = state.load(std::memory_order_acquire);
-		// Releasing too: a load's hold that just settled, its loading menu closing. The first world frames after it can still need a
-		// re-entry (the graph rebuilds for a target the load made again, and the shadow views and occlusion maps are not DCLF's for a
-		// frame): held as one, with the presents, while the menu goes.
+		// The first world frames after a load's hold can still need a re-entry, because the graph rebuilds for re-made targets
+		// and shadow views and occlusion maps are not DCLF's for a frame.
 		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && ShellState::Running() && !Scene::FrameView::Get().NotDrawingYet() &&
 			!Scene::FrameView::LoadShown()) {
 			hold = {};
@@ -417,10 +400,9 @@ namespace DCLF::LoadHold
 			Release("Drawcall Limit Fix does not run", false);
 			return;
 		}
-		// The world's first frame under the kept menu: the load is done, and the tables are built from here (IsLoadingScreenUp: false).
+		// The world's first frame under the kept menu. The load is done, so tables are built from here.
 		if (now == HoldState::Closing) {
 			StoreState(HoldState::Holding);
-			// The test runner's held-frame milestone starts here.
 			Testing::Holds::Set("dclf:load-hold-world", true);
 			logger::info("[DCLF] load hold: the world's first frame under the kept loading menu, {:.0f} ms after the load's end", MillisecondsSince(hold.start));
 		}
@@ -439,7 +421,7 @@ namespace DCLF::LoadHold
 		if (!reentry)
 			reentryBlocked = false;
 		if (now != HoldState::Holding) {
-			// Outside a load: what is not ready yet is withheld, never handed to the engine; logged by reason.
+			// Outside a load, what is not ready is withheld, never handed to the engine.
 			if (now == HoldState::Idle && a_running && !Scene::FrameView::LoadShown())
 				WatchAfterHold();
 			return;
@@ -452,7 +434,7 @@ namespace DCLF::LoadHold
 			Release("the loading menu closed by itself", true);
 			return;
 		}
-		// Only the frames that drew the world count (the scene frame advanced).
+		// Only frames that drew the world count.
 		const std::uint32_t scene = Scene::FrameView::Get().GetFrame();
 		if (scene == 0 || scene == std::exchange(hold.lastScene, scene)) {
 			hold.heldThisFrame = false;
@@ -464,7 +446,7 @@ namespace DCLF::LoadHold
 		hold.withheld += PassCapture::Get().GetStats().holdWithheld;
 		std::uint32_t waits = 0;
 		hold.settled = Settled(waits) ? hold.settled + 1 : 0;
-		// A cold shader cache builds for many seconds while the counts stand still: every finished build counts as progress.
+		// A cold shader cache builds for many seconds while the counts stand still, so every finished build counts as progress.
 		const auto pipelines = DrawPipelines::Get().GetStats();
 		const std::uint64_t builds = std::uint64_t(pipelines.ready) + pipelines.failed + pipelines.shadowReady + pipelines.shadowFailed;
 		if (builds != std::exchange(hold.builds, builds))
@@ -484,7 +466,7 @@ namespace DCLF::LoadHold
 
 	namespace
 	{
-		/** @brief The coordinator's call of ServingThread::SetLoadingScreenActive(true) (SE 13214 / AE 13363 +0x11A): a loading screen starts. */
+		/** @brief ServingThread::SetLoadingScreenActive(true) in the load coordinator (SE 13214 / AE 13363 +0x11A). */
 		struct LoadingScreenStart
 		{
 			static void thunk(bool a_active)
@@ -496,7 +478,6 @@ namespace DCLF::LoadHold
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief Whether the coordinator's end of the Mist Menu is kept: the hold keeps the loading menu's close. */
 		bool KeepsMistEnd(MistEnd a_end)
 		{
 			if (state.load(std::memory_order_acquire) != HoldState::Closing || !withMenu.load(std::memory_order_relaxed))
@@ -506,7 +487,7 @@ namespace DCLF::LoadHold
 			return true;
 		}
 
-		/** @brief The coordinator's fade-out of the Mist Menu (+0x2E5, MistMenu's StartFadeOut): it hides itself once faded. */
+		/** @brief The coordinator's fade-out of the Mist Menu (+0x2E5). It hides itself once faded. */
 		struct MistMenuFadeOut
 		{
 			static void thunk(std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4)
@@ -543,7 +524,7 @@ namespace DCLF::LoadHold
 			}
 		}
 
-		/** @brief The coordinator's close of the loading menu (+0x211: UIMessageQueue::AddMessage("Loading Menu", kHide)): kept for a hold. */
+		/** @brief The coordinator's close of the loading menu (+0x211, AddMessage("Loading Menu", kHide)), kept for a hold. */
 		struct LoadingMenuClose
 		{
 			static void thunk(RE::UIMessageQueue* a_queue, const RE::BSFixedString& a_menu, RE::UI_MESSAGE_TYPE a_type, RE::IUIMessageData* a_data)

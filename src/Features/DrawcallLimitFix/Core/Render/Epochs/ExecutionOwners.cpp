@@ -1,4 +1,3 @@
-// An execution's owners (see the header).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ExecutionOwners.h"
 

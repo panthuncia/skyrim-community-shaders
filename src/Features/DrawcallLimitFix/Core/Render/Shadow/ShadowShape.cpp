@@ -1,5 +1,4 @@
-// The shadow epochs' shapes: the scene's bounds, bucket sizing per view, MakeShadowShape and its frame views, the arena's
-// fixed blocks and latched layout, and the map rows' buckets.
+// Shadow epoch shapes: per-view bucket sizing, MakeShadowShape and its frame views, and the arena's fixed blocks.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -10,9 +9,8 @@ namespace DCLF
 	namespace Draws
 	{
 		/**
-		 * @brief a_row within a_words buckets (the named count words): the buckets a_draws (the claims, by key slot) need first,
-		 * then as many others as fit. The set the claims were made under holds their pipelines, so a dropped bucket with claimed
-		 * draws is a defect, counted in a_lost.
+		 * @brief Trims a_row to a_words buckets. Buckets with claimed draws come first, then as many others as fit.
+		 * Dropping a bucket with claimed draws is a defect, counted in a_lost.
 		 */
 		RowBuckets TrimmedRow(const RowBuckets& a_row, std::uint32_t a_words, std::span<const std::uint32_t> a_draws, std::uint64_t& a_lost)
 		{
@@ -63,9 +61,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief A view's buckets, back to back in the slot's sequences, each sized for its key slots' draws. A bucket keeps its
-		 * previous capacity while the draws fit and grows to a power of two past it, so recordings change only on growth. The
-		 * slot holds half again the scene's casting bound (ShadowSlotSequences); past that, exact sizes fit.
+		 * @brief Sizes a view's buckets back to back in the slot. A bucket keeps its capacity while its draws fit
+		 * and grows to a power of two past it, so recordings change only on growth.
 		 */
 		std::vector<ShadowBucket> SizeShadowBuckets(const RowBuckets& a_row, std::span<const std::uint32_t> a_slotDraws, const ShadowFrameView* a_previous,
 			std::uint64_t a_slotSequences)
@@ -111,10 +108,7 @@ namespace DCLF
 			return nullptr;
 		}
 
-		/**
-		 * @brief Where a view draws: its slot, viewport in its target's slice, and push data (kShadowPushWords): the frame record (and its ref),
-		 * its view blocks and the arena's fixed blocks (ShadowArenaBlocksOf).
-		 */
+		/** @brief Where a view draws: its slot, its viewport in the target slice, and its push data. */
 		ShadowFrameView FrameViewOf(const ShadowViewLayout& a_view, std::uint32_t a_capacity, const ShadowResources& a_resources, const ShadowCapacity& a_sizing,
 			std::uint64_t a_viewBlocks)
 		{
@@ -127,7 +121,7 @@ namespace DCLF
 			out.y = a_view.y;
 			out.width = a_view.width;
 			out.height = a_view.height;
-			// The depth range is applied by the draws (DCLFDepthRange).
+			// The draws apply the depth range themselves (DCLFDepthRange).
 			out.minDepth = 0.0f;
 			out.maxDepth = 1.0f;
 			out.target = a_view.target;
@@ -154,7 +148,7 @@ namespace DCLF
 			return out;
 		}
 
-		/** @brief A view's max count. The slot holds the scene's casting bound (RequireShadowSequences): past it is a defect, not a drop. */
+		/** @brief A view's max draw count. The slot holds the scene's casting bound, so going past it is a defect, not a drop. */
 		std::uint32_t ShadowViewCapacity(std::uint32_t a_previous, std::uint32_t a_draws, std::uint32_t a_slotDraws)
 		{
 			if (a_draws > a_slotDraws)
@@ -181,7 +175,7 @@ namespace DCLF
 
 	bool DrawBoundStore::ShadowShare::KeyOf(std::uint32_t a_mode, ShadowPipelineKey& a_key) const
 	{
-		// As BuildKeptShadow: an occlusion mode's own technique, else the caster's.
+		// As in BuildKeptShadow, an occlusion mode uses its own technique, else the caster's.
 		std::uint32_t modeTechnique;
 		if (IsOcclusionMode(a_mode)) {
 			modeTechnique = occlusion[OcclusionOfMode(a_mode)];
@@ -203,7 +197,7 @@ namespace DCLF
 			std::uint64_t draws = 0;
 			auto& slots = out.keySlotDraws[m];
 			for (const auto& [key, keyDraws] : a_bound.modeKeyDraws[m]) {
-				// A key with no slot draws nothing yet (its casters wait; the slot brings a new shape).
+				// A key with no slot draws nothing yet. Its casters wait for a new shape that brings the slot.
 				const auto it = a_lookups.shadowSlots.find(key);
 				if (it == a_lookups.shadowSlots.end())
 					continue;
@@ -228,7 +222,7 @@ namespace DCLF
 
 	std::shared_ptr<ShadowFrame> Draws::MakeShadowShape(const ShadowResources& a_resources, const ShadowShapeInputs& a_in)
 	{
-		// A revision's shape has no payload: the scene's bound sizes it.
+		// A revision's shape has no payload, so the scene's bound sizes it.
 		static const ShadowPayload kNoPayload;
 		const auto& payload = a_in.payload ? *a_in.payload : kNoPayload;
 		auto frame = std::make_shared<ShadowFrame>();
@@ -239,7 +233,6 @@ namespace DCLF
 		frame->latchLayout = a_in.latchLayout;
 		frame->slotLayouts = a_in.slotLayouts;
 		const ShadowCapacity& sizing = a_in.capacity;
-		// Each view's row within the bucket counts' words.
 		std::vector<RowBuckets> rows;
 		rows.reserve(a_in.rows.size());
 		std::uint64_t lost = 0;
@@ -260,13 +253,13 @@ namespace DCLF
 		for (std::size_t v = 0; v < a_in.views.size(); ++v) {
 			const auto& view = a_in.views[v];
 			const auto* previous = PreviousView(a_in.previous, view.slot);
-			// Max count and buckets: the payload's draws and the scene's bound (the payload can exceed it for an object changed
-			// since the bound was read), within the slot's sequences.
+			// Size from the payload's draws and the scene's bound, within the slot.
+			// The payload can exceed the bound for an object changed since the bound was read.
 			const std::uint32_t m = view.modeIndex;
 			const auto& own = payload.keySlotDraws[m];
 			slotDraws.assign(own.begin(), own.end());
 			std::uint32_t draws = payload.modeDraws[m];
-			// The bound sizes ahead when it fits the slot; else the payload's own draws, which fit the set the claims were made under.
+			// Use the bound when it fits the slot. Else use the payload's own draws, which fit the set the claims were made under.
 			if (a_in.bounds) {
 				const auto& bound = a_in.bounds->keySlotDraws[m];
 				std::vector<std::uint32_t> merged(slotDraws);
@@ -288,7 +281,7 @@ namespace DCLF
 			auto& out = frame->views.emplace_back(FrameViewOf(view, capacity, a_resources, sizing, viewBlocks));
 			out.buckets = SizeShadowBuckets(rows[v], slotDraws, previous, ShadowSlotSequences(sizing.sequenceDraws));
 		}
-		// Latched copies per view: blocks from the latch, draw and bucket counts zeroed; then the commit's values.
+		// Latched copies per view. Blocks come from the latch, draw and bucket counts are zeroed, then the commit's values apply.
 		if (a_in.zeros) {
 			auto& [fromLatch, fromZeros, commit] = frame->latched;
 			fromLatch.latch = a_in.latch;
@@ -330,7 +323,7 @@ namespace DCLF
 		const void* key = a_resources.constants.get();
 		if (!targets || std::find(targets->begin(), targets->end(), key) == targets->end())
 			return out;
-		// As LatchShadowCsBlocks: the frame record (it follows FrameValues' per-frame buffers), SharedData, then FeatureData when CS has it.
+		// Same order as LatchShadowCsBlocks: the frame record, SharedData, then FeatureData when CS has it.
 		const auto blocks = ShadowArenaBlocksOf();
 		std::size_t used = 0;
 		for (const auto& [offset, bytes] : { std::pair{ kShadowFrameRecordOffset, static_cast<std::uint32_t>(sizeof(DrawBindings)) },

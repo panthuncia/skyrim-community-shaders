@@ -1,15 +1,11 @@
-// Drawcall Limit Fix's epoch graph builds: the build state the render thread makes (CurrentBuildState), the scene worker's builds of it
-// (RegisterGraphBuilds: the build manager's external builder), and the attached state settled at frame boundaries (SettleBuildState).
+// DCLF's epoch graph builds: the build state the render thread makes, the scene worker's builds of it, and the attached
+// state settled at frame boundaries.
 //
-// The order of a structural change:
-// 1. The render thread changes its state (new resources, an import, more shadow slots, new conditions) and asks for the epochs' builds.
-// 2. At the next poll the build manager hands the builds to the "DCLF graph builds" lane, each with the newest build state.
-// 3. Meanwhile frames keep the attached graphs and the snapshot made for them: a snapshot of a newer build state is stale, and the
-//    snapshot builder makes none until the builds attach (MakeRevision).
-// 4. At a frame's end, after the frame's epochs were submitted, the finished builds attach together (AttachEpochGraph). Once none is
-//    asked for or in flight, the newest build state becomes the attached one, and the inputs are posted for the new graphs.
-// 5. The host's thread records the new graphs while the engine updates the next frame; that frame's start adopts the new snapshot (a
-//    wait there, if any, is logged).
+// A structural change goes like this. The render thread changes its state and asks for builds. The build manager hands
+// them to the "DCLF graph builds" lane with the newest build state. Frames keep the attached graphs meanwhile, and no
+// snapshot is made for the new state until its builds attach. Finished builds attach together at a frame's end, after
+// its epochs were submitted. Once none is pending, the newest state becomes the attached one and the next frame adopts
+// a snapshot made for it.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
@@ -34,7 +30,7 @@ namespace DCLF
 
 		BuildLane& Lane()
 		{
-			// Never destroyed: a build may still be queued while the process tears down (the build manager's own check drops it).
+			// Never destroyed, since a build may still be queued while the process tears down.
 			static auto* lane = new BuildLane;
 			return *lane;
 		}
@@ -72,7 +68,7 @@ namespace DCLF
 			       a_left.passStates == a_right.passStates;
 		}
 
-		/** @brief Whether any of Drawcall Limit Fix's epochs has a graph (before that, the host builds each at its first submission). */
+		/** @brief Whether any DCLF epoch has a graph. Before that, the host builds each at its first submission. */
 		bool AnyDclfGraph(org::GraphHost& a_host)
 		{
 			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
@@ -85,8 +81,7 @@ namespace DCLF
 
 	std::shared_ptr<const Draws::BuildState> IndirectDraws::Impl::CurrentBuildState()
 	{
-		// Everything a build reads that the render thread changes, as it is now. Compared with the last value, so the serial moves only
-		// with a change.
+		// Everything a build reads that the render thread changes. Compared with the last value so the serial moves only on a change.
 		Draws::BuildState next;
 		next.conditions = Draws::RequestedGraphConditions();
 		next.main = resources;
@@ -124,13 +119,11 @@ namespace DCLF
 		const auto state = CurrentBuildState();
 		if (state->serial == Draws::AttachedBuildSerial())
 			return;
-		// A build still asked for or running: the attached graphs are the old ones until it attaches. With no graph yet, the host's first
-		// builds (at each epoch's first submission) are of this value.
+		// While a build is pending the attached graphs are the old ones.
 		if (AnyDclfGraph(*host) && !RenderGraphRuntime::Get().DclfBuildsSettled())
 			return;
 		Draws::PublishAttachedBuildState(state);
-		// The inputs carry the attached conditions (their CPU pipeline and forward family): posted again, and the builder is woken even
-		// when nothing else moved, since it holds its make until this serial is attached.
+		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is attached.
 		PostRevisionInputs();
 		(void)SnapshotPump();
 		snapshotInputsMoved.store(true, std::memory_order_release);
@@ -144,15 +137,13 @@ namespace DCLF
 		if (graphBuildsRegistered || !builds)
 			return;
 		graphBuildsRegistered = true;
-		// A build without a scope on the render thread (the host's first build of an epoch) takes the render thread's newest value.
+		// A build without a scope on the render thread, the host's first build of an epoch, takes the newest value.
 		Draws::SetBuildStateSource([this] { return CurrentBuildState(); });
 		RenderGraph::BuildManager::ExternalBuilder builder;
-		// Every build the manager makes on the render thread (CS_DCLF_ASYNC_BUILDS=0, a main resources change under claims, a shader
-		// reload, setup) reads the render thread's newest value, held for the build.
+		// Every build the manager makes on the render thread reads the newest value, held for the build.
 		builder.ownerScope = [this]() -> std::shared_ptr<void> { return std::make_shared<Draws::BuildScope>(CurrentBuildState()); };
 		if (Draws::AsyncGraphBuilds()) {
-			// On the scene worker, from the build state made at the poll that handed the build out (render thread). The build reads only
-			// that value: the render thread may change its live state meanwhile.
+			// On the scene worker, the build reads only the state made at the poll that handed it out.
 			builder.post = [this](std::function<void()> a_build) {
 				auto state = CurrentBuildState();
 				{

@@ -1,7 +1,7 @@
 #pragma once
 
-// The frame facts the graph's passes are added by (PassContext::Interior, PassContext::PhaseTwo): what a frame needs decides which
-// passes exist, not a pass that runs and finds nothing to do (each pass costs its dispatch and its barriers whether it has work or not).
+// The frame facts that decide which passes the graph has. Passes are left out rather than run with nothing to do,
+// because each pass costs its dispatch and barriers either way.
 
 #include <memory>
 #include <string>
@@ -24,80 +24,62 @@ namespace DCLF::Draws
 
 	struct GraphConditions
 	{
-		bool interior = false;         // the current cell is an interior: no grass and no tree LOD (their passes are left out)
-		bool twoPassOcclusion = true;  // the cull mode tests occlusion (cullMode 2): the HZB and the depth epoch's phase 2 block
-		// The CPU-driven pipeline (CpuPipelineFor the cell: Toggles.h; Core/Render/Direct): a DCLF epoch keeps only its passes in the CPU
-		// pipeline (Api::PassDef::cpuPipeline: the latched and index pool copies, texture transforms, the object rows, tree LOD's and
-		// grass's single-phase culls and arguments, tree wind), which the revisions record. In guest they are external epochs
-		// (org::GraphHost::SetExternalEpochs: CpuPipelineEpochs), which the sites execute in DXVK's command buffer before their draws
-		// (Direct::ExecuteEpoch); in native the graph submits them, the sites' late passes recorded inline (Direct::SitesInline). The draws (main depth and colour, shadow and occlusion maps, forward, the reflection's faces, first
-		// person's depth and colour) are the direct sites'; the builds, the HZB and phase 2, the visibility and fade-event readbacks and
-		// fade state are left out (the CPU's).
+		bool interior = false;  // interiors have no grass and no tree LOD
+		bool twoPassOcclusion = true;  // cull mode 2, which needs the HZB and depth phase 2
+		// The CPU-driven pipeline. DCLF epochs keep only their CPU-pipeline passes, and the direct sites do the draws.
+		// In guest those epochs are external and the sites run them in DXVK's command buffer. In native the graph submits them.
 		bool cpuPipeline = false;
-		// The GPU-driven graph sends the forward family through the CPU pipeline's cull, sort and forward site (CS_DCLF_FORWARD_DIRECT,
-		// Direct/Sites.h). Only when the epoch records its late pass at execution (RenderGraphRuntime::RecordsAtExecution): in DXVK's
-		// stream (guest), or inline into the epoch's own list (native).
+		// The GPU-driven graph sends the forward family through the CPU pipeline's cull, sort and forward site.
+		// Only when the epoch records its late pass at execution.
 		bool forwardDirect = false;
-		// With it, first person's forward part too, while its colour epoch records at execution as well.
+		// First person's forward part too, while its colour epoch also records at execution.
 		bool firstPersonForwardDirect = false;
-		// DCLF can draw the first-person view whole: the CPU pipeline, device-generated commands, or firstPersonForwardDirect for its
-		// forward part (which has no plain buckets). Without it the view is the engine's: its epochs have no passes and its slots are
-		// not asked for (Features/FirstPerson).
+		// Whether DCLF can draw the whole first-person view. Without it the engine draws the view and its epochs have no passes.
 		bool firstPerson = true;
-		std::string cuts;              // diagnostics (dclf:cut=): comma-separated pass key prefixes left out ("*": every pass)
+		std::string cuts;  // dclf:cut= diagnostics, comma-separated pass key prefixes, "*" for every pass
 
 		bool operator==(const GraphConditions&) const = default;
 	};
 
-	/** @brief Whether the device makes every cell CPU-driven: no counted indirect draws for the GPU path (DrawPipelines::GpuDriven). */
+	/** @brief Whether the device has no counted indirect draws, which makes every cell CPU-driven. */
 	bool CpuPipelineForced();
 
-	/** @brief Whether a_set draws a cell of a_interior CPU-driven (CpuPipelineFor: Toggles.h), or the device forces it (CpuPipelineForced). */
+	/** @brief Whether a_set draws a cell of a_interior CPU-driven, or the device forces it. */
 	bool CpuPipelineForCell(const ToggleSet& a_set, bool a_interior);
 
 	/**
-	 * @brief Render thread, at the frame's build point before it builds (IndirectDraws::BuildPoint): this frame's conditions. A change
-	 * from the ones last asked for becomes the requested conditions (the next build states' value) and requests the rebuild of Drawcall
-	 * Limit Fix's epochs. The frame keeps the attached conditions until those builds attach (PublishAttachedBuildState).
+	 * @brief Render thread, at the frame's build point: this frame's conditions. A change requests a rebuild of DCLF's epochs,
+	 * and the frame keeps the attached conditions until those builds attach.
 	 */
 	void RefreshGraphConditions(org::GraphHost& a_host);
 
-	/** @brief Render thread: the conditions the next builds are for (the newest RefreshGraphConditions made). Immutable. */
+	/** @brief Render thread: the conditions the next builds are for. Immutable. */
 	std::shared_ptr<const GraphConditions> RequestedGraphConditions();
 
-	/**
-	 * @brief Render thread: the conditions the attached graphs were built for are a_conditions (PublishAttachedBuildState). CurrentGraphConditions
-	 * outside a build, GraphBuiltForCpu and LatchedRecordCut follow it.
-	 */
+	/** @brief Render thread: records the conditions the attached graphs were built for. */
 	void AttachGraphConditions(std::shared_ptr<const GraphConditions> a_conditions);
 
-	/** @brief Any thread (diagnostics, dclf:cut=): the pass key prefixes the next build point leaves out; empty: none. */
+	/** @brief Any thread, diagnostics: the pass key prefixes the next build point leaves out. */
 	void SetPassCuts(std::string a_cuts);
 
-	/** @brief Whether the graph's conditions leave the pass a_key out (its cuts). */
+	/** @brief Whether the graph's conditions leave the pass a_key out. */
 	bool PassCut(std::string_view a_key);
 
 	/**
-	 * @brief Any thread, recording (diagnostics: the cut "~latched-record", which "*" does not imply): the latched-copies passes record no
-	 * copy. Unsafe with draws (their constants and counters are not reset): timing an empty-epoch run only.
+	 * @brief Any thread, diagnostics: the latched-copies passes record no copy. Unsafe with draws since their constants and
+	 * counters are not reset. For timing an empty-epoch run only.
 	 */
 	bool LatchedRecordCut();
 
-	/**
-	 * @brief Any thread: whether the graph as built is the CPU pipeline's (GraphConditions::cpuPipeline), which decides the frame's
-	 * pipeline: the direct sites draw while it holds, the epochs otherwise (the frame's mode, Direct::FrameMode). Set when the builds attach.
-	 */
+	/** @brief Any thread: whether the attached graph is the CPU pipeline's, which decides whether direct sites or epochs draw. */
 	bool GraphBuiltForCpu();
 
 	/**
-	 * @brief Any thread. Inside a graph build (a BuildScope: the makes, the extensions, the passes' declarations): the conditions it builds for.
-	 * Elsewhere (the frame, the preparations, the revisions): the conditions the attached graphs were built for. The reference stays valid.
+	 * @brief Any thread: inside a graph build, the conditions it builds for, elsewhere the attached graphs' conditions.
+	 * The reference stays valid.
 	 */
 	const GraphConditions& CurrentGraphConditions();
 
-	/**
-	 * @brief Whether a phase 1 cull tests occlusion against the HZB: the pyramid exists, the frame's cull mode tests occlusion and the
-	 * graph was built with the HZB pass (else the pyramid holds an old frame's depth).
-	 */
+	/** @brief Whether a phase 1 cull tests occlusion. Without the HZB pass in the graph the pyramid holds an old frame's depth. */
 	bool OcclusionTested(const Resources& a_resources, const PassFrame& a_frame);
 }

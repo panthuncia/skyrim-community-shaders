@@ -1,5 +1,4 @@
-// The visibility events once both phases' verdicts are final, from the roots' InView and phase 1's frustum stamps: what the stood-in
-// roots' write-back reads (Handoff's, not the occlusion's).
+// The visibility events once both phases' verdicts are final. The stood-in roots' write-back reads them.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
@@ -18,10 +17,7 @@ namespace DCLF::Draws
 		std::uint32_t groups = 0;
 	};
 
-	/**
-	 * @brief The main camera's visibility as change events (VisibilityEventsCS.hlsl) at the depth segment's end, from the roots'
-	 * InView and the objects' frustum stamps. The normal path writes the stood-in roots' kAccumulated from them.
-	 */
+	/** @brief The main camera's visibility as change events at the depth segment's end, from the roots' InView and the frustum stamps. */
 	class VisibilityEventsPass final : public org::TypedRenderGraphPass<VisibilityEventsPass, VisibilityEventsPrepared, VisibilityEventsBindings>
 	{
 	public:
@@ -33,8 +29,7 @@ namespace DCLF::Draws
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const auto& scene = *resources->scene;
 			VisibilityEventsBindings bindings{};
-			// The root states' rows, the states their step wrote this frame and its frame row (the cull bindings RootRows, RootStepStates,
-			// RootFrame: the pass is added only with the rows).
+			// The root rows, this frame's stepped states and the frame row. The pass is added only with the rows.
 			bindings.roots = a_builder.ShaderResource(*Extensions::CullBindingBuffer(Api::CullBindingSlot::RootRows, scene)).View();
 			bindings.states = a_builder.ShaderResource(*Extensions::CullBindingBuffer(Api::CullBindingSlot::RootStepStates, scene)).View();
 			bindings.frame = a_builder.ShaderResource(*Extensions::SelectCullBinding(Api::CullBindingSlot::RootFrame, scene).buffer).View();
@@ -45,8 +40,7 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The buffers' versions and the depth shape are the revision's (the ticket's host data); frame, counts and camera are in the
-		// uploaded fade frame row.
+		// Frame, counts and camera are in the uploaded fade frame row.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		VisibilityEventsPrepared Prepare(const VisibilityEventsBindings&, const org::PassPrepareContext& a_preparation) const
@@ -60,8 +54,7 @@ namespace DCLF::Draws
 			prepared.program = scene.visibilityEventsProgram;
 			auto& constants = prepared.constants;
 			constants.eventCapacity = events;
-			// Every root slot, then every object slot while the segment builds (without depth phase 1 no stamp is this frame's): what the
-			// revision's versions of the buffers read and written by slot hold.
+			// Every root slot, then every object slot while the segment builds, since without depth phase 1 no stamp is this frame's.
 			constants.rootSlots = static_cast<std::uint32_t>(std::min({ NamedUnitsOf(a_preparation, Extensions::CullBindingBuffer(Api::CullBindingSlot::RootRows, scene)),
 				NamedUnitsOf(a_preparation, Extensions::CullBindingBuffer(Api::CullBindingSlot::RootStepStates, scene)), NamedUnitsOf(a_preparation, scene.visibilityRootReported) }));
 			constants.objectSlots = BuildsDraws(a_preparation, *resources, RenderGraphRuntime::Segment::ZPrepass) ?

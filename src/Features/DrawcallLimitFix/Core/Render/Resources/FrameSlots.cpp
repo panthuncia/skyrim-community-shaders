@@ -1,5 +1,4 @@
-// FrameSlots.h's functions: the main pass's bindings captured (render thread), the frame textures it binds at t16+, and FrameData's
-// names of the frame-constants buffer's parts.
+// The main pass's captured bindings, the frame textures at t16 and up, and the names of the frame constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 
 #include "RenderGraph/Engine/Flush/Flush.h"
@@ -10,7 +9,7 @@ namespace DCLF::Draws
 	{
 		std::array<Block, kFrameBlocks> blocks{};
 		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
-			// The shared light block is half a slot (FrameSlots.h, kSharedLightBlockBytes).
+			// The shared light block is half a slot.
 			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
 			blocks[a_block] = { FrameBlockOffset(a_pixel, a_register), static_cast<std::uint32_t>(bytes) };
 		});
@@ -81,7 +80,7 @@ namespace DCLF::Draws
 		context->VSGetConstantBuffers(0, kConstantBufferRegisters, capture.vsBuffers.data());
 		context->PSGetConstantBuffers(0, kConstantBufferRegisters, capture.psBuffers.data());
 		context->PSGetShaderResources(0, kTextureRegisters, capture.psViews.data());
-		// CS's own registers: a null where CS bound a view DXVK dropped is logged by the state readers' trace (flush.md).
+		// A null where CS bound a view DXVK dropped is logged by the state readers' trace.
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
 			RenderGraph::Engine::Flush::NoteRead("DCLF CaptureBindings", t, capture.psViews[t]);
 		ID3D11RenderTargetView* views[kColorTargets] = {};
@@ -102,9 +101,8 @@ namespace DCLF::Draws
 			capture.depth = resource.try_as<ID3D11Texture2D>();
 			depth->Release();
 		}
-		// Community Shaders binds its own per-frame pixel buffers - b5 SharedData and b6 FeatureData - from Renderer_ResetState, so
-		// whether they are bound when this capture is taken depends on where the engine last reset its state (which the withheld
-		// native draws change). They are CS's own buffers with known identities: taken from CS when the capture lacks them.
+		// CS binds b5 SharedData and b6 FeatureData from Renderer_ResetState, so whether they are bound here depends on the last reset.
+		// They are CS's own buffers, so take them from CS when the capture lacks them.
 		if (auto* state = globals::state) {
 			auto adopt = [&](std::uint32_t a_slot, ConstantBuffer* a_buffer) {
 				if (capture.psBuffers[a_slot] || !a_buffer || !a_buffer->CB())
@@ -130,7 +128,7 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		/** @brief Whether a_register is one of the frame graph buffers' in a_graphBuffers (a bit per registration). */
+		/** @brief Whether a_register belongs to one of the frame graph buffers in a_graphBuffers. */
 		bool GraphBufferHeld(std::uint32_t a_graphBuffers, std::uint32_t a_register)
 		{
 			const auto registered = Extensions::RegisteredFrameGraphBuffers();

@@ -1,5 +1,4 @@
-// The main graph extension: registers the main view's resources and adds its passes (the schedule's: Epochs/ScheduleExecutor.h) to the
-// depth, colour and forward epochs.
+// The main graph extension. It registers the main view's resources and adds the depth, colour and forward epochs' passes.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
@@ -10,7 +9,7 @@
 
 namespace DCLF::Draws
 {
-	/** @brief The buffers a main commit may latch into (LatchedUploads); its latched copies declare them. */
+	/** @brief The buffers a main commit may latch into, which its latched copies declare. */
 	std::vector<LatchedTarget> MainLatchedTargets(const Resources& a_resources)
 	{
 		std::vector<LatchedTarget> out;
@@ -25,8 +24,7 @@ namespace DCLF::Draws
 		for (const auto& frameBuffer : a_resources.frameBuffers)
 			if (frameBuffer.copy)
 				out.push_back({ frameBuffer.copy, nullptr });
-		// The features' scene resources' latched buffers (Api::SceneResources::latched: Features/TreeLod's draw row and list header); not the
-		// next-frame state's frame rows (the features', the fades'), which the compute queue reads.
+		// The features' latched scene buffers. Not the next-frame frame rows, which the compute queue reads.
 		Extensions::LatchSceneResources(a_resources.scene->sceneResources,
 			[](void* a_out, const std::shared_ptr<org::Buffer>& a_buffer, const Versioned& a_versioned, std::size_t) {
 				static_cast<std::vector<LatchedTarget>*>(a_out)->push_back({ a_buffer, a_versioned });
@@ -47,7 +45,7 @@ namespace DCLF::Draws
 			RegisterSceneBuffers(a_graph, *resources->scene);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.draw-count"), resources->count);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.class-counts"), resources->classCounts);
-			// Read by address; readers declare it so the graph orders them after the latched copies.
+			// Read by address, but readers declare it so the graph orders them after the latched copies.
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.frame-constants"), resources->frameConstants);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.z.bucket-counts"), resources->zBucketCounts[0]);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.z.bucket-counts2"), resources->zBucketCounts[1]);
@@ -78,7 +76,7 @@ namespace DCLF::Draws
 				Register(a_graph, org::ResourceIdentifier(Extensions::NearTwin().resource), resources->terrainDepth);
 			if (resources->refractionNormals)
 				Register(a_graph, org::ResourceIdentifier("cs.dclf.refraction-normals"), resources->refractionNormals);
-			// The depth pyramid under its producer's names (a texture only with a producer: Extensions::DepthPyramidOf).
+			// The depth pyramid under its producer's names.
 			if (resources->hzb) {
 				const auto& pyramid = *Extensions::DepthPyramidOf();
 				Register(a_graph, org::ResourceIdentifier(pyramid.resource), resources->hzb);
@@ -91,7 +89,6 @@ namespace DCLF::Draws
 
 		void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 		{
-			// The depth, colour and forward epochs' passes (Schedule/Frame.cpp; Passes/CorePasses.cpp makes them): the graph's epoch's.
 			Api::PassContext context{};
 			context.main = &build->main;
 			context.build = build.get();
@@ -99,7 +96,7 @@ namespace DCLF::Draws
 		}
 
 	private:
-		std::shared_ptr<const BuildState> build;  // what the graph is built from; held for the build
+		std::shared_ptr<const BuildState> build;  // held for the build
 		std::shared_ptr<Resources> resources;
 	};
 

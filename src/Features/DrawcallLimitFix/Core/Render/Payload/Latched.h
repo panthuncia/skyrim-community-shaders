@@ -1,7 +1,7 @@
 #pragma once
 
-// Latched copies: the per-frame values a commit writes into a latch block and its epoch's first pass copies to their targets.
-// Self-contained (features include it); Internal.h includes it in its order.
+// Latched copies. A commit writes per-frame values into a latch block and its epoch's first pass copies them to their targets.
+// Features include this header directly, so it must stay self-contained.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 
@@ -16,10 +16,7 @@
 
 namespace DCLF::Draws
 {
-	/**
-	 * @brief A copy a main epoch's latched-copies pass (LatchedCopiesPass) records: bytes of the latch block's region of the run, at
-	 * latchOffset, to a target the pass declared, at dstOffset. The commit wrote the bytes (LatchedUploads).
-	 */
+	/** @brief One copy from the run's latch region at latchOffset to a declared target at dstOffset. */
 	struct LatchedCopy
 	{
 		const void* target = nullptr;  // LatchedTarget::key: the buffer, or a versioned buffer's (VersionedBuffer::Key)
@@ -27,10 +24,7 @@ namespace DCLF::Draws
 		std::uint64_t dstOffset = 0;
 		bool operator==(const LatchedCopy&) const = default;
 	};
-	/**
-	 * @brief A commit's latched copies: the block they read, and the list (part of the frame's shape). fixed: a dedicated block whose one
-	 * region every run reads (the counters' zeros), else the run's region.
-	 */
+	/** @brief A commit's latched copies. A fixed list uses a dedicated block whose one region every run reads. */
 	struct LatchedList
 	{
 		std::shared_ptr<const org::LatchBlock> latch;
@@ -39,11 +33,8 @@ namespace DCLF::Draws
 		bool operator==(const LatchedList& o) const { return latch == o.latch && copies == o.copies && fixed == o.fixed; }
 	};
 	/**
-	 * @brief Which parts of each run's latch region already hold the bytes a snapshot fixes (its revision's bucket tables and maps, the
-	 * shadow views' map rows). A published copy's region is pinned to its lease index (org::RunRef::Stable) and only its commit writes
-	 * those places, so bytes keyed to the same snapshot are written once per copy, and again only when the key moves (a new latch block,
-	 * revision or source). A leased run's region is new for each run (an external run's), so nothing of it is held before its commit
-	 * writes it. The per-frame values (camera, counts, stamps, FrameValues' indices) are written by every commit. Render thread.
+	 * @brief Tracks which parts of each run's latch region already hold snapshot-fixed bytes. Render thread only.
+	 * A published copy's region is pinned to its lease, so those bytes are rewritten only when the key changes.
 	 */
 	struct LatchRegionsHeld
 	{
@@ -54,7 +45,7 @@ namespace DCLF::Draws
 			std::uint64_t extra = 0;                  // what else the bytes depend on (the installed pipeline slots)
 			std::vector<std::uint8_t> parts;          // by the caller's part index: written since the key was set
 		};
-		/** @brief a_run's record, emptied (no part held) when it is another run's, or its key is not (a_latch, a_source, a_extra). */
+		/** @brief a_run's record, cleared when it belongs to another run or another key. */
 		Slot& Of(const org::RunRef& a_run, const std::shared_ptr<const void>& a_latch, const std::shared_ptr<const void>& a_source, std::uint64_t a_extra)
 		{
 			if (a_run.lease >= slots.size())
@@ -69,7 +60,7 @@ namespace DCLF::Draws
 			}
 			return slot;
 		}
-		/** @brief Whether part a_part of a_slot is held; marks it held (the caller writes it when it was not). */
+		/** @brief Marks part a_part held and returns whether it already was. */
 		static bool Hold(Slot& a_slot, std::size_t a_part)
 		{
 			if (a_part >= a_slot.parts.size())
@@ -84,10 +75,7 @@ namespace DCLF::Draws
 		std::vector<Slot> slots;  // by lease index
 	};
 
-	/**
-	 * @brief A shader's latch words for a_run (Record: PassRecordContext::Run): latchIndex the view of the arena chunk the run's region
-	 * is in, latchOffset the region's offset there plus a_offset. Both depend on the run, so a pass sets them where it records.
-	 */
+	/** @brief Sets a shader's latch words for a_run. Both depend on the run, so set them at record time. */
 	template <class Constants>
 	void SetLatchWords(Constants& a_constants, const org::LatchBlock& a_latch, const org::RunRef& a_run, std::uint64_t a_offset = 0)
 	{
@@ -96,7 +84,6 @@ namespace DCLF::Draws
 		a_constants.latchOffset = static_cast<std::uint32_t>(region.offset + a_offset);
 	}
 
-	/** @brief A target a latched copy may write: a buffer, or a versioned buffer (copied into the version its preparation resolved). */
 	struct LatchedTarget
 	{
 		std::shared_ptr<org::Buffer> buffer;

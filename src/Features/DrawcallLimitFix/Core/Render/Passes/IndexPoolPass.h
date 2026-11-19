@@ -1,6 +1,6 @@
 #pragma once
 
-// The index pool's copy pass (IndexPoolCS.hlsl), made for the main and shadow epochs (CorePasses.cpp: core.z.index-pool; Passes/Shadow.cpp MakeShadowIndexPoolPass: shadows.index-pool, registered by Features/Shadows/Engine).
+// The index pool's copy pass, made for the main and shadow epochs.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
@@ -20,11 +20,11 @@ namespace DCLF::Draws
 		IndexPoolConstants constants{};
 	};
 
-	/** @brief Copies this frame's new index pool ranges (IndexPoolCS.hlsl) before draws read the pool; dispatched from the latch. */
+	/** @brief Copies this frame's new index pool ranges before draws read the pool. Dispatched from the latch. */
 	class IndexPoolPass final : public org::TypedRenderGraphPass<IndexPoolPass, IndexPoolPrepared, IndexPoolBindings>
 	{
 	public:
-		// The latch holding the pool's dispatch, from the shape the epoch runs (shadow or depth: whichever commit gave out ranges).
+		// The latch holding the pool's dispatch, from whichever commit gave out ranges.
 		struct LatchOf
 		{
 			std::shared_ptr<const org::LatchBlock> latch;
@@ -42,7 +42,6 @@ namespace DCLF::Draws
 			return bindings;
 		}
 
-		// The latch's shape and the pool's versions are the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		IndexPoolPrepared Prepare(const IndexPoolBindings&, const org::PassPrepareContext& a_preparation) const
@@ -57,7 +56,6 @@ namespace DCLF::Draws
 			return prepared;
 		}
 
-		// The dispatch, from the latch's region of the run.
 		static void Record(const IndexPoolBindings& a_bindings, const IndexPoolPrepared& a_prepared, org::PassRecordContext& a_recording)
 		{
 			if (!a_prepared.pool || !a_prepared.latch)
@@ -65,7 +63,6 @@ namespace DCLF::Draws
 			auto constants = a_prepared.constants;
 			constants.copiesIndex = a_recording.Index(a_bindings.copies);
 			constants.poolIndex = a_recording.Index(a_bindings.indices);
-			// The run's region of the latch: its arena chunk, and its offset there.
 			const auto region = a_prepared.latch->At(a_recording.Run());
 			const std::uint64_t offset = region.offset + a_prepared.poolOffset;
 			constants.latchIndex = region.srvIndex;

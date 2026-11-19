@@ -1,12 +1,9 @@
-// The CPU-driven pipeline's draw families (SiteFrame.h): tree LOD's and grass's draws at the depth and colour sites.
+// The CPU-driven pipeline's draw families: tree LOD and grass at the depth and colour sites.
 //
-// The GPU path draws a family in the main pass's executions (MainOpaquePass: its depth draw after the Z-prepass's buckets, its colour
-// draw after the main colour draws, before the second pass), with its main.declare's arguments and draw row. Here the depth run resolves
-// them once a frame (the family's main.direct, from the depth commit's adopted set) with the slot's pipelines, and the
-// colour run draws what the depth run resolved: its colour tests EQUAL against that depth draw, and its arguments are what the depth
-// site's epoch's passes wrote (the families' single-phase culls and grass's arguments, before its draws: GraphConditions::cpuPipeline).
+// The depth run resolves each family's row and arguments once a frame, and the colour run draws the same ones. Colour
+// tests EQUAL against the depth draw, and the arguments come from the depth epoch's family culls.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h goes first because volk must come before every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
@@ -22,16 +19,13 @@ namespace DCLF::Direct::detail
 {
 	namespace
 	{
-		/** @brief A frame's family draws (FrameSlot::familyState): by family, what the depth and colour runs' bindings name. */
+		/** @brief A frame's family draws, by family. */
 		struct FamilyFrame
 		{
 			std::array<FamilyDraw, Extensions::kDrawFamilies> draws{};
 		};
 
-		/**
-		 * @brief Render thread, the depth run's: each family DCLF draws this frame (IndirectDraws::DrawFamilyOwned, set up, its pipelines
-		 * published) with its row and arguments resolved; the arguments buffer held by the slot. Null when none is drawn.
-		 */
+		/** @brief Render thread, depth run: resolves each family DCLF draws this frame. Null when none is drawn. */
 		std::shared_ptr<FamilyFrame> ResolveFamilies(FrameSlot& a_slot, const MainCommitInputs& a_inputs)
 		{
 			if (!a_inputs.adopted || !a_inputs.resources || !a_inputs.resources->scene)
@@ -59,7 +53,7 @@ namespace DCLF::Direct::detail
 			return frame;
 		}
 
-		/** @brief A rendering of the main targets for the families' draws (as Sites.cpp's main passes): a_colours or depth only, all loaded. */
+		/** @brief A rendering of the main targets for the families' draws, colour or depth only, all loaded. */
 		struct FamilyPass
 		{
 			std::array<rhi::ColorAttachment, Draws::kColorTargets> colours{};
@@ -97,8 +91,7 @@ namespace DCLF::Direct::detail
 
 	void PrepareFamilies(FrameSlot& a_slot, SiteRun& a_run, const MainCommitInputs& a_inputs)
 	{
-		// The depth run resolves the frame's; the colour run draws the same ones (none when the depth site did not run this frame: their
-		// culls did not either, and their colour has no depth to test against).
+		// Without a depth run this frame the families were not culled and their colour has no depth to test against.
 		if (a_run.site == Site::Depth)
 			a_slot.familyState = ResolveFamilies(a_slot, a_inputs);
 		if (const auto* frame = static_cast<const FamilyFrame*>(a_slot.familyState.get()))
@@ -114,7 +107,6 @@ namespace DCLF::Direct::detail
 		auto& list = a_out.Inline();
 		FamilyPass pass(a_run, !a_depthPass, a_depthPass ? "DCLF direct families depth" : "DCLF direct families colour");
 		list.BeginPass(pass.begin);
-		// The main view's pass (its depth or colour: the Z-prepass's layout, the frame push words, the heaps), then the families' draws.
 		RecordContext context{ list, *slot.set, ViewType::Main, 0, a_run.site, a_depthPass, a_run.bindings, &slot.counters };
 		if (BeginList(context))
 			RecordFamilyDraws(context);

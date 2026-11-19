@@ -1,5 +1,4 @@
-// FrameRecords.h's writers: a frame record, the frame-wide rows of a frame-constants buffer and the frame buffers' copies, from this
-// frame's sources (render thread).
+// Writers for the frame record, the frame-wide rows and the frame buffers' copies. Render thread.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 #include "RenderGraph/BufferRefs.h"
@@ -19,12 +18,12 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		// The frame's point light table at PS b3 without Light Limit Fix (Common/DCLFPointLights.hlsli): the light count, then a row each.
+		// The frame's point light table at PS b3 without Light Limit Fix. The light count, then a row per light.
 		struct GpuPointLight
 		{
 			float positionRadius[4];
 			float color[3];
-			std::uint32_t flags;  // kPointLightShadowChannel: the shadow mask channel + 1; kPointLightAffectsLand
+			std::uint32_t flags;  // shadow mask channel + 1 under kPointLightShadowChannel, plus kPointLightAffectsLand
 		};
 		struct GpuPointLightTable
 		{
@@ -36,12 +35,8 @@ namespace DCLF::Draws
 		constexpr std::uint32_t kPointLightShadowChannel = 0xFFu;
 		constexpr std::uint32_t kPointLightAffectsLand = 0x100u;
 
-		/**
-		 * @brief Render thread: this commit's table, from the light volumes contribution (Extensions::SamplePointLights). The shadow lights
-		 * the shader can select (a mask channel 0-3: DCLFLocalShadowMask's four bits) come first, then every other light as a plain one, each
-		 * part in the contribution's order: the shader takes a draw's lights in table order and counts its first ShadowCount as shadow lights
-		 * (Lighting.hlsl reads shadowColor[channel - 1] for them), so no plain row may come before a shadow row.
-		 */
+		/** @brief Render thread. Builds this commit's point light table with the selectable shadow lights first.
+		 * The shader counts a draw's first ShadowCount lights as shadow lights, so no plain row may come before a shadow row. */
 		const GpuPointLightTable& SamplePointLightTable()
 		{
 			static GpuPointLightTable table{};
@@ -73,7 +68,7 @@ namespace DCLF::Draws
 		a_record.textures[kShadingBufferRegister] = a_values.shading;
 		Extensions::FrameBindingValues bindings;
 		Extensions::FrameBindingValuesOf(a_adopted, a_scene, a_frame, bindings, true);
-		// The root states and rows every draw's alpha reads are among them (t120/t119: Features/Fades').
+		// Among them are the fade root states and rows every draw's alpha reads.
 		Extensions::WriteFrameBindings(bindings, a_record.textures);
 	}
 
@@ -104,7 +99,7 @@ namespace DCLF::Draws
 			entry.ref = a_ref;
 			entry.address = a_ref ? a_address : 0;
 			entry.bytes = a_ref ? static_cast<std::uint32_t>(std::min<std::uint64_t>(a_bytes, UINT32_MAX)) : 0u;
-			// CS_DCLF_REF_CHECK: the stages turn addresses in the backing into refs from this pair; it must start at the address.
+			// CS_DCLF_REF_CHECK. The ref must start at the address, since the stages build refs from this pair.
 			RenderGraph::CheckBufferRef(a_ref, a_address, a_bytes, "record backing");
 		};
 		backing(kBackingFrameConstants, a_constantsRef, a_constants, a_constantsBytes);
@@ -116,7 +111,7 @@ namespace DCLF::Draws
 		const auto animatedRows = PassAnimatedRows();
 		backing(kBackingAnimatedRows, animatedRows.ref, animatedRows.address, std::uint64_t(animatedRows.count) * kMaterialRowBytes);
 		backing(kBackingShadowRows, shadowRows.ref, shadowRows.address, shadowRows.units * sizeof(ShadowMaterialRow));
-		// CS_DCLF_REF_TRACE: which buffer each backing slot is, logged when it changes.
+		// CS_DCLF_REF_TRACE. Log which buffer each backing slot is when it changes.
 		if (materialRows.ref && SwitchEnabled(Switch::RefTrace)) {
 			static constexpr const char* kNames[kRecordBackings] = { "frame constants", "pipeline rows", "material rows", "animated copy", "shadow rows" };
 			std::string text;
@@ -124,7 +119,7 @@ namespace DCLF::Draws
 				const auto& entry = a_record.backings[i];
 				text += fmt::format("{}{} slot {} offset {} VA 0x{:x} bytes {}", i ? "; " : "", kNames[i], entry.ref.viewSlot, entry.ref.byteOffset, entry.address, entry.bytes);
 			}
-			// Keyed by the constants' buffer: the main and shadow records each change on their own.
+			// Keyed by the constants' buffer, since the main and shadow records change independently.
 			::DCLF::Diagnostics::RefTrace::NoteChanged(fmt::format("record backings (constants slot {})", a_constantsRef.viewSlot), std::move(text));
 		}
 	}
@@ -134,7 +129,7 @@ namespace DCLF::Draws
 		if (a_zeroed)
 			return;
 		static const std::array<std::uint32_t, kStrictLightDataBytes / 4> zeroLight{};
-		// The zero block, and Light Limit Fix's StrictLightData at PS b3 (without it every commit latches the point light table there).
+		// The zero block, and Light Limit Fix's StrictLightData at PS b3.
 		a_uploads(a_target, zeroLight.data(), sizeof(zeroLight), std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
 		if (!Extensions::PointLightsActive())
 			a_uploads(a_target, zeroLight.data(), sizeof(zeroLight), kSharedLightBlockOffset);
@@ -143,26 +138,24 @@ namespace DCLF::Draws
 
 	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target)
 	{
-		// The frame lighting, every commit: latching it only on change would change the frame's shape.
+		// Latched every commit, since latching only on change would change the frame's shape.
 		const auto& frameCapture = Scene::FrameView::Get().GetFrameCapture();
 		a_latched(a_target, frameCapture.lighting.data(), sizeof(frameCapture.lighting), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes);
-		// The LOD fades' frame inputs after the lighting (PS b13, c6): the draws fade specular and envmap by distance.
+		// The draws fade specular and envmap by distance.
 		const LodFadeFrame lodFadeFrame = SampleLodFadeFrame();
 		a_latched(a_target, &lodFadeFrame, sizeof(lodFadeFrame), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting));
-		// The frame's fog into VS b13 (DCLFFrameFog); the technique rows keep theirs.
+		// The frame's fog goes to VS b13. The technique rows keep theirs.
 		a_latched(a_target, frameCapture.fog.data(), sizeof(FrameFog), FrameSlotOffset(false, kFrameFogRegister));
-		// The extras' frame inputs: vertex part after the fog (c3-c7), pixel part at PS b13 c16.
 		const ExtrasFrame extrasFrame = SampleExtrasFrame();
 		a_latched(a_target, &extrasFrame, kExtrasFrameVertexBytes, FrameSlotOffset(false, kFrameFogRegister) + sizeof(FrameFog));
 		a_latched(a_target, extrasFrame.projectedGlobals, sizeof(extrasFrame.projectedGlobals), kExtrasPixelFrameOffset);
-		// The frame constant rows (PS b13 c17 and up, Api::FrameConstantRow: the Effect port's camera planes, light colour and blood),
-		// in ascending row order, as FrameRowWrites lays them out.
+		// Frame constant rows in ascending order, as FrameRowWrites lays them out.
 		for (const auto& row : Extensions::RegisteredFrameConstantRows()) {
 			float value[4]{};
 			row.sample(value);
 			a_latched(a_target, value, sizeof(value), FrameConstantRowOffset(row.row));
 		}
-		// Without Light Limit Fix, the frame's point lights at PS b3 (the Lighting draws pick theirs from it).
+		// Without Light Limit Fix, the Lighting draws pick their point lights from this table.
 		if (Extensions::PointLightsActive()) {
 			const auto& table = SamplePointLightTable();
 			a_latched(a_target, &table, sizeof(table), kSharedLightBlockOffset);
@@ -215,7 +208,7 @@ namespace DCLF::Draws
 
 	std::span<const std::byte> SharedDataBlock()
 	{
-		// Community Shaders' own, written through its ConstantBuffer helper (the constant mirror never sees it): the struct it uploaded.
+		// The constant mirror never sees CS's own block, so take the struct it uploaded.
 		const auto* state = globals::state;
 		return state ? std::as_bytes(std::span(&state->lastSharedData, 1)) : std::span<const std::byte>();
 	}
@@ -236,7 +229,7 @@ namespace DCLF::Draws
 			}
 			return a_nullIndex;  // the shared lookup root already owns the null descriptor
 		}
-		// A superseded import holds its old storage, and that storage's chunk, for as long as it is held here.
+		// A superseded import holds its old storage and that storage's chunk for as long as it is held here.
 		if (a_heldView != a_view || !a_held.owner || a_held.index == GpuTextures::kInvalid || GpuTextures::Superseded(a_held.owner.get())) {
 			a_heldView = a_view;
 			a_held = GpuTextures::Get().ResolveBinding(a_view, GpuTextures::Tag(GpuTextures::Source::FrameSlot, a_register));

@@ -1,5 +1,4 @@
-// The views' epochs' recording (ViewEpoch.h): their passes (cull, a trees view's draw family, draws, forward range), their PassDefs
-// (view.*, which Passes/CorePasses.cpp registers) and graph extension.
+// The view epochs' recording: their passes (cull, a trees view's draw family, draws, forward range), their PassDefs and graph extension.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
@@ -21,10 +20,7 @@ namespace DCLF
 				return nullptr;
 			}
 
-			/**
-			 * @brief The build state's part of the view a pass is made for (its target, depth and main resources as the build has them). Empty
-			 * (no main, no target) when the build has no such view: the make then adds no pass.
-			 */
+			/** @brief The build state's part of the view a pass is made for. Empty when the build has no such view, and then no pass is added. */
 			ViewBuild ViewBuildOf(const Api::PassContext& a_context)
 			{
 				if (a_context.build)
@@ -52,9 +48,8 @@ namespace DCLF
 			};
 
 			/**
-			 * @brief A view's cull: BuildDrawsCS in its single phase over the frame's scene list (the installed payload the latch names), frustum
-			 * only, one dispatch per face; the latch's map sends each of the view's slots to its bucket and every other to none. A face
-			 * not drawn has a dispatch of 0 groups.
+			 * @brief A view's cull: BuildDrawsCS's single phase, frustum only, one dispatch per face. A face not drawn gets a
+			 * dispatch of 0 groups.
 			 */
 			class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildPrepared, BuildBindings>
 			{
@@ -69,18 +64,17 @@ namespace DCLF
 					BuildBindings bindings{};
 					bindings.sequences = a_builder.UnorderedAccess(*resources->sequences).View();
 					bindings.count = a_builder.UnorderedAccess(resources->count).View();
-					// Read only in the single phase (an input's published verdict), never written.
+					// Only read in the single phase, never written.
 					bindings.visibility = a_builder.UnorderedAccess(*main.visibility).View();
 					bindings.poolFirsts = a_builder.ShaderResource(*main.scene->pool->firsts).View();
 					for (std::uint32_t f = 0; f < resources->traits->faces; ++f)
 						bindings.bucketCounts[f] = a_builder.UnorderedAccess(*resources->bucketCounts[f]).View();
-					// BuildDrawsCS reads the frame's placements and the fade seeds pool through each face's latch, and the payload's parts.
 					FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 					DeclarePayloadReads(a_builder);
 					return bindings;
 				}
 
-				// The view's shape and the pool's version are the revision's (the ticket's host data).
+				// The view's shape and the pool's version come from the revision.
 				void Revision(std::vector<std::uint64_t>&) const {}
 
 				BuildPrepared Prepare(const BuildBindings&, const org::PassPrepareContext& a_preparation) const
@@ -95,8 +89,8 @@ namespace DCLF
 					prepared.faces = resources->traits->faces;
 					auto& constants = prepared.constants;
 					SetRowStrides(constants);
-					constants.phaseBits = 0;  // the single phase: frustum only (the latch's mode), nothing published
-					// The bucket path's draws are bounded by their buckets (the latch's tables); this bounds the other, which none takes.
+					constants.phaseBits = 0;  // the single phase, frustum only, nothing published
+					// Bucket draws are bounded by their buckets. This bounds the other path, which nothing takes.
 					constants.phaseTwoBase = prepared.faces * frame->sequenceDraws;
 					return prepared;
 				}
@@ -122,10 +116,10 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
-				std::shared_ptr<Resources> mainResources;  // the build state's (ViewBuild::main)
+				std::shared_ptr<Resources> mainResources;
 			};
 
-			/** @brief What a view's draw pass draws into: the reflection's faces, first person's main depth, first person's colour. */
+			/** @brief What a view's draw pass draws into. */
 			enum class DrawMode : std::uint8_t
 			{
 				Faces,
@@ -151,15 +145,8 @@ namespace DCLF
 			};
 
 			/**
-			 * @brief A view's draws, per face a pass and per bucket a plain indirect draw of the bucket's range of the face's sequences
-			 * (DCLF_PULLED, as the Z-prepass's):
-			 * - Faces: on the face's slice of the engine's cube target (loaded and stored: the engine's sky is there) with DCLF's depth
-			 *   cleared, each bucket's forward pipeline, then the face's draw families (tree LOD).
-			 * - Depth: each bucket's Z-prepass depth pipeline into the main depth (after the world's and DCLF's HZB: the HZB keeps leaving
-			 *   the arms out).
-			 * - Colour: each bucket's first-person forward pipeline into kMAIN and the motion vectors (the engine's first-person slots 0 and
-			 *   1; slot 2 unbound), tested against kPOST_ZPREPASS_COPY (FUN_1414cb6d0's depth target 7).
-			 * The view's viewport depth range ([0, f1stPersonFarDepthRange]: both of the engine's first-person passes set it).
+			 * @brief A view's draws, a pass per face and a plain indirect draw per bucket. Faces load the cube slice because the engine's
+			 * sky is there. Colour uses kPOST_ZPREPASS_COPY, FUN_1414cb6d0's depth target 7, and the first-person depth range.
 			 */
 			class DrawPass final : public org::TypedRenderGraphPass<DrawPass, DrawPrepared, DrawBindings>
 			{
@@ -186,36 +173,32 @@ namespace DCLF
 					} else {
 						bindings.depth = a_builder.DepthReadWrite(main.nativeDepth).View();
 					}
-					// The sequences are the draws' arguments and what the vertex stage reads by device address (DCLF_PULLED).
+					// The sequences are both the draw arguments and what the vertex stage reads by device address.
 					bindings.sequences = a_builder.IndirectArguments(*resources->sequences).Resource();
 					a_builder.ShaderResource(*resources->sequences, noViews);
 					bindings.pool = a_builder.IndexBuffer(*scene.pool->indices);
 					for (std::uint32_t f = 0; f < faces; ++f)
 						bindings.bucketCounts[f] = a_builder.IndirectArguments(*resources->bucketCounts[f]).Resource();
-					// Read through device addresses; declared so the graph orders them after their uploads.
-					// The view's own frame slots (the faces': its commit's) or the colour segment's, by address.
+					// Read through device addresses, but declared so the graph orders them after their uploads.
 					a_builder.ShaderResource(resources->frameConstants ? resources->frameConstants : main.frameConstants, noViews);
-					// With its own frame constants, its copies of the main frame buffers (its commit's), named by its frame record.
+					// A view with its own frame constants also has its own copies of the main frame buffers.
 					if (const auto frameBuffers = resources->frameBuffers.load(std::memory_order_acquire))
 						for (const auto& frameBuffer : *frameBuffers)
 							a_builder.ShaderResource(frameBuffer.copy, noViews);
 					if (scene.vertexStream)
 						a_builder.ShaderResource(*scene.vertexStream, noViews);
 					a_builder.ShaderResource(resources->blocks, noViews);
-					// Every mode draws through a frame record (the view's own or the colour segment's), whose shaders read the frame's
-					// placements, palettes, shading and fade seeds (t117, t121-t123), and the payload's rows.
+					// Every mode draws through a frame record, whose shaders read t117 and t121-t123 and the payload's rows.
 					FrameValues::Get().DeclareReads(a_builder);
 					DeclarePayloadReads(a_builder);
 					if (mode == DrawMode::Colour)
 						DeclareFrameBuffers(a_builder, main);
-					// The faces read the published textures their frame textures' views export (ResolveViewFrameTextures). Only
-					// a frame texture with a view can be read there.
+					// The faces read the published textures their frame textures' views export. Only a frame texture with a view can be read there.
 					else if (mode == DrawMode::Faces) {
 						Extensions::DeclareGraphTextures(a_builder, Extensions::FacesGraphTextureIds());
-						// And the character light's noise, an HDR downsample level (ResolveViewFrameTextures).
+						// And the character light's noise, an HDR downsample level.
 						Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds());
 					}
-					// The faces' draw families (tree LOD's tables, the faces' rows and lists).
 					for (std::size_t d = 0; d < Extensions::kDrawFamilies && mode == DrawMode::Faces; ++d)
 						if (const auto& family = Extensions::DrawFamilies()[d].contribution.faces; Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(d))) {
 							Api::DrawFamilyDeclare declare{ a_builder, scene, resources.get(), std::span(bindings.faceLists[d]) };
@@ -224,7 +207,6 @@ namespace DCLF
 					return bindings;
 				}
 
-				// The view's shape and the versions it draws are the revision's (the ticket's host data).
 				void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(static_cast<std::uint64_t>(mode)); }
 
 				DrawPrepared Prepare(const DrawBindings&, const org::PassPrepareContext& a_preparation) const
@@ -255,7 +237,7 @@ namespace DCLF
 					const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences);
 					const rhi::IndexBufferView pool{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt };
 					const auto& families = Extensions::DrawFamilies();
-					static const std::shared_ptr<const void> kNothing;  // a face's draw has no prepared state: its pipeline is the shape's
+					static const std::shared_ptr<const void> kNothing;  // the face's pipeline is the shape's
 					for (std::uint32_t f = 0; f < a_prepared.faces; ++f) {
 						std::array<rhi::ColorAttachment, 2> colours{};
 						rhi::PassBeginInfo begin{};
@@ -304,7 +286,7 @@ namespace DCLF
 							RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, std::uint64_t(f) * frame.sequenceDraws + bucket.first,
 								mode == DrawMode::Depth ? bucket.depth : bucket.colour, counts, b, bucket.capacity);
 						}
-						// The faces' draw families (tree LOD: one instanced draw of the face's list, its row the face's), with the shape's pipeline for each.
+						// The faces' tree LOD, one instanced draw of the face's list with the shape's pipeline.
 						for (std::size_t d = 0; d < Extensions::kDrawFamilies && mode == DrawMode::Faces; ++d) {
 							const auto& faces = families[d].contribution.faces;
 							const auto& drawn = frame.faces[d];
@@ -319,7 +301,7 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
-				ViewBuild view;  // the build state's part of the view: its target, depth and main resources
+				ViewBuild view;
 				DrawMode mode;
 			};
 
@@ -339,10 +321,8 @@ namespace DCLF
 			};
 
 			/**
-			 * @brief A view's forward range's sorted halves drawn through the main set's colour signatures, a call per state class (the main
-			 * set's forward pipelines, a pipeline per sequence: blended Lighting, the Effect port's meshes and particles), after the view's bucket draws, with the view's
-			 * frame push data and depth range, onto the main pass's attachments (every one loaded: the forward pipelines write the main target
-			 * alone) tested against the view's depth target, as the engine's first-person blended list is drawn after its opaque passes.
+			 * @brief A view's forward range, sorted halves drawn per state class with the main set's forward pipelines, after the bucket
+			 * draws. Mirrors the engine drawing first person's blended list after its opaque passes.
 			 */
 			class ForwardPass final : public org::TypedRenderGraphPass<ForwardPass, ForwardPrepared, ForwardBindings>
 			{
@@ -362,7 +342,7 @@ namespace DCLF
 					bindings.depth = a_builder.DepthReadWrite(view.target).View();
 					bindings.sequences = a_builder.IndirectArguments(*resources->sequences).Resource();
 					bindings.counts = a_builder.IndirectArguments(*resources->bucketCounts[0]).Resource();
-					// The face shapes' second vertex stream, pulled by address (DCLF_PULLED_VERTICES).
+					// The face shapes' second vertex stream, pulled by address.
 					if (scene.vertexStream)
 						a_builder.ShaderResource(*scene.vertexStream, noViews);
 					a_builder.ShaderResource(resources->blocks, noViews);
@@ -371,7 +351,6 @@ namespace DCLF
 					return bindings;
 				}
 
-				// The view's shape is the revision's (the ticket's host data).
 				void Revision(std::vector<std::uint64_t>&) const {}
 
 				ForwardPrepared Prepare(const ForwardBindings&, const org::PassPrepareContext& a_preparation) const
@@ -404,8 +383,7 @@ namespace DCLF
 					begin.debugName = "DCLF first-person forward";
 					const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
 					const auto counts = a_recording.Resolve(a_bindings.counts).GetHandle();
-					// Per state class with forward slots, its sorted half (after its staging half), counted by its entry's bucket count word,
-					// with its class's colour signature; the classes in creation order.
+					// Per state class with forward slots, its sorted half, counted by its bucket count word. Classes in creation order.
 					std::vector<IndirectCall> calls;
 					for (std::uint32_t c = 0; c < frame.forwardRanges.size() && c < frame.indirect.classes.size(); ++c)
 						if (const auto& range = frame.forwardRanges[c]; range.capacity)
@@ -417,7 +395,7 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
-				ViewBuild view;  // the build state's part of the view: its target and main resources
+				ViewBuild view;
 			};
 
 			class ViewExtension final : public org::RenderGraph::IRenderGraphExtension
@@ -428,11 +406,10 @@ namespace DCLF
 
 				void PrepareForBuild(org::RenderGraph& a_graph) override
 				{
-					// The main pass's, under the main extension's identifiers (the same registration again).
+					// The main pass's resources, under the main extension's identifiers.
 					const auto& main = *view.main;
 					Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility"), main.visibility);
 					RegisterSceneBuffers(a_graph, *main.scene);
-					// Its own.
 					const auto& traits = *resources->traits;
 					const auto id = [&](std::string_view a_name) { return org::ResourceIdentifier(fmt::format("{}.{}", traits.prefix, a_name)); };
 					Register(a_graph, id("draw-count"), resources->count);
@@ -455,7 +432,7 @@ namespace DCLF
 				{
 					if (!view.main || !ViewPassesReady(view, *view.main))
 						return;
-					// The view's epochs' passes (Schedule/Frame.cpp; none for a hosted epoch: its host's extension adds them).
+					// A hosted epoch gets no passes here, since its host's extension adds them.
 					Api::PassContext context{};
 					context.main = &view.main;
 					context.view = &resources;
@@ -464,7 +441,7 @@ namespace DCLF
 				}
 
 			private:
-				std::shared_ptr<const BuildState> build;  // what the graph is built from; held for the build
+				std::shared_ptr<const BuildState> build;  // held for the build
 				ViewBuild view;
 				std::shared_ptr<ViewResources> resources;
 			};
@@ -484,9 +461,8 @@ namespace DCLF
 				return view.main ? std::make_shared<BuildDrawsPass>(a_context.View(), std::move(view.main)) : nullptr;
 			}
 
-			// A view without a depth pass draws its faces in its one epoch (the reflection's: hosted by the depth epoch); one with a depth
-			// pass its depth (first person's: hosted by the depth epoch, after the HZB and both phases' depth), then its colour in the
-			// colour epoch.
+			// A view without a depth pass, the reflection, draws its faces in one epoch. First person draws its depth in the depth
+			// epoch after the HZB and both depth phases, then its colour in the colour epoch.
 			std::shared_ptr<org::RenderPass> FacesDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
@@ -501,7 +477,7 @@ namespace DCLF
 				return resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Depth) : nullptr;
 			}
 
-			// The forward range sorted with the depth epoch (after its BuildDraws), drawn in the colour epoch after the bucket draws.
+			// The forward range is sorted in the depth epoch and drawn in the colour epoch after the bucket draws.
 			std::shared_ptr<org::RenderPass> ForwardSort(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
@@ -513,7 +489,6 @@ namespace DCLF
 					const auto frame = CurrentViewFrame(a_preparation, kind);
 					if (!frame || !frame->latch)
 						return ForwardSortSource{};
-					// Each state class's forward pair, its count its entry's bucket count word, after the buckets'.
 					ForwardSortSource source{ main->forwardSort };
 					for (std::uint32_t c = 0; c < frame->forwardRanges.size(); ++c)
 						if (const auto& range = frame->forwardRanges[c]; range.capacity)
@@ -539,7 +514,7 @@ namespace DCLF
 				           nullptr;
 			}
 
-			// Named with the view's prefix (ViewTraits::prefix).
+			// Named with the view's prefix.
 			constexpr Api::PassDef kViewPasses[] = {
 				{ .key = "view.latched-copies", .passName = "{view}.latched-copies", .kind = PassKind::Copy, .make = &LatchedCopies },
 				{ .key = "view.build-draws", .passName = "{view}.build-draws", .make = &BuildDraws },

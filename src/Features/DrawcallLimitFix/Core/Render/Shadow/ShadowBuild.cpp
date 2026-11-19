@@ -1,6 +1,5 @@
-// The shadow build (ShadowBuild.h): the shadow epochs' list, material rows and frame record (kept across builds: ShadowKept).
-// Snapshot builder, on DCLF's pool. The next frame's sun and paraboloid exclusions are the shadow exclusion contribution's
-// (Api::ShadowExclusionContribution: Features/Shadows/Local's ExclusionBuild), which the shadow participant's payload calls.
+// The shadow build. It writes the shadow list, the material rows and the frame record, mostly kept across builds in ShadowKept.
+// Runs on DCLF's thread pool as part of the snapshot build. The sun and point-light exclusions are built elsewhere.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -11,13 +10,13 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		/** @brief In the frame's DCLF set for the mode's phase (Extensions::ShadowViewSet::phaseOfMode): the only objects the mode's views draw. */
+		/** @brief Whether the object is in DCLF's set for this mode. The mode's views draw only those objects. */
 		bool SetCaster(const SceneTables& a_tables, std::uint32_t a_object, std::uint32_t a_mode)
 		{
 			return a_object < a_tables.setPhases.size() && (a_tables.setPhases[a_object] & Extensions::ShadowViewsSet().phaseOfMode[a_mode]) != 0;
 		}
 
-		/** @brief The key slot of a_technique on a_object's geometry, or ~0u (none, or not yet). */
+		/** @brief The key slot of the technique on the object's geometry, or ~0u if there is none yet. */
 		std::uint32_t KeySlotOf(const SceneTables& a_tables, const Lookups& a_lookups, std::uint32_t a_object, std::uint32_t a_technique)
 		{
 			if (!a_technique)
@@ -29,15 +28,12 @@ namespace DCLF::Draws
 			return it == a_lookups.shadowSlots.end() ? ~0u : it->second;
 		}
 
-		/**
-		 * @brief An object's shadow list input: its view mask from the modes holding it (a_modes, bit m), its caster key, each
-		 * occlusion view's key, and its material row. Flags keep the caster class, tested only by class-split modes' views.
-		 */
+		/** @brief An object's shadow list input for the modes in a_modes, bit m per mode. */
 		DrawInput ShadowEntry(const SceneTables& a_tables, const Lookups& a_lookups, std::uint32_t a_object, std::uint32_t a_record, std::uint8_t a_modes,
 			std::uint32_t a_stream)
 		{
 			const auto& object = a_tables.objects[a_object];
-			// The record is the input's rows word's material field (BuildDrawsCS.hlsl RowsOf): past it is a hard failure, as the main build's.
+			// The record must fit the material field of the input's rows word, which BuildDrawsCS.hlsl reads.
 			if (a_record > kRowMaterialMask)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: shadow material row {} past an input's row fields", a_record));
 			std::uint32_t mask = 0;
@@ -51,23 +47,22 @@ namespace DCLF::Draws
 			std::uint32_t occlusionKey[kOcclusionViews];
 			for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
 				occlusionKey[v] = ((a_modes >> OcclusionModeOf(v)) & 1) ? KeySlotOf(a_tables, a_lookups, a_object, BaseTechnique(a_tables, OcclusionModeOf(v), a_object)) : ~0u;
-			// A focus-only caster keeps its marker (kObjectFocusOnly's kObjectDecal): the views read it to drop it outside the focus shadows.
+			// Keep the focus-only marker, which shares a bit with kObjectDecal. Views use it to skip the object outside focus shadows.
 			const std::uint32_t kept = ObjectFocusOnly(object.flags) ? kObjectFocusOnly : 0u;
 			return { casterKey == ~0u ? 0u : casterKey, a_record, object.geometryIndex, (object.flags & ~(kObjectDecal | kObjectForward)) | kept | kInputDrawable,
 				{ mask, casterKey, { occlusionKey[0], occlusionKey[1] } }, a_object, 0, PartitionsOf(a_tables, a_object), a_stream, FadeRootOf(a_tables, a_object),
 				a_record, LodPartitionsOf(a_tables, a_object) };
 		}
 
-		/** @brief The texture-transform buffer the frame reads (textureTransformCurrentBuffer, flipped by Main::Update): ShadowTexcoord's. */
+		/** @brief The texture-transform buffer the frame reads. The engine flips it each frame in Main::Update. */
 		std::uint32_t ShadowTransformBuffer()
 		{
 			return globals::game::smState ? (globals::game::smState->textureTransformCurrentBuffer & 1) : 0u;
 		}
 
 		/**
-		 * @brief A shadow material row's texcoord (offset xy, scale zw): a_material's texture transform in a_buffer (ShadowTransformBuffer).
-		 * Read now, not from the walk: BSLightingShaderPropertyFloatController::Update moves it between Main::Draw and BeforeShadowMaps. Use
-		 * the buffer the frame reads, as BSUtilityShader::SetupMaterial does; the controllers write the other.
+		 * @brief The material's texcoord offset in xy and scale in zw. Read it now, not during the walk, because the float
+		 * controllers move it between Main::Draw and BeforeShadowMaps. They write the buffer the frame does not read.
 		 */
 		std::array<float, 4> ShadowTexcoord(const RE::BSShaderMaterial& a_material, std::uint32_t a_buffer)
 		{
@@ -76,9 +71,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief The kept build's transform watch: the transform moves since the last build (Extensions::DrainTransformMoves) watch their
-		 * material's slot, and a watched slot's row is marked (a_markRow) while its two buffers (flipped each frame) differ or for 2 builds
-		 * after its last move, so both buffers' values reach the row.
+		 * @brief Marks rows whose texture transform moved. A slot stays watched while its two buffers differ or for 2 builds
+		 * after its last move, so the value from both buffers reaches the row.
 		 */
 		template <class MarkRow>
 		void WatchTransformMoves(ShadowKept& k, std::uint64_t a_build, MarkRow&& a_markRow)
@@ -87,7 +81,7 @@ namespace DCLF::Draws
 			const bool lost = Extensions::DrainTransformMoves(moved);
 			if (k.transformWatchBuild.size() < k.slotMaterial.size())
 				k.transformWatchBuild.resize(k.slotMaterial.size(), 0);
-			// Moves were dropped while no build ran: every kept material is watched, so its row is written again from both buffers.
+			// Moves were dropped while no build ran, so watch every kept material.
 			if (lost)
 				for (std::uint32_t slot = 1; slot < k.slotMaterial.size(); ++slot)
 					if (k.slotMaterial[slot]) {
@@ -118,7 +112,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief A mark list's membership: a_on adds o once; off clears its mark (dropped from the list at its next pass). */
+		/** @brief Adds o to a mark list once, or clears its mark. A cleared entry leaves the list at its next pass. */
 		void SetMark(std::vector<std::uint32_t>& a_list, std::vector<std::uint8_t>& a_mark, std::uint32_t o, bool a_on)
 		{
 			if (a_mark.size() <= o)
@@ -127,11 +121,11 @@ namespace DCLF::Draws
 				a_mark[o] = 1;
 				a_list.push_back(o);
 			} else if (!a_on && a_mark[o]) {
-				a_mark[o] = 0;  // dropped from the list at its next pass
+				a_mark[o] = 0;
 			}
 		}
 
-		/** @brief BuildKeptShadow's state shared by its stages, and the per-object steps they repeat. */
+		/** @brief State shared by the stages of the kept shadow build. */
 		struct KeptShadowBuild
 		{
 			const ShadowInputs& in;
@@ -143,7 +137,7 @@ namespace DCLF::Draws
 			std::uint32_t objects;
 			std::uint64_t build;
 			std::uint32_t transformBuffer = 0;
-			// Objects whose held modes or record may have moved; their entries are rewritten after the modes.
+			// Objects whose entries are rewritten after the modes update.
 			std::vector<std::uint32_t> touched;
 
 			void WriteRow(std::uint32_t a_slot, const ShadowMaterialRow& a_row)
@@ -160,7 +154,6 @@ namespace DCLF::Draws
 			}
 			bool MaterialRow(std::uint32_t a_slot)
 			{
-				// Read the texture offset off the material now (controllers move it after the walk: ShadowTexcoord).
 				const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(k.slotMaterial[a_slot]);
 				const auto textureIt = k.slotDiffuse[a_slot] ? lookups.shadowTextures.find(k.slotDiffuse[a_slot]) : lookups.shadowTextures.end();
 				const bool ready = textureIt != lookups.shadowTextures.end() && textureIt->second != Lookups::kNone;
@@ -188,7 +181,7 @@ namespace DCLF::Draws
 					k.rowDirty.push_back(a_slot);
 				}
 			}
-			// An object's record: plain (0), its material's slot (acquired), or none.
+			// Returns 0 for the plain row, the material's slot (acquired if new), or kNoRecord.
 			std::uint32_t RecordOf(std::uint32_t o)
 			{
 				const auto& object = tables.objects[o];
@@ -258,14 +251,14 @@ namespace DCLF::Draws
 
 			int Evaluate(std::uint32_t m, std::uint32_t o)
 			{
-				// 0: not held, 1: held (region entry), 2: waiting (pipeline or texture), 3: the frame's list (a face).
+				// 0 not held, 1 held in the region, 2 waiting for a pipeline or texture, 3 in the per-frame list.
 				const auto& object = tables.objects[o];
 				const bool occlusionMode = IsOcclusionMode(m);
 				if (object.flags & kObjectFree)
 					return 0;
 				if (occlusionMode ? !ModeTechnique(tables, m, o) : (object.flags & kObjectNoShadow) != 0)
 					return 0;
-				// Views draw only the set's casters; a member that cannot be drawn is a defect, counted with what waits.
+				// A set member that cannot be drawn is a defect, so it is counted with what waits.
 				if (!SetCaster(tables, o, m))
 					return 0;
 				const std::uint32_t record = k.objectRecord[o];
@@ -276,7 +269,7 @@ namespace DCLF::Draws
 						out.setWaitingFirst = fmt::format("object {} mode {}: {} {}", o, m, a_why, a_value);
 					return 2;
 				};
-				// Past the scene buffers: waits for their growth (the resync rereads it).
+				// Waits for the scene buffers to grow. The resync after growth reads it again.
 				if (!ObjectFits(tables, o, in.addresses.fit))
 					return wait("scene buffers", o);
 				if (record != 0 && !(record < k.slotReady.size() && k.slotReady[record]))
@@ -310,8 +303,7 @@ namespace DCLF::Draws
 				if (o < k.heldModes.size() && k.Holds(m, o) != a_held) {
 					k.heldModes[o] ^= static_cast<std::uint8_t>(1u << m);
 					k.modes[m].membership = build;
-					// The exclusions' moves (ShadowPayload::joined, left) while the mode is not retaken whole: an object flips at most once
-					// a build there (Evaluate reads nothing the modes write).
+					// Record the move for the exclusions. An object flips at most once per build, since Evaluate reads nothing the modes write.
 					if (out.movesValid[m])
 						(a_held ? out.joined[m] : out.left[m]).push_back(o);
 				}
@@ -329,7 +321,7 @@ namespace DCLF::Draws
 				Hold(m, o, result == 1);
 			}
 
-			/** @brief o's shadow words in the main build's region (the main part is the main build's). */
+			/** @brief Writes o's shadow words into the shared region. The main build owns the rest of the entry. */
 			void WriteRegionEntry(std::uint32_t o, std::uint8_t a_heldNow)
 			{
 				auto& r = *scene;
@@ -367,7 +359,6 @@ namespace DCLF::Draws
 			{
 				const std::uint8_t heldNow = o < k.heldModes.size() && o < objects ? k.heldModes[o] : std::uint8_t{ 0 };
 				if (scene) {
-					// Shadow words only; the main part is the main build's.
 					WriteRegionEntry(o, heldNow);
 					return;
 				}
@@ -392,20 +383,17 @@ namespace DCLF::Draws
 		};
 
 		/**
-		 * @brief The kept build's start: the journals begun (the main build's region's at BeginRegion), and on a resync (log trimmed,
-		 * identity or scene buffers moved) ShadowKept emptied (the shadow words are cleared at BeginRegion). a_sharedRegion: the shadow
-		 * words are the main build's region's. Returns whether it resynced.
+		 * @brief Starts the kept build. Empties ShadowKept on a resync, when the log was trimmed or the identity or scene buffers moved.
+		 * Returns whether it resynced.
 		 */
 		bool BeginKeptBuild(KeptShadowBuild& b, bool a_sharedRegion)
 		{
 			const auto& in = b.in;
 			auto& k = b.k;
-			// The journal keeps what the oldest payload backing lacks; each backing is sent the rows changed since its content epoch.
+			// The journal keeps what the oldest payload backing still lacks.
 			k.rows.BeginBuild(in.materialRowsOldestContentEpoch);
-			// Shadow words in the main build's region, or a region of its own (Policy::ReuseResidentRegion off).
 			if (!a_sharedRegion)
 				k.scene.inputs.BeginBuild(in.inputsOldestContentEpoch);
-			// Scene buffer growth (ObjectFits moved) also rereads every object.
 			const bool resync = !k.cursor.Continues(b.tables.changeLog, in.tablesGeneration) || k.identity != in.addresses.identity ||
 			                    k.objectRecord.size() > b.objects || k.fit != in.addresses.fit;
 			if (resync) {
@@ -422,10 +410,7 @@ namespace DCLF::Draws
 			return resync;
 		}
 
-		/**
-		 * @brief The region half's start: the main build's region's journal begun, and on a resync (a_resync: BeginKeptBuild's) its
-		 * shadow words cleared; every held object is retaken by the modes.
-		 */
+		/** @brief Starts the region half. On a resync it clears every shadow word in the shared region. */
 		void BeginRegion(KeptShadowBuild& b, bool a_resync)
 		{
 			if (!b.scene)
@@ -449,8 +434,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief The objects to read again (a_changed): the logged ones, or all on a resync or view-state change (a record depends on
-		 * whether Skylighting's map is drawn); their records retaken.
+		 * @brief Collects the objects to read again and retakes their records. A view-state change rereads all of them,
+		 * because a record depends on whether Skylighting's map is drawn.
 		 */
 		void TakeChangedRecords(KeptShadowBuild& b, bool a_resync, std::vector<std::uint32_t>& a_changed)
 		{
@@ -472,20 +457,18 @@ namespace DCLF::Draws
 				b.TakeRecord(o);
 		}
 
-		/** @brief The material rows marked dirty (events, lookups, transform watch) rewritten, and the owners' root. */
+		/** @brief Rewrites the dirty material rows and rebuilds the owner list if it changed. */
 		void UpdateMaterialRows(KeptShadowBuild& b)
 		{
 			auto& k = b.k;
-			// Material rows are rewritten on events (rowDirty); a lookups change marks every slot.
 			if (k.lookupsGeneration != b.lookups.shadowGeneration) {
 				k.lookupsGeneration = b.lookups.shadowGeneration;
 				for (std::uint32_t slot = 1; slot < k.slotMaterial.size(); ++slot)
 					if (k.slotMaterial[slot])
 						b.MarkRow(slot);
 			}
-			// Texture-transform events watch a slot: it is reread while the two buffers (flipped each frame) differ.
 			WatchTransformMoves(k, b.build, [&](std::uint32_t a_slot) { b.MarkRow(a_slot); });
-			// An unwritten slot (texture unresolved) stays for the next build.
+			// A slot whose texture is not resolved stays dirty for the next build.
 			for (std::size_t d = 0; d < k.rowDirty.size();) {
 				const std::uint32_t slot = k.rowDirty[d];
 				if (slot < k.slotMaterial.size() && k.slotMaterial[slot] && !b.MaterialRow(slot)) {
@@ -507,7 +490,7 @@ namespace DCLF::Draws
 			b.out.bindingOwners.push_back(k.owners);
 		}
 
-		/** @brief Each mode's holdings: all objects again when its view states changed, else the changed and the waiting ones. */
+		/** @brief Updates which objects each mode holds. A mode whose view states changed reads every object again. */
 		void UpdateModes(KeptShadowBuild& b, const std::vector<std::uint32_t>& a_changed)
 		{
 			auto& k = b.k;
@@ -515,7 +498,7 @@ namespace DCLF::Draws
 				auto& mode = k.modes[m];
 				const ModeRasterStates states = b.in.modeUsed[m] ? b.in.modeRasterStates[m] : ModeRasterStates{};
 				if (!mode.active || mode.rasterStates != states) {
-					// View states changed: every object again (none held without views), and the exclusions read the mode's inputs whole.
+					// The exclusions must then read this mode's inputs whole instead of its moves.
 					b.out.movesValid[m] = false;
 					mode.Reset();
 					mode.active = true;
@@ -541,7 +524,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief The frame's list: face shapes with this walk's positions, one entry covering all their modes; and the skip counters. */
+		/** @brief Builds the per-frame list of face shapes with this walk's positions, one entry per object for all its modes. */
 		void BuildFaceList(KeptShadowBuild& b)
 		{
 			auto& k = b.k;
@@ -564,7 +547,6 @@ namespace DCLF::Draws
 				}
 				mode.faces.resize(keptFaces);
 				out.membership[m] = mode.membership;
-				// Skip counters: what waits (set members only: a defect).
 				out.deferredPipelines += static_cast<std::uint32_t>(mode.waiting.size());
 				out.skippedPipeline += static_cast<std::uint32_t>(mode.waiting.size());
 				for (const std::uint32_t o : mode.waiting)
@@ -573,16 +555,13 @@ namespace DCLF::Draws
 			for (const std::uint32_t o : faceObjects) {
 				const std::uint32_t streamIndex = StreamGeometry(b.tables, o, b.in.addresses.streamBuffer);
 				if (streamIndex == ~0u)
-					continue;  // no positions this walk: left to the engine
+					continue;  // no positions this walk, so the engine draws it
 				out.inputList.push_back(ShadowEntry(b.tables, b.lookups, o, k.objectRecord[o], faceModes[o], streamIndex));
 			}
 		}
 	}
 
-	/**
-	 * @brief BuildShadowPayload's kept path, its region-independent half: material rows and records updated incrementally in ShadowKept,
-	 * the objects to read again noted (a_split) for the region half.
-	 */
+	/** @brief The kept path's shared half. Updates rows and records in ShadowKept and notes the objects for the region half. */
 	void BuildKeptShadowShared(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out, ShadowKept& k,
 		const ShadowMaterialRow& a_plain, bool a_sharedRegion, ShadowBuildSplit& a_split)
 	{
@@ -591,8 +570,7 @@ namespace DCLF::Draws
 		++k.builds;
 		const std::uint64_t build = ++k.build;
 		KeptShadowBuild b{ a_in, a_tables, a_lookups, a_out, k, nullptr, objects, build };
-		// A shared half whose region half never ran (its build ahead abandoned) is carried into this one: its touched objects (marked)
-		// and the objects it read again are still to be written and taken.
+		// If the last region half never ran because its build was abandoned, carry its work into this build.
 		const bool carried = a_split.pending;
 		b.touched.swap(a_split.touched);
 		if (!carried) {
@@ -601,16 +579,14 @@ namespace DCLF::Draws
 		}
 		const bool resync = BeginKeptBuild(b, a_sharedRegion);
 		if (resync) {
-			// Emptied (its marks too): every object is read and touched again below.
+			// Every object is read and touched again below.
 			b.touched.clear();
 			a_split.changed.clear();
 		}
-		// The exclusions' moves: every mode's, unless the build retakes it whole (UpdateModes clears a mode's whose view states changed).
 		a_out.keptBuild = build;
 		a_out.movesValid.fill(!resync);
-		// ---- Material rows: the plain one, and each material's.
 		if (k.slotMaterial.empty()) {
-			k.slotMaterial.push_back(nullptr);  // slot 0: the plain record
+			k.slotMaterial.push_back(nullptr);  // slot 0 is the plain row
 			k.slotDiffuse.push_back(nullptr);
 			k.slotRefs.push_back(0);
 			k.slotReady.push_back(1);
@@ -619,7 +595,6 @@ namespace DCLF::Draws
 		b.WriteRow(0, a_plain);
 		b.transformBuffer = ShadowTransformBuffer();
 
-		// ---- Modes: which hold each object (heldModes), and the list entry from that.
 		if (k.heldModes.size() < objects)
 			k.heldModes.resize(objects, 0);
 		auto& changed = a_split.changed;
@@ -633,10 +608,7 @@ namespace DCLF::Draws
 		b.touched.swap(a_split.touched);
 	}
 
-	/**
-	 * @brief BuildShadowPayload's kept path, its region half (after BuildKeptShadowShared's a_split): each mode's holdings, the entries
-	 * written into the scene list's region, and the frame's list.
-	 */
+	/** @brief The kept path's region half. Updates each mode, writes the region entries and builds the per-frame list. */
 	void BuildKeptShadowRegion(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out, ShadowKept& k,
 		ResidentRegion* a_scene, ShadowBuildSplit& a_split)
 	{
@@ -646,7 +618,7 @@ namespace DCLF::Draws
 		b.transformBuffer = a_split.transformBuffer;
 		b.touched.swap(a_split.touched);
 		BeginRegion(b, a_split.resync);
-		// The main build's resync emptied the scene list: rewrite every held object.
+		// The main build's resync emptied the region, so rewrite every held object.
 		if (a_scene && k.sceneResets != a_scene->resets) {
 			k.sceneResets = a_scene->resets;
 			for (std::uint32_t o = 0; o < k.heldModes.size() && o < objects; ++o)
@@ -668,15 +640,13 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		// CountModeDraws goes to the pool past this many inputs, in chunks of this many.
+		// CountModeDraws goes parallel past kCountFanoutMin inputs, in chunks of kCountGrain.
 		constexpr std::size_t kCountFanoutMin = 8192;
 		constexpr std::size_t kCountGrain = 4096;
 
 		/**
-		 * @brief The kept counts (ShadowKept::ModeCounts) brought up to a_out's region: the entries its journal changed since the position
-		 * counted, each taken out as it was counted and put back as it is (every mode's: the modes a build uses are only read), and the
-		 * entries past the region's end taken out. Counted whole for another region, the first time, or one without a journal. Sums mod
-		 * 2^32 as the whole count's (the key slots, the inputs), so the counts are the same whatever the order.
+		 * @brief Brings the kept counts up to date by recounting only the entries the region's journal changed.
+		 * Sums wrap mod 2^32 like a full count, so the result does not depend on order.
 		 */
 		void UpdateRegionCounts(ShadowKept::ModeCounts& a_counts, const ShadowPayload& a_out, const void* a_source, std::uint64_t& a_counted)
 		{
@@ -733,7 +703,7 @@ namespace DCLF::Draws
 			const std::size_t held = c.entries.size();
 			for (std::size_t n = regionCount; n < held; ++n)
 				apply(c.entries[n], false);
-			c.entries.resize(regionCount);  // an appended entry counts nothing until recounted (mask 0)
+			c.entries.resize(regionCount);  // a new entry has mask 0 and counts nothing until recounted
 			if (!c.contentEpoch) {
 				for (std::size_t n = 0; n < regionCount; ++n)
 					recount(n);
@@ -742,12 +712,12 @@ namespace DCLF::Draws
 					for (std::uint64_t n = a_first; n < a_first + a_count; ++n)
 						recount(static_cast<std::size_t>(n));
 				});
-				// The appended entries are the journal's too; recounted here whatever it names (a recount is idempotent).
+				// Recount appended entries too. Recounting twice is harmless.
 				for (std::size_t n = held; n < regionCount; ++n)
 					recount(n);
 			}
 			c.contentEpoch = region.ContentEpoch();
-			// The key slots end at the last one an entry is counted in (the whole count's sizes).
+			// Trim the key slots to the last used one, matching what a full count would size them to.
 			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 				auto& slots = c.keyDraws[m];
 				auto& inputs = c.keyInputs[m];
@@ -759,14 +729,12 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief Per used mode, the draws its inputs can produce (a skin once per partition), total and per key slot (bucket sizes). With
-		 * a_counts (the kept build), the region's from the kept counts (UpdateRegionCounts) and the payload's own inputs counted.
+		 * @brief Counts the draws each used mode can produce, in total and per key slot. Skinned inputs draw once per partition.
+		 * These sizes set the draw buckets.
 		 */
 		void CountModeDraws(ShadowPayload& a_out, ShadowKept::ModeCounts* a_counts = nullptr, const void* a_source = nullptr, std::uint64_t* a_counted = nullptr)
 		{
 			DCLF_ZONE("CS.DCLF.BuildShadow.CountModeDraws");
-			// One pass for every used mode (each input's mask names its modes): a reduce, each chunk counting into its own totals, summed
-			// in chunk order.
 			std::uint32_t used = 0, usedBits = 0;
 			for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 				a_out.keySlotDraws[m].clear();
@@ -807,7 +775,7 @@ namespace DCLF::Draws
 			};
 			std::vector<Counts> chunks;
 			if (a_counts) {
-				// The region's entries from the kept counts (their used modes'), then the payload's own inputs: two chunks.
+				// Chunk 0 is the region from the kept counts. Chunk 1 is the payload's own inputs.
 				UpdateRegionCounts(*a_counts, a_out, a_source, *a_counted);
 				chunks.resize(2);
 				for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
@@ -843,10 +811,7 @@ namespace DCLF::Draws
 				a_out.modeDraws[m] = static_cast<std::uint32_t>(std::min<std::uint64_t>(draws[m], UINT32_MAX));
 		}
 
-		/**
-		 * @brief BuildShadowPayload's shared part: the geometry table, the arena's frame record and shared blocks. Returns the null
-		 * texture's index (the plain row's diffuse).
-		 */
+		/** @brief Writes the geometry table, the frame record and the shared blocks. Returns the null texture's index. */
 		std::uint32_t WriteSharedBlocks(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
 			std::shared_ptr<const StreamViews>& a_streams)
 		{
@@ -867,16 +832,13 @@ namespace DCLF::Draws
 				return base + offset;
 			};
 
-			// ---- Shared by every view: the geometry table and binding records (object records are the stream views', published
-			// in the payload by PayloadPools; palettes are FrameValues').
 			TakeGeometryDraws(a_streams.get(), a_tables, a_in.tablesGeneration, a_in.frameNumber, a_out.geometries);
 			a_out.streams = std::move(a_streams);
 			AppendStreamRows(a_tables, a_in.addresses.streamBuffer, a_out.geometries);
 			if (a_in.addresses.streamBuffer)
-				a_out.streamRows = a_tables.streamRows;  // a view: the publication's tables outlive the draws' payload
-			// The frame record heads the arena, then the shared blocks. No register the Utility shaders declare may be at address
-			// zero (a late-compiled pipeline reading one would lose the device); unsupplied ones read zeros. CS's SharedData (b5;
-			// alpha testing uses MipBias) and FeatureData (b6) sit at fixed places, filled by the commit's latched copies.
+				a_out.streamRows = a_tables.streamRows;  // a view, safe because the published tables outlive the payload
+			// No register the Utility shaders declare may sit at address zero. A late-compiled pipeline reading one would lose
+			// the device, so unsupplied registers point at a zero block.
 			const auto blocks = ShadowArenaBlocksOf();
 			const std::uint64_t end = std::max({ blocks.zeros + kShadowZeroBlockBytes, blocks.sharedData + blocks.sharedBytes, blocks.featureData + blocks.featureBytes });
 			if (block(nullptr, static_cast<std::size_t>(end)) != base)
@@ -885,12 +847,11 @@ namespace DCLF::Draws
 				std::memcpy(arena.At(blocks.sharedData, blocks.sharedBytes).data(), a_in.sharedData.data(), blocks.sharedBytes);
 			if (blocks.featureBytes && a_in.featureData.size() == blocks.featureBytes)
 				std::memcpy(arena.At(blocks.featureData, blocks.featureBytes).data(), a_in.featureData.data(), blocks.featureBytes);
-			// Every texture and sampler but the diffuse (the material row's).
+			// The diffuse comes from the material row. Everything else is here.
 			auto& frameRecord = a_out.frameRecord;
 			const std::uint32_t nullIndex = a_lookups.nullTexture == Lookups::kNone ? 0u : a_lookups.nullTexture;
 			for (auto& index : frameRecord.textures)
 				index = nullIndex;
-			// The objects' and extras' registers are the payload's: the commit fills them from the installed payload.
 			frameRecord.textures[kPlacementBufferRegister] = a_in.addresses.placementsIndex;
 			frameRecord.textures[kPaletteBufferRegister] = a_in.addresses.palettesIndex;
 			frameRecord.textures[kShadingBufferRegister] = a_in.addresses.shadingIndex;  // a tree's wind until its entry
@@ -903,7 +864,7 @@ namespace DCLF::Draws
 			return nullIndex;
 		}
 
-		/** @brief BuildShadowPayload's whole path: a record for every caster and Skylighting occluder (a_out.objectRecord) and the rows. */
+		/** @brief Non-kept path. Builds a record for every caster and Skylighting occluder, and the material rows. */
 		void BuildMaterialRows(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
 			const ShadowMaterialRow& a_plain)
 		{
@@ -915,7 +876,6 @@ namespace DCLF::Draws
 			const bool haveShadowMaterials = a_tables.shadowMaterial.size() == a_tables.objects.size();
 			for (std::size_t o = 0; o < a_tables.objects.size(); ++o) {
 				const auto& object = a_tables.objects[o];
-				// A record for every caster and Skylighting occluder; alpha-tested ones name their diffuse.
 				const std::uint32_t occlusion = OcclusionTechniques(a_tables, a_in.modeUsed, o);
 				if ((object.flags & kObjectNoShadow) && !occlusion)
 					continue;
@@ -945,7 +905,6 @@ namespace DCLF::Draws
 					++a_out.skippedTexture;
 					continue;
 				}
-				// Read now, not from the walk (ShadowTexcoord).
 				ShadowMaterialRow row;
 				row.texcoord = ShadowTexcoord(*material, ShadowTransformBuffer());
 				row.diffuse = textureIt->second;
@@ -959,7 +918,7 @@ namespace DCLF::Draws
 			a_out.materialRows = { std::make_shared<const std::vector<ShadowMaterialRow>>(std::move(rows)), {} };
 		}
 
-		/** @brief BuildShadowPayload's whole path: the modes that draw each object, then one input per object for all of them. */
+		/** @brief Non-kept path. Finds the modes that draw each object, then writes one input per object. */
 		void BuildModeInputs(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out)
 		{
 			const auto& objectRecord = a_out.objectRecord;
@@ -973,7 +932,7 @@ namespace DCLF::Draws
 					const auto& object = a_tables.objects[o];
 					if (occlusionMode ? !ModeTechnique(a_tables, m, o) : (object.flags & kObjectNoShadow) != 0)
 						continue;
-					// Set members of the mode's phase only; a member skipped below is a defect.
+					// A set member skipped below is a defect and is counted.
 					const bool member = SetCaster(a_tables, static_cast<std::uint32_t>(o), m);
 					if (!member)
 						continue;
@@ -986,14 +945,13 @@ namespace DCLF::Draws
 					if (objectRecord[o] == ~0u || !ObjectFits(a_tables, static_cast<std::uint32_t>(o), a_in.addresses.fit)) {
 						continue;
 					}
-					// A volumetric-only caster with no volumetric view under this mode is no input.
 					const bool volumetricOnly = VolumetricClass(m, object.flags);
 					const auto& classStates = a_in.modeRasterStates[m].Of(volumetricOnly);
 					if (volumetricOnly && classStates.empty()) {
 						memberSkip.armed = false;
 						continue;
 					}
-					// No view of its class: no input, nothing withheld.
+					// No view of its class draws it, so nothing is withheld.
 					if (classStates.empty())
 						memberSkip.armed = false;
 					const std::uint32_t technique = ModeTechnique(a_tables, m, o);
@@ -1005,11 +963,11 @@ namespace DCLF::Draws
 						++a_out.skippedPipeline;
 						continue;
 					}
-					// Every view of the mode must draw it: the set withholds the engine's pass from all of them (PhaseReady).
+					// Every view of the mode must be able to draw it, because the engine's pass is withheld from all of them.
 					bool deferred = false, missing = false;
 					for (const std::uint32_t state : classStates) {
 						if (a_lookups.ShadowMapPipeline(m, state, slotIt->second) == Lookups::kNone) {
-							// shadowPipelines tells unresolved from resolved-to-nothing.
+							// shadowPipelines tells "not resolved yet" apart from "resolved to nothing".
 							const auto pipelineIt = a_lookups.shadowPipelines.find({ technique, key.rasterFlags, key.vertexLayout, state });
 							(pipelineIt == a_lookups.shadowPipelines.end() ? deferred : missing) = true;
 						}
@@ -1019,12 +977,12 @@ namespace DCLF::Draws
 						++a_out.skippedPipeline;
 						continue;
 					}
-					// Faces and second-stream-position casters need this walk's positions, else they stay the engine's.
+					// Faces and second-stream casters need this walk's positions, or the engine draws them.
 					const std::uint32_t streamIndex = StreamGeometry(a_tables, o, a_in.addresses.streamBuffer);
 					if (streamIndex == ~0u && (IsStreamObject(a_tables, o) || (key.vertexLayout & kPositionInSecondStream))) {
 						continue;
 					}
-					// Sun entry rule (kCullSunEntry): BuildDraws tests the entry sphere against the latch, so inputs ignore the planes.
+					// No plane test here. BuildDraws tests the sun entry sphere on the GPU.
 					heldModes[o] |= static_cast<std::uint8_t>(1u << m);
 					streams[o] = streamIndex;
 					memberSkip.armed = false;
@@ -1041,7 +999,7 @@ namespace DCLF::Draws
 	{
 		DCLF_ZONE("CS.DCLF.BuildShadowPayload.Shared");
 		const std::uint32_t nullIndex = WriteSharedBlocks(a_in, a_tables, a_lookups, a_out, a_streams);
-		// Row 0: every caster without alpha testing (no texture offset, the null texture).
+		// Row 0 serves every caster without alpha testing.
 		ShadowMaterialRow plain;
 		plain.diffuse = nullIndex;
 		if (a_kept)

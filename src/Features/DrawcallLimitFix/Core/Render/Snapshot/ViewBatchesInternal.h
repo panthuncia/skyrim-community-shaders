@@ -1,7 +1,6 @@
 #pragma once
 
-// The CPU pipeline's view batches' internals (ViewBatches.cpp: the full build; SceneLists.cpp: the incremental lists): a lane before its
-// batch is laid out, the resident sequences' sink and rows, the list builder, the batches' layout and sort. The builder thread's alone.
+// Internals shared by the full view batch build and the incremental scene lists. Used only on the builder thread.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
@@ -31,7 +30,7 @@ namespace DCLF::Draws::detail
 	constexpr std::uint32_t kNoKey = ~0u;
 	constexpr std::uint32_t kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
 
-	/** @brief One lane before its batch is laid out: its sort key (k0, k1, object), its bucket's key and its columns. */
+	/** @brief One lane before its batch is laid out. It sorts by k0, then k1, then object. */
 	struct Lane
 	{
 		std::uint32_t k0 = 0, k1 = 0;
@@ -41,27 +40,27 @@ namespace DCLF::Draws::detail
 		std::uint32_t flags = 0, fadeRoot = 0;
 		float fadeDistance = 0.0f;
 		std::uint32_t partitions = 0, lodPartitions = 0;
-		std::uint32_t decalGroup = 0;  // the decal list's: its group (1-3)
+		std::uint32_t decalGroup = 0;  // 1 to 3, decal list only
 	};
-	/** @brief An entry's run of resident sequences, per view class (made at its first view of the class). */
+	/** @brief A run of resident sequences, made the first time an input appears in a view class. */
 	struct Run
 	{
 		std::uint32_t first = kNoKey;
 		std::uint16_t count = 0;
 	};
-	/** @brief An input's runs, by view class: the main family's, the shadow casters', each occlusion map's (ListBuilder::Add). */
+	/** @brief An input's runs, one per view class. */
 	struct InputRuns
 	{
 		Run main, caster;
 		std::array<Run, kOcclusionViews> occlusion{};
 	};
 
-	/** @brief MakeViewBatches' scratch, the builder's alone (kept warm across sets). */
+	/** @brief Builder scratch, kept warm across sets. */
 	struct Scratch
 	{
 		std::array<std::vector<Lane>, Direct::kViewTypes> lanes;
 		std::vector<std::uint32_t> moverCount;
-		std::size_t lastSequences = 0;  // the last set's resident sequences (the next's reserve)
+		std::size_t lastSequences = 0;  // used to reserve the next set
 	};
 	inline Scratch& BuilderScratch()
 	{
@@ -70,8 +69,8 @@ namespace DCLF::Draws::detail
 	}
 
 	/**
-	 * @brief The sets' batch storage, recycled: a set's block comes back when the set goes (any thread), and the builder takes one at
-	 * least as large, its pages already touched (a fresh block faults every page at its first fill). A few blocks kept; never destroyed.
+	 * @brief Recycled batch storage. Reusing blocks avoids a page fault on every page of a fresh block at its first fill.
+	 * Blocks can come back on any thread. Never destroyed.
 	 */
 	class StoragePool
 	{
@@ -81,7 +80,7 @@ namespace DCLF::Draws::detail
 			static auto* pool = new StoragePool;
 			return *pool;
 		}
-		/** @brief Builder thread: a block of at least a_bytes (not zeroed). */
+		/** @brief Builder thread. A block of at least a_bytes, not zeroed. */
 		std::shared_ptr<std::byte[]> Take(std::size_t a_bytes)
 		{
 			Block block;
@@ -91,7 +90,7 @@ namespace DCLF::Draws::detail
 					return Wrap(block);
 				delete[] block.bytes;
 			}
-			const std::size_t size = a_bytes + a_bytes / 4;  // room for the next sets' growth
+			const std::size_t size = a_bytes + a_bytes / 4;  // room for growth
 			return Wrap({ new std::byte[size], size });
 		}
 
@@ -101,7 +100,7 @@ namespace DCLF::Draws::detail
 			std::byte* bytes = nullptr;
 			std::size_t size = 0;
 		};
-		// The sets alive at once: the frames in flight's, the installed one's, the one being made.
+		// Frames in flight, plus the installed set and the one being made.
 		static constexpr int kKept = 6;
 		std::shared_ptr<std::byte[]> Wrap(Block a_block)
 		{
@@ -120,15 +119,15 @@ namespace DCLF::Draws::detail
 		std::atomic<int> kept{ 0 };
 	};
 
-	/** @brief The resident sequences of one set, as they are made (the GPU copy and the recorder's arguments). */
+	/** @brief Collects one set's resident sequences and the recorder's draw arguments. */
 	struct SequenceSink
 	{
 		std::vector<DrawSequence>& sequences;
 		std::vector<Direct::DrawArgs>& args;
 		const GeometryDrawsOut& geometries;
-		// The first sequence's index: the sequences already emitted before these (SceneLists' persistent store).
+		// Index of the first sequence, after those already in SceneLists' persistent store.
 		std::uint32_t base = 0;
-		// Non-null: every geometry slot a walk read is appended (SceneLists' reverse map; a stream row's are not slots).
+		// When set, every geometry slot a walk reads is appended, for SceneLists' reverse map.
 		std::vector<std::uint32_t>* walked = nullptr;
 
 		const GeometryDraw* At(std::uint32_t a_index) const
@@ -138,7 +137,7 @@ namespace DCLF::Draws::detail
 				return geometries.slots.At(a_index);
 			return a_index - slots < geometries.streamRows.size() ? &geometries.streamRows[a_index - slots] : nullptr;
 		}
-		/** @brief A plain pulled draw's sequence (StoreShadowSequence's, its pool first left out: the recorder adds it). */
+		/** @brief Emit one plain pulled draw's sequence. The pool's first index is left out because the recorder adds it. */
 		void Emit(const DrawSequence& a_rows, std::uint32_t a_slot, const GeometryDraw& a_geometry, const GeometryDraw* a_stream)
 		{
 			DrawSequence s = a_rows;
@@ -163,8 +162,8 @@ namespace DCLF::Draws::detail
 			args.push_back({ a_geometry.indexCount, a_geometry.firstIndex, a_slot });
 		}
 		/**
-		 * @brief An input's partitions' sequences, BuildDrawsCS's walk (the GeometryDraw links from its geometry) over every partition any
-		 * LOD level may draw: a LOD skin's levels' masks ORed (Cull.cpp draws the k-th of them as the k-th set bit), else its partitions.
+		 * @brief Emit a sequence for every partition any LOD level may draw. Must walk the same way as BuildDrawsCS.
+		 * A LOD skin's level masks are ORed together.
 		 */
 		Run EmitPartitions(const DrawSequence& a_rows, const DrawInput& a_input)
 		{
@@ -191,7 +190,7 @@ namespace DCLF::Draws::detail
 			}
 			return run;
 		}
-		/** @brief A decal's slots of its span (BuildDrawsCS's decal walk), the drawn partitions' sequences in slot order. */
+		/** @brief Emit a decal's drawn partitions in slot order. Must match BuildDrawsCS's decal walk. */
 		Run EmitDecal(const DrawSequence& a_rows, const DrawInput& a_input)
 		{
 			const std::uint32_t p = a_input.partitions;
@@ -217,14 +216,13 @@ namespace DCLF::Draws::detail
 	};
 
 	/**
-	 * @brief A set's sequences' rows: offsets into the payload's row parts (their versions' addresses are the set's bases, pushed per
-	 * list: kDirectFlagRelativeRows), and the shadow key slots' entries. The blocks SetSequenceBlocks derives are then offsets too:
-	 * only the GPU path's indirect arguments read them, never a direct draw.
+	 * @brief Row addresses for a set's sequences. They are offsets into the payload's row parts, and the bases are pushed per list.
+	 * The derived blocks are offsets too, which is fine because only the GPU path reads them.
 	 */
 	struct RowBases
 	{
 		std::uint64_t pipelineRows = 0, materialRows = 0, shadowRows = 0;
-		RenderGraph::BufferRef pipelineRowsRef, materialRowsRef, shadowRowsRef;  // the same rows' buffer view refs (the direct draws' bases)
+		RenderGraph::BufferRef pipelineRowsRef, materialRowsRef, shadowRowsRef;  // the direct draws' bases
 		const std::vector<ShadowPipelineKey>* slotKeys = nullptr;
 
 		static std::uint64_t AddressOf(const ScenePayload& a_payload, PayloadPart a_part)
@@ -232,7 +230,7 @@ namespace DCLF::Draws::detail
 			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
 			return version ? version->lease->address : 0;
 		}
-		/** @brief Not a raw ref: the payload's readers declare its parts (PayloadPools::DeclareReads). */
+		/** @brief Not a raw ref, because the payload's readers declare its parts. */
 		static RenderGraph::BufferRef RefOf(const ScenePayload& a_payload, PayloadPart a_part)
 		{
 			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
@@ -241,7 +239,7 @@ namespace DCLF::Draws::detail
 			           RenderGraph::MakeBufferRef(host->Device(), version->lease->buffer->GetAPIResource().GetHandle(), 0, std::source_location::current()) :
 			           RenderGraph::BufferRef{};
 		}
-		/** @brief A main input's rows (BuildDrawsCS RowsOf: the installed rows; the draw resolves an animated row to the frame's copy, DCLFSequenceRows). */
+		/** @brief A main input's rows. The draw later resolves an animated row to the frame's copy. */
 		DrawSequence Main(const DrawInput& a_input) const
 		{
 			DrawSequence s{};
@@ -250,7 +248,7 @@ namespace DCLF::Draws::detail
 			s.objectIndex = a_input.objectIndex & kObjectIndexMask;
 			return s;
 		}
-		/** @brief A shadow input's rows for key slot a_key: its slot's vertex layout in the pipeline-row words, its technique in the pipeline word. */
+		/** @brief A shadow input's rows. The slot's vertex layout goes in the pipeline-row words and its technique in the pipeline word. */
 		DrawSequence Shadow(const DrawInput& a_input, std::uint32_t a_key) const
 		{
 			DrawSequence s{};
@@ -265,7 +263,7 @@ namespace DCLF::Draws::detail
 		}
 	};
 
-	/** @brief A set's animated material rows (ViewBatchSet::animatedRowOf), from its main payload's rows' headers. */
+	/** @brief Fill a set's animated material rows from the main payload's row headers. */
 	inline void FillAnimatedRows(Direct::ViewBatchSet& a_set, const ViewBatchInputs& a_in)
 	{
 		a_set.animatedRowOf.clear();
@@ -296,7 +294,7 @@ namespace DCLF::Draws::detail
 		return out;
 	}
 
-	/** @brief Every input of the snapshot's scene list in its order: the region (the main payload's, else the shadow payload's), then the frame inputs. */
+	/** @brief Visit every input of the scene list in order, the resident region first and then the frame inputs. */
 	template <class F>
 	void ForEachInput(const ViewBatchInputs& a_in, F&& a_visit)
 	{
@@ -316,7 +314,7 @@ namespace DCLF::Draws::detail
 				a_visit(input);
 	}
 
-	/** @brief The lists' lanes from the scene list: each input in the views its mask names, its sequences per view class made once. */
+	/** @brief Builds the lists' lanes from the scene list. Each input's sequences are emitted once per view class. */
 	class ListBuilder
 	{
 	public:
@@ -329,25 +327,22 @@ namespace DCLF::Draws::detail
 			firstPersonBit = Extensions::ViewEntryOf(Api::EngineView::FirstPerson).viewBit;
 			for (std::uint32_t v = 0; v < kOcclusionViews; ++v) {
 				const std::uint32_t bit = Extensions::OcclusionMapOf(v).viewBit;
-				// Features/OcclusionMaps' bits (GpuLayouts.h: 1u << 5 the sky occluder's, 1u << 6 the precipitation mask's).
+				// The bit values come from Features/OcclusionMaps and must match GpuLayouts.h.
 				occlusionBits[v] = bit;
 				occlusionView[v] = bit == (1u << 5) ? ViewType::SkyOccluder : bit == (1u << 6) ? ViewType::PrecipOccluder : ViewType::kCount;
 			}
 		}
 
-		/** @brief Where Add pushes its lanes and emits its sequences from here on. */
+		/** @brief Redirect where Add pushes lanes and emits sequences. */
 		void Target(std::array<std::vector<Lane>, Direct::kViewTypes>& a_lanes, SequenceSink& a_sink)
 		{
 			lanes = &a_lanes;
 			sinkTarget = &a_sink;
 		}
-		/** @brief The Z groups the main list is ordered by (the catalog's targets'). */
+		/** @brief The Z groups the main list is ordered by. */
 		const std::vector<std::uint32_t>& ZGroups() const { return zGroups; }
 
-		/**
-		 * @brief a_input's lanes, and its runs: its sequences by view class. With a_reuse, those runs are its (its sequences already
-		 * emitted: SceneLists re-adding an object whose sphere changed) and none are emitted.
-		 */
+		/** @brief Add a_input's lanes and return its runs. With a_reuse, its sequences already exist and none are emitted. */
 		InputRuns Add(const DrawInput& a_input, const InputRuns* a_reuse = nullptr)
 		{
 			InputRuns out = a_reuse ? *a_reuse : InputRuns{};
@@ -373,7 +368,6 @@ namespace DCLF::Draws::detail
 					AddMain(ViewType::FirstPerson, a_input, mainRuns(), 0, a_input.pipelineIndex);
 				return out;
 			}
-			// The main family's views (keyWord 0: the drawable bit is theirs).
 			if (!decalGroup && !forward && (mask & (kViewMain | kViewMainCull))) {
 				if (drawable && (mask & kViewMain))
 					AddMain(ViewType::Main, a_input, mainRuns(), ZGroupOf(a_input.pipelineIndex), a_input.pipelineIndex);
@@ -390,7 +384,6 @@ namespace DCLF::Draws::detail
 				AddMain(ViewType::Reflection, a_input, mainRuns(), 0, a_input.pipelineIndex);
 			if (drawable && firstPersonBit && (mask & firstPersonBit))
 				AddMain(ViewType::FirstPerson, a_input, mainRuns(), 0, a_input.pipelineIndex);
-			// The shadow family's (their keys' slots; every input their bits select draws).
 			const std::uint32_t caster = a_input.view.shadowKey;
 			const auto casters = [&]() -> const Run& {
 				if (casterRun.first == kNoKey)
@@ -432,7 +425,6 @@ namespace DCLF::Draws::detail
 			lane.lodPartitions = a_input.lodPartitions;
 			return lane;
 		}
-		// A main family view's lane: its bucket the set index, ordered by (a_k0, a_k1, object).
 		Lane& AddMain(ViewType a_view, const DrawInput& a_input, const Run& a_run, std::uint32_t a_k0, std::uint32_t a_k1)
 		{
 			auto& lane = Push(a_view, a_input, a_run);
@@ -442,7 +434,7 @@ namespace DCLF::Draws::detail
 			lane.pipelineSlot = a_input.recordIndex >> kRowPipelineShift;
 			return lane;
 		}
-		// Main's cull-only candidate: no sequences, after every drawn lane.
+		// A cull-only candidate has no sequences and sorts after every drawn lane.
 		void AddCullOnly(const DrawInput& a_input)
 		{
 			auto& lane = Push(ViewType::Main, a_input, Run{});
@@ -450,7 +442,7 @@ namespace DCLF::Draws::detail
 			lane.flags |= Direct::kLaneCullOnly;
 			lane.bucketKey = kNoKey;
 		}
-		// A shadow family view's lane: its bucket the key slot (the view's map row names its pipeline under its mode and state).
+		// Shadow lanes bucket by key slot. The view's map row picks the pipeline for its mode and state.
 		void AddShadow(ViewType a_view, const DrawInput& a_input, const Run& a_run, std::uint32_t a_key)
 		{
 			auto& lane = Push(a_view, a_input, a_run);
@@ -461,19 +453,19 @@ namespace DCLF::Draws::detail
 		const RowBases& rows;
 		SequenceSink* sinkTarget;
 		std::array<std::vector<Lane>, Direct::kViewTypes>* lanes;
-		bool forwardOnly = false;  // ViewBatchInputs::forwardOnly: Add takes the forward family's lanes alone
+		bool forwardOnly = false;
 		std::vector<std::uint32_t> zGroups;
 		std::uint32_t reflectionBit = 0, firstPersonBit = 0;
 		std::array<std::uint32_t, kOcclusionViews> occlusionBits{};
 		std::array<ViewType, kOcclusionViews> occlusionView{};
 	};
 
-	/** @brief The bytes a lane takes in its batch: its columns (Direct::ViewBatch), the 4-byte ones then the 2-byte ones. */
+	/** @brief The bytes a lane takes in its batch. Must match LayOut's columns. */
 	constexpr std::size_t kLaneWords = 20;  // object, sequence, pipelineBucket, flags, fadeRoot, fadeDistance, partitions, lodPartitions, 4 spheres, 8 live
 	constexpr std::size_t kLaneHalves = 1;  // sequenceCount
 	constexpr std::size_t kLaneBytes = kLaneWords * 4 + kLaneHalves * 2;
 
-	/** @brief a_batch's columns laid out at a_base (a_lanes each). */
+	/** @brief Lay out a_batch's columns at a_base. */
 	inline void LayOut(Direct::ViewBatch& a_batch, std::byte* a_base, std::uint32_t a_lanes)
 	{
 		auto words = reinterpret_cast<std::uint32_t*>(a_base);
@@ -505,7 +497,7 @@ namespace DCLF::Draws::detail
 		a_batch.sequenceCount = halves;
 	}
 
-	/** @brief Whether a_object's snapshot sphere is known (a_spheres' row is its geometry's and does not move), and the sphere. */
+	/** @brief The snapshot sphere of a_object, if known. It is known only for a non-moving object whose row matches its geometry. */
 	inline bool SnapshotSphere(const SceneTables& a_tables, const Direct::SnapshotSpheres* a_spheres, std::uint32_t a_object, std::array<float, 4>& a_out)
 	{
 		if (!a_spheres || a_object >= a_spheres->sphere.size() || a_object >= a_tables.objectGeometry.size())
@@ -517,8 +509,7 @@ namespace DCLF::Draws::detail
 		return true;
 	}
 
-	/** @brief A list's lanes sorted (by key, then object) and given dense buckets; the view's buckets filled. */
-	/** With a_extend, a_buckets and a_bucketOf already hold buckets (a base's) the lanes' keys take, new keys appended after them. */
+	/** @brief Sort a list's lanes and give them dense buckets. With a_extend, new keys are appended after a base's buckets. */
 	inline void SortList(std::vector<Lane>& a_lanes, Direct::ViewBuckets& a_buckets, ankerl::unordered_dense::map<std::uint32_t, std::uint32_t>& a_bucketOf,
 		bool a_extend = false)
 	{
@@ -526,11 +517,11 @@ namespace DCLF::Draws::detail
 			[](const Lane& a, const Lane& b) { return a.k0 != b.k0 ? a.k0 < b.k0 : a.k1 != b.k1 ? a.k1 < b.k1 : a.object < b.object; });
 		if (!a_extend)
 			a_bucketOf.clear();
-		// Sorted lanes of one bucket key are mostly adjacent (it is, or follows, their k1): the last key's bucket is kept.
+		// Lanes of one bucket key are mostly adjacent after the sort, so cache the last key's bucket.
 		std::uint32_t lastKey = kNoKey, lastBucket = 0;
 		for (auto& lane : a_lanes) {
 			if (lane.bucketKey == kNoKey) {
-				lane.bucketKey = 0;  // a cull-only lane draws nothing: its bucket is never read
+				lane.bucketKey = 0;  // cull-only, so its bucket is never read
 				continue;
 			}
 			if (lane.bucketKey != lastKey) {
@@ -547,9 +538,8 @@ namespace DCLF::Draws::detail
 	}
 
 	/**
-	 * @brief A set's sequences' version as the builder posts it (PostSequences): its count, its own writes [first, total) (emit: each
-	 * piece's bytes at its sequence offset), built from previous (null: whole, first 0), and what previous's backing journal says
-	 * changed since a backing's content epoch (changedSince; null: nothing beyond the writes).
+	 * @brief A set's sequence upload. It writes [first, total) on top of previous, or the whole buffer when previous is null.
+	 * changedSince reports other ranges a backing needs, or null for none.
 	 */
 	struct SequencesUpload
 	{
@@ -561,48 +551,37 @@ namespace DCLF::Draws::detail
 	};
 
 	/**
-	 * @brief The incremental scene lists (SceneLists.cpp; dclf-architecture.md, "The CPU pipeline's scene lists"): the view batch sets of
-	 * successive snapshots made from one base (a full build's sorted batches, shared) less its lanes gone since (each set's tombstones),
-	 * plus the lanes added since (the delta) and those rebuilt every set (the volatile: the tails, stream rows, decals), with an
-	 * append-only store of persistent sequences. The resident region's journal names the inputs that changed; geometry slots and snapshot
-	 * spheres re-emit their objects. A compaction (the base made again) when the delta or the dead grow, or what every lane depends on
-	 * changes. The builder thread's alone.
+	 * @brief Incremental scene lists. Each set is a shared sorted base, minus tombstoned lanes, plus a delta and a volatile part
+	 * rebuilt every set. A compaction rebuilds the base when the delta or dead lanes grow. See dclf-architecture.md. Builder thread only.
 	 */
 	class SceneLists
 	{
 	public:
 		SceneLists();
 		~SceneLists();
-		/**
-		 * @brief a_in's set (sequences in its version a_write: a_upload), from the last set's lists and the snapshot's deltas, or a
-		 * compaction. Null: a_in cannot be taken (the caller makes a full set).
-		 */
+		/** @brief Make a_in's set from the last set and the deltas, or by compaction. Null means the caller must make a full set. */
 		std::shared_ptr<Direct::ViewBatchSet> Make(const ViewBatchInputs& a_in, const std::shared_ptr<const Direct::SnapshotSpheres>& a_spheres, std::uint64_t a_write,
 			SequencesUpload& a_upload);
-		/** @brief Set a_write's version is GPU ready (null: failed: the next set compacts). */
+		/** @brief Set a_write's version is GPU ready. A null version means it failed and the next set compacts. */
 		void Posted(std::uint64_t a_write, std::shared_ptr<const org::services::PublishedBufferVersion> a_version);
-		/** @brief Forgets everything: the next set compacts. */
+		/** @brief Forget everything, so the next set compacts. */
 		void Reset();
-		/** @brief A set's resident sequence's bytes (the equivalence check), or null. */
+		/** @brief A set's resident sequence, or null. For the equivalence check. */
 		const DrawSequence* Sequence(const Direct::ViewBatchSet& a_set, std::uint32_t a_sequence) const;
-		/** @brief The equivalence check's: what the lists hold of a_object (its lanes' segment, its input, its slots) against a_in. */
+		/** @brief Describe what the lists hold for a_object. For the equivalence check. */
 		std::string Explain(std::uint32_t a_object, const ViewBatchInputs& a_in) const;
-		/** @brief The report window's line (sets made, compactions, ms, delta and dead), or empty; the counters start again. */
+		/** @brief The report line, or empty. Resets the counters. */
 		std::string TakeReport();
 
 		struct State;
-		struct Compaction;  // a compaction on the pool (its snapshot's inputs, its State once done)
+		struct Compaction;  // runs on the pool
 
 	private:
 		std::unique_ptr<State> state;
 		std::shared_ptr<Compaction> compaction;
 	};
 
-	/**
-	 * @brief The equivalence check (Direct::kExpIncrementalCheck): a_lists' set a_incremental against a full build a_full of the same
-	 * snapshot (its sequences a_fullSequences), every view's lanes as multisets (object, flags, fade, partitions, sphere, bucket's pipeline,
-	 * each sequence's bytes). Returns the lanes that differ; logs the first few.
-	 */
+	/** @brief Compare an incremental set against a full build of the same snapshot. Returns the number of differing lanes. */
 	std::size_t CompareSets(const SceneLists& a_lists, const Direct::ViewBatchSet& a_incremental, const Direct::ViewBatchSet& a_full,
 		const std::vector<DrawSequence>& a_fullSequences, const ViewBatchInputs& a_in);
 }

@@ -2,10 +2,9 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// The index pool (IndexPool): every geometry slot's indices in one buffer, which every plain indexed draw binds. Self-contained (the
-// passes of the features that draw indexed include it); Internal.h includes it before the shadow frame's types.
+// The index pool holds every geometry slot's indices in one buffer, which every plain indexed draw binds.
 
-// volk must precede every Vulkan header in this translation unit (Helpers.h: DrawPipelinesRhi.h's FamilyPipelines).
+// volk must come before every Vulkan header in this translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
@@ -22,17 +21,12 @@
 
 namespace DCLF::Draws
 {
-	/**
-	 * @brief Every geometry slot's indices copied into one buffer, so plain indexed draws bind one index buffer and keep vertex
-	 * reuse. Ranges are per slot, never shared: a buffer address is no identity (freed addresses are reused at once). The frame's
-	 * first drawing commit reassigns logged slots' ranges (UpdateIndexPool), copied before its draws. Render thread. Its capacities
-	 * (indices, geometry slots, copies) are the named versions' units (Impl::RequireIndexPool).
-	 */
+	/** @brief Every geometry slot's indices in one buffer, so plain indexed draws bind one index buffer and keep vertex reuse.
+	 * Ranges are per slot and never shared, since freed buffer addresses are reused at once. Render thread. */
 	struct IndexPool
 	{
 		static constexpr std::uint32_t kNoRange = ~0u;
-		// A slot's range: first index and count (even: 4-byte aligned), and the source buffer (its address, which names it, and its buffer
-		// view ref, which the copy reads through).
+		// A slot's range. The count is even to keep 4-byte alignment.
 		struct Range
 		{
 			std::uint32_t first = kNoRange, count = 0;
@@ -40,18 +34,16 @@ namespace DCLF::Draws
 			RenderGraph::BufferRef ref;
 		};
 		Versioned indices;  // 16-bit
-		Versioned firsts;   // per geometry slot: its range's first index, kNoRange without one
-		Versioned copies;   // this commit's copies: source buffer view ref, first index, words
-		// The versions the last update filled: an indices version it did not lay out is laid out and every range copied again; a
-		// firsts version it did not fill is sent every slot's first index.
+		Versioned firsts;   // per geometry slot, kNoRange without one
+		Versioned copies;   // this commit's copies
+		// The versions the last update filled. A new indices version is laid out again and every range recopied.
 		org::services::FilledVersion indicesFilled, firstsFilled;
-		// Slots waiting for growth (no room, past the first-index table or this commit's copies); retried by every update.
+		// Slots waiting for growth, retried by every update.
 		std::vector<std::uint32_t> waiting;
-		// No room though the pool has twice what it holds: the serial of the indices version found fragmented, published by the
-		// render thread; the producer requires a version newer than it (a relayout at the same size). A serial alone, so relaxed
-		// order suffices.
+		// The serial of an indices version found fragmented despite twice the room. The producer then requires a newer version.
+		// A serial alone, so relaxed order is enough.
 		std::atomic<std::uint64_t> fragmentedAt{ 0 };
-		// The revision producer's bound (RevisionProducer::poolBound): every slot's index count, kept from the log.
+		// The revision producer's bound, every slot's index count kept from the log.
 		struct Bound
 		{
 			LogCursor cursor;
@@ -61,8 +53,8 @@ namespace DCLF::Draws
 		std::shared_ptr<const ComputeProgram> program;
 		rhi::CommandSignaturePtr dispatchSignature;
 		LogCursor cursor;
-		std::vector<Range> slots;                                   // per geometry slot: its range
-		std::vector<std::uint32_t> slotFirst;                       // per geometry slot: what firsts holds
+		std::vector<Range> slots;
+		std::vector<std::uint32_t> slotFirst;                       // what firsts holds
 		std::map<std::uint32_t, std::uint32_t> free;                // first -> count
 		std::uint32_t end = 0;                                      // past the last range ever given out
 		std::uint64_t indicesHeld = 0;                              // live indices, for the report

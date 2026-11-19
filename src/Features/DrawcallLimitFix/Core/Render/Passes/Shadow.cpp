@@ -1,6 +1,4 @@
-// The shadow views' and occlusion maps' graph extension: their resources registered, and the shadow epoch's passes gathered from the
-// schedule (shadows.*: Features/Shadows/Engine's); and the shadow epoch's index pool copies (Core's IndexPoolPass, as the depth epoch's),
-// which that feature's shadows.index-pool makes.
+// The shadow views' and occlusion maps' graph extension: their resources, the shadow epoch's scheduled passes and its index pool copies.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/IndexPoolPass.h"
@@ -24,7 +22,7 @@ namespace DCLF::Draws
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.shadow.caster-rows"), resources->casterRows);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.shadow.caster-firsts"), resources->casterFirsts);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.shadow.caster-rows-used"), resources->casterRowsUsed);
-			// The slots and shadow maps as the build state has them, never the live vectors the render thread grows.
+			// Use the build state's slots and maps, never the live vectors the render thread grows.
 			for (std::size_t s = 0; s < slots->drawArgs.size(); ++s) {
 				if (slots->OwnsDrawArgs(s))
 					Register(a_graph, org::ResourceIdentifier(fmt::format("cs.dclf.shadow.draw-args{}", s)), slots->drawArgs[s]);
@@ -39,7 +37,6 @@ namespace DCLF::Draws
 
 		void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 		{
-			// The shadow epoch's passes (Schedule/Frame.cpp): the graph's epoch's.
 			Api::PassContext context{};
 			context.shadow = &build->shadow;
 			context.build = build.get();
@@ -47,7 +44,7 @@ namespace DCLF::Draws
 		}
 
 	private:
-		std::shared_ptr<const BuildState> build;  // what the graph is built from; held for the build
+		std::shared_ptr<const BuildState> build;  // held for the build
 		std::shared_ptr<ShadowResources> resources;
 		std::shared_ptr<const ShadowSlotBuffers> slots;
 	};

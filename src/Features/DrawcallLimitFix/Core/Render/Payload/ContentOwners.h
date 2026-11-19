@@ -1,9 +1,8 @@
 #pragma once
 
-// The owners of what GPU-visible bytes currently hold (dclf-architecture.md, "Descriptor ownership"): the descriptors an uploaded
-// OwnedRow names, by the range its write replaced. Bytes written once and read by any later execution (a latched draw row both main
-// epochs draw with, a table row read until it is rewritten) keep their descriptors through every execution submitted while they are
-// current: each execution holds Snapshot (ExecutionOwners::Seal).
+// Tracks which descriptors the bytes in GPU buffers currently name, by byte range.
+// Bytes written once can be read by many later executions, so each execution holds a snapshot of the owners
+// to keep those descriptors alive while the bytes are current.
 
 #include <cstddef>
 #include <cstdint>
@@ -16,22 +15,16 @@
 namespace DCLF::Draws
 {
 	/**
-	 * @brief The scene's content owners (SceneBuffers::content): render thread. Ranges are keyed by their target as the upload classes
-	 * match it (a plain buffer's address, a versioned buffer's Key(): every version of it, so a catch-up's or a growth's copy keeps them).
+	 * @brief Owners of uploaded descriptor-naming bytes. Render thread only.
+	 * Versioned buffers are keyed by Key(), so growth copies keep their owners.
 	 */
 	class ContentOwners
 	{
 	public:
-		/**
-		 * @brief a_target's [a_offset, a_offset + a_bytes) now holds bytes naming a_owners' descriptors (none: plain bytes); every range it
-		 * overlaps is replaced. A replaced range's owners go with the next snapshot, so the last of them is released by an execution.
-		 */
+		/** @brief Records the owners for a range, replacing every range it overlaps. Replaced owners live until the next snapshot is released. */
 		void Set(const void* a_target, std::uint64_t a_offset, std::uint64_t a_bytes, std::span<const std::shared_ptr<const void>> a_owners);
 
-		/**
-		 * @brief One owner of every current range's owners (and those replaced since the last snapshot), sealed on the cleanup queue; made
-		 * again only after a change. Null when there are none.
-		 */
+		/** @brief One owner holding all current and recently replaced owners. Rebuilt only after a change. Null when empty. */
 		std::shared_ptr<const void> Snapshot();
 
 		struct Counts

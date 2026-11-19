@@ -1,5 +1,5 @@
-// The main build (MainBuild.h): both main segments' payloads from a publication's tables and lookups (pipeline and material rows,
-// the resident region, the object loop). Pure; run by the snapshot builder on DCLF's pool, one build at a time.
+// Builds both main segments' payloads from a publication's tables and lookups. Pure.
+// The snapshot builder runs it on DCLF's pool, one build at a time.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -15,7 +15,6 @@ namespace DCLF::Draws
 	{
 		using Skip = IndirectDraws::Skip;
 
-		// Blocks shared by many objects.
 		struct PipelineBlocks
 		{
 			std::uint32_t setIndex = Lookups::kNone;
@@ -26,7 +25,7 @@ namespace DCLF::Draws
 			bool rowOk = false;        // its pipeline row's blocks fit (MainRows)
 		};
 
-		/** @brief A pipeline's constant tables, hashed (FNV-1a): what a material row was packed with. */
+		/** @brief FNV-1a hash of a pipeline's constant tables, to tell which tables a material row was packed with. */
 		std::uint64_t TablesHash(std::span<const std::uint8_t> a_vs, std::span<const std::uint8_t> a_ps)
 		{
 			std::uint64_t hash = 14695981039346656037ull;
@@ -40,7 +39,6 @@ namespace DCLF::Draws
 			return hash;
 		}
 
-		/** @brief The projected texture a ProjectedUV pipeline binds at a_slot, or -1. */
 		std::int32_t ProjectedSlot(bool a_projectedPipeline, std::uint32_t a_slot)
 		{
 			if (!a_projectedPipeline)
@@ -52,21 +50,19 @@ namespace DCLF::Draws
 			return -1;
 		}
 
-		/** @brief The segment built first: colour when built (its skips are the report's). */
+		/** @brief Colour when built, since the report counts its skips. */
 		std::size_t PrimarySegment(const std::array<const MainInputs*, 2>& a_in) { return a_in[kAsyncColour] ? kAsyncColour : kAsyncZPrepass; }
 
-		// Pairs.Resolve goes to the pool for a check list worth the chunks; a chunk ends on a material boundary past this many pairs.
+		// Pair resolution goes to the pool past this many pairs. Chunks end on a material boundary.
 		constexpr std::size_t kPairFanoutMin = 512;
 		constexpr std::size_t kPairGrain = 128;
-		// A region resync goes to the pool for this many object slots, in chunks of this many.
 		constexpr std::size_t kResyncFanoutMin = 4096;
 		constexpr std::size_t kResyncGrain = 512;
 
 		std::uint64_t Mix(std::uint64_t a_value, std::uint64_t a_word) { return (a_value ^ a_word) * 0x100000001b3ull; }
 
-		// A kept array's writes from pool chunks (KeptArray: the chunked copy-on-write's PrepareWrites/WriteParts/MarkParts when it has
-		// them; else the whole array made writable once before the loop, the parts compared and written by hand). The marks are applied
-		// on the owner thread afterwards, in chunk order.
+		// Prepares a kept array for writes from pool chunks.
+		// The marks are applied afterwards on the owner thread, in chunk order.
 		template <class Rows>
 		void PrepareMainKeptWrites(Rows& a_rows, std::size_t a_first, std::size_t a_count)
 		{
@@ -105,10 +101,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		/**
-		 * @brief The texture registers by who gives them (ResolvePair): the pipeline row (t14), the material row (t0-t15 but t14, and the
-		 * features' registers), the payload's buffers, and the frame record (the rest; the Z-prepass's binds only the character light's).
-		 */
+		/** @brief Which source gives each texture register: the pipeline row for t14, the material row, the payload, or the frame record. */
 		struct TextureClasses
 		{
 			std::array<std::uint64_t, 2> shadowMask{}, material{}, buffers{}, frame{}, characterLight{};
@@ -142,7 +135,7 @@ namespace DCLF::Draws
 			return classes;
 		}
 
-		/** @brief A material row's state as a pair's verdict reads it (MainRows::MaterialState but its key), hashed. */
+		/** @brief A hash of the material row state a pair's verdict reads. */
 		std::uint64_t MaterialStateWitness(const MainRows::MaterialState& a_state)
 		{
 			std::uint64_t value = 0xcbf29ce484222325ull;
@@ -162,9 +155,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief What resolving pairs writes besides the pairs (MainBuild::WriteMaterialRow, ResolvePair): the loop's, merged after each
-		 * resolution, or one pool chunk's, merged in chunk order (MainBuild::MergeWork) with its row marks applied there (the rows'
-		 * journal is single-threaded). A chunk writes only its own materials' rows (chunks split on material boundaries).
+		 * @brief What resolving pairs writes besides the pairs, merged in chunk order because the rows' journal is single-threaded.
+		 * A chunk writes only its own materials' rows, since chunks split on material boundaries.
 		 */
 		struct PairWork
 		{
@@ -174,11 +166,11 @@ namespace DCLF::Draws
 			std::uint64_t materialsWritten = 0, materialRowsWritten = 0;
 			std::uint32_t missingVertexConstants = 0, missingPixelConstants = 0;
 			std::uint32_t rowTableConflicts = 0, conflictMaterial = 0, conflictPipeline = 0;
-			// Region pairs that cannot draw, counted per resolution as AssembleRecord counts a draw: skips, the texture sample, deferrals.
+			// Region pairs that cannot draw, counted per resolution the way AssembleRecord counts a draw.
 			std::array<std::uint32_t, static_cast<std::size_t>(Skip::Count)> skipped{};
 			std::vector<std::uint32_t> missingTextures;
 			std::uint32_t deferredTextures = 0;
-			// Region: each pair resolved again, its verdict, applied to the pair in check order (UpdateRegionPairs).
+			// Each re-resolved pair's verdict, applied in check order.
 			struct Verdict
 			{
 				ResidentRegion::Pair* pair = nullptr;
@@ -199,13 +191,13 @@ namespace DCLF::Draws
 			}
 		};
 
-		/** @brief A body no payload holds, reset (the build cache's; a new one when it has none free, or with no cache). */
+		/** @brief A body no payload holds, reset, or a new one. */
 		std::shared_ptr<MainBody> AcquireBody(BuildCache* a_cache)
 		{
 			if (!a_cache)
 				return std::make_shared<MainBody>();
-			// Every idle body is reset, not only the one taken, as AcquirePayload does: one left idle past the first free would hold its
-			// stream views (their tables) and binding owners, and keep the retirement chain from that publication on.
+			// Reset every idle body, not only the one taken. An idle body would otherwise hold its stream views and owners
+			// and keep that publication from retiring.
 			std::shared_ptr<MainBody> free;
 			for (auto& held : a_cache->bodies)
 				if (held.use_count() == 1) {
@@ -217,10 +209,8 @@ namespace DCLF::Draws
 		}
 
 		/**
-		 * @brief One build of the main segments' payloads (BuildMainPayloads); Run calls the parts in order. Both segments draw the
-		 * frame's DCLF set and nothing else. They read one list: each main candidate once, its view mask choosing the segments
-		 * (MainMaskOf), drawable only when every built segment can draw its pair, so a member is drawn by both or neither. The
-		 * other segment's payload shares the primary's body with its own inputs (Finish).
+		 * @brief One build of the main segments' payloads. Both segments read one list, and an object draws only when every built segment
+		 * can draw its pair, so a member is drawn by both or neither.
 		 */
 		class MainBuild final
 		{
@@ -231,9 +221,9 @@ namespace DCLF::Draws
 				out(*a_out[primary]), rows(a_rows), cache(a_cache), heldBody(AcquireBody(a_cache)), body(*heldBody)
 			{}
 
-			/** @brief The build but what reads the stream views (Finish). */
+			/** @brief Everything except the part that reads the stream views. */
 			void Run();
-			/** @brief The stream views' part (the geometry draws, the rows' views) and the other segment's payload. */
+			/** @brief The stream views' part, then the other segment's payload. */
 			void Finish(std::shared_ptr<const StreamViews> a_streams);
 
 		private:
@@ -242,24 +232,21 @@ namespace DCLF::Draws
 			const std::size_t primary;
 			const MainInputs& in;  // the primary segment's
 			const SceneTables& tables;
-			// Each object's root slot (the root states' family's objectRow), read once a build for the inputs' fade rows.
 			const std::span<const std::uint32_t> objectRoots = ObjectRootsOf(tables);
 			const FrameTables& frame;  // the frame's PerGeometry blocks
 			const Lookups& lookups;
 			MainPayload& out;  // the primary segment's
 			MainRows& rows;
 			BuildCache* cache;
-			// The build's body (MainBody): what both segments' payloads hold, handed to them by Reset and Finish.
+			// Shared by both segments' payloads.
 			const std::shared_ptr<MainBody> heldBody;
 			MainBody& body;
 			std::shared_ptr<const StreamViews> streams;  // the frame's (Finish), or none: the build packs its own geometry slots
-			// The parts' timings (partMs) are the report's alone: the clock is read only when it is wanted.
+			// Only read the clock when the report wants part timings.
 			const bool timeParts = Diagnostics::Observe().stats || Diagnostics::Observe().profile;
-			// Pool fan-out (Policy::SerialFanout keeps every loop on the builder's thread).
 			const bool serialFanout = Policy::SerialFanout();
-			// The CategoryRoot views' phases (Extensions::Views, resolved at install), read once a build for InSet.
 			const std::uint8_t rootPhases = Extensions::Views().rootPhases;
-			// Policy::CheckRowPacking: per material, the first pipeline packing its row this build (whole builds; the region checks its pairs).
+			// Per material, the first pipeline packing its row this build.
 			const bool checkPacking = Policy::CheckRowPacking(rows.builds);
 			ankerl::unordered_dense::map<std::uint32_t, std::pair<std::uint32_t, std::array<std::uint64_t, 3>>> packingSeen;
 			PairWork loopWork;  // the object loop's resolutions (merged after each)
@@ -272,15 +259,12 @@ namespace DCLF::Draws
 			const std::uint32_t frameNumber = in.frameNumber;
 			static constexpr auto renderFlags = GeometryPort::kMainPassRenderFlags;
 
-			// The frame registers' blocks (FrameRegisters), per segment.
 			std::array<std::array<std::uint64_t, kConstantBufferRegisters>, 2> frameVS{}, framePS{};
 			std::array<std::uint32_t, 2> frameVSBits{}, framePSBits{};  // the registers above that are bound (bit per register)
 			std::vector<PipelineBlocks> pipelineBlocks;
-			// Per (material, pipeline) pair: its verdict this build.
 			ankerl::unordered_dense::map<std::uint64_t, ResolvedBindings> resolvedBindings;
 			std::uint32_t currentObject = ~0u;
 			std::chrono::steady_clock::time_point partStart;
-			// The resident region and its share of the buffers' capacity.
 			ResidentRegion* region = nullptr;
 			bool wholeScene = false;
 			std::size_t regionInputs = 0, regionDraws = 0;
@@ -293,94 +277,76 @@ namespace DCLF::Draws
 			void PrepareObjects();
 			void Skipped(Skip a_reason);
 			void Mark(std::size_t a_part);
-			/** @brief The built segments as bits (1 << kAsyncColour, 1 << kAsyncZPrepass). */
 			std::uint8_t Segments() const
 			{
 				return static_cast<std::uint8_t>((segmentIn[kAsyncColour] ? 1u << kAsyncColour : 0u) | (segmentIn[kAsyncZPrepass] ? 1u << kAsyncZPrepass : 0u));
 			}
-			// In the frame's set: the only objects either segment draws. A CategoryRoot view's members (the first person's: its phase, no
-			// kObjectMember) are drawable, their input the view's alone.
+			// Only set members are drawn. A CategoryRoot view's members are drawable through the view's phase alone.
 			bool InSet(std::uint32_t o) const
 			{
 				return o < tables.objects.size() && ((tables.objects[o].flags & kObjectMember) || (o < tables.setPhases.size() && (tables.setPhases[o] & rootPhases)));
 			}
 
-			// The pair's rows (RowsOf), checked once per build, or kNoRecord after Skipped() recorded why.
+			// Checked once per build. kNoRecord after Skipped() recorded why.
 			std::uint32_t AssembleRecord(std::uint32_t o, const ObjectRecord& object, const PipelineBlocks& blocks);
-			/**
-			 * @brief The pair's verdict: what its rows give (a_material: its material row's state, written for this pipeline) against what
-			 * its pipeline reads; the frame textures it asks of the commit into a_registers. Pure but for a_work: any thread.
-			 */
+			/** @brief Checks what a pair's rows give against what its pipeline reads. Pure except for a_work, so any thread. */
 			void ResolvePair(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks, const MainRows::MaterialState& a_material, ResolvedBindings& resolved,
 				std::array<std::uint64_t, 2>& a_registers, PairWork& a_work) const;
-			/** @brief Rewrites the pipeline's row when its sources changed. */
 			void WritePipelineRow(std::uint32_t p, const PipelineBlocks& blocks);
-			/** @brief The material row's sources for pipeline p (MainRows::MaterialState::key). */
 			std::array<std::uint32_t, 8> MaterialRowKey(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks) const;
-			/** @brief The material's row and its state packed for pipeline p, from scratch (pure). */
+			/** @brief Packs the material's row for pipeline p from scratch. Pure. */
 			void PackMaterialRow(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks, const std::array<std::uint32_t, 8>& a_key, MainRows::MaterialState& a_state,
 				MaterialRow& a_row) const;
-			// PackMaterialRow's stages: the PerMaterial constant blocks (and TexcoordOffset's place), the textures, the samplers.
 			void PackMaterialBlocks(std::uint32_t p, const MaterialRecord& a_material, const PipelineBlocks& blocks, MainRows::MaterialState& a_state, MaterialRow& a_row) const;
 			void PackMaterialTextures(std::uint32_t m, bool a_projected, const Lookups::Material* a_lookup, const MaterialRecord& a_material, MainRows::MaterialState& a_state,
 				MaterialRowHeader& a_header) const;
 			void PackMaterialSamplers(std::uint32_t p, bool a_projected, const MaterialRecord& a_material, MainRows::MaterialState& a_state, MaterialRowHeader& a_header) const;
-			/**
-			 * @brief Rewrites the material's row when its sources changed: marked now, or for a pool chunk (a_work.deferred) written into the
-			 * prepared rows and marked by MergeWork. Only the chunk holding m writes m's row.
-			 */
+			/** @brief Rewrites the material's row when its sources changed. A pool chunk's write is marked later by MergeWork. */
 			void WriteMaterialRow(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks, PairWork& a_work);
-			/** @brief A_work's rows marks, counters, skips and samples into the build and the rows (owner thread, in order); a_work cleared. */
+			/** @brief Merges a_work into the build and rows on the owner thread, in order, then clears it. */
 			void MergeWork(PairWork& a_work);
-			/** @brief The written rows' animated rows (MainRows::AnimatedRows) taken or let go, their headers with them (Finish, before the rows' views). */
+			/** @brief Takes or releases animated rows for the written rows. Runs in Finish before the rows' views. */
 			void AssignAnimatedRows();
-			/** @brief What packing a material row for pipeline p depends on of p (technique bindings, projected, constant tables). */
+			/** @brief What packing a material row depends on from pipeline p. */
 			std::array<std::uint64_t, 3> PackingOf(std::uint32_t p) const;
-			/** @brief Policy::CheckRowPacking: logs a material whose pipelines pack its one row differently (a_first, a_second). */
+			/** @brief Logs a material whose pipelines pack its one row differently. */
 			void NotePackingConflict(std::uint32_t m, std::uint32_t a_first, std::uint32_t a_second);
 
 			void BuildResidentRegion();
 			static std::uint64_t PairKeyOf(const ObjectRecord& a_object) { return (std::uint64_t(a_object.materialIndex) << 32) | a_object.pipelineIndex; }
 			bool ResidentAt(std::uint32_t o) const { return o < tables.residentSlot.size() && tables.residentSlot[o] != 0; }
-			// What the region can hold: a resident's (with the whole scene, anyone's) single-input record, plus with the whole
-			// scene the depth segment's cull-only candidates.
+			// With the whole scene, any single-input record and the depth segment's cull-only candidates can join the region.
 			bool RegionEligible(std::uint32_t o) const;
-			// The input the loop would write, drawable while in the set with its pair's record built.
 			std::uint8_t RegionEntry(std::uint32_t o, DrawInput& a_input) const;
-			// An object's main entry taking or leaving pair a_key (its lists, the pair's objects, its bundle share).
 			void RegionAcquire(std::uint64_t a_key, std::uint32_t o);
 			void RegionRelease(std::uint64_t a_key, std::uint32_t o);
-			// A pair's share of the bundle: its frame textures (by count per register) and its owners (by count per owner).
+			// A pair's share of the bundle, kept by count.
 			void SetPairRegisters(ResidentRegion::Pair& a_pair, const std::array<std::uint64_t, 2>& a_registers);
 			void SetPairOwners(ResidentRegion::Pair& a_pair, std::uint32_t m, std::uint32_t p, const void* a_binding, const void* a_mask);
 			void AcquireOwner(const void* a_owner, const std::shared_ptr<const void>& a_held);
 			void ReleaseOwner(const void* a_owner);
-			/** @brief Every slot's entry again after a Reset: evaluated on the pool, indexed by a prefix sum, scattered (one journal resync). */
+			/** @brief Rebuilds every entry after a Reset on the pool, with one journal resync. */
 			void ResyncRegionParallel();
-			/** @brief Policy::CheckBuilderPairs: the parallel resync's entries against the serial path's verdicts, slot by slot. */
+			/** @brief Checks the parallel resync against the serial path, slot by slot. */
 			void CheckRegionResync();
-			/** @brief Resolves check[a_begin, a_end) (whole materials) into a_work: a pool chunk, or the whole list serially. */
+			/** @brief Resolves whole materials of the check list into a_work. */
 			void ResolvePairsChunk(const std::vector<std::uint64_t>& a_check, std::size_t a_begin, std::size_t a_end, bool a_everyPair, PairWork& a_work);
-			/** @brief Policy::CheckBuilderPairs: every pair resolved again serially from scratch, against what the narrowed checks left. */
+			/** @brief Resolves every pair again serially from scratch and compares with what the narrowed checks left. */
 			void CheckNarrowedPairs();
-			/** @brief Policy::CheckRowPacking: every material's live pairs pack its row alike. */
+			/** @brief Checks that every material's live pairs pack its row alike. */
 			void CheckRegionPacking();
-			// An entry's draws, with the region's totals.
 			void RegionSetDraws(std::uint32_t i, std::uint8_t a_draws);
 			void RegionRemove(std::uint32_t o);
-			/** @brief Writes entry i whole (the caller merged its main part). */
+			/** @brief Writes entry i whole. The caller already merged its main part. */
 			void RegionWrite(std::uint32_t i, const DrawInput& a_entry);
-			/** @brief A decal's blank input: BuildDrawsCS writes a zero-count draw; it names no row past the scene's buffers. */
+			/** @brief A decal's blank input. BuildDrawsCS writes a zero-count draw, and it names no row past the scene's buffers. */
 			DrawInput DecalBlank(std::uint32_t o) const;
 			void RegionUpsert(std::uint32_t o);
 			void RegionTake(std::uint32_t o);
-			/** @brief Updates the entries the change log named since the last build, or every slot on a resync. */
+			/** @brief Updates the entries the change log named, or every slot on a resync. */
 			void UpdateRegionEntries();
-			/** @brief Updates entries whose pipeline's set index changed or whose pair's record became (un)buildable. */
+			/** @brief Updates entries whose pipeline set index changed or whose pair became buildable or unbuildable. */
 			void UpdateRegionPairs();
-			// UpdateRegionPairs' stages, in order: the pipelines whose set index changed; whether every pair is checked (the frame's half
-			// moved or a log was lost); the pipelines whose witness moved; the pairs to check; their resolution (pool chunks or serial);
-			// the verdicts applied; the bundle; the changed entries rewritten.
 			void ChangedPipelineSets(std::vector<std::uint32_t>& a_changed);
 			bool EveryPairMoved();
 			void MovedPipelines(std::vector<std::uint32_t>& a_moved);
@@ -390,13 +356,11 @@ namespace DCLF::Draws
 			void BundleRegionPairs();
 			void RewriteChangedEntries(const std::vector<std::uint32_t>& a_changedPipelines, const std::vector<std::uint64_t>& a_changedPairs);
 			std::uint64_t PipelineWitness(std::uint32_t p) const;
-			/** @brief Routes every touched slot to the region, the loop (loopList) or nobody, and notes candidate-only ones. */
+			/** @brief Routes every touched slot to the region, the loop or nobody. */
 			void RouteTouched();
-			/** @brief Publishes the region's draws into the payload. */
 			void PublishRegion();
 
 			void RunObjectLoop();
-			/** @brief One loop object: its draw input, and its sequence and record when drawn. */
 			void LoopObject(std::uint32_t o);
 		};
 	}
@@ -429,11 +393,11 @@ namespace DCLF::Draws
 
 	void MainBuild::BeginRows()
 	{
-		// The journals keep what the oldest payload backing lacks (its content epoch); only what is written from here on is new.
+		// Only what is written from here on is new. The journals keep what the oldest backing lacks.
 		rows.material.BeginBuild(in.materialRowsOldestContentEpoch);
 		rows.pipeline.BeginBuild(in.pipelineRowsOldestContentEpoch);
 		if (!rows.active || rows.identity != in.addresses.identity || rows.generation != in.tablesGeneration) {
-			// New resources or tables (slots mean other things): every row again.
+			// New resources or tables mean the slots mean other things, so redo every row.
 			rows.material.Clear();
 			rows.pipeline.Clear();
 			rows.materials.clear();
@@ -448,9 +412,8 @@ namespace DCLF::Draws
 		++rows.builds;
 		if (rows.material.Size() < tables.materials.size())
 			rows.material.Mutable().resize(tables.materials.size());
-		// The pipeline rows follow the pipeline table both ways: cut with its top (Coordinator::RecycleRetired), they drop the rows and
-		// write states past it, so a slot made again past the cut starts unwritten (its row is written whole and marked) and the part's
-		// next version is smaller (PayloadVersions; PooledBackings::Shrink gives the class back).
+		// Pipeline rows shrink with the pipeline table, so a slot reused past the cut starts unwritten
+		// and the part's next version can shrink too.
 		if (const auto slots = tables.pipelines.size(); rows.pipeline.Size() > slots) {
 			rows.pipeline.Mutable().resize(slots);
 			rows.pipelines.resize(slots);
@@ -466,7 +429,7 @@ namespace DCLF::Draws
 
 	void MainBuild::FrameRegisters()
 	{
-		// A frame slot the commit does not supply stays zero, which the constants check rejects for a pipeline reading it.
+		// An unsupplied frame slot stays zero, which the constants check rejects for any pipeline reading it.
 		frameVS = {};
 		framePS = {};
 		frameVSBits = framePSBits = {};
@@ -491,13 +454,12 @@ namespace DCLF::Draws
 		TracyCZoneN(pipelinesZone, "CS.DCLF.BuildMain.Pipelines", true);
 		for (std::size_t p = 0; p < tables.pipelines.size(); ++p) {
 			auto& blocks = pipelineBlocks[p];
-			// Only used pipeline slots get rows.
 			if (!tables.PipelineUsed(p) || p >= lookups.pipelines.size())
 				continue;
 			const auto& entry = lookups.pipelines[p];
 			if (entry.setIndex == Lookups::kNone || !(entry.key == tables.pipelines[p]))
 				continue;
-			// No published constants yet: no row (its members wait).
+			// No published constants yet, so no row. Its members wait.
 			if (!tables.PipelineConstantsCurrent(p) || !tables.TechniqueConstantsValid(p))
 				continue;
 			blocks.setIndex = entry.setIndex;
@@ -506,7 +468,7 @@ namespace DCLF::Draws
 			blocks.usage[kAsyncColour] = &entry.usage[kColorVariant];
 			blocks.usage[kAsyncZPrepass] = &entry.usage[kDepthVariant];
 			blocks.shadowMaskIndex = entry.shadowMaskIndex;
-			// Hashed again only when the entry moved (its version is new with any change of its tables).
+			// Rehash only when the entry's version moved.
 			auto& hashed = rows.tablesHashes[p];
 			if (hashed.instance != lookups.instance || hashed.version != entry.version)
 				hashed = { lookups.instance, entry.version, TablesHash(blocks.vsTable, blocks.psTable) };
@@ -519,8 +481,6 @@ namespace DCLF::Draws
 
 	void MainBuild::WritePipelineRow(std::uint32_t p, const PipelineBlocks& blocks)
 	{
-		// The row's sources: the pipeline's constants and permutation, its technique's constants and bindings, its lookup entry
-		// and the shared lookups.
 		auto& state = rows.pipelines[p];
 		const auto& techniqueRow = tables.TechniqueOf(p);
 		const std::uint64_t vertexLayout = tables.pipelines[p].vertexLayout;
@@ -540,12 +500,10 @@ namespace DCLF::Draws
 			}
 			PackConstantGroup(a_block, a_layout, a_table, a_variables, a_first, std::span(row.bytes.data() + a_offset, a_room));
 		};
-		// A family key without row blocks keeps its technique and PerGeometry blocks zero (the Effect port's: its variants read the frame's
-		// fog VS b13 and camera planes PS b13 c17, Effect.hlsl, or the object's World, PropertyColor and alpha test reference).
+		// A family without row blocks keeps its technique and PerGeometry blocks zero. The Effect port reads frame values there instead.
 		if (Extensions::FamilyRules(tables.pipelines[p].rasterFlags).rowBlocks) {
 			pack(technique.vs, LightingVSLayout(), blocks.vsTable, kVSGroups[kPerTechnique], kVSFirstVariable[kPerTechnique], kPipelineRowTechniqueVS, kPipelineRowTechniqueBytes);
 			pack(technique.ps, LightingPSLayout(), blocks.psTable, kPSGroups[kPerTechnique], kPSFirstVariable[kPerTechnique], kPipelineRowTechniquePS, kPipelineRowTechniqueBytes);
-			// The PerGeometry template: what objects do not override from their records.
 			GeometryTemplate geometry;
 			PackGeometryTemplate(tables.pipelineConstants[p].constants, blocks.vsTable, blocks.psTable, true, geometry);
 			if (geometry.vs.size() > kPipelineRowGeometryVSBytes || geometry.ps.size() > kPipelineRowGeometryPSBytes)
@@ -555,15 +513,13 @@ namespace DCLF::Draws
 				std::memcpy(row.bytes.data() + kPipelineRowGeometryPS, geometry.ps.data(), geometry.ps.size());
 			}
 		}
-		// The permutation is per pipeline: its one per-object bit, SuppressExternalEmittance, is read only by Effect.hlsl's
-		// GetLightingColor, never by Lighting.hlsl.
+		// The permutation is per pipeline. Its one per-object bit is read only by Effect.hlsl, never by Lighting.hlsl.
 		const auto& permutation = tables.permutations[p];
 		const std::uint32_t data[8] = { permutation.vertexShaderDescriptor, permutation.pixelShaderDescriptor, permutation.extraShaderDescriptor,
 			permutation.extraFeatureDescriptor, 0, 0, 0, 0 };
 		std::memcpy(row.bytes.data() + kPipelineRowPermutation, data, sizeof(data));
-		// The header holds no addresses (its reserved words stay zero): the draws' sequences carry the blocks' (BuildDrawsCS).
+		// The header holds no addresses. The draws' sequences carry them.
 		auto& header = HeaderOf(row);
-		// The technique's shadow mask (t14, s14), or the null texture where the technique binds none.
 		const std::uint32_t shadowMask = technique.shadowMask ? blocks.shadowMaskIndex : lookups.nullTexture;
 		header.shadowMask = shadowMask == Lookups::kNone ? 0u : shadowMask;
 		const std::uint32_t filter = technique.shadowMask && technique.filterModes[kShadowMaskSlot] != kUnwrittenFilterMode ? technique.filterModes[kShadowMaskSlot] : 0u;
@@ -582,23 +538,22 @@ namespace DCLF::Draws
 
 	void MainBuild::BeginStates()
 	{
-		// Per-object states are the diagnostics' alone.
+		// Per-object states are only for diagnostics.
 		if (Diagnostics::Observe().claims)
 			body.objectState.assign(tables.objects.size(), kObjectStateAbsent);
 	}
 
 	void MainBuild::PrepareObjects()
 	{
-		// The per-object records are the stream views' (MakeStreamViews, published in the payload source, sent by PayloadPools) and the palettes the
-		// frame values' (FrameValues), not the build's.
+		// Object records come from the stream views and palettes from the frame values, not from this build.
 		Mark(6);
 		if (colourBuilt) {
 			for (std::uint32_t group = 0; group < kDecalGroups; ++group) {
-				// The decal ranges hold every decal except while their growth is outstanding: the rest wait.
+				// Decals past the range wait while its growth is outstanding.
 				decalCount[group] = std::min(tables.rangeCount[group], in.addresses.sequenceDecals);
 			}
-			// A decal past the scene's buffers keeps its slot with a blank input: cutting the range would drop every later
-			// decal while the set claims them.
+			// A decal past the scene's buffers keeps its slot with a blank input.
+			// Cutting the range would drop every later decal while the set claims them.
 			for (std::uint32_t group = 0; group < kDecalGroups; ++group)
 				decalTemplates[group].resize(decalCount[group]);
 		}
@@ -636,7 +591,7 @@ namespace DCLF::Draws
 				if (!first && seen->second.second != PackingOf(p))
 					NotePackingConflict(m, seen->second.first, p);
 			}
-			// No row waits for a table: the payload's row tables hold every row (PayloadPools).
+			// No row waits for a table, because the payload's row tables hold every row.
 			Mark(0);
 			WriteMaterialRow(m, p, blocks, loopWork);
 			Mark(1);
@@ -688,12 +643,12 @@ namespace DCLF::Draws
 	void MainBuild::ResolvePair(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks, const MainRows::MaterialState& material, ResolvedBindings& resolved,
 		std::array<std::uint64_t, 2>& a_registers, PairWork& a_work) const
 	{
-		// An input names its rows in one word (RowsOf): past its fields is a hard failure, like the sequence limits.
+		// An input packs its rows in one word, so overflowing its fields is a hard failure.
 		if (m > kRowMaterialMask || p >= (1u << (32 - kRowPipelineShift)))
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: material slot {} or pipeline slot {} past an input's row fields", m, p));
 		auto fail = [&](Skip a_reason) { resolved.skipReason = static_cast<std::uint32_t>(a_reason); };
 		const auto& pipeline = rows.pipelines[p];
-		// The row was packed with its technique's constant tables; a pipeline of the same slot with others would read it wrong.
+		// The row was packed with its technique's tables. A pipeline in the same slot with other tables would read it wrong.
 		if (material.tables != blocks.tables) {
 			if (a_work.rowTableConflicts++ == 0) {
 				a_work.conflictMaterial = m;
@@ -706,14 +661,12 @@ namespace DCLF::Draws
 			resolved.missingTexture = material.missingTexture;
 			return fail(Skip::Texture);
 		}
-		// Whether segment j's variant gets what it reads from the rows and its frame; false after fail() recorded why. By register
-		// class (TextureClassesOf), as masks: the first register not given is the skip's sample, and the frame textures asked of the
-		// commit are those below it.
+		// Whether segment j's variant gets everything it reads. The first register not given is the skip's sample,
+		// and the frame textures asked of the commit are those below it.
 		const auto& classes = TextureClassesOf();
 		auto reads = [&](std::size_t j) {
 			const auto& usage = *blocks.usage[j];
 			const bool depthOnly = j == kAsyncZPrepass;
-			// Textures: the material row's (t0-t15 but t14, and the features'), the pipeline row's (t14), the frame record's (rest).
 			std::array<std::uint64_t, 2> given{};
 			for (std::size_t w = 0; w < 2; ++w)
 				given[w] = classes.buffers[w] | (pipeline.shadowMask ? classes.shadowMask[w] : 0) | (depthOnly ? classes.characterLight[w] : classes.frame[w]);
@@ -746,7 +699,6 @@ namespace DCLF::Draws
 				fail(Skip::Sampler);
 				return false;
 			}
-			// Constant buffers: the rows' (b0, b1, b2, b4), the frame slots', and the pass's (PS b3, b13).
 			constexpr std::uint32_t registerMask = kConstantBufferRegisters >= 32 ? ~0u : (1u << kConstantBufferRegisters) - 1;
 			constexpr std::uint32_t rowRegisters = (1u << kPerTechnique) | (1u << kPerMaterial) | (1u << kPerGeometry) | (1u << 4);
 			const std::uint32_t rowsMissing = (material.blocksOk ? 0u : 1u << kPerMaterial) | (pipeline.blocksOk ? 0u : rowRegisters & ~(1u << kPerMaterial));
@@ -762,15 +714,14 @@ namespace DCLF::Draws
 			}
 			return true;
 		};
-		// Both segments or neither: every built segment's variant must get what it reads, colour first (its skip is the report's).
+		// Both segments or neither. Colour is checked first since its skip is the report's.
 		if (colourBuilt && !reads(kAsyncColour))
 			return;
-		// Forward keys (blended Lighting, refraction, effects) are no depth segment input, so their depth variant is never drawn. A
-		// ForwardOrDecal family key's depth variant (the Effect port's) is its colour stages (BuildForwardOrDecal), drawn only by the colour
-		// segment's decal depth pass with the colour frame record, which the check above covered.
+		// Forward keys are not depth segment inputs, so their depth variant is never drawn.
+		// The Effect port's depth variant is drawn by the colour decal depth pass, which the check above covered.
 		const auto rasterFlags = tables.pipelines[p].rasterFlags;
 		if (segmentIn[kAsyncZPrepass] && !RasterForward(rasterFlags) && Extensions::FamilyRules(rasterFlags).depthSegment && !reads(kAsyncZPrepass)) {
-			// Colour alone would test EQUAL against depth nobody wrote: neither segment draws it.
+			// Colour alone would test EQUAL against depth nobody wrote, so neither segment draws it.
 			static std::atomic<std::uint32_t> logged{ 0 };
 			if (colourBuilt && logged.fetch_add(1, std::memory_order_relaxed) < 8)
 				logger::info("[DCLF] main pair (material {}, pipeline {}): its colour variant is given what it reads, its depth variant not ({}): neither segment "
@@ -783,11 +734,9 @@ namespace DCLF::Draws
 
 	std::array<std::uint32_t, 8> MainBuild::MaterialRowKey(std::uint32_t m, std::uint32_t p, const PipelineBlocks& blocks) const
 	{
-		// The row's sources: the material record and frame values, its lookup entry, the shared lookups, its technique's bindings
-		// (filter modes a material leaves unwritten) and the constant tables it is packed with.
+		// The technique's bindings matter for filter modes a material leaves unwritten.
 		const Lookups::Material* lookup = m < lookups.materials.size() ? &lookups.materials[m] : nullptr;
-		// The key's port's ProjectedUV bit of its pass descriptor (Lighting's 0x8000; none for an effect key, whose bit 15 is Membrane's, not
-		// ported).
+		// An effect key has no ProjectedUV bit. Its bit 15 is Membrane's, which is not ported.
 		const bool projected = (tables.pipelines[p].passDescriptor & Extensions::FamilyRules(tables.pipelines[p].rasterFlags).projectedPassBit) != 0;
 		return { m < tables.materialVersion.size() ? tables.materialVersion[m] : 0u, m < tables.materialFrameVersion.size() ? tables.materialFrameVersion[m] : 0u,
 			lookup ? lookup->version : ~0u, lookups.sharedVersion, tables.TechniqueOf(p).bindingVersion, projected ? 1u : 0u, static_cast<std::uint32_t>(blocks.tables),
@@ -817,17 +766,14 @@ namespace DCLF::Draws
 		const auto key = MaterialRowKey(m, p, blocks);
 		if (state.written && state.key == key)
 			return;
-		// Which of the key's parts moved (the report's).
 		if (state.written)
 			for (std::size_t k = 0; k < key.size(); ++k)
 				a_work.keyMoved[k] += state.key[k] != key[k] ? 1u : 0u;
 		MaterialRow row;
 		PackMaterialRow(m, p, blocks, key, state, row);
-		// The animated row it holds (read only here: Finish assigns a row that has none and lets go of one no longer animated).
+		// Read only here. Finish assigns and releases animated rows.
 		HeaderOf(row).animatedRow = MainRows::AnimatedRows::Animated(state) ? rows.animated.RowOf(m) : ~0u;
-		// Only the parts that moved are marked (an animated effect's TexcoordOffset or falloff moves one, not the row): a backing catches up
-		// those parts alone (EmitMainRowParts).
-		// Its state moved with it (the products read it: MainRows::productDirty, marked here or by MergeWork).
+		// Mark only the parts that moved, so a backing catches up just those. An animated effect moves one part, not the row.
 		if (!a_work.deferred) {
 			if (rows.material.SetParts(m, row, kMaterialRowParts))
 				++a_work.materialRowsWritten;
@@ -842,9 +788,8 @@ namespace DCLF::Draws
 
 	void MainBuild::PackMaterialBlocks(std::uint32_t p, const MaterialRecord& material, const PipelineBlocks& blocks, MainRows::MaterialState& state, MaterialRow& row) const
 	{
-		// PerMaterial blocks, packed through the technique's tables in the record's shader's variable space (a port's record is its shader's,
-		// the Effect port's BSEffectShader's, its tables Effect.hlsl's), the groups the key's shader's. A record of another shader than its
-		// key's gets no row.
+		// PerMaterial blocks are packed in the record's shader variable space through the technique's tables.
+		// A record of another shader than its key's gets no row.
 		const std::uint8_t keyKind = Extensions::FamilyRules(tables.pipelines[p].rasterFlags).kind;
 		const auto& recordSpace = Extensions::MaterialSpaceOf(material.kind);
 		const auto& keySpace = Extensions::MaterialSpaceOf(keyKind);
@@ -860,8 +805,7 @@ namespace DCLF::Draws
 		if (state.blocksOk) {
 			PackConstantGroup(material.vs, vsLayout, blocks.vsTable, vsGroup, vsFirst, std::span(row.bytes.data() + kMaterialRowVS, kMaterialRowVSBytes));
 			PackConstantGroup(material.ps, psLayout, blocks.psTable, psGroup, psFirst, std::span(row.bytes.data() + kMaterialRowPS, kMaterialRowPSBytes));
-			// The frame-owned variables' places (TexcoordOffset, the port's declared frame variables): the row holds the record's values,
-			// which a feature's frame patch overwrites (a payload product names the places).
+			// The row holds the record's values. A feature's frame patch overwrites the frame-owned ones.
 			PlaceFrameVariables(material, keyKind, { vsLayout, blocks.vsTable, vsGroup, vsFirst }, { psLayout, blocks.psTable, psGroup, psFirst }, state);
 		}
 	}
@@ -871,9 +815,9 @@ namespace DCLF::Draws
 	{
 		header.feedbackSlot = m;
 		header.feedbackRef = TextureFeedback::Ref();
-		// Textures: the material's, else a projected technique's, else the null texture. t14 is the pipeline row's.
+		// The material's textures, else a projected technique's, else the null texture. t14 is the pipeline row's.
 		const bool resolved = lookup && lookup->resolved && lookup->key.first == tables.materialSlotKey[m].first && lookup->key.second == tables.materialSlotKey[m].second;
-		// A character-light pass reads the frame's kCharacterLightRegister instead of t11: null texture there.
+		// A character-light pass reads the frame's kCharacterLightRegister instead of t11, so t11 gets the null texture.
 		const std::uint32_t textureWritten = material.textureWritten &
 		                                     ~(MaterialSources::FrameCharacterLight(tables.materialSlotKey[m].second) ? 1u << kCharacterLightMaterialRegister : 0u);
 		state.texturesOk = true;
@@ -914,7 +858,7 @@ namespace DCLF::Draws
 	void MainBuild::PackMaterialSamplers(std::uint32_t p, bool projected, const MaterialRecord& material, MainRows::MaterialState& state, MaterialRowHeader& header) const
 	{
 		const auto& technique = tables.TechniqueOf(p).value;
-		// Samplers: the material's modes (its technique's filter where unwritten), or a projected technique's.
+		// The material's sampler modes, using the technique's filter where unwritten.
 		for (std::uint32_t sampler = 0; sampler < kSamplerRegisters; ++sampler) {
 			if (sampler == kShadowMaskSlot)
 				continue;
@@ -943,7 +887,6 @@ namespace DCLF::Draws
 		state = {};
 		PackMaterialBlocks(p, material, blocks, state, row);
 		auto& header = HeaderOf(row);
-		// No addresses (the draws' sequences carry the blocks'); not an animated row until one is assigned (MaterialRowHeader).
 		header.animatedRow = ~0u;
 		PackMaterialTextures(m, projected, lookup, material, state, header);
 		PackMaterialSamplers(p, projected, material, state, header);
@@ -952,15 +895,13 @@ namespace DCLF::Draws
 		state.written = true;
 	}
 
-	// The resident region (dclf-architecture.md, "Persistent resident draws"): draw inputs kept across frames, changed only by
-	// the tables' change log, a pipeline's set index or a pair's record failing. The loop skips its objects; PayloadPools send
-	// a backing only what changed since its content epoch.
+	// The resident region keeps draw inputs across frames. They change only with the change log, a pipeline's set index,
+	// or a pair's record failing. The loop skips its objects.
 	void MainBuild::BuildResidentRegion()
 	{
 		region = cache && Policy::ReuseResidentRegion() ? &cache->region : nullptr;
 		if (!region && cache && cache->region.cursor.active)
 			cache->region.Reset();
-		// The whole scene, in both segments.
 		wholeScene = region != nullptr;
 		TracyCZoneN(residentRegionZone, "CS.DCLF.BuildMain.ResidentRegion", true);
 		if (region) {
@@ -994,10 +935,9 @@ namespace DCLF::Draws
 		const auto& object = tables.objects[o];
 		if (object.flags & (kObjectFree | kObjectShadowOnly))
 			return false;
-		// A decal past the buffers stays a blank entry, so its group's range keeps every slot written.
+		// A decal past the buffers stays as a blank entry so its group's range keeps every slot written.
 		if (!ObjectFits(tables, o, in.addresses.fit) && !ObjectDecalGroup(object.flags))
 			return false;
-		// A cull-only candidate (depth segment).
 		if (object.flags & kObjectNoBindings)
 			return wholeScene && object.geometryIndex < tables.geometries.size();
 		if (object.pipelineIndex >= pipelineBlocks.size() || object.pipelineIndex >= tables.pipelines.size() || object.geometryIndex >= tables.geometries.size())
@@ -1005,11 +945,11 @@ namespace DCLF::Draws
 		const auto& geometry = tables.geometries[object.geometryIndex];
 		if (!geometry.vertexAddress || !geometry.indexAddress)
 			return false;
-		// A decal (colour segment only) needs its ordinal within its group's range (OrderDecals logs a change for every move).
+		// A decal needs its ordinal within its group's range. OrderDecals logs every move.
 		if (const std::uint32_t group = ObjectDecalGroup(object.flags))
 			if (o >= tables.rangeOrdinal.size() || tables.rangeOrdinal[o] >= decalCount[group - 1])
 				return false;
-		// A stream object (a face shape), or a second-stream position, needs its vertex stream row.
+		// A face shape or second-stream position needs its vertex stream row.
 		const bool needsStream = IsStreamObject(tables, o) || (tables.pipelines[object.pipelineIndex].vertexLayout & kPositionInSecondStream);
 		return !needsStream || StreamGeometry(tables, o, in.addresses.streamBuffer) != ~0u;
 	}
@@ -1019,7 +959,6 @@ namespace DCLF::Draws
 		auto& r = *region;
 		const auto& object = tables.objects[o];
 		if (object.flags & kObjectNoBindings) {
-			// A cull-only candidate: bounds for culling, nothing to draw.
 			a_input = { 0, 0, object.geometryIndex, object.flags, { MainMaskOf(tables, o) }, o, 0 };
 			SetFadeRow(a_input, objectRoots, tables, o);
 			return 0;
@@ -1030,7 +969,7 @@ namespace DCLF::Draws
 		}
 		const auto& blocks = pipelineBlocks[object.pipelineIndex];
 		const auto pair = r.pairs.find(PairKeyOf(object));
-		// A decal's slots in its group's range (one per partition: DecalSpanOf); an undrawable decal is still an input (zero-count draws).
+		// One slot per partition. An undrawable decal is still an input, drawn with zero counts.
 		const bool decal = ObjectDecalGroup(object.flags) != 0;
 		const std::uint32_t ordinal = decal ? tables.rangeOrdinal[o] : 0u;
 		const std::uint32_t partitions = PartitionsOf(tables, o);
@@ -1049,7 +988,6 @@ namespace DCLF::Draws
 		auto [found, fresh] = r.pairs.try_emplace(a_key);
 		auto& pair = found->second;
 		if (fresh) {
-			// Its rows, once UpdateRegionPairs finds the pair can draw.
 			pair.slot = kNoRecord;
 			pair.ok = false;
 			pair.skip = kNoSkip;
@@ -1089,7 +1027,7 @@ namespace DCLF::Draws
 				SetPairRegisters(pair, {});
 				ReleaseOwner(pair.bindingSeen);
 				ReleaseOwner(pair.maskSeen);
-				// Out of its material's and its pipeline's lists by place: the last one takes it.
+				// Remove by place. The last one takes its spot.
 				auto unlist = [&](auto& a_lists, std::uint32_t a_list, std::uint32_t a_at, std::uint32_t ResidentRegion::Pair::*a_place) {
 					const auto list = a_lists.find(a_list);
 					if (list == a_lists.end())
@@ -1157,7 +1095,7 @@ namespace DCLF::Draws
 
 	void MainBuild::SetPairOwners(ResidentRegion::Pair& a_pair, std::uint32_t m, std::uint32_t p, const void* a_binding, const void* a_mask)
 	{
-		// The owner counted holds the pointer's object, so a new owner never reuses a counted one's address.
+		// The counted owner keeps its object alive, so a new owner never reuses a counted one's address.
 		if (a_binding != a_pair.bindingSeen) {
 			AcquireOwner(a_binding, a_binding ? lookups.materials[m].bindingBlock : nullptr);
 			ReleaseOwner(a_pair.bindingSeen);
@@ -1182,7 +1120,7 @@ namespace DCLF::Draws
 	DrawInput MainBuild::DecalBlank(std::uint32_t o) const
 	{
 		const auto& object = tables.objects[o];
-		// No kInputDrawable; stream and fade row stay none. The partitions word names the decal's slots, each a zero-count draw.
+		// Not drawable. The partitions word names the decal's slots, each a zero-count draw.
 		return { 0, 0, object.geometryIndex < tables.geometries.size() ? object.geometryIndex : 0u, object.flags, { MainMaskOf(tables, o) }, o, tables.rangeOrdinal[o],
 			o < tables.skinPartitions.size() ? tables.skinPartitions[o] : 0u };
 	}
@@ -1210,7 +1148,7 @@ namespace DCLF::Draws
 		r.draws -= RegionDraws(r.drawsOf[i]);
 		r.decals -= r.drawsOf[i] == kRegionDecal ? 1 : 0;
 		if (r.sideOf[i] & kSideShadow) {
-			// The shadow build's words stay: the entry becomes its alone.
+			// The shadow build's words stay and the entry becomes its alone.
 			r.pairOf[i] = kNoPair;
 			r.drawsOf[i] = 0;
 			r.sideOf[i] = kSideShadow;
@@ -1234,8 +1172,7 @@ namespace DCLF::Draws
 		const std::uint64_t key = (object.flags & kObjectNoBindings) ? kNoPair : PairKeyOf(object);
 		std::uint32_t i = r.indexOf[o];
 		if (i == kNoRegion || !(r.sideOf[i] & kSideMain)) {
-			// No share to stay within: region and loop together have at most an input per object, which the buffers hold. A
-			// shadow-only entry takes the main part too.
+			// Region and loop together hold at most one input per object, which the buffers fit. A shadow-only entry takes the main part too.
 			if (i == kNoRegion)
 				i = r.AddEntry(o, DrawInput{}, kSideMain);
 			else
@@ -1272,10 +1209,8 @@ namespace DCLF::Draws
 	{
 		auto& r = *region;
 		r.touched.clear();
-		// The journal keeps what the oldest payload backing lacks; only later changes are new (once per publication, by whichever
-		// build writes first).
+		// Once per publication, by whichever build writes first.
 		r.Begin(in.inputsOldestContentEpoch);
-		// Resync reasons (for the report): log lost, segments, tables shrunk, scope, buffers' fit.
 		const std::array<bool, kResyncReasons> reasons{ !r.cursor.Continues(tables.changeLog, in.tablesGeneration), r.segments != Segments(),
 			r.indexOf.size() > tables.objects.size(), r.wholeScene != wholeScene, r.fit != in.addresses.fit };
 		const bool resync = std::find(reasons.begin(), reasons.end(), true) != reasons.end();
@@ -1300,18 +1235,18 @@ namespace DCLF::Draws
 					RegionTake(o);
 			}
 		} else {
-			// Changes a draw input carries (fade distance, bindings, geometry, partitions, residency); placement is the object record's.
+			// Placement is the object record's, not the input's.
 			constexpr std::uint32_t kInputCauses = kChangeBindings | kChangeSkin | kChangeGeometry | kChangeMembership;
 			for (const auto& change : r.cursor.Unread(tables.changeLog))
 				if (change.causes & kInputCauses)
 					RegionTake(change.slot);
-			// Stream row indices count from the geometry slots: when that count or the stream buffer changes, retake every stream object.
+			// Stream row indices count from the geometry slots. When that count or the stream buffer changes, retake every stream object.
 			if (const std::size_t base = in.addresses.streamBuffer ? tables.geometries.size() : 0; base != r.streamBase) {
 				for (const auto& row : tables.streamRows)
 					if (row.object != Api::VertexStreamRow::kNoObject && row.object < tables.objects.size())
 						RegionTake(row.object);
 			}
-			// A decal group's capped count moved: retake the decals between the old and new counts (changed ordinals are in the log).
+			// A decal group's capped count moved. Retake the decals between the old and new counts.
 			if (r.decalCount != decalCount) {
 				++out.residentDecalRetakes;
 				for (std::uint32_t o = 0; o < tables.rangeOrdinal.size() && o < tables.objects.size(); ++o) {
@@ -1332,8 +1267,7 @@ namespace DCLF::Draws
 	{
 		auto& r = *region;
 		const std::size_t count = tables.objects.size();
-		// 1. Per slot on the pool: whether the region holds it, its pair and its entry. The pairs are all new (the Reset emptied them), so
-		// RegionEntry finds none and every entry waits for UpdateRegionPairs, as the serial path's fresh pairs do.
+		// 1. Per slot on the pool. The Reset emptied the pairs, so every entry waits for UpdateRegionPairs, as on the serial path.
 		std::vector<std::uint8_t> eligible(count, 0), draws(count, 0);
 		std::vector<std::uint64_t> keys(count, kNoPair);
 		std::vector<DrawInput> entries(count);
@@ -1352,7 +1286,7 @@ namespace DCLF::Draws
 				SetMainPart(entries[n], fresh);
 			}
 		});
-		// 2. In slot order (the serial path's): dense entry indices (a prefix sum), the pairs acquired, the region's totals.
+		// 2. In slot order, as the serial path does. Prefix-sum the entry indices and acquire the pairs.
 		std::size_t held = 0;
 		for (std::size_t n = 0; n < count; ++n)
 			held += eligible[n];
@@ -1375,7 +1309,7 @@ namespace DCLF::Draws
 			RegionSetDraws(i, draws[n]);
 			++i;
 		}
-		// 3. The entries scattered into their places on the pool, and one journal resync for them all (the Reset began one).
+		// 3. Scatter the entries on the pool, with one journal resync for them all.
 		PrepareMainKeptWrites(r.inputs, 0, held);
 		auto& list = r.inputs.Mutable();
 		executor.ParallelFor("CS.DCLF.BuildMain.Region.Scatter", count, kResyncGrain, [&](std::size_t a_begin, std::size_t a_end) {
@@ -1420,9 +1354,8 @@ namespace DCLF::Draws
 
 	std::uint64_t MainBuild::PipelineWitness(std::uint32_t p) const
 	{
-		// A hash of what a pair's verdict and its material row's packing read of the pipeline: the shared lookups, the technique's
-		// bindings, projection, the constant tables, the set, the raster flags (forward, effect), both variants' register usage, its row's
-		// verdict parts and its shadow mask's owner. Not its constants: they move its row's bytes (WritePipelineRow), never a verdict.
+		// A hash of what a pair's verdict and row packing read from the pipeline.
+		// Not its constants, which move the row's bytes but never a verdict.
 		std::uint64_t value = 0xcbf29ce484222325ull;
 		const auto& blocks = pipelineBlocks[p];
 		value = Mix(value, lookups.sharedVersion);
@@ -1446,7 +1379,7 @@ namespace DCLF::Draws
 
 	void MainBuild::ResolvePairsChunk(const std::vector<std::uint64_t>& a_check, std::size_t a_begin, std::size_t a_end, bool a_everyPair, PairWork& a_work)
 	{
-		// Reads the pairs (no insert or erase meanwhile: each a distinct slot of the map) and writes only its materials' rows and states.
+		// No inserts or erases meanwhile, and each pair is a distinct slot, so chunks can run in parallel.
 		auto& r = *region;
 		for (std::size_t k = a_begin; k < a_end; ++k) {
 			const std::uint64_t key = a_check[k];
@@ -1459,8 +1392,7 @@ namespace DCLF::Draws
 			const bool pipelineOk = p < pipelineBlocks.size() && pipelineBlocks[p].setIndex != Lookups::kNone;
 			const void* binding = m < lookups.materials.size() ? lookups.materials[m].bindingBlock.get() : nullptr;
 			const void* mask = p < lookups.pipelines.size() ? lookups.pipelines[p].shadowMaskOwner.get() : nullptr;
-			// The row first (its bytes follow the material's frame values whatever the verdict); the verdict again only when what it reads
-			// moved: the pipeline's witness or the row's state.
+			// The row always follows the material's frame values. The verdict reruns only when the pipeline witness or row state moved.
 			std::uint64_t witness = 1ull;
 			if (pipelineOk) {
 				WriteMaterialRow(m, p, pipelineBlocks[p], a_work);
@@ -1473,7 +1405,7 @@ namespace DCLF::Draws
 				ResolvedBindings resolved;
 				ResolvePair(m, p, pipelineBlocks[p], rows.materials[m], resolved, verdict.registers, a_work);
 				if (resolved.skipReason != kNoSkip) {
-					// Counted as the draw AssembleRecord would refuse: once per resolution.
+					// Counted once per resolution, as AssembleRecord would refuse a draw.
 					verdict.ok = false;
 					verdict.skip = resolved.skipReason;
 					if (resolved.skipReason == static_cast<std::uint32_t>(Skip::Texture))
@@ -1556,7 +1488,7 @@ namespace DCLF::Draws
 				listed(r.pipelinePairs, p);
 			a_check.insert(a_check.end(), r.freshPairs.begin(), r.freshPairs.end());
 		}
-		// Sorted: a material's pairs are adjacent (its slot is the key's high half), so chunks split on material boundaries.
+		// A material's pairs are adjacent once sorted, so chunks split on material boundaries.
 		std::sort(a_check.begin(), a_check.end());
 		a_check.erase(std::unique(a_check.begin(), a_check.end()), a_check.end());
 		stats.pipelinesMoved += a_moved.size();
@@ -1569,7 +1501,6 @@ namespace DCLF::Draws
 	std::vector<PairWork> MainBuild::ResolveCheckedPairs(const std::vector<std::uint64_t>& a_check, bool a_everyPair)
 	{
 		auto& stats = rows.pairStats;
-		// The chunks: whole materials, at least kPairGrain pairs each; one for the serial path.
 		const bool fanout = !serialFanout && a_check.size() >= kPairFanoutMin;
 		std::vector<std::size_t> bounds{ 0 };
 		if (fanout)
@@ -1584,7 +1515,7 @@ namespace DCLF::Draws
 		const std::size_t chunks = bounds.size() - 1;
 		std::vector<PairWork> works(chunks);
 		if (fanout) {
-			// The rows the chunks write are made writable here, on the builder's thread; the chunks mark nothing (MergeWork does).
+			// Make the chunks' rows writable here on the builder's thread. MergeWork marks them later.
 			for (std::size_t k = 0; k < a_check.size(); ++k)
 				if (k == 0 || (a_check[k] >> 32) != (a_check[k - 1] >> 32))
 					PrepareMainKeptWrites(rows.material, static_cast<std::size_t>(a_check[k] >> 32), 1);
@@ -1607,7 +1538,7 @@ namespace DCLF::Draws
 	{
 		auto& r = *region;
 		auto& stats = rows.pairStats;
-		// Applied in chunk order (the check list's): the rows' marks and counters, then each verdict onto its pair and the bundle's counts.
+		// Apply in chunk order.
 		for (auto& work : a_works) {
 			for (const auto& verdict : work.verdicts) {
 				auto& pair = *verdict.pair;
@@ -1638,7 +1569,7 @@ namespace DCLF::Draws
 		auto& r = *region;
 		for (std::size_t reason = 0; reason < r.skipCounts.size(); ++reason)
 			body.skipped[reason] += r.skipCounts[reason];
-		// Every pair's owners in one list, made again only when an owner joined or left (the counts follow each resolution).
+		// Rebuild the owner list only when an owner joined or left.
 		if (r.ownersChanged) {
 			r.ownersChanged = false;
 			auto owners = std::make_shared<std::vector<std::shared_ptr<const void>>>();
@@ -1659,7 +1590,6 @@ namespace DCLF::Draws
 		DCLF_ZONE("CS.DCLF.BuildMain.Pairs.Inputs");
 		auto& r = *region;
 		auto& stats = rows.pairStats;
-		// The entries of the changed pairs and of the pipelines whose set moved, through their objects (Pair::objects).
 		if (!a_changedPipelines.empty() || !a_changedPairs.empty()) {
 			auto& inputs = r.inputs.Mutable();
 			auto rewrite = [&](const ResidentRegion::Pair& a_pair) {
@@ -1690,12 +1620,9 @@ namespace DCLF::Draws
 	{
 		auto& stats = rows.pairStats;
 		++stats.builds;
-		// Entries of pipelines whose set index changed and of pairs that became (un)buildable are rewritten (both rare).
 		std::vector<std::uint32_t> changedPipelines;
 		ChangedPipelineSets(changedPipelines);
-		// A pair resolves again only when what it reads changed (its pipeline's witness, its material row's state, frame slots, owners).
-		// Candidates come from events: the material logs, new pairs, the pairs of moved pipelines; every pair when the frame's half moved
-		// or a log is lost.
+		// A pair resolves again only when what it reads changed. Every pair when the frame's half moved or a log was lost.
 		const bool everyPair = EveryPairMoved();
 		std::vector<std::uint64_t> changedPairs;
 		currentObject = ~0u;
@@ -1727,8 +1654,6 @@ namespace DCLF::Draws
 
 	void MainBuild::CheckNarrowedPairs()
 	{
-		// Every pair resolved again serially from scratch (its row packed anew, nothing stored), against what the narrowed checks and the
-		// pool's chunks left: the pair's verdict, frame textures and owners, its row's bytes and state, the bundle's counts, the pair index.
 		auto& r = *region;
 		auto& stats = rows.pairStats;
 		++stats.parityChecks;
@@ -1766,7 +1691,7 @@ namespace DCLF::Draws
 			const auto rowKey = MaterialRowKey(m, p, blocks);
 			const auto& held = rows.materials[m];
 			if (held.key != rowKey) {
-				// Another pipeline's packing (the row's material half the same): CheckRegionPacking's finding, not the narrowing's.
+				// Another pipeline's packing is CheckRegionPacking's finding, not the narrowing's.
 				if (std::equal(rowKey.begin(), rowKey.begin() + 4, held.key.begin()) && held.written)
 					continue;
 				note([&] { return fmt::format("pair ({}, {}): material row's sources moved unseen", m, p); });
@@ -1775,7 +1700,7 @@ namespace DCLF::Draws
 			MainRows::MaterialState state;
 			MaterialRow row;
 			PackMaterialRow(m, p, blocks, rowKey, state, row);
-			// Its animated row is the builds' (AssignAnimatedRows), not the packing's.
+			// The animated row is assigned by the builds, not the packing.
 			if (m < materialRows.size())
 				HeaderOf(row).animatedRow = reinterpret_cast<const MaterialRowHeader*>(materialRows[m].bytes.data() + kMaterialRowHeader)->animatedRow;
 			if (!SameMaterialState(state, held) || m >= materialRows.size() || std::memcmp(&row, &materialRows[m], sizeof(MaterialRow)) != 0)
@@ -1799,7 +1724,6 @@ namespace DCLF::Draws
 		}
 		if (!ownersSame)
 			note([&] { return fmt::format("the bundle's owners ({} counted, {} held)", ownersAll.size(), r.ownerCounts.size()); });
-		// The pair index: every main entry with a pair is listed once, at its place, in its pair's objects.
 		std::size_t entriesAll = 0;
 		const auto& inputs = r.inputs.Get();
 		for (std::uint32_t i = 0; i < r.pairOf.size(); ++i) {
@@ -1853,7 +1777,6 @@ namespace DCLF::Draws
 			const auto flags = o < tables.objects.size() ? tables.objects[o].flags : kObjectFree;
 			const bool inRegion = r.MainHolds(o);
 			const bool isCandidate = !(flags & kObjectFree) && (flags & (kObjectNoBindings | kObjectShadowOnly));
-			// The one list holds every segment's candidates, cull-only ones and decals too.
 			const bool loop = !inRegion && !(flags & (kObjectFree | kObjectShadowOnly));
 			if (loop && r.loopIndex[o] == kNoRegion) {
 				r.loopIndex[o] = static_cast<std::uint32_t>(r.loopList.size());
@@ -1876,7 +1799,7 @@ namespace DCLF::Draws
 	void MainBuild::PublishRegion()
 	{
 		auto& r = *region;
-		// Per-object states, for the set parity alone.
+		// Per-object states are only for set parity.
 		const auto& inputs = r.inputs.Get();
 		if (!body.objectState.empty()) {
 			for (std::uint32_t i = 0; i < inputs.size(); ++i)
@@ -1890,10 +1813,9 @@ namespace DCLF::Draws
 				if (r.candidate[o] && body.objectState[o] == kObjectStateAbsent)
 					body.objectState[o] = static_cast<std::uint8_t>(Skip::CandidateOnly);
 		}
-		// Every candidate counts, whether the loop sees it or not.
 		body.skipped[static_cast<std::size_t>(Skip::CandidateOnly)] += static_cast<std::uint32_t>(r.candidates);
 		body.residentUndrawable = static_cast<std::uint32_t>(r.undrawable);
-		// Not the region's view: the shadow build writes the scene list after this; RunAhead hands out the view once both have.
+		// The shadow build writes the scene list after this, so RunAhead hands out the region's view once both have.
 		body.residentDraws = static_cast<std::uint32_t>(r.draws);
 		body.decalsDrawn += static_cast<std::uint32_t>(r.decals);
 		body.residentPairs = static_cast<std::uint32_t>(r.pairs.size());
@@ -1904,7 +1826,6 @@ namespace DCLF::Draws
 	void MainBuild::RunObjectLoop()
 	{
 		TracyCZoneN(objectLoopZone, "CS.DCLF.BuildMain.ObjectLoop", true);
-		// With a region, the loop visits only its loopList; the region counted the candidates.
 		const std::vector<std::uint32_t>* loopObjects = region ? &region->loopList : nullptr;
 		const std::size_t loopCount = loopObjects ? loopObjects->size() : tables.objects.size();
 		if (loopObjects)
@@ -1923,7 +1844,6 @@ namespace DCLF::Draws
 		const auto& object = tables.objects[o];
 		if (region && region->MainHolds(o))
 			return;
-		// Free slots and shadow-only records are not even culling candidates.
 		if (object.flags & kObjectFree)
 			return;
 		if (object.flags & kObjectShadowOnly) {
@@ -1931,7 +1851,7 @@ namespace DCLF::Draws
 				Skipped(Skip::CandidateOnly);
 			return;
 		}
-		// Past the scene's buffers' named versions: no input, except a decal's blank, which keeps its slot as a zero-count draw.
+		// Past the scene's buffers there is no input, except a decal's blank, which keeps its slot as a zero-count draw.
 		if (!ObjectFits(tables, o, in.addresses.fit)) {
 			if (const std::uint32_t group = ObjectDecalGroup(object.flags);
 				group && o < tables.rangeOrdinal.size() && tables.rangeOrdinal[o] < decalCount[group - 1])
@@ -1940,19 +1860,19 @@ namespace DCLF::Draws
 			return;
 		}
 		if (object.flags & kObjectNoBindings) {
-			// No material or pipeline entry: the depth segment submits it cull-only, with its bounds.
+			// No material or pipeline entry. The depth segment submits it cull-only.
 			drawInputs.push_back({ 0, 0, object.geometryIndex, object.flags, { MainMaskOf(tables, o) }, static_cast<std::uint32_t>(o), 0 });
 			SetFadeRow(drawInputs.back(), objectRoots, tables, o);
 			if (!region)
 				Skipped(Skip::CandidateOnly);
 			return;
 		}
-		// Decals are not occluders: only the colour segment's second pass draws them; without it no decal has a slot.
+		// Decals are not occluders. Only the colour segment's second pass draws them.
 		const std::uint32_t decalGroup = ObjectDecalGroup(object.flags);
 		if (decalGroup && (o >= tables.rangeOrdinal.size() || tables.rangeOrdinal[o] >= decalCount[decalGroup - 1]))
 			return;
-		// An undrawable decal must still reach BuildDraws so its slot is a zero-count draw, not a stale one: this guard pushes
-		// the blank on every early return below.
+		// An undrawable decal must still reach BuildDraws so its slot is a zero-count draw, not a stale one.
+		// This guard pushes the blank on every early return below.
 		struct DecalSlot
 		{
 			std::vector<DrawInput>* inputs = nullptr;
@@ -1978,9 +1898,9 @@ namespace DCLF::Draws
 			Skipped(Skip::Geometry);
 			return;
 		}
-		// Outside the set the engine draws depth and colour; DCLF depth would break its EQUAL test against its own prepass.
+		// Outside the set the engine draws depth and colour. DCLF depth would break its EQUAL test against its own prepass.
 		if (!InSet(o)) {
-			// Still cull-only: the depth segment publishes every candidate's verdict for the colour segment. A decal gets its blank.
+			// Still cull-only, because the colour segment reads every candidate's verdict from the depth segment.
 			if (!decalGroup) {
 				drawInputs.push_back({ 0, 0, object.geometryIndex, object.flags, { MainMaskOf(tables, o) }, static_cast<std::uint32_t>(o), 0 });
 				SetFadeRow(drawInputs.back(), objectRoots, tables, o);
@@ -1988,21 +1908,19 @@ namespace DCLF::Draws
 			Skipped(Skip::NotInSet);
 			return;
 		}
-		// A multi-partition skin writes a sequence per drawn partition; a skinned decal (blood) one per slot of its span.
+		// A multi-partition skin writes a sequence per drawn partition. A skinned decal such as blood writes one per slot of its span.
 		const std::uint32_t partitions = PartitionsOf(tables, o);
-		// A stream object (a face shape) or second-stream position needs its stream row, else the geometry's other attributes draw as
-		// positions.
+		// Without its stream row, the geometry's other attributes would draw as positions.
 		const std::uint32_t streamIndex = StreamGeometry(tables, o, in.addresses.streamBuffer);
 		if (streamIndex == ~0u && (IsStreamObject(tables, o) || (tables.pipelines[object.pipelineIndex].vertexLayout & kPositionInSecondStream))) {
 			Skipped(Skip::Geometry);
 			return;
 		}
-		// No draw cap: the sequences hold every draw the scene can produce.
+		// No draw cap. The sequences hold every draw the scene can produce.
 		const std::uint32_t recordIndex = AssembleRecord(o, object, blocks);
 		if (recordIndex == kNoRecord)
 			return;
-		// The CPU template of what BuildDraws writes (for the build parity). Its row addresses are byte offsets into the tables: the
-		// tables are the payload's backings (PayloadVersions), which the build parity adds; the draws embed none of them.
+		// A CPU template of what BuildDraws writes, for the build parity. Row addresses are byte offsets that the parity rebases.
 		Mark(2);
 		auto sequence = tables.draws[o];
 		sequence.pipelineIndex = blocks.setIndex;
@@ -2014,7 +1932,6 @@ namespace DCLF::Draws
 		if (decalGroup) {
 			const std::uint32_t ordinal = tables.rangeOrdinal[o];
 			decalSlot.inputs = nullptr;  // drawn: the blank is not needed
-			// The partitions word names the slots (BuildDrawsCS draws a partition at each).
 			drawInputs.push_back({ blocks.setIndex, recordIndex, object.geometryIndex, object.flags | kInputDrawable, { MainMaskOf(tables, o) },
 				static_cast<std::uint32_t>(o), ordinal, partitions, streamIndex });
 			decalTemplates[decalGroup - 1][ordinal] = sequence;
@@ -2037,7 +1954,7 @@ namespace DCLF::Draws
 				});
 			}
 		}
-		// The draw fetches through the buffer's address and size: a short slice reads zeros and the object silently collapses.
+		// A short vertex or index slice reads zeros and the object silently collapses.
 		// Checked here because nothing on the D3D11 side sees the Vulkan slice.
 		const std::uint64_t vertexNeeded = std::uint64_t(geometry.vertexCount) * geometry.vertexStride;
 		const std::uint64_t indexNeeded = (std::uint64_t(geometry.firstIndex) + geometry.indexCount) * sizeof(std::uint16_t);
@@ -2050,8 +1967,7 @@ namespace DCLF::Draws
 
 	void MainBuild::AssignAnimatedRows()
 	{
-		// The rows this build wrote (every one after a resync): each animated one holds its row of the frame's copy, any other none. A row
-		// that keeps its index was written with it (WriteMaterialRow); one taken or let go here is written again, its header part alone.
+		// Each animated row holds its row of the frame's copy. A row taken or released here has just its header part rewritten.
 		DCLF_ZONE("CS.DCLF.BuildMain.AnimatedRows");
 		auto& animated = rows.animated;
 		const auto assign = [&](std::uint32_t m) {
@@ -2073,7 +1989,7 @@ namespace DCLF::Draws
 			for (std::uint32_t m = 0; m < rows.materials.size(); ++m)
 				assign(m);
 		} else {
-			// In slot order, so the rows taken do not depend on the order the chunks marked them.
+			// Slot order keeps the rows taken independent of chunk order.
 			static std::vector<std::uint32_t> slots;  // the builds run one at a time (the snapshot builder's)
 			slots.assign(dirty.slots.begin(), dirty.slots.end());
 			std::sort(slots.begin(), slots.end());
@@ -2088,7 +2004,7 @@ namespace DCLF::Draws
 		streams = std::move(a_streams);
 		TakeGeometryDraws(streams.get(), tables, in.tablesGeneration, frameNumber, body.geometryDraws);
 		body.streams = streams;
-		// The stream rows' draws, and the rows the commit uploads: the tables' own (the draws holding the payload hold the tables).
+		// The commit uploads the tables' own stream rows. The draws holding the payload keep the tables alive.
 		TracyCZoneN(streamRowsZone, "CS.DCLF.BuildMain.StreamRows", true);
 		AppendStreamRows(tables, in.addresses.streamBuffer, body.geometryDraws);
 		if (in.addresses.streamBuffer)
@@ -2097,9 +2013,7 @@ namespace DCLF::Draws
 		AssignAnimatedRows();
 		body.materialRows = rows.material.View();
 		body.pipelineRows = rows.pipeline.View();
-		// The features' payload products, from the rows and tables as this build left them (Api::PayloadProduct), each from its last build
-		// and the material slots that moved since: the rows written (marked as they were), and the slots the tables' material log names
-		// since the last build (every slot when the log cannot be continued).
+		// Payload products are rebuilt from their last build for the material slots that moved since.
 		TracyCZoneN(textureListZone, "CS.DCLF.BuildMain.TextureList", true);
 		auto& dirty = rows.productDirty;
 		if (!dirty.cursor.Continues(tables.materialLog, in.tablesGeneration)) {
@@ -2115,8 +2029,7 @@ namespace DCLF::Draws
 		dirty.Clear();
 		TracyCZoneEnd(textureListZone);
 		Mark(5);
-		// The other segment's payload: the same body (products, rows and templates) with its own inputs. One-off counts stay the
-		// primary's; the depth variant resolves no frame textures.
+		// The other segment shares the body with its own inputs. One-off counts stay the primary's.
 		TracyCZoneN(zCopyZone, "CS.DCLF.BuildMain.ZCopy", true);
 		for (std::size_t j = 0; j < segmentOut.size(); ++j) {
 			if (j == primary || !segmentOut[j] || !segmentIn[j])

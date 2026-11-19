@@ -1,7 +1,6 @@
-// The CPU-driven pipeline's cull (Cull.h): BuildDrawsCS.hlsl's per-input decisions (BuildInput, Culled, ParabolicRejected,
-// StampFrustum, LodPartitions, LocalShadowMask, InSunCascades, OutsideSunEntry, RootFading, FadedOutOfOcclusion) over a ViewBatch's lanes,
-// the frame's CPU state's publication, and the main camera's verdicts diffed into the visibility decoder (VisibilityEventsCS on the CPU).
-// Keep the decisions the shader's: a change to one is a change to both.
+// The CPU-driven pipeline's cull. It runs BuildDrawsCS.hlsl's per-input decisions over a ViewBatch's lanes, publishes the
+// frame's CPU cull state, and diffs the main camera's verdicts for the visibility decoder.
+// The decisions must match the shader's. A change to one is a change to both.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -31,29 +30,28 @@ namespace DCLF::Direct
 	namespace
 	{
 		constexpr std::uint32_t kNoRoot = 0xFFFFFFFFu;
-		constexpr std::uint32_t kNoProgram = 0xFFFFFFFFu;  // Portals' kPortalNoProgram
+		constexpr std::uint32_t kNoProgram = 0xFFFFFFFFu;  // must match Portals' kPortalNoProgram
 		constexpr std::uint32_t kObjectCrossfadeCopy = 1u << 30;
-		constexpr std::uint32_t kDrawAll = 0xFFFFu;  // CulledBatch::drawMasks: every sequence, none as the copy
-		// The frustum stamp word (BuildDrawsCS): the stamp in the low 28 bits, the fade test's drop in bit 31.
+		constexpr std::uint32_t kDrawAll = 0xFFFFu;
+		// The frustum stamp word holds the stamp in the low 28 bits and the fade test's drop in bit 31.
 		constexpr std::uint32_t kStampMask = 0x0FFFFFFFu;
 		constexpr std::uint32_t kStampFadeHidden = 0x80000000u;
-		// Skylighting's occlusion map size test (kCullMinRadius): a bound radius of 32 or less draws nothing.
+		// Skylighting's occlusion map draws nothing with a bound radius of 32 or less.
 		constexpr float kOcclusionMinRadius = 32.0f;
 
 		bool MainCamera(ViewType a_type)
 		{
 			return a_type == ViewType::Main || a_type == ViewType::Decal || a_type == ViewType::Forward || a_type == ViewType::Refraction;
 		}
-		// The shadow epoch's views (single phase, a caster key word): their casters under a fading root are dropped.
+		// Shadow epoch views drop casters under a fading root.
 		bool ShadowFamily(ViewType a_type)
 		{
 			return a_type == ViewType::Sun || a_type == ViewType::Spot || a_type == ViewType::Point || a_type == ViewType::SkyOccluder ||
 			       a_type == ViewType::PrecipOccluder;
 		}
 
-		// ---- The frustum stamps: per object slot, the frame its bound was last in the main camera's frustum (and portals), and whether
-		// its root's fade dropped it then. A fixed directory over the object word's 26-bit index range, chunks made on first write
-		// (compare-exchange: a loser frees its own), never moved or freed while DCLF runs. ----
+		// ---- Frustum stamps: per object slot, the frame it was last in the main camera's frustum. Chunks are made on first
+		// write by compare-exchange and never moved or freed while DCLF runs. ----
 
 		class StampTable
 		{
@@ -94,7 +92,7 @@ namespace DCLF::Direct
 		};
 		StampTable stamps;
 
-		// ---- The frame state: the arm (render thread), the producer's rows (producer thread), the published frames ----
+		// ---- The frame state ----
 
 		struct Arm
 		{
@@ -110,17 +108,17 @@ namespace DCLF::Direct
 			const BindlessPlacement* rows = nullptr;
 			std::size_t count = 0;
 		};
-		RowStash rowStash;  // the producers' (one at a time)
+		RowStash rowStash;  // one producer at a time
 
-		// The newest CullFrame: readers count themselves before loading (sequentially consistent both sides), so a publish that sees no
-		// reader frees what it replaced; else the replaced ones wait for a publish that sees none (PortalViews' VisibleSetHold).
+		// Readers count themselves before loading, both sides seq_cst. A publish that sees no reader frees what it replaced,
+		// otherwise the replaced frames wait for a publish that sees none.
 		struct Held
 		{
 			std::shared_ptr<const CullFrame> frame;
 		};
 		std::atomic<const Held*> latest{ nullptr };
 		std::atomic<std::uint32_t> latestReaders{ 0 };
-		std::vector<const Held*> retired;  // the publisher's (one at a time: FrameValues' producers)
+		std::vector<const Held*> retired;  // publisher only
 
 		struct Waiter
 		{
@@ -137,7 +135,7 @@ namespace DCLF::Direct
 		}
 		bool Reached(std::uint32_t a_published, std::uint32_t a_wanted) { return static_cast<std::int32_t>(a_published - a_wanted) >= 0; }
 
-		/** @brief Runs every waiter the newest frame satisfies (each taken by one exchange: it runs once); the rest go back. */
+		/** @brief Runs every waiter the newest frame satisfies, each exactly once, and puts the rest back. */
 		void RunReady()
 		{
 			for (;;) {
@@ -163,7 +161,7 @@ namespace DCLF::Direct
 					PushWaiter(w);
 					w = following;
 				}
-				// A frame published while they were out drained before they went back: look again.
+				// A frame was published while the waiters were taken out, so look again.
 				const auto now = LatestCullFrame();
 				if (!now || now->sceneFrame == current->sceneFrame)
 					return;
@@ -172,7 +170,7 @@ namespace DCLF::Direct
 
 		// ---- The tests ----
 
-		/** @brief A view's sphere tests against planes: (n, d), the bound outside where dot(n, c) - d < -r. */
+		/** @brief A view's sphere test planes. A bound is outside where dot(n, c) - d < -r. */
 		struct PlaneSet
 		{
 			std::array<std::array<float, 4>, 12> planes{};
@@ -187,7 +185,7 @@ namespace DCLF::Direct
 				if (a_view.planeMask & (1u << p))
 					set.Add(a_view.planes[p]);
 			for (std::uint32_t p = 0; p < 6; ++p) {
-				// A clamped shadow view pancakes casters in front of its near plane onto it (kCullNoNearPlane).
+				// A clamped shadow view pancakes casters in front of its near plane onto it.
 				if (p == 4 && (a_view.cullFlags & Draws::kCullNoNearPlane))
 					continue;
 				if (a_view.clipPlanes[p][0] != 0.0f || a_view.clipPlanes[p][1] != 0.0f || a_view.clipPlanes[p][2] != 0.0f)
@@ -202,10 +200,7 @@ namespace DCLF::Direct
 			Simd::Spheres simd{ x, y, z, r };
 		};
 
-		/**
-		 * @brief The frustum over a batch's lanes, four at a time (SSE2, the build's baseline): a_pass[i] 1 inside every plane. A radius below 0
-		 * (a per-snapshot cull's mover: its snapshot sphere unknown) is kept.
-		 */
+		/** @brief The frustum test over a batch's lanes, four at a time with SSE2. A negative radius means unknown and is kept. */
 		void FrustumPass(const Spheres& a_spheres, std::uint32_t a_count, const PlaneSet& a_set, std::uint8_t* a_pass)
 		{
 			std::uint32_t i = 0;
@@ -236,14 +231,14 @@ namespace DCLF::Direct
 			}
 		}
 
-		/** @brief The wide frustum kernel kExpCullWide takes (the widest the CPU has, AVX-512 with kExpCullAvx512), null: the SSE pass. */
+		/** @brief The widest frustum kernel the CPU has for kExpCullWide, null for the SSE pass. */
 		Simd::FrustumFn WideFrustum()
 		{
 			const Simd::Level level = Simd::Chosen();
 			return level == Simd::Level::Avx512 ? &Simd::FrustumAvx512 : level == Simd::Level::Avx2 ? &Simd::FrustumAvx2 : nullptr;
 		}
 
-		/** @brief The wide paraboloid kernel kExpCullWide takes, null: the SSE pre-pass (kExpParabolicPass) and the per-lane test. */
+		/** @brief The wide paraboloid kernel for kExpCullWide, null for the SSE pre-pass and per-lane test. */
 		Simd::ParabolicFn WideParabolic()
 		{
 			const Simd::Level level = Simd::Chosen();
@@ -257,7 +252,7 @@ namespace DCLF::Direct
 
 		std::atomic<std::uint64_t> wideChecked{ 0 }, wideMismatches{ 0 };
 
-		/** @brief kExpCullWideCheck: a_pass (the wide kernel's, tombstones folded) against the SSE pass of the same lanes. */
+		/** @brief kExpCullWideCheck: compares the wide kernel's result against the SSE pass on the same lanes. */
 		void CheckWideFrustum(const Spheres& a_spheres, std::uint32_t a_count, const PlaneSet& a_planes, const std::uint64_t* a_dead, const std::uint8_t* a_pass)
 		{
 			thread_local std::vector<std::uint8_t> sse;
@@ -272,10 +267,7 @@ namespace DCLF::Direct
 			wideMismatches.fetch_add(mismatches, std::memory_order_relaxed);
 		}
 
-		/**
-		 * @brief ParabolicSphereMask's first test over a batch's lanes, four at a time: a_pass[i] 0 where the bound misses the view's sphere
-		 * (code 0: rejected on either side), in the scalar test's order; a radius below 0 (ParabolicRejected keeps it) passes.
-		 */
+		/** @brief ParabolicSphereMask's first test, four lanes at a time. a_pass[i] is 0 where the bound misses the view's sphere. */
 		void ParabolicPass(const Spheres& a_spheres, std::uint32_t a_count, const std::array<float, 4>& a_sphere, std::uint8_t* a_pass)
 		{
 			const __m128 sx = _mm_set1_ps(a_sphere[0]), sy = _mm_set1_ps(a_sphere[1]), sz = _mm_set1_ps(a_sphere[2]), sr = _mm_set1_ps(a_sphere[3]);
@@ -295,7 +287,7 @@ namespace DCLF::Direct
 			}
 		}
 
-		/** @brief ParabolicPrograms.hlsli's ParabolicSphereMask (FUN_14151a1e0): the sqrt, the subtraction order and the strict comparisons. */
+		/** @brief ParabolicPrograms.hlsli's ParabolicSphereMask (FUN_14151a1e0). Keep its sqrt, subtraction order and strict comparisons. */
 		std::uint32_t ParabolicSphereMask(const float a_bound[4], const std::array<float, 4>& a_sphere, const std::array<float, 4>& a_plane, bool a_bothSides)
 		{
 			const float dx = a_bound[0] - a_sphere[0], dy = a_bound[1] - a_sphere[1], dz = a_bound[2] - a_sphere[2];
@@ -307,7 +299,7 @@ namespace DCLF::Direct
 			return side > 0.0f ? 1u : (a_bothSides ? 2u : 0u);
 		}
 
-		/** @brief BuildDrawsCS's ParabolicRejected: the front hemisphere takes codes 1 and 3, the back one 2 and 3. */
+		/** @brief The front hemisphere takes codes 1 and 3, the back one 2 and 3. */
 		bool ParabolicRejected(const CullView& a_view, const float a_bound[4])
 		{
 			if (a_bound[3] < 0.0f)
@@ -316,7 +308,7 @@ namespace DCLF::Direct
 			return (a_view.cullFlags & Draws::kCullParabolicBack) ? (code & 2u) == 0 : (code & 1u) == 0;
 		}
 
-		/** @brief kExpCullWideCheck: a_pass (the wide paraboloid pass's, tombstones folded) against ParabolicRejected of each lane. */
+		/** @brief kExpCullWideCheck: compares the wide paraboloid pass against ParabolicRejected per lane. */
 		void CheckWideParabolic(const CullView& a_view, const Spheres& a_spheres, std::uint32_t a_count, const std::uint64_t* a_dead, const std::uint8_t* a_pass)
 		{
 			std::uint64_t mismatches = 0;
@@ -329,12 +321,12 @@ namespace DCLF::Direct
 			wideMismatches.fetch_add(mismatches, std::memory_order_relaxed);
 		}
 
-		/** @brief LocalShadowMask: the local shadow lights whose sphere the bound meets and whose planes it is inside (strict lights gated). */
+		/** @brief The local shadow lights whose sphere the bound meets and whose planes it is inside. */
 		std::uint32_t LocalShadowMask(const CullView& a_view, const float a_bound[4], bool a_landscape, std::uint32_t a_object)
 		{
 			std::uint32_t mask = 0;
 			const float radius = a_bound[3] + a_view.planeMargin;
-			// The actor probe's verdicts (Diagnostics::ShadowMaskProbe), per volume: 0 taken, else the test that dropped it.
+			// The actor probe's verdicts per volume. 0 means taken, else the test that dropped it.
 			std::uint8_t rejects[64];
 			const bool probe = Diagnostics::ShadowMaskProbe::Armed() && a_view.shadowVolumeCount <= 64;
 			for (std::uint32_t v = 0; v < a_view.shadowVolumeCount; ++v) {
@@ -384,7 +376,7 @@ namespace DCLF::Direct
 			return false;
 		}
 
-		/** @brief The draw's object word for a view: the index, the sun miss (the colour pass's sun test), the local shadow mask. */
+		/** @brief The draw's object word for a view: the index, the sun miss and the local shadow mask. */
 		std::uint32_t ObjectWordOf(const CullView& a_view, std::uint32_t a_object, std::uint32_t a_flags, const float a_bound[4])
 		{
 			std::uint32_t word = a_object & kObjectIndexMask;
@@ -400,15 +392,11 @@ namespace DCLF::Direct
 			return a_root < a_frame.rootWords.size() ? a_frame.rootWords[a_root] : 0u;
 		}
 
-		/**
-		 * @brief MainFrustumRejected past the frustum: the portal program the member's root is culled through, tested with the member's own
-		 * bound (the member batch's query; no node flags). A root without a program: the frustum alone.
-		 */
-		// kExpCullProfile: the calling thread's portal tests (calls, cycles) while its CullBatch profiles.
+		// kExpCullProfile: the calling thread's portal test counts while its CullBatch profiles.
 		thread_local bool profilePortals = false;
 		thread_local std::uint64_t portalCalls = 0, portalCycles = 0;
 
-		/** @brief A bound's radius for a portal test, with the view's margin. Only a positive one grows: the test culls a zero radius, and a negative one is unknown. */
+		/** @brief Only a positive radius grows by the margin. The test culls a zero radius, and a negative one is unknown. */
 		float PortalRadius(float a_radius, float a_margin)
 		{
 			return a_radius > 0.0f ? a_radius + a_margin : a_radius;
@@ -432,9 +420,8 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief StampFrustum: a main-camera lane in the frustum (and portals). The root's this-frame verdict where its OnVisible ran
-		 * (serviced, not drawn: hidden), else the fade-out distance test against the previous stamp (kFrustumFadeHidden keeps a hidden
-		 * one hidden while it stays past the distance). Writes the frame's stamp; returns the drop.
+		 * @brief Stamps a main-camera lane that is in the frustum and returns the fade drop. Uses the root's OnVisible verdict
+		 * this frame if it ran, else the fade-out distance test against the previous stamp.
 		 */
 		bool StampFrustum(const CullFrame& a_frame, std::uint32_t a_object, std::uint32_t a_root, std::uint32_t a_flags, float a_fadeDistance)
 		{
@@ -457,13 +444,13 @@ namespace DCLF::Direct
 			return fadeHidden;
 		}
 
-		/** @brief BSTreeNode::OnVisible's height test: a tree whose root is above the frame's limit draws nothing. */
+		/** @brief BSTreeNode::OnVisible's height test. A tree whose root is above the frame's limit draws nothing. */
 		bool AboveTreeHeight(const CullFrame& a_frame, std::uint32_t a_object)
 		{
 			return a_object < a_frame.fadeNode.size() && a_frame.fadeNode[a_object][2] - a_frame.treeHeight[0] > a_frame.treeHeight[1];
 		}
 
-		/** @brief A mask of a lane's partitions (bits of the four level bytes' union) as bits of its sequences (the k-th set bit is sequence k). */
+		/** @brief Maps a lane's partition bits to its sequence bits. The k-th set bit is sequence k. */
 		std::uint32_t SequenceBits(std::uint32_t a_partitions, std::uint32_t a_union)
 		{
 			std::uint32_t bits = 0;
@@ -475,8 +462,8 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief LodPartitions: a LOD skin's partitions at its root's level and, in a main view while the root crosses levels, the cross-fade
-		 * copy's (row L+1 less row L); as the lane's draw mask. False: the level draws none of them (kNoPartitions).
+		 * @brief A LOD skin's partitions at its root's level as a draw mask. In a main view, a root crossing levels also draws
+		 * the cross-fade copy. False when the level draws none of them.
 		 */
 		bool LodMask(const CullFrame& a_frame, std::uint32_t a_lod, std::uint32_t a_partitions, std::uint32_t a_root, bool a_mainFamily, std::uint32_t& a_mask)
 		{
@@ -486,7 +473,7 @@ namespace DCLF::Direct
 			const std::uint32_t all = (a_lod | (a_lod >> 8) | (a_lod >> 16) | (a_lod >> 24)) & 0xFFu;
 			const std::uint32_t rootWord = a_root != kNoRoot ? RootWordOf(a_frame, a_root) : 0u;
 			if (!(rootWord & kRootListed)) {
-				// No state: the partitions as is (BuildDrawsCS's a_partitions).
+				// No LOD state, so the partitions are used as is.
 				if (a_partitions != 0)
 					a_mask = SequenceBits(a_partitions, all);
 				return a_mask != 0;
@@ -500,7 +487,6 @@ namespace DCLF::Direct
 			return true;
 		}
 
-		/** @brief One lane's inputs, gathered. */
 		struct Lane
 		{
 			std::uint32_t object = 0, flags = 0, root = kNoRoot;
@@ -508,7 +494,7 @@ namespace DCLF::Direct
 			float bound[4]{};
 		};
 
-		/** @brief A shadow view's per-input drops before culling (BuildInput): caster class, sun entry, size tests, fading roots. */
+		/** @brief A shadow view's drops before culling: caster class, sun entry, size tests and fading roots. */
 		bool ShadowDropped(const CullView& a_view, const CullFrame& a_frame, const Lane& a_lane)
 		{
 			const bool volumetric = (a_lane.flags & kLaneVolumetricOnly) != 0;
@@ -532,15 +518,14 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief A main-camera list's lane (Main, Decal, Forward, Refraction): the stamp (frustum and portals, the fade drop) for kAccumulated,
-		 * then the draw verdict: Main's phase 1 (the stamp's verdict, the height test), the colour segment's for the others (the frustum
-		 * alone; a refraction lane also its root's stopped OnVisible).
+		 * @brief A main-camera lane. Writes the stamp for kAccumulated, then decides the draw. Main uses the stamp and the
+		 * height test, the other lists the frustum alone, and refraction also drops a root whose OnVisible stopped.
 		 */
 		bool MainCameraKept(const CullView& a_view, const CullFrame& a_frame, const Lane& a_lane, bool a_inFrustum, bool a_live, const std::uint8_t* a_portalRejected)
 		{
 			const bool portalPassed = a_inFrustum && !(a_portalRejected ? *a_portalRejected != 0 : PortalRejected(a_frame, a_lane.root, a_lane.bound, a_view.planeMargin));
 			bool fadeHidden = false;
-			// Only a per-frame cull stamps: a per-snapshot one's verdicts are not the frame's (its lists get a stamp-only pass a frame).
+			// Only a per-frame cull stamps. A per-snapshot cull's verdicts are not this frame's.
 			if (portalPassed && a_live && a_frame.reportsVisibility)
 				fadeHidden = StampFrustum(a_frame, a_lane.object, a_lane.root, a_lane.flags, a_lane.fadeDistance);
 			if (a_view.stampOnly || (a_lane.flags & kLaneCullOnly))
@@ -560,7 +545,7 @@ namespace DCLF::Direct
 			return true;
 		}
 
-		/** @brief Any other view's lane (shadow, occlusion, reflection, first person): its drops, then its frustum or paraboloid, then its strict gates. */
+		/** @brief Any other view's lane. Its drops, then its frustum or paraboloid, then its strict gates. */
 		bool ViewKept(const CullView& a_view, const CullFrame& a_frame, const Lane& a_lane, bool a_inFrustum, bool a_parabolicDecided)
 		{
 			if (a_lane.flags & kLaneCullOnly)
@@ -569,7 +554,7 @@ namespace DCLF::Direct
 				return false;
 			if (!a_view.frustumCull)
 				return true;
-			// The wide paraboloid pass decides it whole (a_inFrustum its verdict); else the per-lane test.
+			// The wide paraboloid pass may already have decided it, otherwise run the per-lane test.
 			const bool rejected = (a_view.cullFlags & Draws::kCullParabolic) && !a_parabolicDecided ? ParabolicRejected(a_view, a_lane.bound) : !a_inFrustum;
 			if (rejected)
 				return false;
@@ -579,17 +564,14 @@ namespace DCLF::Direct
 			return true;
 		}
 
-		/**
-		 * @brief The main camera lists' portal tests over a batch's lanes in the frustum (kExpPortalBatch): PortalRejected's verdict by lane
-		 * into a_rejected, the lanes grouped by their root's program (a counting sort) and each group handed to portalTestBatch.
-		 */
+		/** @brief Portal tests for the main camera's lanes in the frustum, grouped by their root's program with a counting sort. */
 		void PortalPass(const CullFrame& a_frame, const ViewBatch& a_batch, const Spheres& a_spheres, const std::uint8_t* a_pass, std::uint32_t a_count, float a_margin,
 			std::uint8_t* a_rejected)
 		{
 			std::memset(a_rejected, 0, a_count);
 			if (a_frame.programs.empty() || !a_batch.fadeRoot)
 				return;
-			const std::uint32_t programs = a_frame.programs.size() > 32 ? a_frame.programs[28] : 0u;  // the header's program count (word 112 / 4)
+			const std::uint32_t programs = a_frame.programs.size() > 32 ? a_frame.programs[28] : 0u;  // the header's program count, word 112 / 4
 			if (!programs)
 				return;
 			thread_local std::vector<std::uint32_t> firsts;
@@ -597,7 +579,7 @@ namespace DCLF::Direct
 			thread_local std::vector<std::uint32_t> programOf;
 			firsts.assign(std::size_t(programs) + 2, 0u);
 			programOf.resize(a_count);
-			// Pass 1: each lane's program (programs: none tested, rejected as PortalTestCpu's -1), counted.
+			// Pass 1 counts each lane's program.
 			for (std::uint32_t i = 0; i < a_count; ++i) {
 				std::uint32_t program = kNoProgram;
 				if (a_pass[i]) {
@@ -620,17 +602,16 @@ namespace DCLF::Direct
 			for (std::uint32_t i = 0; i < a_count; ++i)
 				if (programOf[i] < programs)
 					lanes[firsts[std::size_t(programOf[i]) + 1]++] = static_cast<std::uint16_t>(i);
-			// The lanes' radii with the view's margin (PortalRadius).
 			thread_local std::vector<float> radii;
 			radii.resize(a_count);
 			for (std::uint32_t i = 0; i < a_count; ++i)
 				radii[i] = PortalRadius(a_spheres.r[i], a_margin);
-			// firsts[p + 1] is now program p's end, firsts[p] its first.
+			// firsts[p] is now program p's first lane and firsts[p + 1] its end.
 			for (std::uint32_t p = 0; p < programs; ++p)
 				if (const std::uint32_t first = firsts[p], end = firsts[std::size_t(p) + 1]; end > first)
 				{
 					a_frame.portalTestBatch(a_frame.programs, p, a_spheres.x, a_spheres.y, a_spheres.z, radii.data(), lanes.data() + first, end - first, a_rejected);
-					// kExpCullProfile: the batch's calls, one a program it holds lanes of (the report's "portal tests").
+					// kExpCullProfile counts one call per program.
 					portalCalls += profilePortals ? 1u : 0u;
 				}
 		}
@@ -660,7 +641,7 @@ namespace DCLF::Direct
 
 		void DiffVisibility(const CullFrame& a_frame);
 
-		/** @brief kExpCullProfile: CullBatch's sections' TSC cycles and its lanes, by view type (TakeCullProfileLine). */
+		/** @brief kExpCullProfile: CullBatch's TSC cycles per section and its lanes, by view type. */
 		struct CullProfile
 		{
 			enum Section { kFrustum, kPortal, kGather, kKeep, kLod, kWord, kSections };
@@ -688,7 +669,7 @@ namespace DCLF::Direct
 				used = 0;
 				continue;
 			}
-			// A new chunk (one request larger than a chunk gets its own size); the old ones stay where they are.
+			// A request larger than a chunk gets its own size. Old chunks never move.
 			const std::size_t size = std::max(kChunkBytes, a_bytes + a_align);
 			chunks.push_back({ std::make_unique<std::byte[]>(size), size });
 			current = chunks.size() - 1;
@@ -729,7 +710,7 @@ namespace DCLF::Direct
 			return {};
 		}
 		arm.armed = false;
-		// An observer's frame stays a GPU frame: the GPU's states stay bound, and the next CPU frame still starts the visibility again.
+		// An observer's frame stays a GPU frame. The GPU's states stay bound, and the next CPU frame restarts visibility.
 		if (arm.observer)
 			return { std::move(arm.set), frame, false, true };
 		CpuFrameArm taken{ std::move(arm.set), frame, !arm.everArmed || arm.lastArmed + 1 != frame };
@@ -777,7 +758,7 @@ namespace DCLF::Direct
 
 	void PublishCullFrame(std::shared_ptr<CullFrame> a_frame)
 	{
-		// The main camera's lists still to cull, plus this publication's own count (dropped below, after the waiters ran).
+		// The main camera's lists still to cull, plus one for this publication, dropped after the waiters run.
 		std::uint32_t batches = 1;
 		if (a_frame->set)
 			for (const ViewType type : { ViewType::Main, ViewType::Decal, ViewType::Forward, ViewType::Refraction })
@@ -824,7 +805,7 @@ namespace DCLF::Direct
 		return frame;
 	}
 
-	// ---- The wide kernels' support (here, built for the baseline: CullAvx2.cpp's code may use AVX anywhere) ----
+	// ---- Wide kernel support, built for the baseline. CullAvx2.cpp may use AVX anywhere. ----
 
 	namespace Simd
 	{
@@ -847,7 +828,7 @@ namespace DCLF::Direct
 				const bool avx512 = (info[1] & (1 << 16)) != 0 && (info[1] & (1 << 30)) != 0;  // F and BW
 				if (!avx2)
 					return Level::Sse;
-				return avx512 && (xcr0 & 0xE6) == 0xE6 ? Level::Avx512 : Level::Avx2;  // the opmask and ZMM state kept too
+				return avx512 && (xcr0 & 0xE6) == 0xE6 ? Level::Avx512 : Level::Avx2;  // the opmask and ZMM state must be kept too
 			}
 		}
 
@@ -879,18 +860,14 @@ namespace DCLF::Direct
 
 	namespace
 	{
-		/**
-		 * @brief CullBatch's first stage: a_view's frustum or paraboloid over a_batch's lanes into a_pass (all 1 on entry), the tombstones in
-		 * it. True: a_pass holds a paraboloid view's whole verdict (ViewKept takes it as is).
-		 */
+		/** @brief Runs the frustum or paraboloid over the lanes into a_pass. True when a_pass holds a paraboloid view's whole verdict. */
 		bool PassOf(const ViewBatch& a_batch, const Spheres& a_spheres, std::uint32_t a_count, const CullView& a_view, std::uint8_t* a_pass)
 		{
-			// A view without a frustum test (cull mode 0, or first person drawing every member) keeps every lane past its other tests.
+			// A view without a frustum test keeps every lane past its other tests.
 			bool deadFolded = false, parabolicDecided = false;
 			if (a_view.frustumCull && !(a_view.cullFlags & Draws::kCullParabolic)) {
 				const PlaneSet planes = PlanesOf(a_view);
 				if (const auto wide = WideFrustum()) {
-					// The tombstones folded into the wide pass.
 					wide(a_spheres.simd, a_count, reinterpret_cast<const float (*)[4]>(planes.planes.data()), planes.count, a_batch.dead, a_pass);
 					deadFolded = true;
 					if (ExperimentOn(kExpCullWideCheck))
@@ -908,7 +885,7 @@ namespace DCLF::Direct
 					ParabolicPass(a_spheres, a_count, a_view.planes[0], a_pass);
 				}
 			}
-			// The incremental lists' tombstones: a lane gone from this set passes nothing (the portal pass skips it; the loop drops it).
+			// A lane gone from this set passes nothing.
 			if (a_batch.dead && !deadFolded)
 				for (std::uint32_t i = 0; i < a_count; ++i)
 					if ((a_batch.dead[i >> 6] >> (i & 63)) & 1u)
@@ -916,7 +893,7 @@ namespace DCLF::Direct
 			return parabolicDecided;
 		}
 
-		/** @brief Calls a_test(i) for each lane a_pass keeps, found sixteen pass bytes (0 or 1) at a time. */
+		/** @brief Calls a_test(i) for each lane a_pass keeps, scanning sixteen pass bytes at a time. */
 		template <class Test>
 		void ForEachPassed(const std::uint8_t* a_pass, std::uint32_t a_count, Test&& a_test)
 		{
@@ -962,10 +939,8 @@ namespace DCLF::Direct
 		lap(CullProfile::kFrustum);
 		const bool mainCamera = MainCamera(a_view.type);
 		const bool mainFamily = mainCamera || a_view.type == ViewType::Reflection || a_view.type == ViewType::FirstPerson;
-		// A lane outside the frustum is kept by no view (MainCameraKept and ViewKept both drop it, and only a lane inside stamps); a view
-		// without the frustum pass has every lane passed.
+		// A lane outside the frustum is kept by no view, and only a lane inside stamps.
 		const bool early = ExperimentOn(kExpCullEarly);
-		// The main camera lists' portal tests, made over the batch before the lanes' other tests.
 		thread_local std::vector<std::uint8_t> portalRejected;
 		const bool portalBatch = mainCamera && a_frame.portalTestBatch && ExperimentOn(kExpPortalBatch);
 		if (portalBatch) {
@@ -992,14 +967,14 @@ namespace DCLF::Direct
 		};
 		const auto test = [&](std::uint32_t i) {
 			if (!early && a_batch.dead && ((a_batch.dead[i >> 6] >> (i & 63)) & 1u))
-				return;  // gone from this set (with kExpCullEarly the pass holds the tombstones)
+				return;  // gone from this set
 			if (profile)
 				++counts[CullProfile::kPassed];
 			const Lane lane = LaneOf(a_batch, spheres, i);
-			// A focus view's casters: its target's members alone (an input's root word against the latch's root + 1).
+			// A focus view only draws its target's members.
 			if (a_view.focusRoot != 0 && lane.root != a_view.focusRoot - 1)
 				return;
-			// A focus-only caster (a hidden actor part): the focus views' alone.
+			// A focus-only caster, such as a hidden actor part, is drawn by focus views alone.
 			if (a_view.focusRoot == 0 && (lane.flags & kLaneFocusOnly))
 				return;
 			laneLap(CullProfile::kGather);
@@ -1022,7 +997,7 @@ namespace DCLF::Direct
 			laneLap(CullProfile::kWord);
 		};
 		if (early && ExperimentOn(kExpCullPassedLanes)) {
-			// The passed lanes alone: the shadow views pass a few in a hundred.
+			// Shadow views pass only a few lanes in a hundred.
 			ForEachPassed(pass.data(), count, test);
 		} else {
 			for (std::uint32_t i = 0; i < count; ++i)
@@ -1030,7 +1005,7 @@ namespace DCLF::Direct
 					test(i);
 		}
 		if (!laneLaps)
-			lap(CullProfile::kGather);  // the loop whole ("lanes")
+			lap(CullProfile::kGather);
 		if (profile) {
 			const std::size_t v = static_cast<std::size_t>(a_view.type);
 			counts[CullProfile::kLanes] = count;
@@ -1047,7 +1022,7 @@ namespace DCLF::Direct
 		out.lanes = lanes;
 		out.objectWords = words;
 		out.drawMasks = masks;
-		// The main camera's per-frame lists: the frame's last one diffs the verdicts for kAccumulated.
+		// The frame's last main-camera list diffs the verdicts for kAccumulated.
 		if (mainCamera && a_live && a_frame.reportsVisibility && a_frame.pendingStamps.fetch_sub(1, std::memory_order_acq_rel) == 1)
 			DiffVisibility(a_frame);
 		return out;
@@ -1073,7 +1048,6 @@ namespace DCLF::Direct
 				counts[c] = cullProfile.counts[v][c].exchange(0, std::memory_order_relaxed);
 			if (!counts[CullProfile::kLanes])
 				continue;
-			// Each section's cycles a lane: gather and the keep test per lane passed, the LOD mask per lane the test kept, the word per lane kept.
 			const auto per = [](std::uint64_t a_cycles, std::uint64_t a_n) { return a_n ? static_cast<double>(a_cycles) / static_cast<double>(a_n) : 0.0; };
 			line += fmt::format("{}{}: {} lanes, {} passed, {} kept by the test, {} kept; Mcycles frustum {:.1f}, portal {:.1f}, lanes/gather {:.1f}, keep {:.1f}, lod {:.1f}, word {:.1f}; "
 								"cycles a lane: gather {:.0f}, keep {:.0f}, lod {:.0f}, word {:.0f}; portal tests {}, {:.0f} cycles each",
@@ -1105,13 +1079,13 @@ namespace DCLF::Direct
 
 	namespace
 	{
-		/** @brief The diff's own state (one diff at a time; a frame whose diff finds one running is skipped: the next reports its changes). */
+		/** @brief The diff's state. One diff runs at a time, and a frame that finds one running is skipped. The next reports its changes. */
 		struct VisibilityDiff
 		{
 			std::atomic<bool> running{ false };
-			std::vector<std::uint32_t> objectReported;                    // kReportedValid | the bits last reported
+			std::vector<std::uint32_t> objectReported;  // kReportedValid | the bits last reported
 			std::vector<std::pair<std::uint32_t, std::uint32_t>> roots;  // the generation and the bits last reported
-			std::atomic<bool> pendingReset{ false };  // a skipped frame was a reset: the next diff resets
+			std::atomic<bool> pendingReset{ false };  // a skipped frame was a reset, so the next diff resets
 			std::atomic<std::uint64_t> diffs{ 0 }, skipped{ 0 };
 		};
 		VisibilityDiff visibilityDiff;
@@ -1170,7 +1144,7 @@ namespace DCLF::Direct
 			batch->publication = a_frame.publication;
 			batch->retirement = a_frame.retirement;
 			batch->candidates = a_frame.candidates;
-			// A reset starts the reported words again: every verdict is reported, as a new backing's zeroed words make the GPU's.
+			// A reset reports every verdict again, as a new backing's zeroed words do on the GPU.
 			if (batch->reset) {
 				diff.objectReported.clear();
 				diff.roots.clear();
@@ -1188,8 +1162,8 @@ namespace DCLF::Direct
 	namespace
 	{
 		/**
-		 * @brief The view-projection's clip planes in world space (row-major, mul(M, v)): -x, +x, -y, +y, near (z >= 0), far (z <= w), normalised.
-		 * a_viewProj has the eye folded in. Made in double, so a plane is rounded only once, to float.
+		 * @brief The view-projection's normalised clip planes in world space: -x, +x, -y, +y, near, far. Computed in double so
+		 * each plane is rounded to float only once.
 		 */
 		std::array<std::array<float, 4>, 6> ClipPlanesOf(const double a_viewProj[16])
 		{
@@ -1203,8 +1177,7 @@ namespace DCLF::Direct
 			for (std::size_t p = 0; p < 6; ++p) {
 				const double length = std::sqrt(raw[p][0] * raw[p][0] + raw[p][1] * raw[p][1] + raw[p][2] * raw[p][2]);
 				if (!(length > 0.0))
-					continue;  // a degenerate plane tests nothing (FadeStateCS's InView)
-				// (n, d) with the bound outside where dot(n, c) - d < -r: the clip plane's dot(n, c) + w over its length.
+					continue;  // a degenerate plane tests nothing
 				planes[p] = { static_cast<float>(raw[p][0] / length), static_cast<float>(raw[p][1] / length), static_cast<float>(raw[p][2] / length),
 					static_cast<float>(-raw[p][3] / length) };
 			}
@@ -1212,9 +1185,8 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief Moves a view's absolute planes out by its margin, which every kernel then sees: the same as adding it to each bound's radius.
-		 * A paraboloid's: its sphere grows. Its plane moves only for the back hemisphere, the one whose test a bound near the plane can fail
-		 * (ParabolicKept); moved for the front one, a zero radius on the moved plane would be rejected.
+		 * @brief Moves a view's planes out by its margin, which is the same as adding it to every bound's radius. A paraboloid's plane
+		 * moves only for the back hemisphere. Moving it for the front one would reject a zero radius on the plane.
 		 */
 		void ApplyPlaneMargin(CullView& a_view)
 		{
@@ -1250,7 +1222,7 @@ namespace DCLF::Direct
 		view.treeHeight = a_latch.treeHeight[1];
 		view.focusRoot = a_latch.focusRoot;
 		view.frame = a_latch.visibilityStamp;
-		// Cull mode 0 (no view-projection this frame): nothing is frustum-tested (BuildDrawsCS's CullMode() == 0).
+		// Cull mode 0 means no view-projection this frame, so nothing is frustum-tested.
 		view.frustumCull = (a_latch.cullFlags & 0xFu) != 0;
 		view.clipPlanes = ClipPlanesOf(folded);
 		view.planeMargin = a_latch.cullEye[3];
@@ -1272,7 +1244,7 @@ namespace DCLF::Direct
 		CullView view = CullViewOfLatch(a_type, 0, a_colourLatch);
 		view.cascades = a_cascades.data();
 		view.cascadeCount = static_cast<std::uint32_t>(a_cascades.size());
-		// The latch's region is what it tests (localShadowOffset 0: none).
+		// A localShadowOffset of 0 means no local shadow region.
 		if (a_colourLatch.localShadowOffset) {
 			view.shadowVolumes = a_volumes.data();
 			view.shadowVolumeCount = static_cast<std::uint32_t>(a_volumes.size());

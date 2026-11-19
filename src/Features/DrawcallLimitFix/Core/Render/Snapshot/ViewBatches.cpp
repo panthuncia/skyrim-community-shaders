@@ -1,6 +1,5 @@
-// The CPU pipeline's view batches (ViewBatches.h): the snapshot builder's per-view lists of its draws' scene list, as fixed-size SoA
-// batches, and their resident sequences (what BuildDrawsCS would store for each drawn partition, resolved against the snapshot's payload)
-// in a pooled version of their own.
+// The CPU pipeline's view batches. Each view gets a list of fixed-size SoA batches built from the scene list. The resident
+// sequences are what BuildDrawsCS would store for each drawn partition, kept in a pooled buffer version of their own.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -32,7 +31,7 @@ namespace DCLF::Draws
 
 	namespace
 	{
-		/** @brief A built sequences version's ref at byte 0 (null without a backing or a graph host). */
+		/** @brief A sequences version's ref at byte 0, or null without a backing or a graph host. */
 		RenderGraph::BufferRef SequencesRefOf(const org::services::PublishedBufferVersion& a_version)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -41,13 +40,13 @@ namespace DCLF::Draws
 			                        RenderGraph::BufferRef{};
 		}
 
-		/** @brief a_lanes rounded up to a multiple of 8, within [8, 65528] (a lane index is 16 bits). */
+		/** @brief a_lanes rounded up to a multiple of 8, within [8, 65528], because a lane index is 16 bits. */
 		std::uint32_t RoundedLanes(unsigned long a_lanes)
 		{
 			return std::max<std::uint32_t>(8, (static_cast<std::uint32_t>(std::min<unsigned long>(a_lanes, 65528)) + 7) & ~7u);
 		}
 
-		/** @brief The live setting (BatchLanes): seeded from CS_DCLF_CPU_BATCH, else the default. */
+		/** @brief The live lane setting, seeded from CS_DCLF_CPU_BATCH. */
 		std::atomic<std::uint32_t>& LiveLanes()
 		{
 			static std::atomic<std::uint32_t> lanes{ [] {
@@ -104,7 +103,7 @@ namespace DCLF::Draws
 		}
 		set->sequenceCount = static_cast<std::uint32_t>(a_sequences.size());
 		scratch.lastSequences = a_sequences.size();
-		// Sorted, bucketed and sized: one allocation for every batch's columns.
+		// One allocation for every batch's columns.
 		ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> bucketOf;
 		const std::uint32_t laneCount = set->lanes;
 		std::size_t batches = 0;
@@ -118,11 +117,11 @@ namespace DCLF::Draws
 		const std::size_t batchBytes = std::size_t(laneCount) * kLaneBytes;
 		{
 			DCLF_ZONE("CS.DCLF.ViewBatches.Storage");
-			// Not zeroed: every column of a batch's lanes is written below (both live columns too), and nothing past its count is read.
+			// Not zeroed, because every column is written below and nothing past a batch's count is read.
 			set->storage = StoragePool::Get().Take(batches * batchBytes);
 		}
 		DCLF_ZONE_NAMED(fillZone, "CS.DCLF.ViewBatches.Fill", true);
-		// Off (A/B): the producer fills each parity's static lanes at its first frame with the set (FrameValues' StoreLiveSpheres).
+		// When off, FrameValues fills the static lanes at the set's first frame instead.
 		const bool prefill = Direct::ExperimentOn(Direct::kExpPrefillLive);
 		const std::size_t objects = a_in.tables->objects.size();
 		auto& moverCount = scratch.moverCount;
@@ -159,7 +158,7 @@ namespace DCLF::Draws
 					batch.cy[l] = sphere[1];
 					batch.cz[l] = sphere[2];
 					batch.r[l] = sphere[3];
-					// Both live columns start as the snapshot's (FrameValues' producer writes the movers' every frame).
+					// Both live columns start from the snapshot. FrameValues rewrites the movers every frame.
 					if (prefill)
 						for (const auto& live : batch.liveSpheres) {
 							live.cx[l] = sphere[0];
@@ -172,7 +171,7 @@ namespace DCLF::Draws
 		}
 		set->liveFilled[0].store(prefill, std::memory_order_relaxed);
 		set->liveFilled[1].store(prefill, std::memory_order_relaxed);
-		// The movers' lanes, by object (FrameValues' producer writes their live spheres every frame).
+		// FrameValues writes the movers' live spheres every frame.
 		auto& first = set->moverLaneFirst;
 		first.assign(objects + 1, 0u);
 		for (std::size_t o = 0; o < objects; ++o)
@@ -184,7 +183,7 @@ namespace DCLF::Draws
 				for (std::uint32_t l = 0; l < batch.count; ++l)
 					if (const std::uint32_t o = batch.object[l]; (batch.flags[l] & Direct::kLaneMover) && o < objects)
 						set->moverLanes[first[o] + moverCount[o]++] = { static_cast<std::uint16_t>(v), batch.index, static_cast<std::uint16_t>(l) };
-		// The decal list's groups by main range slot (group g's slot is g - 1): its lanes are sorted by group.
+		// Decal group g uses main range slot g - 1. The lanes are already sorted by group.
 		const auto& decals = scratch.lanes[View(ViewType::Decal)];
 		if (!decals.empty()) {
 			auto& groupFirst = set->decalGroupFirst;
@@ -198,21 +197,20 @@ namespace DCLF::Draws
 		return set;
 	}
 
-	// ---- The sequences' version (the payload's publication rules: a pooled version, written whole into a backing no frame reads, GPU
-	// ready before the snapshot is posted).
+	// ---- The sequences' version. Same rules as the payload: written into a backing no frame reads, GPU ready before posting.
 
 	struct ViewBatchBuilder::Pending
 	{
 		std::atomic<bool> done{ false };
-		std::shared_ptr<const org::services::PublishedBufferVersion> version;  // null: failed (error)
+		std::shared_ptr<const org::services::PublishedBufferVersion> version;  // null if failed
 		std::string error;
-		std::uint64_t write = 0;  // its write sequence
-		bool lists = false;       // the incremental lists' set (SceneLists::Posted)
+		std::uint64_t write = 0;
+		bool lists = false;       // made by the incremental lists
 	};
 
 	namespace
 	{
-		/** @brief The sequences' backing pool (DCLF's retirement clock), made at the first post; never destroyed (a lease may return late). */
+		/** @brief The sequences' backing pool. Never destroyed, because a lease may return late. */
 		const std::shared_ptr<org::services::BackingPool>& SequencesPool()
 		{
 			static const auto* pool = new std::shared_ptr<org::services::BackingPool>(org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
@@ -224,7 +222,7 @@ namespace DCLF::Draws
 			return *pool;
 		}
 
-		/** @brief Posts a set's sequences' version (a_upload); false when refused (a_pending's done never runs). */
+		/** @brief Post a set's sequence upload. False when refused, and then a_pending never completes. */
 		bool PostSequences(SequencesUpload a_upload, const std::shared_ptr<org::runtime::IUploadService>& a_uploads, std::uint64_t a_version,
 			const std::shared_ptr<ViewBatchBuilder::Pending>& a_pending);
 	}
@@ -247,13 +245,13 @@ namespace DCLF::Draws
 		payload = nullptr;
 		set.reset();
 		building.reset();
-		pending.reset();  // a version in flight finishes into its own Pending, then drops
+		pending.reset();  // a version in flight still finishes into its own Pending
 		failed = false;
 	}
 
 	bool ViewBatchBuilder::Ready(const ViewBatchInputs& a_in)
 	{
-		// A new payload, or the lanes changed (SetBatchLanes): the set made again, from this snapshot.
+		// A new payload or a lane count change remakes the set.
 		if (const std::uint32_t want = BatchLanes(); payload != a_in.payload || lanes != want || forwardOnly != a_in.forwardOnly) {
 			Reset();
 			payload = a_in.payload;
@@ -263,15 +261,14 @@ namespace DCLF::Draws
 		if (!a_in.payload || set || failed)
 			return true;
 		if (!pending) {
-			// The newest spheres a producer posted, and the next producer's asked for (the next set's).
-			// A forward-only set asks for none: its few lanes are all movers, their spheres the frame's.
+			// A forward-only set asks for no spheres, because its few lanes are all treated as movers.
 			auto& values = FrameValues::Get();
 			if (!a_in.forwardOnly) {
 				if (auto taken = values.TakeSnapshotSpheres())
 					spheres = std::move(taken);
 				values.RequestSnapshotSpheres();
 			}
-			// The incremental lists (kExpIncremental), else a full build; off, the lists are forgotten (back on, they compact).
+			// Use the incremental lists when enabled. Turning them off forgets them, so turning them back on compacts.
 			SequencesUpload upload;
 			const bool incremental = Direct::ExperimentOn(Direct::kExpIncremental);
 			if (!incremental)
@@ -282,7 +279,7 @@ namespace DCLF::Draws
 				building = lists->Make(a_in, spheres, versions + 1, upload);
 			const bool fromLists = building != nullptr;
 			if (fromLists && Direct::ExperimentOn(Direct::kExpIncrementalCheck) && ++checks % 2 == 0) {
-				// The equivalence check: the same snapshot's full build, its lanes and sequences against the lists' set.
+				// The equivalence check compares a full build of the same snapshot against the lists' set.
 				std::vector<DrawSequence> full;
 				if (const auto fullSet = MakeViewBatches(a_in, spheres.get(), full)) {
 					const std::size_t differ = CompareSets(*lists, *building, *fullSet, full, a_in);
@@ -353,7 +350,7 @@ namespace DCLF::Draws
 		}
 		building->sequencesVersion = done->version;
 		building->sequencesAddress = done->version->lease->address;
-		// Not a raw ref: the CPU sites declare the sequences (DeclareViewBatchReads), whose version the frame publishes (PublishViewBatches).
+		// Not a raw ref, because the CPU sites declare the sequences and the frame publishes their version.
 		building->sequencesRef = SequencesRefOf(*done->version);
 		set = std::move(building);
 		return true;
@@ -373,12 +370,10 @@ namespace DCLF::Draws
 			input.elementCount = a_upload.total;
 			input.capacity = std::max<std::uint64_t>(input.elementCount, 1);
 			input.growth = org::services::GrowthPolicy::Headroom(25, 64);
-			// Smaller again once the lists stay much smaller (the copy is the predecessor's up to this version's sequences).
 			input.shrink = PooledBackings::Shrink();
 			input.flags.deviceAddress = true;
 			input.backingPool = SequencesPool();
-			// Every version into a backing no frame reads (the pool's retirement), never patched in place: a full build's whole, the
-			// incremental lists' as their predecessor's GPU copy plus their own writes (the store's appends, the volatile sequences).
+			// Never patch a backing in place. An incremental version copies its predecessor on the GPU, then adds its own writes.
 			input.predecessorCopy = true;
 			input.previous = std::move(a_upload.previous);
 			input.keep = std::move(a_upload.keep);

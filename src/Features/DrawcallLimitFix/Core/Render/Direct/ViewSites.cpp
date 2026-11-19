@@ -1,18 +1,13 @@
-// The CPU-driven pipeline's view sites (ViewSites.h, SiteFrame.h): the depth site's hosted views (the reflection's faces, first person's
-// depth) and the first-person colour site at fp.colour-render.
+// The CPU-driven pipeline's view sites: the depth site's hosted views (the reflection faces and first-person depth) and
+// the first-person colour site.
 //
-// The GPU path's view passes (ViewEpochRecord.cpp) and their direct counterparts here:
-// - view.faces (the reflection): per face a rendering of the cube's slice (loaded: the engine's sky is there) with DCLF's depth cleared,
-//   each bucket's forward pipeline, the face's frame push words; then the face's tree LOD. Here the depth is the site's own (the view's is
-//   an ORG resource the CPU graph never materialises), and the tree LOD a rendering of its own after the face's draws.
-// - view.depth (first person): each bucket's Z-prepass depth pipeline into the main depth, after main depth.
-// - view.colour and view.forward (first person, fp.colour): each bucket's first-person forward pipeline into kMAIN and the motion vectors
-//   against kPOST_ZPREPASS_COPY, then the forward range with the main set's pipelines onto every main target, sorted back to front
-//   (RecordForward: ForwardSortCS's order).
-// A view's lanes bind their bucket's pipelines as the view's shape has them (ViewPipelines: by its map, the slot each bucket was made
-// from), so a lane the GPU path's map sends to no bucket (a forward slot, a slot without its view pipeline) draws nothing there either.
+// Reflection faces draw into the cube's slice, which is loaded because the engine's sky is there, with a depth of the
+// site's own that each face clears. The face's tree LOD is a rendering of its own after the face's draws.
+// First-person depth draws into the main depth after main depth. First-person colour draws its buckets into kMAIN and
+// the motion vectors against kPOST_ZPREPASS_COPY, then the forward range back to front onto every main target.
+// Lanes bind pipelines as the view's shape has them, so a lane the GPU map sends to no bucket draws nothing here either.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h goes first because volk must come before every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
@@ -37,7 +32,6 @@ namespace DCLF::Direct::detail
 {
 	namespace
 	{
-		// (Not S: the frame state's accessor, SiteFrame.h.)
 		using RA = rhi::ResourceAccessType;
 		using RS = rhi::ResourceSyncState;
 
@@ -56,8 +50,7 @@ namespace DCLF::Direct::detail
 			return static_cast<rhi::ResourceSyncState>(bits);
 		}
 
-		// Between two renderings of the same attachments (main depth then first person's, a face's draws then its tree LOD's): the first's
-		// colour and depth writes against the second's tests and writes.
+		// Between two renderings of the same attachments, the first's colour and depth writes against the second's tests and writes.
 		constexpr rhi::GlobalBarrier kAttachments{ Sync({ RS::RenderTarget, RS::DepthStencil }), Sync({ RS::RenderTarget, RS::DepthStencil }),
 			Access({ RA::RenderTarget, RA::DepthReadWrite }), Access({ RA::RenderTarget, RA::DepthReadWrite }) };
 
@@ -68,13 +61,13 @@ namespace DCLF::Direct::detail
 		}
 
 		/**
-		 * @brief A hosted view's own targets: the reflection's cube slices (RTVs) and the faces' depth (an image of the site's own), first
-		 * person's kPOST_ZPREPASS_COPY (a DSV). Made once per target; the ones before are kept by the slot of the frame that replaced them.
+		 * @brief A hosted view's own targets. Made once per target, and the old ones are kept alive by the frame slot that
+		 * replaced them.
 		 */
 		struct ViewTargets
 		{
-			std::shared_ptr<org::GloballyIndexedResource> target;  // the cube, or kPOST_ZPREPASS_COPY, as current when the views were made (held: the views are of it)
-			rhi::ResourcePtr depth;                                 // the faces' own depth (the reflection's)
+			std::shared_ptr<org::GloballyIndexedResource> target;  // held because the views are of it
+			rhi::ResourcePtr depth;  // the reflection faces' own depth
 			rhi::DescriptorHeapPtr rtvHeap, dsvHeap;
 			std::array<rhi::DescriptorSlot, Draws::kMaxViewFaces> colours{};
 			rhi::DescriptorSlot dsv{};
@@ -84,7 +77,7 @@ namespace DCLF::Direct::detail
 			bool valid = false;
 		};
 
-		/** @brief One face of a hosted view: its cull's view, what its recordings bind (its push words), its view of the depth run. */
+		/** @brief One face of a hosted view: its cull's view, its push words and its view of the depth run. */
 		struct HostedFace
 		{
 			std::uint32_t face = 0;
@@ -93,7 +86,7 @@ namespace DCLF::Direct::detail
 			SiteView* site = nullptr;
 		};
 
-		/** @brief A hosted view of a frame: its commit's inputs, then (AttachHostedViews) its pipelines, targets and faces' views. */
+		/** @brief A hosted view of a frame: its commit's inputs, then its pipelines, targets and face views once attached. */
 		struct HostedView
 		{
 			ViewType type = ViewType::Reflection;
@@ -101,28 +94,28 @@ namespace DCLF::Direct::detail
 			std::shared_ptr<Draws::ViewResources> resources;
 			std::vector<HostedFaceDraw> families;
 			std::shared_ptr<const void> keep;
-			std::deque<HostedFace> faces;  // never moved: a SiteView names its bindings by address
+			std::deque<HostedFace> faces;  // never moved, since a SiteView names its bindings by address
 			std::shared_ptr<const IndirectState> pipelines;
 			std::shared_ptr<const ViewTargets> targets;
-			std::shared_ptr<const TargetViews> main;  // the depth run's main targets
+			std::shared_ptr<const TargetViews> main;
 			std::array<rhi::Format, 1> colourFormats{};
 			bool valid = false;
 		};
 
-		/** @brief The frame's view state (FrameSlot::viewState, render thread): the hosted views not attached yet, and first person's once it is. */
+		/** @brief Render thread: the frame's hosted views not attached yet, and first person's once it is. */
 		struct ViewFrameState
 		{
 			std::vector<std::shared_ptr<HostedView>> pending;
 			std::shared_ptr<HostedView> firstPerson;
 		};
 
-		/** @brief The depth run's (SiteRun::viewState): its hosted views, read by its callback. */
+		/** @brief The depth run's hosted views, read by its callback. */
 		struct HostedRun
 		{
 			std::vector<std::shared_ptr<HostedView>> views;
 		};
 
-		/** @brief The first-person colour run's (SiteRun::viewState): the view, and what its two renderings bind. */
+		/** @brief The first-person colour run's view and what its two renderings bind. */
 		struct FirstPersonRun
 		{
 			std::shared_ptr<HostedView> view;
@@ -137,8 +130,8 @@ namespace DCLF::Direct::detail
 		}
 
 		/**
-		 * @brief The forward lanes' placement rows of first person by frame slot (by object; the others unwritten), for its sort on the CS
-		 * thread: grown, never shrunk, rewritten only once the slot's last frame retired (render thread).
+		 * @brief First person's forward placement rows per frame slot, for its sort on the CS thread. Grown, never shrunk,
+		 * and rewritten only once the slot's last frame retired.
 		 */
 		std::vector<BindlessPlacement>& FirstPersonRowsOf(const FrameSlot& a_slot)
 		{
@@ -149,10 +142,8 @@ namespace DCLF::Direct::detail
 		}
 
 		/**
-		 * @brief A view's lanes' pipelines as its shape has them: a copy of its IndirectState whose Z-prepass groups and plain colour
-		 * pipelines, by the set index of each of the view's buckets (ViewBuckets: the main set index, and the pipeline slot it was made from),
-		 * are the shape's bucket of that slot (ViewFrame::map, buckets: its depth and colour pipelines); none for a slot the map sends to no
-		 * bucket, or to one without capacity. The recorder binds them as for the main list (Depth: zPipelines by zGroups; Colour: plainColour).
+		 * @brief A view's lane pipelines as its shape has them, so the recorder can bind them as for the main list. A slot the
+		 * map sends to no bucket, or to one without capacity, gets none.
 		 */
 		std::shared_ptr<const IndirectState> ViewPipelines(const Draws::ViewFrame& a_shape, const ViewBuckets& a_buckets)
 		{
@@ -177,7 +168,7 @@ namespace DCLF::Direct::detail
 			return state;
 		}
 
-		/** @brief Render thread: the reflection's targets for a_view's cube (its slices' RTVs, the faces' own depth and its DSV). */
+		/** @brief Render thread: the reflection's cube slice RTVs and the faces' own depth. */
 		std::shared_ptr<const ViewTargets> ReflectionTargets(FrameSlot& a_slot, const Draws::ViewResources& a_view)
 		{
 			static std::shared_ptr<const ViewTargets> current;
@@ -210,7 +201,7 @@ namespace DCLF::Direct::detail
 				ok = device.CreateRenderTargetView(targets->colours[f], targets->targetResource, desc) == rhi::Result::Ok;
 			}
 			if (ok) {
-				// The faces' depth at the engine's precision (the view's depth's format): only ever cleared and drawn by the faces.
+				// The faces' depth uses the view depth's format. Only the faces ever clear and draw it.
 				rhi::ClearValue clear{};
 				clear.type = rhi::ClearValueType::DepthStencil;
 				clear.format = depthFormat;
@@ -237,7 +228,7 @@ namespace DCLF::Direct::detail
 			return current;
 		}
 
-		/** @brief Render thread: first person's colour depth target, kPOST_ZPREPASS_COPY (a_view's import), as a DSV. */
+		/** @brief Render thread: first person's colour depth target, kPOST_ZPREPASS_COPY, as a DSV. */
 		std::shared_ptr<const ViewTargets> FirstPersonTargets(FrameSlot& a_slot, const Draws::ViewResources& a_view)
 		{
 			static std::shared_ptr<const ViewTargets> current;
@@ -262,10 +253,7 @@ namespace DCLF::Direct::detail
 			return current;
 		}
 
-		/**
-		 * @brief Render thread: a_view's pipelines, targets and faces' views in a_depth (each face's bindings: the depth run's index pool and
-		 * pool firsts, the shape's heaps and the face's push words; Parallel mode: its secondaries' rendering).
-		 */
+		/** @brief Render thread: sets up a_view's pipelines, targets and face views in the depth run. */
 		void PrepareHostedView(FrameSlot& a_slot, SiteRun& a_depth, HostedView& a_view)
 		{
 			const auto& shape = *a_view.shape;
@@ -287,14 +275,14 @@ namespace DCLF::Direct::detail
 				b.offsetDepth = false;
 				if (face.face < shape.push.size())
 					b.framePush = shape.push[face.face];
-				// The animated rows' copy is the frame's: a view recorded once per snapshot draws the installed rows (its captured transforms).
+				// A view recorded once per snapshot draws the installed rows, its captured transforms.
 				if (FrameMode().cadence[static_cast<std::size_t>(a_view.type)] == Cadence::PerSnapshot)
 					b.animatedRows = 0;
-				// The reflection's lanes draw their colour pipelines (the faces' forward ones), first person's depth its Z-prepass ones.
+				// Reflection lanes draw the faces' forward pipelines, first-person depth its Z-prepass ones.
 				auto& site = NewView(a_slot, a_depth, a_view.type, face.view, !reflection);
 				site.bindings = &b;
 				face.site = &site;
-				// A GPU-driven frame culls it for its forward part alone: no depth of its own to record.
+				// A GPU-driven frame culls it only for its forward part, so there is no depth to record.
 				if (!a_slot.ownsEpochs || !a_view.valid || (reflection && face.face >= a_view.targets->faces))
 					continue;
 				auto& inheritance = site.inheritance;
@@ -315,10 +303,10 @@ namespace DCLF::Direct::detail
 			}
 		}
 
-		/** @brief A face's tree LOD (its draw families), after its draws: a rendering of its own, the face's colour and depth loaded. */
+		/** @brief A face's tree LOD, drawn in its own rendering after the face's draws with colour and depth loaded. */
 		void RecordFaceFamilies(SiteOut& a_out, SiteRun& a_run, const HostedView& a_view, const HostedFace& a_face, rhi::PassBeginInfo a_begin)
 		{
-			static const std::shared_ptr<const void> kNothing;  // a face's draw has no prepared state: its pipeline is the shape's
+			static const std::shared_ptr<const void> kNothing;  // the face's pipeline is the shape's
 			const auto drawn = [&](const HostedFaceDraw& a_draw) { return a_draw.face == a_face.face && a_draw.list.valid() && a_draw.pipeline.valid(); };
 			if (std::none_of(a_view.families.begin(), a_view.families.end(), drawn))
 				return;
@@ -335,10 +323,7 @@ namespace DCLF::Direct::detail
 			list.EndPass();
 		}
 
-		/**
-		 * @brief The reflection's faces: per face its draws into the cube's slice (loaded) with the faces' depth cleared (an image of the
-		 * site's own: its contents before undefined), then its tree LOD.
-		 */
+		/** @brief The reflection faces. Each draws into its loaded cube slice with the faces' depth cleared, then its tree LOD. */
 		void RecordReflection(SiteOut& a_out, SiteRun& a_run, HostedView& a_view)
 		{
 			const auto& shape = *a_view.shape;
@@ -346,7 +331,7 @@ namespace DCLF::Direct::detail
 			for (auto& face : a_view.faces) {
 				if (face.face >= targets.faces || !face.site)
 					continue;
-				// The faces' depth: every face clears it (the face before's writes, any frame's, against the clear).
+				// Every face clears the shared depth, so the previous face's writes must finish first.
 				rhi::TextureBarrier depthBarrier{};
 				depthBarrier.texture = targets.depthResource;
 				depthBarrier.beforeSync = RS::All;
@@ -384,7 +369,7 @@ namespace DCLF::Direct::detail
 			}
 		}
 
-		/** @brief First person's depth: its lanes' Z-prepass depth pipelines into the main depth, after main depth and the families'. */
+		/** @brief First-person depth: Z-prepass depth pipelines into the main depth, after main depth and the families. */
 		void RecordFirstPersonDepth(SiteOut& a_out, SiteRun& a_run, HostedView& a_view)
 		{
 			if (a_view.faces.empty() || !a_view.faces.front().site)
@@ -433,7 +418,7 @@ namespace DCLF::Direct::detail
 		const auto* run = static_cast<const HostedRun*>(a_run.viewState.get());
 		if (!run)
 			return;
-		// A view that is not valid records nothing; its queues are drained with the run's (SiteCallback).
+		// An invalid view records nothing. Its queues are drained with the run's.
 		for (const auto& view : run->views) {
 			if (!view->valid)
 				continue;
@@ -454,10 +439,10 @@ namespace DCLF::Direct::detail
 		const auto& shape = *view.shape;
 		const auto& main = *view.main;
 		const auto& targets = *view.targets;
-		// What the depth site culled for first person (its callback, earlier on this thread, drained every batch).
+		// The depth site's callback already drained every first-person batch on this thread.
 		const auto batches = AwaitAll(a_run, *view.faces.front().site);
 		auto& list = a_out.Inline();
-		// The buckets: each lane's first-person forward pipeline into kMAIN and the motion vectors, tested against kPOST_ZPREPASS_COPY.
+		// Each lane's first-person forward pipeline into kMAIN and the motion vectors, tested against kPOST_ZPREPASS_COPY.
 		Barrier(list, kAttachments);
 		std::array<rhi::ColorAttachment, Draws::kColorTargets> colours{};
 		for (std::uint32_t i = 0; i < main.count; ++i) {
@@ -480,19 +465,18 @@ namespace DCLF::Direct::detail
 		begin.minDepth = 0.0f;
 		begin.maxDepth = shape.depthRange;
 		begin.debugName = "DCLF direct first person";
-		// A GPU-driven frame's graph draws the buckets, and its lanes are the forward part's alone.
+		// In a GPU-driven frame the graph draws the buckets, and the lanes are only the forward part.
 		if (slot.ownsEpochs) {
 			list.BeginPass(begin);
 			RecordContext colour{ list, *slot.set, ViewType::FirstPerson, 0, Site::FirstPerson, false, run->colour, &slot.counters };
-			colour.mainTargets = false;  // kMAIN and the motion vectors alone
+			colour.mainTargets = false;  // kMAIN and the motion vectors only
 			if (BeginList(colour))
 				for (const auto* batch : batches)
 					if (batch->count)
 						RecordBatch(colour, *batch);
 			list.EndPass();
 		}
-		// The forward part: the forward lanes with the main set's pipelines (the others have none there), farthest first, onto every main
-		// target.
+		// The forward part: forward lanes with the main set's pipelines, farthest first, onto every main target.
 		if (slot.ownsEpochs && shape.forwardRanges.empty())
 			return;
 		Barrier(list, kAttachments);
@@ -541,19 +525,19 @@ namespace DCLF::Direct
 			return false;
 		const auto& face = view->faces.front();
 		auto& run = NewBareRun(*slot, Site::FirstPerson);
-		// The run's own heaps: its callback binds them in DXVK's buffer (SiteOut::BindHeaps).
+		// The callback binds the run's own heaps in DXVK's buffer.
 		run.bindings.resourceHeap = face.bindings.resourceHeap;
 		run.bindings.samplerHeap = face.bindings.samplerHeap;
 		auto state = std::make_shared<FirstPersonRun>();
 		state->view = view;
 		state->colour = face.bindings;
-		// The forward part draws with the main set's pipelines (the shape's own IndirectState), sorted by the first-person camera.
+		// The forward part uses the main set's pipelines, sorted by the first-person camera.
 		state->forward = face.bindings;
 		state->forward.main = &view->shape->indirect;
 		state->forward.viewProj = face.view.viewProj;
 		bool rowsDone = true;
 		if (!slot->ownsEpochs || !view->shape->forwardRanges.empty()) {
-			// The forward lanes' rows (the producer's rows change at the next Kick); a frame whose producer is not done waits here (counted).
+			// A frame whose producer is not done waits here, and the wait is counted.
 			const auto* rows = FrameValues::Get().RowsIfDone();
 			if (!rows) {
 				++s.window.rowWaits;
@@ -571,7 +555,7 @@ namespace DCLF::Direct
 				state->forward.placements = kept;
 			}
 		}
-		// Its view is the depth site's (for the report's drawn counts and the callback's drain; its batches already arrived).
+		// Its view is the depth site's, for the drawn counts and the callback's drain.
 		run.views.push_back(face.site);
 		run.viewState = std::move(state);
 		if (!slot->ownsEpochs)

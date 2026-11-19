@@ -1,5 +1,5 @@
-// The revision producer's assembly (snapshot builder): a scene revision's versions (the sealed set), its epochs' shapes and the
-// recordings requested for them on ORG's host thread, sealed; and the render thread's use of the selected revision (RevisionOf).
+// Assembles a scene revision on the snapshot builder: the sealed versions, each epoch's shape, and the recordings requested from
+// ORG's host thread. Also the render thread's lookup and submission of the selected revision.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -14,31 +14,30 @@ namespace DCLF
 
 	namespace
 	{
-		// Render thread: the submissions of each epoch outside its trigger (SubmitRevisionRecording), the first logged.
+		// Render thread. Counts submissions outside an epoch's trigger, so only the first is logged.
 		std::array<std::uint64_t, kMaxEpochs> outsideTrigger{};
 
-		/** @brief a_made, unless a_old is the same shape (then a_old: its fragment, and its recording, stand). */
+		/** @brief Returns a_old when it has the same shape as a_made, so its fragment and recording stay valid. */
 		template <class Frame>
 		std::shared_ptr<const Frame> Kept(const std::shared_ptr<const Frame>& a_old, const std::shared_ptr<const Frame>& a_made, bool& a_changed)
 		{
 			if (a_old && a_made && a_old->SameShape(*a_made))
 				return a_old;
 			a_changed = true;
-			// A copy: the revision's shape is never the live one, whose identity the live recordings are prepared for.
+			// Copy, because live recordings are prepared against the identity of the live shape.
 			return std::make_shared<const Frame>(*a_made);
 		}
 
-		/** @brief The recordings of one epoch's request, completed on ORG's host thread: the fragment resolves once all are recorded. */
+		/** @brief One epoch's pending recordings. The fragment resolves once all of them are recorded on ORG's host thread. */
 		struct PendingRecordings
 		{
 			std::shared_ptr<RevisionFragment> fragment;
 			std::vector<std::shared_ptr<const org::GraphHost::EpochRecording>> recordings;
 			std::atomic<std::uint32_t> remaining = 0;
 			std::atomic<bool> failed = false;
-			std::uint32_t hosted = 0;  // the hosted epochs recorded with their shapes, a bit each (RevisionRecordings::hosted)
-			// The build of the epoch's graph the revision is of (RevisionInputs::epochBuilds): a recording of another is none of its.
+			std::uint32_t hosted = 0;
+			// A recording made on any other graph build does not belong to this revision.
 			std::uint64_t buildGeneration = 0;
-			// The epoch's counters (SceneRevisions::EpochStats), the failures logged, and the recordings outstanding (Impl::recordingsOutstanding).
 			std::atomic<std::uint64_t>*recorded = nullptr, *failedCount = nullptr, *droppedCount = nullptr, *shapes = nullptr;
 			std::atomic<std::uint32_t>* logged = nullptr;
 			std::atomic<std::uint32_t>* outstanding = nullptr;
@@ -48,7 +47,7 @@ namespace DCLF
 		using Revisions = ImplProducer::SceneRevisions;
 		using Draft = org::async::RevisionAssembler::Draft;
 
-		/** @brief Each epoch's shape (MakeRevision's) in a_draft: its fragment kept while the shape is the same. */
+		/** @brief Put each epoch's shape in a_draft, keeping the old fragment while the shape is the same. */
 		void AssembleShapes(Revisions& a_rv, Draft& a_draft, const MadeShapes& a_shapes, const ToggleSet& a_toggles)
 		{
 			using R = Revisions;
@@ -57,7 +56,6 @@ namespace DCLF
 				draft.Set(R::kShapeSlot + a_epoch, RevisionFragment::MakeReady(std::move(a_value)));
 				++a_rv.epochs[a_epoch].changed;
 			};
-			// The producer's newest shapes (MakeRevision's), by the epochs' traits.
 			const auto& shapes = a_shapes;
 			const auto& toggles = a_toggles;
 			for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e) {
@@ -65,8 +63,7 @@ namespace DCLF
 				const auto& current = draft.Get(R::kShapeSlot + e);
 				bool changed = false;
 				if (traits.sharesWith != kNoEpoch) {
-					// The shared shape's own value (a recording kept for this epoch stays while the shape does); none while the epoch's
-					// gate class is off.
+					// Share the same pointer so this epoch's recording stays valid. No shape while the gate class is off.
 					const auto& source = draft.Get(R::kShapeSlot + traits.sharesWith);
 					const bool on = source && (traits.gate == Api::ObjectClass::Count || Extensions::ObjectClassOn(toggles, traits.gate));
 					auto share = [&]<class Frame>() {
@@ -102,8 +99,7 @@ namespace DCLF
 					if (changed)
 						setShape(e, std::shared_ptr<const ShadowVariants>(std::move(variants)));
 				} else {
-					// A DropWhenOff view's shape while its toggle is on (none while it is off: first person's); a KeepLast view's last one
-					// stands without a new one (the reflection's).
+					// A DropWhenOff view loses its shape while toggled off. A KeepLast view keeps its last shape when no new one is made.
 					const auto view = static_cast<ViewKind>(traits.index);
 					const bool dropWhenOff = Extensions::Views().views[traits.index].life == Api::ViewShapeLife::DropWhenOff;
 					const auto& made = dropWhenOff && !Extensions::ViewOn(toggles, view) ? nullptr : shapes.views[traits.index];
@@ -119,14 +115,13 @@ namespace DCLF
 			}
 		}
 
-		/** @brief A recording of a_work's request a_index completed (ORG's host thread): the fragment resolves once all are, or fails. */
+		/** @brief ORG's host thread. One recording finished. The fragment resolves after the last one, or fails. */
 		void RecordingCompleted(const std::shared_ptr<PendingRecordings>& a_work, std::size_t a_index, std::shared_ptr<const org::GraphHost::EpochRecording> a_recording,
 			std::exception_ptr a_error)
 		{
 			const auto& work = a_work;
-			// Dropped (a build stopped ORG's host thread before it was recorded) or recorded on another build than the one the
-			// revision's versions are of: no recording of this revision's, and nothing failed. The fragment fails, so no revision
-			// waits on it; the next make asks again once, for the new build's graph (its versions change with the build).
+			// A drop or a recording on another graph build is not an error. The fragment still fails so nothing waits on it.
+			// The next make asks again for the new build.
 			bool dropped = false;
 			if (a_error) {
 				try {
@@ -174,9 +169,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Epoch a_epoch's recordings of its inputs a_inputs - the versions, its shape, then the shapes of the epochs it hosts in
-		 * a_hosted (a bit each, by row: those that have one) - requested of ORG's host thread: the fragment they resolve, or null when
-		 * async epochs stopped under it.
+		 * @brief Request an epoch's recordings from ORG's host thread. a_inputs is the versions, the shape, then each hosted shape.
+		 * Returns the fragment they resolve, or null when async epochs were stopped.
 		 */
 		std::shared_ptr<RevisionFragment> RequestRecordings(org::GraphHost& a_host, Revisions& a_rv, std::atomic<std::uint32_t>& a_outstanding, std::uint32_t a_epoch,
 			const std::shared_ptr<const NamedVersions>& a_versions, std::span<const std::shared_ptr<const RevisionFragment>> a_inputs, std::uint32_t a_hosted,
@@ -185,7 +179,6 @@ namespace DCLF
 			using R = Revisions;
 			const std::uint32_t e = a_epoch;
 			const auto& shapeFragment = a_inputs[1];
-			// The host data of each of the epoch's shapes (a shadow epoch's variants).
 			std::vector<std::shared_ptr<const EpochRevisionData>> requests;
 			auto request = [&](auto&& a_fill) {
 				auto data = std::make_shared<EpochRevisionData>();
@@ -193,18 +186,15 @@ namespace DCLF
 				a_fill(data->shapes);
 				requests.push_back(std::move(data));
 			};
-			// The epoch's passes prepare against its shape (the forward epoch's, the colour shape: CurrentFrame's MainOpaque).
 			const auto& traits = EpochTraitsOf(e);
 			if (traits.shape == ShapeKind::Main) {
-				// With the view epochs it hosts that have a shape (the depth epoch: the reflection's faces, first person's depth), each a
-				// dimension (RevisionRecordings::hosted): for every subset of them absent, none absent first, its variants with the present
-				// ones' shapes (their passes' work) and none of the absent ones' (their passes record nothing: a frame without faces, a
-				// frame not in first person). A hosted epoch without a shape (its view's toggle off) is no dimension.
+				// One set of variants per subset of hosted views that are absent, so a frame without that view records nothing for it.
+				// The layout must match RevisionRecordings::IndexOf.
 				std::array<std::pair<std::size_t, std::shared_ptr<const ViewFrame>>, kMaxEpochs> hosted{};
 				std::uint32_t dimensions = 0;
 				for (std::uint32_t h = 0, input = 2; h < kMaxEpochs; ++h)
 					if ((a_hosted >> h) & 1)
-						hosted[dimensions++] = { EpochTraitsOf(h).index, a_inputs[input++]->Value<ViewFrame>() };  // its view (a View shape's index)
+						hosted[dimensions++] = { EpochTraitsOf(h).index, a_inputs[input++]->Value<ViewFrame>() };
 				for (std::uint32_t absent = 0; absent < (1u << dimensions); ++absent) {
 					auto fill = [&](RevisionShapes& a_shapes, bool a_withoutIndexPool) {
 						a_shapes.main[traits.index] = shapeFragment->Value<PassFrame>();
@@ -214,8 +204,7 @@ namespace DCLF
 								a_shapes.views[hosted[d].first] = hosted[d].second;
 					};
 					request([&](RevisionShapes& a_shapes) { fill(a_shapes, false); });
-					// The depth epoch's again, without the index pool's dispatch: the commit submits it when it gave out no range (its own
-					// UpdateIndexPool decides, whichever commit ran first), so such a frame records no copy of zero groups.
+					// A depth variant without the index pool dispatch, so a frame with no range to upload records no zero-group copy.
 					if (traits.index == kDepthShape && traits.sharesWith == kNoEpoch)
 						request([&](RevisionShapes& a_shapes) { fill(a_shapes, true); });
 				}
@@ -262,18 +251,15 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.AssembleRevision");
 		using R = SceneRevisions;
 		auto& rv = revisions;
-		// A graph build asked of the frame (shadow view slots: ServeRevisionRequests) not made yet: a recording now would be of the graph
-		// without what it declares, which that build supersedes. None is sealed until the inputs carry it (one integer compare; the
-		// inputs' post wakes the builder).
+		// Wait for a graph build we asked the frame for. Recording now would use the graph it is about to replace.
 		if (producer.buildWanted && producer.inputs.buildGeneration < producer.buildWanted) {
 			++rv.buildWaits;
 			return;
 		}
 		producer.buildWanted = 0;
 		auto draft = rv.assembler.Begin();
-		// The versions: the make's sealed set (the same set and fragment while nothing changed, so every recording of it stands), as a
-		// fragment of its own after a graph build (a recording is of the build it was made on, so every epoch is recorded again). The
-		// build as the frame posted it (RevisionInputs: BuildPoint's).
+		// Keep the versions fragment while nothing changed, so every recording stays valid.
+		// A graph build gets a new fragment, which forces every epoch to record again.
 		const std::uint64_t builds = producer.inputs.buildGeneration;
 		const auto& seal = rv.sealed;
 		if (rv.versionsFragmentSet != seal.named || rv.graphBuilds != builds) {
@@ -287,12 +273,10 @@ namespace DCLF
 		const auto& versionsFragment = draft.Get(R::kVersionsSlot);
 		const auto versions = versionsFragment->Value<NamedVersions>();
 
-		// Each epoch's shape (MakeRevision's): its fragment kept while the shape is the same.
 		AssembleShapes(rv, draft, producer.made, producer.toggles);
 
-		// Each epoch's recording: kept while it requires exactly the draft's shape and versions (and the shapes of the epochs it hosts
-		// that have one); else requested for them. A failed one is dropped (the epoch has none in the revision) and not asked for again
-		// until its inputs change. A hosted epoch has none of its own: its host's carry its passes.
+		// Keep a recording while its inputs are exactly the draft's, otherwise request a new one.
+		// A failed recording is not asked for again until its inputs change.
 		auto* host = RenderGraphRuntime::Get().Host();
 		const bool recordable = host && producer.inputs.asyncEpochs;
 		std::vector<std::shared_ptr<const RevisionFragment>> inputs;
@@ -301,7 +285,6 @@ namespace DCLF
 			const auto& traits = EpochTraitsOf(e);
 			const auto& shapeFragment = draft.Get(R::kShapeSlot + e);
 			const auto current = draft.Get(slot);
-			// Its inputs: the versions, its shape, then the shapes of the epochs it hosts that have one (by row; hosted, a bit each).
 			inputs.assign({ versionsFragment, shapeFragment });
 			std::uint32_t hosted = 0;
 			for (std::uint32_t h = 0; h < epochs; ++h)
@@ -319,8 +302,7 @@ namespace DCLF
 						return false;
 				return true;
 			};
-			// The CPU pipeline's graph has no pass in a DCLF epoch without CPU pipeline passes (GraphConditions): nothing to record, and the
-			// snapshot is complete without (DecideEpochCoverage); the direct sites draw from its payload and view batches.
+			// With the CPU pipeline, epochs without CPU pipeline passes have nothing to record.
 			if (!recordable || !shapeFragment || traits.hostedBy != kNoEpoch || (producer.inputs.cpuPipeline && !CpuPipelineRecords(e))) {
 				draft.Set(slot, nullptr);
 				continue;
@@ -328,7 +310,6 @@ namespace DCLF
 			if (current && requiresExactly(*current)) {
 				if (current->GetState() != RevisionFragment::State::Failed)
 					continue;
-				// Failed for these exact inputs: none in this revision, and none asked for until they change.
 				draft.Set(slot, nullptr);
 				rv.failedFor[e] = inputs;
 				continue;
@@ -339,7 +320,7 @@ namespace DCLF
 			}
 			auto fragment = RequestRecordings(*host, rv, recordingsOutstanding, e, versions, inputs, hosted, producer.inputs);
 			if (!fragment) {
-				// Async epochs stopped under it: what was asked settles the fragment, which this revision does not name.
+				// Async epochs stopped. Anything already asked for still settles the fragment, which this revision does not name.
 				++rv.epochs[e].refused;
 				draft.Set(slot, nullptr);
 				continue;
@@ -348,7 +329,6 @@ namespace DCLF
 			draft.Set(slot, std::move(fragment));
 		}
 
-		// The frame adopts the revision's set with its selection (AdoptSnapshot: NamedVersions::AdoptAll).
 		try {
 			(void)rv.assembler.Seal(std::move(draft));
 			rv.revisionVersions = versions;
@@ -380,7 +360,7 @@ namespace DCLF
 
 	void IndirectDraws::Impl::SubmitRevisionRecording(std::uint32_t a_epoch, const RevisionRecordings& a_recordings, std::size_t a_index)
 	{
-		// Each epoch is submitted at its trigger's engine point (Schedule/Frame.cpp): anywhere else, a hook is out of step with the table.
+		// Submitting outside the epoch's trigger means a hook is out of step with the schedule.
 		if (const auto trigger = EpochTrigger(a_epoch); Extensions::ActiveTrigger() != trigger) [[unlikely]] {
 			if (outsideTrigger[a_epoch]++ == 0)
 				logger::warn("[DCLF] the {} epoch was submitted outside its trigger {} (active: {})", EpochTraitsOf(a_epoch).name, TriggerName(trigger),

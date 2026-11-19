@@ -1,5 +1,5 @@
-// The kept stores' updates (KeptStores.h): extras rows, object records and geometry draws brought up to a frame's tables from
-// their change logs. Run by MakeStreamViews, one caller at a time (the snapshot builder).
+// Brings the kept stores up to a frame's tables from their change logs.
+// Only the snapshot builder calls this, one caller at a time.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -9,11 +9,10 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		// A resync's records on the pool past this many slots (each record reads only the immutable tables).
+		// Resyncs this large go to the thread pool. Each record reads only the immutable tables.
 		constexpr std::size_t kRecordsFanoutMin = 4096;
 		constexpr std::size_t kRecordsGrain = 1024;
 
-		/** @brief A kept array's elements made writable for pool chunks (the chunked copy-on-write's PrepareWrites when it has one). */
 		template <class Kept>
 		void PrepareKeptWrites(Kept& a_kept, std::size_t a_first, std::size_t a_count)
 		{
@@ -70,7 +69,7 @@ namespace DCLF::Draws
 		s.records.BeginBuild(a_oldestContentEpoch);
 		TracyCZoneN(updateRecordsZone, "CS.DCLF.Build.Objects.ApplyChanges", true);
 		if (!s.cursor.Continues(a_tables.changeLog, a_generation) || s.records.Size() > count) {
-			// Every record again: the first build, new tables, or a log this store fell behind.
+			// Rebuild every record on the first build, on new tables, or when this store fell behind the log.
 			auto& records = s.records.Mutable();
 			records.resize(count);
 			if (count >= kRecordsFanoutMin && !Policy::SerialFanout()) {
@@ -88,7 +87,6 @@ namespace DCLF::Draws
 			s.cursor.Restart(a_generation);
 			++s.resyncs;
 		} else {
-			// Slots the tables grew by since: records of their own (the log names them too).
 			if (s.records.Size() < count) {
 				auto& records = s.records.Mutable();
 				const auto first = records.size();
@@ -111,7 +109,7 @@ namespace DCLF::Draws
 				++s.streamOnly;
 			}
 			for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
-				// Every event reads the final immutable table row, not an intermediate value.
+				// Each event reads the final table row, not an intermediate value.
 				if (!(change.causes & kObjectRecordCauses) || change.slot >= count || (reuseKeptStorage && !s.changedObjects.Add(change.slot)))
 					continue;
 				BuildObjectRecord(a_tables, change.slot, GeometryPort::kMainPassRenderFlags, fresh);
@@ -165,7 +163,6 @@ namespace DCLF::Draws
 			s.cursor.Restart(a_generation);
 			++s.resyncs;
 		} else {
-			// Slots the tables grew by since (the log names them too), then the slots written.
 			if (s.packed.Size() < count) {
 				auto& packed = s.packed.Mutable();
 				const auto first = packed.size();

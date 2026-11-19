@@ -1,7 +1,7 @@
 #pragma once
 
-// The shapes a revision's recording of an epoch is prepared for, as its passes read them. A feature's pass reads its own epoch's
-// (the segment of the Api::PassContext it was made with). Self-contained (features include it); Internal.h includes it in its order.
+// The shapes an epoch's recording is prepared for, as its passes read them. A feature's pass reads its own epoch's shapes.
+// Self-contained because features include it.
 
 // volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
@@ -22,37 +22,29 @@ namespace DCLF::Draws
 	struct ShadowFrame;
 	struct ViewFrame;
 	/**
-	 * @brief The shapes a scene revision's recording of an epoch is prepared for (Revision/Assemble.cpp): what its passes read
-	 * from the preparation's host data (PassPrepareContext::preparationData). A
-	 * preparation without one draws nothing: every DCLF epoch is submitted from a revision.
+	 * @brief The shapes an epoch's recording is prepared for, read from the preparation's host data.
+	 * A preparation without them draws nothing, because every DCLF epoch is submitted from a revision.
 	 */
 	struct RevisionShapes
 	{
 		std::array<std::shared_ptr<const PassFrame>, 2> main;  // kDepthShape, kColourShape
-		// The shadow epoch's (its variant: the shadow views' and the occlusion maps' it records).
 		std::shared_ptr<const ShadowFrame> shadow;
-		// The views' (ViewKind; first person's two epochs record against its one shape). In a recording of an epoch hosting views' (the
-		// depth epoch's: the reflection's, first person's depth; Revision/Assemble.cpp), each hosted view's in the variants with its passes'
-		// work, none in the others.
+		// In a host epoch's recording, a hosted view's shape is null in the variants where that view draws nothing.
 		std::array<std::shared_ptr<const ViewFrame>, kViews> views;
-		// The depth epoch's second recording (Revision/Assemble.cpp): its index pool pass records nothing. Submitted when the depth
-		// commit gave out no range (UpdateIndexPool: the shadow epoch's commit took the frame's, or none changed).
+		// The depth epoch's variant whose index pool pass records nothing. Used when the depth commit has no range to upload.
 		bool depthWithoutIndexPool = false;
 	};
 	inline const RevisionShapes* RevisionShapesOf(const org::PassPrepareContext& a_preparation)
 	{
 		return a_preparation.preparationData ? a_preparation.preparationData->Get<RevisionShapes>() : nullptr;
 	}
-	/**
-	 * @brief The units of a_buffer's version a_preparation's revision names (0: none): what its passes size their dispatches and
-	 * lists by, for the versions it binds.
-	 */
+	/** @brief The units of the a_buffer version the revision names, or 0. Passes size their dispatches by this. */
 	inline std::uint64_t NamedUnitsOf(const org::PassPrepareContext& a_preparation, const Versioned& a_buffer)
 	{
 		const auto* sealed = a_preparation.preparationData ? a_preparation.preparationData->Get<NamedVersions>() : nullptr;
 		return sealed ? NamedUnits(*sealed, a_buffer) : 0;
 	}
-	/** @brief The shape a_preparation prepares the segment's passes for: its revision's, null without one or for a segment that does not draw. */
+	/** @brief The main shape for a segment, or null when there is no revision or the segment does not draw. */
 	inline std::shared_ptr<const PassFrame> CurrentFrame(const org::PassPrepareContext& a_preparation, RenderGraphRuntime::Segment a_segment)
 	{
 		if (const auto* shapes = RevisionShapesOf(a_preparation)) {
@@ -66,7 +58,7 @@ namespace DCLF::Draws
 
 	static_assert(DrawPipelines::kMaxPipelines == 4096, "BuildDrawsCS.hlsl's kSortKeys");
 
-	/** @brief Whether BuildDraws runs in the segment (BuildDrawsPass::Prepare's conditions), which is when a sort follows it. */
+	/** @brief Whether BuildDraws runs in the segment. Keep in step with BuildDrawsPass::Prepare. */
 	inline bool BuildsDraws(const org::PassPrepareContext& a_preparation, const Resources& a_resources, RenderGraphRuntime::Segment a_segment)
 	{
 		const auto frame = a_resources.buildDraws && a_resources.dispatchSignature ? CurrentFrame(a_preparation, a_segment) : nullptr;

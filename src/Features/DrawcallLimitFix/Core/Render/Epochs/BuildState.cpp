@@ -1,4 +1,3 @@
-// The build state (see the header).
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -15,7 +14,7 @@ namespace DCLF::Draws
 
 		std::mutex sourceMutex;
 		std::function<std::shared_ptr<const BuildState>()> source;  // sourceMutex
-		std::atomic<std::thread::id> sourceThread{};                // the thread that set the source: the render thread
+		std::atomic<std::thread::id> sourceThread{};  // the render thread
 
 		std::atomic<std::shared_ptr<const BuildState>> attached;
 		std::atomic<std::uint64_t> attachedSerial{ 0 };
@@ -78,8 +77,8 @@ namespace DCLF::Draws
 	{
 		if (t_scope)
 			return t_scope->State();
-		// No scope: a build nobody set one for. The host's build at an epoch's first submission runs on the render thread, whose newest
-		// value is consistent there; anywhere else it is a defect (the build reads a value the render thread may be replacing).
+		// No scope. On the render thread its newest value is consistent. Anywhere else it is a defect, since the render thread
+		// may be replacing the value.
 		const bool renderThread = std::this_thread::get_id() == sourceThread.load(std::memory_order_acquire);
 		static std::atomic<std::uint32_t> logged{ 0 };
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
@@ -101,7 +100,7 @@ namespace DCLF::Draws
 		}
 		if (renderThread && current)
 			return current();
-		// Off the render thread the source must not run (it reads the render thread's state): the attached value is the closest.
+		// The source reads the render thread's state, so off that thread the attached value is the closest.
 		return AttachedBuildState();
 	}
 

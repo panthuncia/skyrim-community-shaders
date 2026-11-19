@@ -27,8 +27,8 @@ namespace DCLF::Direct::SiteStats
 		{
 			std::uint32_t slot;
 			std::size_t site;
-			std::uint64_t frameValue;  // the CPU-frame timeline's value that covers it
-			std::uint64_t frame;       // Collect's count when it began
+			std::uint64_t frameValue;  // the CPU-frame timeline value that covers it
+			std::uint64_t frame;  // Collect's count when it began
 		};
 
 		struct State
@@ -37,8 +37,8 @@ namespace DCLF::Direct::SiteStats
 			bool ready = false;
 			rhi::QueryPoolPtr pool;
 			rhi::ResourcePtr readback;
-			std::uint32_t stride = 0;                      // bytes per query in the readback buffer
-			std::array<std::uint32_t, kValues> offsets{};  // each field's byte offset in a query's result (~0u: not supported)
+			std::uint32_t stride = 0;  // bytes per query in the readback buffer
+			std::array<std::uint32_t, kValues> offsets{};  // ~0u when not supported
 			std::mutex mutex;
 			std::uint32_t next = 0;
 			std::vector<Pending> pending;
@@ -66,7 +66,7 @@ namespace DCLF::Direct::SiteStats
 				logger::warn("[DCLF] site stats: could not create the pipeline statistics query pool");
 				return;
 			}
-			// Where each counter sits in a query's result: the backend's own layout (D3D12's statistics struct, Vulkan's bit order).
+			// Each counter's place in a query's result follows the backend's own layout.
 			std::array<rhi::PipelineStatsFieldDesc, kValues> fields{};
 			for (std::size_t v = 0; v < kValues; ++v)
 				fields[v].field = kFields[v];
@@ -139,7 +139,7 @@ namespace DCLF::Direct::SiteStats
 		void* mapped = nullptr;
 		bool mapFailed = false;
 		for (const auto& entry : s.pending) {
-			// Its frame not done yet: kept, unless its signal never came (a frame whose signal was not queued).
+			// Keep it until its frame is done, unless its signal was never queued.
 			if (entry.frameValue > a_completed || mapFailed) {
 				if (s.frame - entry.frame < kGiveUpFrames)
 					waiting.push_back(entry);

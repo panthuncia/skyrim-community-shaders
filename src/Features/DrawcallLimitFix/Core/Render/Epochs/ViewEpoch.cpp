@@ -1,6 +1,5 @@
-// The views' epochs (ViewEpoch.h): their traits, forward keys, bucket plans and shapes, their cameras' VS_PerFrame and their
-// commits (render thread). Their passes and graph extension are ViewEpochRecord.cpp's, their captures and coverage the view
-// features' (Features/Reflection, Features/FirstPerson), on the view engine's calls (ViewEngine.cpp).
+// The view epochs on the render thread: their traits, forward keys, bucket plans and shapes, their cameras' VS_PerFrame and
+// their commits. Their passes are in ViewEpochRecord.cpp, and their captures belong to the view features.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
@@ -15,8 +14,7 @@ namespace DCLF
 	{
 		const ViewTraits& TraitsOf(ViewKind a_kind)
 		{
-			// The view's resolved shape (Extensions::Views: the feature's registration; none for a view no feature took) with its epochs
-			// and segments (the schedule's: ViewEpochsOf); made once, the first time a view's traits are read (after InstallFeatures).
+			// Made once, the first time a view's traits are read after InstallFeatures.
 			static const auto kTraits = [] {
 				std::array<ViewTraits, kViews> traits{};
 				for (const auto& slot : kViewSlots) {
@@ -38,10 +36,8 @@ namespace DCLF
 				return false;
 			const auto& pipelineKey = a_tables.pipelines[a_slot];
 			const std::uint32_t twoSided = (pipelineKey.rasterFlags & kRasterTwoSided) ? ForwardPipelineKey::kForwardTwoSided : 0u;
-			// The view's key rule (Api::ViewKeyRule). The faces': a LOD slot's. First person's: a forward key's slot draws with the main
-			// set's colour pipeline in the forward range (ViewForwardSlotsOf), the rest with the first-person targets' key. The vertex
-			// descriptor is the pulled vertex stage (skins read their palette as the Z-prepass's do); the pixel descriptor drops Deferred
-			// (the engine draws first person forward, after the composite: Community Shaders' Deferred sets InWorld around it).
+			// First person draws a forward key's slot with the main set's colour pipeline in the forward range, the rest with its own key.
+			// The pixel descriptor drops Deferred because the engine draws first person forward, after the composite.
 			const auto& keys = Extensions::ViewEntryOf(a_kind).keys;
 			if (keys.lodTechniquesOnly && !LodLightingTechnique(pipelineKey.passDescriptor))
 				return false;
@@ -69,8 +65,7 @@ namespace DCLF
 
 		std::uint32_t ZGroupOf(const Lookups* a_lookups, const IndirectState& a_indirect, std::uint32_t a_slot)
 		{
-			// The Z-prepass groups are the set's (IndirectState::zGroups, by set index): a pipeline slot's is its lookup entry's set
-			// index's, as PlanZBuckets takes it.
+			// A pipeline slot's Z-prepass group is its lookup entry's set index's, as PlanZBuckets takes it.
 			if (!a_lookups || a_slot >= a_lookups->pipelines.size())
 				return kNoBucket;
 			const auto setIndex = a_lookups->pipelines[a_slot].setIndex;
@@ -80,9 +75,8 @@ namespace DCLF
 		namespace
 		{
 			/**
-			 * @brief A view's forward range's state classes into its latch slot (CommitView): BuildDrawsCS takes a forward draw's class (its
-			 * table entry, and the index its sequence stores) from its set index through this map, the shape's set version's. False (no map:
-			 * every forward draw dropped, counted) without a forward range, or past what the latch holds (never: the revision reserved it).
+			 * @brief Writes the view's forward class map into its latch slot, which BuildDrawsCS uses to class each forward draw.
+			 * False without a forward range, and then every forward draw is dropped and counted.
 			 */
 			bool WriteViewClassMap(const ViewFrame& a_shape, std::string_view a_what, const org::RunRef& a_latchRun)
 			{
@@ -100,7 +94,7 @@ namespace DCLF
 
 		std::uint32_t SetClassOf(const Lookups* a_lookups, const IndirectState& a_indirect, std::uint32_t a_slot)
 		{
-			// As ZGroupOf: the slot's lookup entry's set index's word (IndirectState::classOf).
+			// As ZGroupOf, the slot's lookup entry's set index's word.
 			if (!a_lookups || a_slot >= a_lookups->pipelines.size())
 				return kNoSetClass;
 			const auto setIndex = a_lookups->pipelines[a_slot].setIndex;
@@ -136,10 +130,8 @@ namespace DCLF
 				bucket.first = a_out.draws;
 				a_out.draws += bucket.capacity;
 			}
-			// The forward range, per state class (its draws are device-generated: one call per class, each with its class's execution set):
-			// every forward slot's map word names the first class's table entry (after the buckets) with kFirstPersonForwardBucket, and
-			// BuildDrawsCS adds the draw's class (from its set index, through the latch's class map). Each class's entry holds every draw
-			// its forward slots can produce (their capacities in the main layout), staged then sorted: two halves after the buckets' ranges.
+			// The forward range gets one device-generated call per state class. Each class's entry holds every draw its forward
+			// slots can produce, staged then sorted, in two halves after the buckets' ranges.
 			a_out.forwardRanges.clear();
 			std::vector<std::uint32_t> capacity(a_indirect.classes.size(), 0u);
 			std::uint64_t forward = 0;
@@ -148,7 +140,7 @@ namespace DCLF
 					continue;
 				const std::uint32_t setClass = SetClassOf(a_lookups, a_indirect, p);
 				if (setClass == kNoSetClass || (setClass >> kSetClassShift) >= capacity.size())
-					continue;  // no pipeline of the set version: none of its draws is the view's
+					continue;  // no pipeline in the set version, so none of its draws is the view's
 				a_out.map[p] = kFirstPersonForwardBucket | static_cast<std::uint32_t>(a_out.buckets.size());
 				const std::uint32_t slotCapacity = p < a_main.slotCapacity.size() ? a_main.slotCapacity[p] : 0u;
 				capacity[setClass >> kSetClassShift] += slotCapacity;
@@ -186,7 +178,7 @@ namespace DCLF
 			frame->forwardEntry = static_cast<std::uint32_t>(a_in.plan.buckets.size());
 			frame->latchLayout = latches.layout;
 			frame->map = std::make_shared<const std::vector<std::uint32_t>>(a_in.plan.map);
-			// Each draw family's faces: its cull a thread per word its lists' units hold, cullGroup a group.
+			// Each draw family's faces: a cull thread per word of its lists' units.
 			for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d) {
 				const auto& in = a_in.faces[d];
 				if (!in.pipeline.valid())
@@ -196,11 +188,10 @@ namespace DCLF
 				frame->faces[d].signature = in.signature;
 				frame->faces[d].groups = static_cast<std::uint32_t>((std::uint64_t(in.units) * faces.unitWords + faces.cullGroup - 1) / faces.cullGroup);
 			}
-			// Per face, the view's frame constants (its own or the colour segment's: the frame lighting at PS b13, the frame record) with VS and
-			// PS b12 its block.
+			// Per face, the view's frame constants, with VS and PS b12 as the face's block.
 			const auto base = FramePushWords(a_in.frameConstantsAddress, a_in.frameConstantsRef);
 			frame->push.assign(traits.faces, base);
-			// A view with frame constants of its own holds a record per face (ViewResources::faceBlocks): each face's words name its own.
+			// A view with its own frame constants holds a record per face, so each face's words name its own.
 			const bool faceRecords = a_resources.frameConstants && a_resources.faceBlocks;
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
 				if (faceRecords && f) {
@@ -217,7 +208,7 @@ namespace DCLF
 						frame->push[f][word + 1] = static_cast<std::uint32_t>(block >> 32);
 					}
 			}
-			// The latched copies: each face's block (and each draw family's row and list header) from the latch, the counters zeroed.
+			// The latched copies: each face's block and family rows from the latch, with the counters zeroed.
 			auto& fromLatch = frame->latched[0];
 			auto& fromZeros = frame->latched[1];
 			fromLatch.latch = latches.latch;
@@ -236,7 +227,6 @@ namespace DCLF
 						fromLatch.copies.push_back({ a_resources.faceLists[d][f]->Key(), face + entry.faceLayout.headerInFace, entry.contribution.faces.headerBytes, 0 });
 					}
 			}
-			// A view's own frame values (its commit's, from this frame's sources) from the latch.
 			if (!a_in.frameCopies.empty()) {
 				auto& fromFrame = frame->latched[ViewFrame::kFrameList];
 				fromFrame.latch = latches.latch;
@@ -360,8 +350,7 @@ namespace DCLF
 		const auto& layout = a_shape.latchLayout;
 		const auto& map = *a_shape.map;
 		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(latchRun));
-		// Every pipeline slot the installed publication's members can draw with, as many as the latch holds: a slot the tables have
-		// gained since the map was made has no bucket (none of its draws is the frame's).
+		// Slots the tables gained since the map was made get no bucket, since none of their draws is the frame's.
 		const std::uint32_t slots = std::min(std::max(static_cast<std::uint32_t>(map.size()), InstalledPipelineSlots()), layout.slots);
 		WriteBucketMap(latchBlock, labels.map, latchRun, layout.MapOffset(), map, slots);
 		const bool classMap = WriteViewClassMap(a_shape, labels.map, latchRun);
@@ -372,7 +361,7 @@ namespace DCLF
 		std::uint32_t drawn = 0;
 		for (std::uint32_t f = 0; f < a_faces.size() && f < traits.faces; ++f) {
 			const auto& face = a_faces[f];
-			// The face's bucket table, its forward range's entries (one per state class) after the buckets' (ViewFrame::forwardEntry).
+			// The face's bucket table, then one forward entry per state class.
 			table.clear();
 			for (const auto& bucket : a_shape.buckets) {
 				table.push_back(f * a_shape.sequenceDraws + bucket.first);
@@ -390,13 +379,12 @@ namespace DCLF
 			latch.dispatch[1] = 1;
 			latch.dispatch[2] = 1;
 			latch.drawCount = inputs;
-			latch.cullFlags = traits.frustumCull ? 1u : 0u;  // the frustum alone, near plane included; 0: untested (BuildDrawsCS CullMode)
-			latch.viewBits = traits.viewBits;  // the main list's members of the view
+			latch.cullFlags = traits.frustumCull ? 1u : 0u;  // the frustum alone, near plane included, 0 for untested
+			latch.viewBits = traits.viewBits;
 			latch.visibilityStamp = frameNumber & 0x0FFFFFFFu;
 			latch.placementsIndex = FrameValues::Get().PlacementsIndex();
-			// The root states' seeds (the cull binding RootSeeds: a pooled buffer's index).
 			latch.fadeSeedsIndex = CullBindingIndex(Api::CullBindingSlot::RootSeeds, *scene, frameNumber, Adopted());
-			// The frame's scene list: the installed payload (a covered frame has a ready one).
+			// A covered frame always has a ready installed payload.
 			PayloadLatch(*InstalledPayload(), latch);
 			LatchCullCamera(latch, face.viewProj, face.eye);
 			latch.bucketMapOffset = region + layout.MapOffset();
@@ -408,8 +396,7 @@ namespace DCLF
 			for (std::size_t d = 0; a_rows && view && d < Extensions::kDrawFamilies; ++d) {
 				if ((*a_rows)[d].empty() || !a_shape.faces[d].pipeline.valid())
 					continue;
-				// The family's face (its faces.face: the face's row, its own list, naming nothing when the face is not drawn or the faces'
-				// family is the engine's, and its list's header).
+				// The family's face names nothing when the face is not drawn or the engine draws the family.
 				const auto& entry = Extensions::DrawFamilies()[d];
 				auto& written = state.faces[d];
 				written.faceRow.resize(entry.contribution.faces.rowBytes);
@@ -422,16 +409,12 @@ namespace DCLF
 			drawn += face.drawn ? 1u : 0u;
 		}
 		if (auto* own = state.resources.get(); own && own->frameConstants) {
-			// The view's own frame constants, from this frame's sources (a snapshot component of the frame, as the shadow views' record):
-			// the record (its frame textures as SubmitViewEpoch resolved them, the installed payload, FrameValues' buffers, the frame
-			// bindings), CS's SharedData and FeatureData (PS b5, b6), the shared light block and the frame-wide rows. The faces' programs
-			// read no other frame slot (VS and PS b12 are each face's block).
+			// The view's own frame constants, filled from this frame's sources. The faces' programs read no other frame slot.
 			const auto& adopted = Adopted();
 			CommitUploads uploads(commitStagedPool, adopted);
 			LatchedUploads frame(a_shape.latched[ViewFrame::kFrameList], uploads, latchRun);
-			// Its copies of the main frame buffers (Deferred's sun cascades at t98, written at EarlyPrepasses and again before the cube's faces),
-			// each from the buffer bound at its register now and that buffer's CPU mirror: this frame's contents, named at the register.
-			// Unfillable (nothing bound there, or the mirror holds less): the copy reads zero and the register a null buffer (structured).
+			// Copies of the main frame buffers, such as Deferred's sun cascades at t98, filled from each register's CPU mirror now.
+			// A copy that cannot be filled reads zero and its register gets a null buffer.
 			if (const auto frameBuffers = own->frameBuffers.load(std::memory_order_acquire)) {
 				auto& mirror = ConstantMirror::Get();
 				for (const auto& frameBuffer : *frameBuffers) {
@@ -454,7 +437,7 @@ namespace DCLF
 			const std::uint32_t nullIndex = textures.NullIndex() != kInvalidIndex ? textures.NullIndex() : 0u;
 			const DrawBindings record = FrameRecordOf(own->frameConstantsAddress, own->frameConstantsRef, *own->frameBlocks, vsMask, psMask, state.frameTextures, nullIndex, *InstalledPayload(),
 				{ FrameValues::Get().PlacementsIndex(), FrameValues::Get().PalettesIndex(), FrameValues::Get().ShadingIndex() }, adopted, *scene, frameNumber);
-			// A record per face, each naming its face's block at VS and PS b12 (the faces' cameras), back to back in the record slot.
+			// A record per face, each naming its face's camera block at VS and PS b12.
 			std::array<DrawBindings, kMaxViewFaces> records;
 			const std::uint32_t faces = own->faceBlocks ? std::min(own->traits ? own->traits->faces : 1u, kMaxViewFaces) : 1u;
 			for (std::uint32_t f = 0; f < faces; ++f) {
@@ -472,7 +455,7 @@ namespace DCLF
 			LatchFrameRows(frame, own->frameConstants);
 			(void)frame.Finish();
 			revisions.latchedMisses += frame.Misses();
-			// The frame texture registers left null (no source of this frame's), for the view's report.
+			// Frame texture registers left null, for the view's report.
 			state.nullTextures = {};
 			for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
 				if (record.textures[t] == nullIndex)
@@ -489,9 +472,8 @@ namespace DCLF
 		for (const auto* payload : a_payloads)
 			if (payload)
 				owners.AddPayload(*payload);
-		// The colour segment's frame record names the frame textures it resolved, held by their bindings since (frameTextureBindings): what
-		// the shared epochs and a view drawing with the main frame constants (first person's) read. A view with its own holds its commit's
-		// (SubmitViewEpoch).
+		// Hold the frame textures the colour segment's record names, which the shared epochs and first person read.
+		// A view with its own frame constants holds its commit's instead.
 		for (const auto& held : frameTextureBindings)
 			owners.Add(held.binding.owner);
 		owners.Add(adoptedSnapshot);

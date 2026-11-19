@@ -1,5 +1,4 @@
-// The shadow phases' readiness (render thread): the rasterizer state catalog, the view placements, the capability the scene
-// lane reads, and a slot's readiness for a phase.
+// Shadow phase readiness on the render thread. It holds the rasterizer state catalog, the view placements and per-slot readiness.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
@@ -13,8 +12,8 @@ namespace DCLF
 		auto& table = EngineRasterStates();
 		std::vector<D3D11_RASTERIZER_DESC> engine, cascades;
 		for (std::uint32_t bias = 0; bias < 12; ++bias) {
-			// The entry at cull mode 1, else 0 (as CaptureShadowView). A wireframe entry is skipped, and ShadowRasterStateId refuses a
-			// depth clip it cannot express: such a view stays the engine's.
+			// Use the cull mode 1 entry, else 0, as CaptureShadowView does. Wireframe entries are skipped.
+			// A view whose depth clip ShadowRasterStateId cannot express stays with the engine.
 			auto* entry = table[0][1][bias][0] ? table[0][1][bias][0] : table[0][0][bias][0];
 			if (!entry)
 				continue;
@@ -23,7 +22,7 @@ namespace DCLF
 			if (desc.FillMode != D3D11_FILL_SOLID)
 				continue;
 			engine.push_back(desc);
-			// The cascades draw with ShadowmapCascadeRasterizerFix's clones, each with the cascade's bias.
+			// Cascades draw with ShadowmapCascadeRasterizerFix's clones, each with its own bias.
 			for (std::uint32_t cascade = 0; cascade < ShadowmapRasterizerFix::CascadeCount(); ++cascade) {
 				auto clone = desc;
 				ShadowmapRasterizerFix::CascadeRasterDesc(clone, cascade);
@@ -62,7 +61,7 @@ namespace DCLF
 		auto* plain = renderer ? EngineRasterStates()[0][1][0][0] : nullptr;
 		if (!plain)
 			return false;
-		// Cascade c draws into slice c with its ShadowmapCascadeRasterizerFix clone; every other view with depth bias mode 0.
+		// Cascade c draws into slice c with its clone. Every other view uses depth bias mode 0.
 		const std::uint32_t plainState = EngineRasterStateId(0, 1, 0, 0, PassCapture::kFirstShadowMode + kSunShadowMode);
 		(void)EngineRasterStateId(0, 1, 0, 0, PassCapture::kFirstShadowMode + kParabolicShadowMode);
 		const std::uint32_t unclampedState = EngineRasterStateId(0, 1, 0, 0, PassCapture::kFirstShadowMode + kPlainShadowMode);
@@ -84,7 +83,7 @@ namespace DCLF
 			auto* texture = renderer->GetDepthStencilData().depthStencils[target].texture;
 			if (!texture)
 				continue;
-			// Imported now, before any view draws into it.
+			// Import before any view draws into it.
 			(void)ImportShadowDepth(index, target);
 			D3D11_TEXTURE2D_DESC desc{};
 			texture->GetDesc(&desc);
@@ -92,11 +91,10 @@ namespace DCLF
 				if (index == 0) {
 					add(kSunShadowMode, index, slice, 0, desc.Width, desc.Height, cascadeState(slice));
 				} else if (index == 2) {
-					// The cascades' volumetric copies.
 					add(kSunShadowMode, index, slice, 0, desc.Width, desc.Height, plainState);
 				} else {
-					// Lights' map: a spot light takes a slice, clamped or plain (a light whose near clip leaves casters in front of it:
-					// Window Shadows Ultimate's), a point light's paraboloid pair its two halves.
+					// A spot light gets a clamped and a plain placement. Plain is for lights whose near clip leaves casters in front, as in Window Shadows Ultimate.
+					// A point light's paraboloid pair takes the two halves.
 					add(kSunShadowMode, index, slice, 0, desc.Width, desc.Height, plainState);
 					add(kPlainShadowMode, index, slice, 0, desc.Width, desc.Height, unclampedState);
 					add(kParabolicShadowMode, index, slice, 0, desc.Width, desc.Height / 2, plainState);
@@ -109,7 +107,7 @@ namespace DCLF
 		shadowPlacements = std::move(placements);
 		if (shadow)
 			ShareDrawArgs(*shadow, shadowPlacements);
-		// A revision input: the next revision reserves the latch and slots (ReserveShadowLatch).
+		// The next revision reserves the latch and slots for these placements.
 		shadowHost.PostRevisionInputs();
 		logger::info("[DCLF] shadow view placements: {} (slots {} to {})", shadowPlacements.size(), shadowPlacements.front().slot, shadowPlacements.back().slot);
 		return true;
@@ -117,7 +115,7 @@ namespace DCLF
 
 	std::size_t ShadowEngine::PlacementOf(const PendingView& a_view) const
 	{
-		// The view's mode's placement there first (a light slice has a clamped and a plain one); else any there (a defect).
+		// Prefer the placement for the view's mode, since a light slice has two. Falling back to any placement is a defect.
 		std::size_t found = SIZE_MAX;
 		for (std::size_t p = 0; p < shadowPlacements.size(); ++p) {
 			const auto& placement = shadowPlacements[p];
@@ -146,8 +144,8 @@ namespace DCLF
 
 	void IndirectDraws::UpdateShadowCapability()
 	{
-		// The scene side's alone (the commit's capability, the scene lane's shadow lookups, the builds ahead): under the newest toggles,
-		// which the next publication is committed under; the frame's shadow epochs read the frame's (ActiveToggles) and readyModes.
+		// Scene side only. It reads the newest toggles, which the next publication commits under.
+		// The frame's shadow epochs read ActiveToggles and readyModes instead.
 		auto& i = *impl->shadowEngine;
 		std::uint8_t phases = 0;
 		if (!failed && SceneToggles().shadows && DrawPipelines::Get().Enabled() && globals::game::utilityShader && i.SetupShadow()) {
@@ -161,10 +159,9 @@ namespace DCLF
 							view->GetDesc(&desc);
 							i.shadowTargetFormat = desc.Format;
 						}
-					// Caster modes: sun and spot (clamped) and point (paraboloid). No view uses the plain mode.
+					// Caster modes are sun, spot (clamped) and point (paraboloid). No view uses the plain mode.
 					i.readyModes[kSunShadowMode] = i.readyModes[kParabolicShadowMode] = true;
-					// Both occlusion maps draw into the precipitation occlusion target (an ImportedTexture map's own texture swapped in), in
-					// its format.
+					// Both occlusion maps draw into the precipitation occlusion target, in its format.
 					if (auto* renderer = globals::game::renderer)
 						if (auto* view = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].views[0]) {
 							D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
@@ -173,7 +170,7 @@ namespace DCLF
 								i.occlusion[v].dsvFormat = desc.Format;
 								i.readyModes[OcclusionModeOf(v)] = true;
 							}
-							// Imported now, in the maps' import order: a later import would rebuild the graph mid-play.
+							// Import now, in the maps' import order. A later import would rebuild the graph mid-play.
 							using T = RE::RENDER_TARGETS_DEPTHSTENCIL;
 							for (const auto map : Extensions::ShadowViewsSet().importOrder) {
 								const auto v = static_cast<std::uint32_t>(map);
@@ -205,7 +202,7 @@ namespace DCLF
 					              0;
 			}
 		}
-		// What the builds ahead and the scene lane's shadow lookups are resolved for (PostLookupInputs).
+		// The inputs that later builds and the scene lane's shadow lookups resolve against.
 		auto& views = i.lastShadow;
 		views.known = phases != 0;
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
@@ -230,7 +227,7 @@ namespace DCLF
 		};
 		const auto& tables = *static_cast<const SceneTables*>(a_tables);
 		const auto& lookups = a_lookups;
-		// A LodTechniques view's phase (the reflection's): its slot's forward pipeline.
+		// A LodTechniques view's phase needs its slot's forward pipeline.
 		if (a_phase & Extensions::Views().lodPhases)
 			return impl->LodPhaseReady(a_phase, tables, a_slot) || no(8);
 		if (a_slot >= tables.objects.size() || a_slot >= tables.shadowTechnique.size())
@@ -238,16 +235,15 @@ namespace DCLF
 		const auto& object = tables.objects[a_slot];
 		if (object.geometryIndex >= tables.geometries.size())
 			return no(7);
-		// Past the scene buffers' fit there is no input until they grow.
+		// A slot past the scene buffers has no input until they grow.
 		if (!FitsScene(&tables, a_slot, true))
 			return no(12);
-		// The modes and states the lane's lookups were resolved for (immutable), never the render thread's readyModes/readyStates,
-		// which grow as it sees new ones. None yet: the caster waits.
+		// Use the lookups' immutable inputs, not the render thread's readyModes, which grow over time. With none yet, the caster waits.
 		const auto* inputs = static_cast<const ShadowLookupInputs*>(lookups.shadowInputs.get());
 		if (!inputs)
 			return no(7);
-		// Fade is culled on the GPU (FadedOutOfOcclusion), so nothing of the engine's cull is waited for. As BuildKeptShadow: every
-		// state of the object's class in the phase's modes has its pipeline, and an alpha-tested technique's diffuse is imported.
+		// Fade is culled on the GPU, so nothing waits for the engine's cull. As in BuildKeptShadow, each state of the object's class
+		// in the phase's modes needs its pipeline, and an alpha-tested technique needs its diffuse imported.
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 			if (Extensions::ShadowViewsSet().phaseOfMode[m] != a_phase || !inputs->modes[m])
 				continue;

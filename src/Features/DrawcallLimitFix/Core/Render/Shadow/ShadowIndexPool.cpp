@@ -1,5 +1,5 @@
-// The index pool every plain indexed draw binds: its creation, its update to the tables at a commit, and the producer's
-// requirement of its capacities.
+// The index pool that every plain indexed draw binds. It is a copy of the scene's index buffers in one buffer.
+// Covers creation, the update at each commit, and the capacity the producer requires.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
@@ -20,9 +20,7 @@ namespace DCLF
 				logger::warn("[DCLF] The index pool's copy program could not be created");
 				return nullptr;
 			}
-			// 16-bit indices (a unit: an index), required with a quarter's slack over what the ranges hold (PoolSlack) and grown a
-			// quarter past that, not to a power of two: the pool is a copy of the scene's indices, the largest of DCLF's tables; a first
-			// index per geometry slot; a copy per range.
+			// Units are 16-bit indices. The pool is DCLF's largest table, so it grows by a quarter rather than to a power of two.
 			pool->indices = MakeVersioned(CreateWords((a_small ? 4096u : kInitialPoolIndices) / 2, true, "cs.dclf.index-pool"),
 				{ .extent = { 0, sizeof(std::uint16_t), 4 }, .policy = org::services::GrowthPolicy::Headroom(25, 2) });
 			pool->firsts = MakeVersioned(CreateWords(a_small ? 64u : kInitialGeometries, false, "cs.dclf.pool-firsts"), { .extent = { 0, 4, 4 } });
@@ -34,13 +32,13 @@ namespace DCLF
 			return pool;
 		}
 
-		/** @brief The room the pool's versions keep for a_indices held: a quarter more, which fragmentation uses before a relayout. */
+		/** @brief A quarter of slack over the held indices, to absorb fragmentation before a relayout. */
 		constexpr std::uint64_t PoolSlack(std::uint64_t a_indices)
 		{
 			return a_indices + a_indices / 4;
 		}
 
-		/** @brief A geometry slot's indices in the pool: its index buffer's, rounded up to whole words (0: none). */
+		/** @brief A geometry slot's index count in the pool, rounded up to whole words. 0 means none. */
 		std::uint32_t PoolIndicesOf(const SceneTables& a_tables, std::uint32_t a_slot)
 		{
 			const auto& geometry = a_tables.geometries[a_slot];
@@ -51,7 +49,7 @@ namespace DCLF
 
 		namespace
 		{
-			/** @brief UpdateIndexPool's shared locals: the pool, the capacities the adopted set names, and the update's copies. */
+			/** @brief State for one index pool update. */
 			struct PoolUpdate
 			{
 				IndexPool& p;
@@ -70,7 +68,7 @@ namespace DCLF
 						range = {};
 						return;
 					}
-					// Free at once: the graph orders this frame's copies after every earlier read of the pool.
+					// Safe to free at once. The graph orders this frame's copies after every earlier read of the pool.
 					auto [at, inserted] = p.free.emplace(range.first, range.count);
 					if (auto next = std::next(at); next != p.free.end() && at->first + at->second == next->first) {
 						at->second += next->second;
@@ -110,8 +108,8 @@ namespace DCLF
 						static_cast<std::uint32_t>((a_range.bytes + 3) / 4) });
 				}
 
-				// Lays every range out again in a new indices version (frames in flight read the old one) and copies it. Only between the
-				// releases and the acquires, so every held range matches the tables.
+				// Packs every range into a new version, which frames in flight do not read. Call only between the releases
+				// and the acquires, so every held range matches the tables.
 				void Relayout()
 				{
 					p.free.clear();
@@ -129,23 +127,21 @@ namespace DCLF
 					allFirsts = true;
 				}
 
-				// Each slot owns its range, copied whenever the log names it. Never shared by address: the device reuses a freed
-				// buffer's address for the next one, which a cell load does while the unloaded cell's slots still hold theirs.
+				// Ranges are never shared by buffer address. The device reuses a freed buffer's address during a cell load,
+				// while the unloaded cell's slots may still hold it.
 				void Acquire(std::uint32_t a_slot)
 				{
 					const auto& geometry = tables.geometries[a_slot];
 					const std::uint32_t slotIndices = PoolIndicesOf(tables, a_slot);
 					if (!slotIndices)
 						return;
-					// Past the first-index table or this commit's copies, it waits.
 					if (a_slot >= firstsCapacity || copies.size() >= copiesCapacity) {
 						p.waiting.push_back(a_slot);
 						return;
 					}
 					const std::uint32_t first = Allocate(slotIndices);
 					if (first == IndexPool::kNoRange) {
-						// No room though the version holds the ranges' slack (PoolSlack): fragmented. The producer requires a newer
-						// version (laid out again whole by the update that first writes it).
+						// No room despite enough slack means fragmentation. Ask the producer for a newer version, which gets relaid out.
 						if (PoolSlack(std::uint64_t(p.indicesHeld) + slotIndices) <= capacity)
 							p.fragmentedAt.store(indices.serial, std::memory_order_relaxed);
 						p.waiting.push_back(a_slot);
@@ -158,12 +154,11 @@ namespace DCLF
 					CopyOf(range);
 				}
 
-				/** @brief The slots' ranges brought up to the tables: every slot from an empty pool, else the changed slots'. */
+				/** @brief Brings the ranges up to date. Rebuilds from empty when the log cannot be followed, else updates changed slots. */
 				void UpdateRanges(std::uint32_t a_count, std::uint32_t a_generation)
 				{
 					const auto count = a_count;
 					if (!p.cursor.Continues(tables.geometryLog, a_generation) || p.slots.size() > count) {
-						// Every slot again, from an empty pool.
 						p.free.clear();
 						p.end = 0;
 						p.indicesHeld = 0;
@@ -190,7 +185,7 @@ namespace DCLF
 						p.waiting.clear();
 						std::sort(changed.begin(), changed.end());
 						changed.erase(std::unique(changed.begin(), changed.end()), changed.end());
-						// Every release before any acquire; an indices version this update did not lay out is laid out in between.
+						// Release all before acquiring any. A version this pool has not filled yet is relaid out in between.
 						for (const std::uint32_t g : changed)
 							Release(g);
 						if (!p.indicesFilled.Holds(indices))
@@ -200,8 +195,7 @@ namespace DCLF
 					}
 				}
 
-				// First indices: all of them into a version this update did not fill (a new version holds nothing), else only the changed
-				// slots.
+				// A version not filled yet gets every first index. Otherwise only the changed slots are uploaded.
 				void UploadFirsts(const org::services::NamedEntry& a_firsts, std::uint32_t a_count, CommitUploads& a_uploads)
 				{
 					const auto& firsts = a_firsts;
@@ -224,8 +218,7 @@ namespace DCLF
 					}
 				}
 
-				// A copy per range, every range a slot of the tables the revision required the copies for: past them is a defect of that
-				// requirement, never copies to drop.
+				// The revision sized the copies buffer for every slot, so overflowing it is a defect, never something to drop.
 				std::uint32_t UploadCopies(const org::LatchBlock& a_latch, const org::RunRef& a_latchRun, std::uint32_t a_poolOffset, CommitUploads& a_uploads)
 				{
 					const auto copyCount = static_cast<std::uint32_t>(copies.size());
@@ -242,17 +235,15 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Brings the index pool up to the tables, in the versions a_sealed (the adopted set) names: slots the geometry log named
-		 * since the last read (every slot when it cannot read on) release their ranges and take new ones with a copy. Uploads the first
-		 * indices and copies and writes the copy dispatch into the latch; IndexPoolPass runs it before the views draw. Returns the copies.
+		 * @brief Brings the index pool up to date with the tables and writes the copy dispatch into the latch.
+		 * IndexPoolPass runs the copies before the views draw. Returns the copy count.
 		 */
 		std::uint32_t UpdateIndexPool(const NamedVersions& a_sealed, IndexPool& a_pool, const SceneTables& a_tables, std::uint32_t a_generation, const org::LatchBlock& a_latch,
 			const org::RunRef& a_latchRun, std::uint32_t a_poolOffset, CommitUploads& a_uploads)
 		{
 			auto& p = a_pool;
 			const auto count = static_cast<std::uint32_t>(a_tables.geometries.size());
-			// The capacities the revision producer required (Impl::RequireIndexPool), named by the adopted set: a range that does not
-			// fit waits (only unclaimed geometry can: the claims' room was required).
+			// A range that does not fit waits. Only unclaimed geometry can, since room for the claims was required.
 			const auto& indices = a_sealed.Of(p.indices);
 			const auto& firsts = a_sealed.Of(p.firsts);
 			PoolUpdate update{ p, a_tables, indices, indices.units, firsts.units, a_sealed.Of(p.copies).units };
@@ -271,7 +262,7 @@ namespace DCLF
 		if (!a_scene.pool)
 			return;
 		auto& p = *a_scene.pool;
-		// The producer's bound: every slot's indices, kept from the geometry log by the revision code alone.
+		// Revision code only.
 		auto& b = producer.poolBound;
 		const auto count = static_cast<std::uint32_t>(a_tables.geometries.size());
 		auto take = [&](std::uint32_t a_slot) {
@@ -295,8 +286,7 @@ namespace DCLF
 					take(g);
 		}
 		b.cursor.Advance(a_tables.geometryLog);
-		// Room for the indices' slack (PoolSlack; a relayout needs none), a first index per slot and a copy per range, so together with
-		// the claims; and a version newer than one the frame found fragmented (laid out again at the same size).
+		// Require the slack, and a newer version if the last one was found fragmented.
 		auto& buffers = SceneBufferSet::Get();
 		buffers.Require(a_build, p.indices, Draws::PoolSlack(b.total));
 		buffers.RequireNewer(a_build, p.indices, p.fragmentedAt.load(std::memory_order_relaxed));

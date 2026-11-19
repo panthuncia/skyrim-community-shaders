@@ -1,10 +1,9 @@
-// The CPU-driven pipeline's draws as graph passes (Sites.h): each draw site's epoch ends with a late pass (Api::PassDef::recordAtExecution,
-// ORG's RecordAtExecution), recorded at execution once the commit opened the site's run (SiteFrame.h, RecordExecutingSite): in guest by
-// the site's execution on DXVK's CS thread into DXVK's command buffer, in native inline into the epoch's own list on the render thread. It declares the targets its site draws, so the graph orders, times and names the draws with the
-// epoch's other passes; its revision is constant (what it draws is its run's, not the recording's), so a kept recording records it again
-// in each execution (PreparedPass::RecordAgain).
+// The CPU-driven pipeline's draws as graph passes. Each draw site's epoch ends with a late pass recorded at execution,
+// after the commit opened the site's run. In guest it records into DXVK's command buffer on DXVK's CS thread, in native
+// inline into the epoch's own list. It declares its site's targets so the graph orders, times and names the draws.
+// Its revision is constant because what it draws comes from its run, so a kept recording records it again each execution.
 
-// Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
+// Main/Resources.h goes first because volk must come before every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
@@ -32,16 +31,16 @@ namespace DCLF::Direct
 		struct SiteBindings
 		{
 			Site site = Site::Depth;
-			RenderGraph::DeclaredRefs sequences;  // the view batch sequences, which the recorder pushes refs into
+			RenderGraph::DeclaredRefs sequences;  // the recorder pushes refs into these
 		};
 
-		/** @brief A draw site's late pass: its targets declared, its recording the executing run's draws. */
+		/** @brief A draw site's late pass, recording the executing run's draws. */
 		class SitePass final : public org::TypedRenderGraphPass<SitePass, org::EmptyPassFrameData, SiteBindings>
 		{
 		public:
 			using Textures = std::vector<FrameAnchors::Texture>;
 
-			// a_reads: in a GPU-driven graph, what its draws read: there the barriers are ORG's alone, an external epoch's being full.
+			// Only in a GPU-driven graph, where ORG alone places the barriers. An external epoch's barriers are full anyway.
 			using Reads = std::function<void(org::PassBuilder&)>;
 			SitePass(Site a_site, Textures a_colours, Textures a_depths, Reads a_reads) :
 				site(a_site), colours(std::move(a_colours)), depths(std::move(a_depths)), reads(std::move(a_reads)) {}
@@ -55,19 +54,19 @@ namespace DCLF::Direct
 					(void)a_builder.DepthReadWrite(depth);
 				if (reads)
 					reads(a_builder);
-				// The site's draws read the frame's placements, palettes, shading and fade seeds through the frame record (t117, t121-t123).
+				// The draws read t117 and t121-t123 through the frame record.
 				FrameValues::Get().DeclareReads(a_builder);
-				// And the view batch set's sequences, through the ref every draw's push words carry (ViewBatchSet::sequencesRef).
+				// And the batch set's sequences, through the ref every draw's push words carry.
 				SiteBindings bindings{ site };
 				Draws::DeclareViewBatchReads(a_builder, bindings.sequences);
-				// The set's sequences' rows are offsets from the payload's row parts (ViewBatchSet::pipelineRowsRef...).
+				// The sequences' rows are offsets from the payload's row parts.
 				Draws::DeclarePayloadReads(a_builder);
 				return bindings;
 			}
 
 			org::EmptyPassFrameData Prepare(const SiteBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
-				// The set's ref is latched when the frame takes it (PublishViewBatches). Phase 4 records with the declaration's.
+				// The set's ref is latched when the frame takes it. Phase 4 records with the declaration's.
 				RenderGraph::CheckDeclaredRefs(a_bindings.sequences, a_preparation, "a CPU draw site");
 				return {};
 			}
@@ -79,7 +78,7 @@ namespace DCLF::Direct
 
 			static void Record(const SiteBindings& a_bindings, org::PassRecordContext& a_recording)
 			{
-				// The run its own commit opened, found by the epoch's run: the render thread may have opened the next site by now.
+				// Find the run through the epoch's run, since the render thread may have opened the next site by now.
 				const org::RunRef run = a_recording.Run();
 				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands(), &run);
 			}
@@ -90,7 +89,7 @@ namespace DCLF::Direct
 			Reads reads;
 		};
 
-		/** @brief A site's pass, or null when it would declare no target (a pass that writes nothing would be culled). */
+		/** @brief A site's pass, or null when it would declare no target, since a pass that writes nothing would be culled. */
 		std::shared_ptr<org::RenderPass> MakeSitePass(Site a_site, SitePass::Textures a_colours, SitePass::Textures a_depths, SitePass::Reads a_reads = nullptr)
 		{
 			std::erase(a_colours, nullptr);
@@ -112,9 +111,8 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief What a main site's draws read and write by buffer view ref, declared in every graph: the main frame constants (the frame
-		 * record's slots, after the latched copies), and with the foliage record (Policy::RecordFoliagePixels) the depth draws' owners
-		 * (a_depth) or the colour draws' ids and colours. An external epoch's full barriers cover them too; the declarations order them.
+		 * @brief What a main site's draws read and write by buffer view ref, declared in every graph. External epochs have full
+		 * barriers, so the declarations are there for ordering.
 		 */
 		void DeclareFrameReads(org::PassBuilder& a_builder, const Draws::Resources& a_main, bool a_depth)
 		{
@@ -138,8 +136,7 @@ namespace DCLF::Direct
 			return { a_resources.native.begin(), a_resources.native.begin() + a_resources.targetCount };
 		}
 
-		// main.depth: main depth, the families' depth and the hosted views' (the reflection's faces into their own targets, first person's
-		// depth into the main depth).
+		// main.depth: main depth, the families' depth and the hosted views.
 		std::shared_ptr<org::RenderPass> DepthSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
@@ -147,8 +144,7 @@ namespace DCLF::Direct
 			return MakeSitePass(Site::Depth, {}, { main.nativeDepth },
 				[resources = a_context.Main(), hosted = std::move(hosted)](org::PassBuilder& a_builder) {
 					DeclareFrameReads(a_builder, *resources, true);
-					// The hosted views' draws (RecordHostedDepthViews) read each view's blocks, and its own frame constants when it has
-					// them, through the view's push words. Their latched copies are this epoch's, so the graph has them registered.
+					// The hosted views read their blocks through their push words. Their latched copies are this epoch's, so the graph knows them.
 					const std::span<const org::SrvView> noViews{};
 					for (const auto& view : hosted) {
 						if (view->frameConstants)
@@ -159,7 +155,7 @@ namespace DCLF::Direct
 				});
 		}
 
-		// main.colour: main colour, the decals, the families' colour, the second pass.
+		// main.colour: main colour, the decals, the families' colour and the second pass.
 		std::shared_ptr<org::RenderPass> ColourSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
@@ -167,7 +163,7 @@ namespace DCLF::Direct
 				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, false); });
 		}
 
-		// forward: the forward range's draws and the refraction normals. In the GPU-driven graph too, under GraphConditions::forwardDirect.
+		// forward: the forward range and refraction normals. Also in the GPU-driven graph under GraphConditions::forwardDirect.
 		std::shared_ptr<org::RenderPass> ForwardSite(const Api::PassContext& a_context)
 		{
 			const auto& conditions = Draws::CurrentGraphConditions();
@@ -187,10 +183,8 @@ namespace DCLF::Direct
 		}
 
 		/**
-		 * @brief What the shadow site's draws read, declared in every graph: the shadow constants (the views' frame record) and the view
-		 * blocks, by the addresses and refs in each view's push words (ShadowFrameView::push), and the index pool's indices (the adopted
-		 * version, bound as the index buffer), as the GPU-driven shadow views pass declares them. An external
-		 * epoch's full barriers cover them too; the declarations order them, and Phase 4's in-pass recording needs them.
+		 * @brief What the shadow site's draws read, declared in every graph: the shadow constants, view blocks and index pool.
+		 * The declarations give ordering, and Phase 4's in-pass recording needs them.
 		 */
 		void DeclareShadowReads(org::PassBuilder& a_builder, const Draws::ShadowResources& a_shadow)
 		{
@@ -203,20 +197,20 @@ namespace DCLF::Direct
 				(void)a_builder.IndexBuffer(*a_shadow.pool->indices);
 		}
 
-		// shadow: every shadow view and the occlusion maps, into the imported maps.
+		// shadow: every shadow view and occlusion map, into the imported maps.
 		std::shared_ptr<org::RenderPass> ShadowSite(const Api::PassContext& a_context)
 		{
-			// The shadow maps as the build state has them (the render thread imports the live ones).
+			// Use the build state's shadow maps, since the render thread imports the live ones.
 			const auto& depth = a_context.Build().shadowSlots->depth;
 			return MakeSitePass(Site::Shadow, {}, { depth.begin(), depth.end() },
 				[resources = a_context.Shadow()](org::PassBuilder& a_builder) { DeclareShadowReads(a_builder, *resources); });
 		}
 
-		// fp.colour: first person's colour and forward part, into the main targets against its depth (kPOST_ZPREPASS_COPY).
+		// fp.colour: first person's colour and forward part, into the main targets against kPOST_ZPREPASS_COPY.
 		std::shared_ptr<org::RenderPass> FirstPersonSite(const Api::PassContext& a_context)
 		{
 			const auto& conditions = Draws::CurrentGraphConditions();
-			// The view's target and main resources as the build state has them (the render thread imports the live ones).
+			// Use the build state's target and main resources, since the render thread imports the live ones.
 			const auto* view = a_context.Build().ViewOf(a_context.View().get());
 			if (!view || !view->main || (!conditions.cpuPipeline && (!conditions.firstPersonForwardDirect || !view->main->pool)))
 				return nullptr;

@@ -1,8 +1,5 @@
-// A trees view's draw families per face (IndirectDraws.h, "The view engine"): what the view features read of Core's draw families' faces
-// (Api/DrawFamilies.h: each family's slot and entry; tree LOD's), under each family's class (read as data; dclf-architecture.md, "Water
-// reflections"). A trees view's families' pipelines, ownership and rows (ResolveViewFaces, DecideViewFaces, ViewFaceRows; none but in a
-// trees view) and a LodTechniques view's phase readiness (LodPhaseReady); the roots its faces draw are ViewRoots.cpp's. Render thread,
-// but for LodPhaseReady (the scene lane's commit).
+// The draw families a trees view draws per face, such as tree LOD. Resolves their pipelines, ownership and rows.
+// Render thread, except LodPhaseReady, which runs in the scene lane's commit.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 
@@ -20,10 +17,8 @@ namespace DCLF
 			const auto family = static_cast<Api::DrawFamily>(d);
 			auto& faces = state.faces[d];
 			faces.pipeline = {};
-			// A family without faces (grass) has no forward pipeline: its slot's key flags are none (a Lighting key's).
+			// A family without faces, such as grass, has no forward pipeline.
 			if (a_on && Extensions::DrawFamilyHasFaces(family) && Extensions::DrawFamilyOn(ActiveToggles(), family)) {
-				// Its program is built of the family's program source its decision posts (DrawFamilyFrame::Pipelines: tree LOD's DistantTree
-				// shader).
 				auto& drawPipelines = DrawPipelines::Get();
 				const ForwardPipelineKey key{ 0, 0, FamilySlotOf(family).forwardFlags };
 				drawPipelines.RequestForward(key);
@@ -40,9 +35,7 @@ namespace DCLF
 	{
 		if (!TraitsOf(a_view).trees)
 			return;
-		// A family's faces: DCLF's while the main view's family is (DecideDrawFamilies), the last depth commit uploaded the tables the faces
-		// draw from (the family's faces.row, asked without owners: tree LOD's row names shape slots, its pipelines are in), and the faces are
-		// drawn.
+		// DCLF owns a family's faces only while it owns the main view's family and the faces' row is ready to draw.
 		auto& state = impl->View(a_view);
 		const auto* scene = impl->scene.get();
 		for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d) {
@@ -61,9 +54,7 @@ namespace DCLF
 
 	ViewFamilyRows IndirectDraws::Impl::ViewFaceRows(ViewKind a_kind, const ViewFrame& a_shape, std::vector<std::shared_ptr<const void>>& a_owners)
 	{
-		// Each faces' draw family's row (Api::DrawFamilyContribution::faces.row: tree LOD's as the last depth commit uploaded it, its
-		// texture bound again for this execution), drawn when the revision's faces have it (their shape's pipeline), the view its pipeline,
-		// and the faces' family is DCLF's; zero without the scene.
+		// Each family's row is drawn only when the shape has its pipeline and DCLF owns the family. Zero without the scene.
 		ViewFamilyRows rows{};
 		auto& state = View(a_kind);
 		for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d) {
@@ -84,7 +75,6 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::LodPhaseReady(std::uint8_t a_phase, const SceneTables& a_tables, std::uint32_t a_slot) const
 	{
-		// The view whose set phase a_phase is (the reflection's): its slot's forward pipeline in its state's slot pipelines.
 		const auto& views = Extensions::Views();
 		for (std::size_t v = 0; v < views.views.size(); ++v) {
 			if (views.views[v].phase != a_phase)

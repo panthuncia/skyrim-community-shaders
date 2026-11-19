@@ -1,8 +1,8 @@
 #pragma once
 
-// A commit's uploads on the render thread: staged (CommitUploads) or latched into the epoch's latch block (LatchedUploads). Every write
-// states its content's descriptor owners (dclf-architecture.md, "Descriptor ownership"): an OwnedRow's, or none for plain bytes.
-// Self-contained (features include it); Internal.h includes it in its order.
+// A commit's uploads on the render thread, either staged or latched into the epoch's latch block.
+// Every write states which descriptors its bytes name, so they stay alive while the bytes are current.
+// Features include this header directly, so it must stay self-contained.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameData.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -28,13 +28,8 @@
 
 namespace DCLF::Draws
 {
-	/**
-	 * @brief Where a write at a_offset into the frame-constants buffer goes, named for FrameData: a stage's register slot, the
-	 * shared light block, the lighting slot's parts (the frame lighting, the LOD fades' inputs, the foliage record's) or the record.
-	 * Resources/FrameSlots.cpp.
-	 */
+	/** @brief A readable name for the part of the frame-constants buffer at a_offset. */
 	std::string FrameConstantsPart(std::uint64_t a_offset);
-	/** @brief FrameData's name of a write to a_target at a_offset, as a_route ("latched", "staged"). */
 	template <class Target>
 	std::string FrameDataWhere(std::string_view a_route, const Target& a_target, std::uint64_t a_offset)
 	{
@@ -51,10 +46,7 @@ namespace DCLF::Draws
 		return where;
 	}
 
-	/**
-	 * @brief A released batch from a pool (neither a payload nor the upload service still holds it), reset, or a new one
-	 * of a_pageSize pages added to the pool.
-	 */
+	/** @brief Reuses a released batch from a_pool, or adds a new one. */
 	inline std::shared_ptr<org::runtime::StagedUploadBatch> AcquireStagedBatch(std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool,
 		std::size_t a_pageSize = std::size_t{ 4 } << 20)
 	{
@@ -74,11 +66,8 @@ namespace DCLF::Draws
 		return batch;
 	}
 
-	// A commit's own uploads on the render thread, staged directly (StagedUploadBatch) and submitted when the commit ends: each is
-	// one memcpy into mapped staging here and one copy in the submission, with no per-upload bookkeeping in the upload pass. The
-	// batch comes from a pool of released ones. A versioned buffer's bytes go to the version the adopted set names (a_adopted), the one
-	// the epoch's recordings resolve. Each write replaces its range's content owners (a_content: the scene's; null for a commit that
-	// writes no scene content, which then takes no OwnedRow).
+	// A commit's own uploads, staged directly and submitted when the commit ends. Each is one memcpy and one copy.
+	// A versioned buffer is written in the version the adopted set names, the one the epoch's recordings resolve.
 	class CommitUploads
 	{
 	public:
@@ -93,7 +82,6 @@ namespace DCLF::Draws
 		CommitUploads(const CommitUploads&) = delete;
 		CommitUploads& operator=(const CommitUploads&) = delete;
 
-		// Plain bytes: no descriptor of theirs needs an owner.
 		template <class Target>
 		void operator()(const Target& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)
 		{
@@ -102,19 +90,18 @@ namespace DCLF::Draws
 			NoteContent(ContentKey(a_target), a_offset, a_bytes, {});
 			Stage(a_target, a_data, a_bytes, a_offset);
 		}
-		// A row naming descriptors: its owners are the range's content owners from now on.
+		// The row's descriptors become the range's content owners.
 		template <class Target, class Row>
 		void operator()(const Target& a_target, const OwnedRow<Row>& a_row, std::uint64_t a_offset)
 		{
 			Stage(a_target, a_row.Bytes(), OwnedRow<Row>::kBytes, a_offset);
 			NoteContent(ContentKey(a_target), a_offset, OwnedRow<Row>::kBytes, a_row.Owners());
 		}
-		/** @brief The buffer a write into a_target goes to: the version the adopted set names. */
 		const std::shared_ptr<org::Buffer>& TargetOf(const Versioned& a_target) const { return adopted.Of(a_target).version->buffer; }
 
 	private:
 		friend class LatchedUploads;
-		// A target as the content owners key it: a plain buffer's address, a versioned buffer's key (every version of it).
+		// Versioned buffers are keyed by Key() so owners survive growth to a new version.
 		static const void* ContentKey(const Versioned& a_target) { return a_target->Key(); }
 		template <class T>
 		static const void* ContentKey(const std::shared_ptr<T>& a_target)
@@ -128,8 +115,7 @@ namespace DCLF::Draws
 			if (FrameData::Enabled())
 				FrameData::Note(FrameDataWhere("staged", a_target, a_offset), a_bytes);
 		}
-		// A versioned buffer: the version the adopted set names (every target is one of its buffers: a buffer of the set is named by
-		// every set sealed after its registration, and a commit writes only what its revision's shapes name).
+		// Every set sealed after a buffer's registration names it, so the adopted set always has a version here.
 		void Stage(const Versioned& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset);
 		void NoteContent(const void* a_key, std::uint64_t a_offset, std::uint64_t a_bytes, std::span<const std::shared_ptr<const void>> a_owners)
 		{
@@ -145,11 +131,8 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief A commit's uploads of per-frame values (a block written whole, a counter zeroed) into its shape's latched copies (a
-	 * scene revision's): each value at its copy's place in the list's block (the one the revision's set names), the rest of the copy
-	 * zeroed, and the epoch's first pass copies them to their targets with the ticket, on ORG's host thread. A value the list has no
-	 * copy for is staged (a_fallback), as a target no pass declared is. Finish zeroes the copies no value was written to, and returns
-	 * the list. Content owners as the fallback's.
+	 * @brief A commit's per-frame values, written into its shape's latched copies and copied to their targets by the epoch's first pass.
+	 * A value with no copy is staged by the fallback instead.
 	 */
 	class LatchedUploads
 	{
@@ -157,10 +140,9 @@ namespace DCLF::Draws
 		LatchedUploads(const LatchedList& a_layout, CommitUploads& a_fallback, const org::RunRef& a_run) :
 			fallback(a_fallback), run(a_run), layout(a_layout), written(a_layout.copies.size(), 0)
 		{}
-		/** @brief Values the layout had no copy for (staged instead). */
+		/** @brief Values that had no copy and were staged instead. */
 		std::uint32_t Misses() const { return misses; }
 
-		// Plain bytes (no descriptor of theirs needs an owner). A latched value is counted here (FrameData), a staged one by the fallback.
 		void operator()(const std::shared_ptr<org::Buffer>& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)
 		{
 			if (!a_data || !a_bytes)
@@ -168,7 +150,6 @@ namespace DCLF::Draws
 			fallback.NoteContent(a_target.get(), a_offset, a_bytes, {});
 			Write(a_target, a_data, a_bytes, a_offset);
 		}
-		// A versioned buffer: latched by its key, copied into the version the epoch's preparation resolved (the adopted set's).
 		void operator()(const Versioned& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)
 		{
 			if (!a_data || !a_bytes)
@@ -176,7 +157,7 @@ namespace DCLF::Draws
 			fallback.NoteContent(a_target->Key(), a_offset, a_bytes, {});
 			Write(a_target, a_data, a_bytes, a_offset);
 		}
-		// A row naming descriptors: its owners are the range's content owners from now on.
+		// The row's descriptors become the range's content owners.
 		template <class Target, class Row>
 		void operator()(const Target& a_target, const OwnedRow<Row>& a_row, std::uint64_t a_offset)
 		{
@@ -195,7 +176,7 @@ namespace DCLF::Draws
 			if (Latch(a_target->Key(), a_data, a_bytes, a_offset, [&] { fallback.Stage(a_target, a_data, a_bytes, a_offset); }) && FrameData::Enabled())
 				FrameData::Note(FrameDataWhere("latched", fallback.TargetOf(a_target), a_offset), a_bytes);
 		}
-		// True when the value went into the latch block (false: nothing, or staged by a_fallback).
+		// False when nothing was written or the fallback staged it.
 		template <class Fallback>
 		bool Latch(const void* a_key, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset, Fallback&& a_fallback)
 		{
@@ -218,10 +199,10 @@ namespace DCLF::Draws
 		}
 
 	public:
-		/** @brief The frame's list: the layout's, every copy no value was written to this commit zeroed. */
+		/** @brief The frame's list, with every copy not written this commit zeroed. */
 		LatchedList Finish()
 		{
-			// A copy no value was written to this commit copies zeros, never what an older run left in a published copy's region.
+			// Zero unwritten copies so a published copy's region never replays an older run's bytes.
 			for (std::size_t i = 0; i < written.size(); ++i)
 				if (!written[i] && layout.latch) {
 					const auto& copy = layout.copies[i];

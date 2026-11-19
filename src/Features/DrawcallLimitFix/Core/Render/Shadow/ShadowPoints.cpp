@@ -1,6 +1,3 @@
-// The shadow views' frame points, Core's half (ShadowPoints.h): the frame's shadow view list, over IndirectDraws' capacity
-// (Shadow/ShadowCapture.cpp) and the revision inputs.
-
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowPoints.h"
 
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -11,9 +8,8 @@
 namespace DCLF
 {
 	/**
-	 * @brief Whether Drawcall Limit Fix draws this frame's shadow views: decided at the start of CalculateAndDrawShadowCasterLights
-	 * (BeginShadowViews, DecideShadowCoverage), before the engine's first shadow map clear. The engine skeleton reads it there: the
-	 * shadow clears go into DCLF's shadow epoch only when that epoch draws the views. Render thread.
+	 * @brief Whether DCLF draws this frame's shadow views. It is decided before the engine's first shadow map clear,
+	 * and the clears go into DCLF's shadow epoch only when this is true. Render thread.
 	 */
 	bool DrawsShadowViews()
 	{
@@ -25,8 +21,7 @@ namespace DCLF::Draws
 {
 	void BeginShadowViews()
 	{
-		// Before any shadow light registers: the capacity and the coverage (the epochs' handler, after this) the frame's views are
-		// covered by, so the withholding, the sun's claims and the census all test this frame's.
+		// Set the capacity before any shadow light registers, so every later check sees this frame's value.
 		auto& draws = IndirectDraws::Get();
 		ShadowViews::Get().SetViewCapacity(ActiveToggles().shadows ? draws.ShadowViewCapacity() : UINT32_MAX);
 		ShadowViews::Get().BeginCasters();
@@ -48,14 +43,13 @@ namespace DCLF::Draws
 
 	void ListShadowViews()
 	{
-		// The frame's shadow views, in the order the engine renders them. Everything downstream - the capture's attribution, the
-		// withholding, the epochs - identifies a view by this list.
+		// Everything downstream identifies a shadow view by its index in this list.
 		ShadowViews::Get().Rebuild();
 	}
 
 	void NoteShadowRevisionInputs()
 	{
-		// The shadow views' candidates: a scene revision's input (its main latch holds a cascade and a shadow volume each).
+		// The shadow candidates are a scene revision input, because the main latch holds one cascade and one shadow volume.
 		IndirectDraws::Get().NoteRevisionInputs();
 	}
 }

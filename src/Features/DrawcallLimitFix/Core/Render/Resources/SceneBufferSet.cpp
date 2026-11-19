@@ -1,5 +1,4 @@
-// The scene's growable buffers (SceneBufferSet): registrations, the set's ties to DCLF's state graph, uploader and device, and the
-// producer's requirements and seals.
+// The scene's growable buffers: registration, ties to DCLF's state graph, and the producer's requirements and seals.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
@@ -11,11 +10,7 @@ namespace DCLF::Draws
 	{
 		std::uint64_t DeviceAddressOf(const org::Buffer& a_buffer) { return PooledBackings::DeviceAddressOf(a_buffer); }
 
-		/**
-		 * @brief The set's pool (D4): DCLF's pooled backings (PooledBackings: a backing made like the buffer it grows, without an ECS
-		 * entity; a released one destroyed on the graph host's cleanup lane). On DCLF's retirement clock, no caps. The growth producer
-		 * is its one acquirer (the set posts one batch at a time).
-		 */
+		/** @brief The set's pool of DCLF's pooled backings, on DCLF's retirement clock with no caps. The growth producer is its one acquirer. */
 		std::shared_ptr<org::services::BackingPool> MakeGrowthPool()
 		{
 			auto hooks = PooledBackings::Hooks();
@@ -32,13 +27,12 @@ namespace DCLF::Draws
 	SceneBufferSet::SceneBufferSet() :
 		set([this] {
 			org::services::GrowableBufferSetHooks hooks;
-			// Growth as graph work: made and filled on the preparation pool, ready once its copies completed; the batch's done
-			// wakes the builder, which seals again.
+			// Growth runs as graph work on the preparation pool. When a batch finishes it wakes the builder, which seals again.
 			hooks.post = [](org::async::VersionGrowthWork a_work) { return SceneScheduler::Graph().PostGrowth(std::move(a_work)); };
 			hooks.wake = [] { WakeSnapshotBuilder(); };
 			hooks.uploads = [this] { return uploads.lock(); };
 			hooks.addressOf = [](const org::Buffer& a_buffer) { return DeviceAddressOf(a_buffer); };
-			// Every version is made into a pooled backing, kept from reuse until the frames that read it retired (BindAdopted).
+			// Each version is a pooled backing, kept from reuse until the frames that read it retire.
 			hooks.pool = MakeGrowthPool();
 			hooks.grown = [](const org::services::GrowableRegistration& a_buffer, std::uint64_t a_from, std::uint64_t a_to, std::uint64_t a_bytes) {
 				logger::info("[DCLF] {}: {} {} to {} ({} KB), as graph work", a_buffer.name, a_from, a_to < a_from ? "shrunk" : "grown", a_to, a_bytes / 1024);
@@ -62,11 +56,11 @@ namespace DCLF::Draws
 		registration.buffer = versioned;
 		registration.extent = a_spec.extent;
 		registration.policy = a_spec.policy;
-		// One policy gives every scene buffer's memory back once the scene asks much less of it (CS_DCLF_SHRINK).
+		// Gives memory back once the scene asks for much less (CS_DCLF_SHRINK).
 		registration.shrink = PooledBackings::Shrink();
 		registration.contents = a_spec.contents;
 		registration.capture = std::move(a_spec.capture);
-		// Every entry carries its version's device address (layouts and diagnostics read it; shaders read the version's buffer view ref).
+		// Layouts and diagnostics read the device address. Shaders read the buffer view ref.
 		registration.address = true;
 		(void)set.Register(std::move(registration));
 		return versioned;

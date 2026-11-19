@@ -4,12 +4,11 @@
 #	include "RenderGraph/BufferRefs.h"
 #endif
 
-// The main pass's capture (render thread) and the layout of the per-frame constant blocks at their frame slots, with the frame push
-// words that name them. Part of IndirectDraws' implementation: included by Internal.h, in its order.
+// The main pass's capture and the layout of the per-frame constant blocks at their frame slots, with the push words that name them.
 
 namespace DCLF::Draws
 {
-	// The main pass's bindings where its opaque batches start (DrawcallLimitFix::BeforeOpaquePass), or the depth pass's.
+	// The main pass's bindings where its opaque batches start, or the depth pass's.
 	struct Capture
 	{
 		std::array<ID3D11Buffer*, kConstantBufferRegisters> vsBuffers{};
@@ -20,8 +19,7 @@ namespace DCLF::Draws
 		std::uint32_t targetCount = 0;
 		std::uint32_t viewportWidth = 0, viewportHeight = 0;
 		float minDepth = 0.0f, maxDepth = 1.0f;
-		// The camera the main pass draws with: the world transforms are stored relative to it, and the
-		// engine has moved it on by the time the epoch packs the constants.
+		// World transforms are stored relative to this camera. The engine has moved the camera on by the time the epoch packs the constants.
 		RE::NiPoint3 eye, previousEye;
 
 		void Release()
@@ -40,8 +38,7 @@ namespace DCLF::Draws
 
 	Capture CaptureBindings();
 
-	// The CPU-written structured buffers the main pass binds at t16 and up, less the registers of the frame graph buffers on the graph
-	// (a_graphBuffers: a bit per registration, Resources::graphBuffers), which come from the graph.
+	// The CPU-written structured buffers the main pass binds at t16 and up, minus the frame graph buffers, which come from the graph.
 	std::vector<FrameBuffer> FrameBuffersOf(const Capture& a_capture, std::uint32_t a_graphBuffers);
 
 	inline ID3D11Buffer* BufferOf(ID3D11ShaderResourceView* a_view)
@@ -79,22 +76,16 @@ namespace DCLF::Draws
 		std::uint64_t capacity = 0;
 	};
 
-	// The per-frame constant blocks - whatever the main pass binds outside the per-draw registers - live
-	// in Resources::frameConstants at fixed slots, so that a record can name a block before its contents
-	// exist: the vertex stage's b0-b13, then the pixel stage's, then the shared light slot, and the frame
-	// lighting every DCLF_BINDLESS draw's b13 reads (FrameView::FrameCapture::lighting). A slot is D3D11's
-	// constant buffer maximum, so no block overflows.
+	// The per-frame constant blocks live at fixed slots so a record can name a block before its contents exist.
+	// A slot is D3D11's constant buffer maximum, so no block overflows.
 	constexpr std::uint64_t kFrameSlotBytes = 65536;
 	constexpr std::uint32_t kFrameSlotSharedLight = 2 * kConstantBufferRegisters;
 	constexpr std::uint32_t kFrameSlotLighting = kFrameSlotSharedLight + 1;
-	// The shared light slot holds two blocks. Its first half starts with the zero block the main shadow layout reads
-	// (MainShadowLayoutPush), zeroed once. Its second half is every bindless draw's PS b3: Light Limit Fix's StrictLightData,
-	// zeroed once (DCLF supplies its two per-object words from the object record), or without Light Limit Fix the frame's point
-	// light table, latched by every commit (FrameRecords.cpp, Common/DCLFPointLights.hlsli).
+	// The shared light slot holds two blocks. The first starts with the zero block the main shadow layout reads.
+	// The second is every bindless draw's PS b3, either Light Limit Fix's zeroed StrictLightData or DCLF's own point light table.
 	constexpr std::uint64_t kSharedLightBlockBytes = kFrameSlotBytes / 2;
 	constexpr std::uint64_t kSharedLightBlockOffset = std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes + kSharedLightBlockBytes;
-	// The frame record (DrawBindings): every register a draw's rows do not give - the frame slots' addresses, the frame's
-	// textures (t16 and up), the object and bone tables - written by each commit (FrameRecordOf).
+	// The frame record holds every register a draw's rows do not give. Each commit writes it.
 	constexpr std::uint32_t kFrameSlotRecord = kFrameSlotLighting + 1;
 	constexpr std::uint32_t kFrameSlotCount = kFrameSlotRecord + 1;
 	constexpr std::uint64_t kFrameConstantBytes = std::uint64_t(kFrameSlotCount) * kFrameSlotBytes;
@@ -103,22 +94,16 @@ namespace DCLF::Draws
 	{
 		return (std::uint64_t(a_pixelStage ? kConstantBufferRegisters : 0u) + a_register) * kFrameSlotBytes;
 	}
-	// The lighting slot's rows (PS b13): the frame lighting (c0-c5), the LOD fades' inputs (c6-c13), the foliage record's (c14-c15),
-	// the extras' pixel inputs (c16, ExtrasFrame::projectedGlobals).
+	// The lighting slot's rows (PS b13): frame lighting c0-c5, LOD fades c6-c13, foliage record c14-c15, extras c16.
 	constexpr std::uint64_t kExtrasPixelFrameOffset = std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32;
 	static_assert(sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32 == 16 * 16);
-	// The frame record and every slot's block are pushed addresses (frame constants base + slot offsets; the record's ref is pushed too,
-	// for the stages that read it themselves), and the LOD fades' inputs
-	// (lighting slot + sizeof(FrameLighting)) a draw's material row word: all read through 16-byte-aligned pointers on Vulkan's
-	// descriptor-buffer model (BasicRHI's SPIR-V lowering).
+	// The record and every slot's block are read through 16-byte-aligned pointers on Vulkan's descriptor-buffer model.
 	static_assert(kFrameSlotBytes % 256 == 0 && sizeof(FrameLighting) % 16 == 0);
-	// Then Core's feature rows (c17 up to Extensions::kFrameConstantRowsEnd, Core/Extensions/Commits.h): the frame constant rows
-	// (Api::FrameConstantRow; the Effect port's camera planes, light colour, blood and cloud light colour at c17-c20), 16 bytes each. Uploads.cpp checks the
-	// first is right after the extras' pixel row.
+	// Core's frame constant rows follow from c17, 16 bytes each. Uploads.cpp checks the first comes right after the extras' row.
 	constexpr std::uint64_t FrameConstantRowOffset(std::uint32_t a_row) { return std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + std::uint64_t(a_row) * 16; }
 	static_assert(sizeof(FrameFog) == 3 * 16);
 
-	/** @brief The frame push word of a stage's constant buffer register (FramePushWords' order), or ~0u when it is not pushed. */
+	/** @brief The frame push word of a stage's constant buffer register, or ~0u when it is not pushed. */
 	inline std::uint32_t FramePushWord(bool a_pixel, std::uint32_t a_register)
 	{
 		std::uint32_t word = kFramePushRegisters;
@@ -135,7 +120,7 @@ namespace DCLF::Draws
 		return ~0u;
 	}
 
-	/** @brief A pass-wide block's offset in the frame constants: its frame slot, the shared light block at PS b3, the frame lighting at PS b13. */
+	/** @brief A pass-wide block's offset in the frame constants. */
 	constexpr std::uint64_t FrameBlockOffset(bool a_pixel, std::uint32_t a_register)
 	{
 		if (a_pixel && a_register == 3)
@@ -145,7 +130,7 @@ namespace DCLF::Draws
 		return FrameSlotOffset(a_pixel, a_register);
 	}
 
-	/** @brief Calls a_visit(pixel, register, block) for each pass-wide block, in the frame push words' order (block: its ordinal). */
+	/** @brief Calls a_visit(pixel, register, block) for each pass-wide block, in push word order. */
 	template <class F>
 	void ForEachFrameBlock(F&& a_visit)
 	{
@@ -173,32 +158,25 @@ namespace DCLF::Draws
 		words[kFramePushRecordRef] = recordRef.viewSlot;
 		words[kFramePushRecordRef + 1] = recordRef.byteOffset;
 #if defined(CS_HAS_RENDER_GRAPH)
-		// CS_DCLF_REF_CHECK: the stages read the record, and through its backings every row, from these two words.
+		// CS_DCLF_REF_CHECK. The stages reach the record and every row through these two words.
 		RenderGraph::CheckBufferRef(recordRef, record, kFrameSlotBytes, "frame record (frame push words 2-3)");
 #endif
 		return words;
 	}
 
-	/**
-	 * @brief The pass-wide blocks' uniform buffer views of one frame constants buffer (kFrameBlocks, ForEachFrameBlock's order): slots of
-	 * ORG's shader-visible heap, made with the buffer and retired with it as their owner (released once the GPU is past every use). A
-	 * frame record names them (DrawBindings::frameBlocks, FrameRecordOf); the main layout reads each block through its view.
-	 */
+	/** @brief The uniform buffer views of one frame constants buffer's pass-wide blocks. The views retire with the buffer. */
 	class FrameBlockViews
 	{
 	public:
-		/** @brief Render thread, with the buffer: null (logged) when a slot or view cannot be made. */
+		/** @brief Render thread. Returns null, and logs, when a slot or view cannot be made. */
 		static std::shared_ptr<const FrameBlockViews> Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants);
-		/** @brief A block of a buffer a view covers: its offset (256-aligned) and bytes (a multiple of 256). */
+		/** @brief A block a view covers. The offset is 256-aligned and the size a multiple of 256. */
 		struct Block
 		{
 			std::uint64_t offset = 0;
 			std::uint32_t bytes = 0;
 		};
-		/**
-		 * @brief Views of other blocks of a_buffer, in a_blocks' order (at most kFrameBlocks): the shadow views' SharedData and FeatureData
-		 * on D3D12 (ShadowResources::blockViews). a_what names them in the log. Render thread; null (logged) when one cannot be made.
-		 */
+		/** @brief Views of other blocks of a_buffer, such as the D3D12 shadow views' SharedData and FeatureData. Null when one cannot be made. */
 		static std::shared_ptr<const FrameBlockViews> CreateFor(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_buffer, std::span<const Block> a_blocks,
 			const char* a_what);
 		FrameBlockViews() = default;

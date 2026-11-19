@@ -1,11 +1,10 @@
 #pragma once
 
-// The draw passes' recording helpers: attachments, the frame buffers' declaration, the preprocessed indirect draw, a bucket's plain draws,
-// and the frame slots' addresses a draw pass pushes; and the common passes a feature's epoch is made of: the latched copies, the latched
-// BuildDraws dispatch, the shadow epoch's index pool copies. Self-contained (a feature's pass includes it: Features/Forward's,
-// Features/MainView's, Features/Shadows/Engine's); PassHelpers.h includes it.
+// Recording helpers for the draw passes: attachments, frame buffer declarations, preprocessed indirect draws, a bucket's
+// plain draws and the frame slot addresses a draw pass pushes. Also the common passes a feature's epoch is made of: latched
+// copies, the latched BuildDraws dispatch and the shadow index pool copies. Self-contained so feature passes can include it.
 
-// volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
+// volk must come before every Vulkan header, so Main/Resources.h goes first.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Api/Passes.h"
@@ -31,31 +30,28 @@
 
 namespace DCLF::Draws
 {
-	class FrameBlockViews;  // Resources/FrameSlots.h
+	class FrameBlockViews;
 
 	/**
-	 * @brief A buffer's device address, for a pass that records one into its push data. 0 once the render graph has stopped (device
-	 * lost, or turned off): a worker may still be recording then, and what it records is never submitted.
+	 * @brief A buffer's device address for push data. 0 once the render graph has stopped, since a worker may still be
+	 * recording and nothing it records is submitted.
 	 */
 	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer);
 	/**
-	 * @brief A declared buffer's view ref at recording (the graph host's device; null without one): what a pulled stage's push words
-	 * name. a_binding is the pass's declaration of the buffer, resolved to this frame's backing, so the ref is not a raw one: the pass
-	 * declares the buffer for the shader read too.
+	 * @brief A declared buffer's view ref at recording, for a pulled stage's push words. Null without a graph host device.
+	 * It resolves the pass's declaration, so the pass must declare the buffer for the shader read too.
 	 */
 	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding);
 
 	struct ShadowResources;
 
-	// Records one BuildDrawsCS dispatch whose values and group count are the slot's latch at a_latchOffset.
+	// Records one BuildDrawsCS dispatch whose values and group count come from the latch at a_latchOffset.
 	void RecordLatchedDispatch(BuildDrawsConstants a_constants, const org::LatchBlock& a_latch,
 		rhi::CommandSignatureHandle a_signature, std::uint32_t a_latchOffset, org::PassRecordContext& a_recording);
 
 	/**
-	 * @brief What a latched copies pass copies, as of the shape its preparation is for: the shape (held) and its lists;
-	 * and in an epoch hosting others' (Api::EpochDef::hostedBy: the depth epoch, the reflection's and first person's depth), each hosted
-	 * shape's, one entry per hosted view in the host's order: its own when the preparation names it (its recordings with that view's
-	 * passes' work), else none (no lists), copied after the epoch's own.
+	 * @brief What a latched copies pass copies: the shape and its lists. A host epoch also copies each hosted view's shape
+	 * after its own, one entry per hosted view in the host's order.
 	 */
 	struct LatchedSource
 	{
@@ -67,42 +63,29 @@ namespace DCLF::Draws
 		std::shared_ptr<const void> shape;
 		std::span<const LatchedList> lists;
 		std::vector<Hosted> hosted;
-		// The zeroed counts' lists too: the GPU culls'; a CPU pipeline's graph's pass leaves them out (nothing in a CPU frame reads them).
+		// The zeroed count lists too. A CPU pipeline graph leaves them out because nothing in a CPU frame reads them.
 		bool zeros = true;
 	};
 	/**
-	 * @brief An epoch's first pass: its shape's latched copies (LatchedList) from their blocks to where its passes read them,
-	 * recorded with the epoch's ticket on ORG's host thread (its commit records no copy). It declares a_targets() as copy
-	 * destinations, published to a_declared when given (what a commit may latch: LatchedUploads); a copy of another target is skipped.
-	 * An epoch hosting others' copies the hosted shapes' lists too (one pass: a hosted epoch has no latched copies of its own).
+	 * @brief An epoch's first pass, which copies its latched values to where its passes read them. A copy to a target
+	 * a_targets() did not declare is skipped. A host epoch copies its hosted shapes' lists in the same pass.
 	 */
 	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets,
 		std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared = nullptr);
 
-	/**
-	 * @brief The shadow epoch's index pool copies (Passes/Shadow.cpp: IndexPoolPass, Core's, as the depth epoch's), dispatched from the
-	 * revision's shadow shape's latch.
-	 */
+	/** @brief The shadow epoch's index pool copies, dispatched from the revision's shadow shape's latch. */
 	std::shared_ptr<org::RenderPass> MakeShadowIndexPoolPass(const std::shared_ptr<ShadowResources>& a_resources);
 
 	/**
-	 * @brief A pass's frame buffers (t16 and up) declared as read through no view, and Light Limit Fix's lights (t35-t37) and the frame
-	 * textures' published ids (Extensions::DeclareGraphTextures) declared with the views whose indices the commit latches.
-	 * @return Those published reads, for Extensions::CheckDeclaredReads in the pass's Prepare.
+	 * @brief Declares a pass's frame buffers (t16 and up), Light Limit Fix's lights (t35-t37) and the frame textures' ids.
+	 * @return The published reads, for Extensions::CheckDeclaredReads in the pass's Prepare.
 	 */
 	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
 
-	/**
-	 * @brief Graph build: the pass reads the installed payload's parts (the scene list, geometry table, objects, extras and rows) through
-	 * the indices, addresses or refs its latch, frame record or view batch set carries. Declares each part's late-bound buffer
-	 * (PayloadPools::DeclareReads), whose version the frame's payload publishes. DeclareFrameBuffers does this too.
-	 */
+	/** @brief Declares the late-bound buffers of the installed payload's parts that the pass reads. DeclareFrameBuffers does this too. */
 	void DeclarePayloadReads(org::PassBuilder& a_builder);
 
-	/**
-	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),
-	 * where its sequences start in the arguments, its count word and its max count.
-	 */
+	/** @brief One device-generated call of a draw pass, drawing one state class's sub-range of a range. */
 	struct IndirectCall
 	{
 		rhi::CommandSignatureHandle signature{};
@@ -110,18 +93,17 @@ namespace DCLF::Draws
 		rhi::ResourceHandle counts{};
 		std::uint64_t countOffset = 0;
 		std::uint32_t capacity = 0;
-		const char* range = nullptr;  // the nvperf range around its execution, when a capture selects it (none: none)
-		const char* preprocessRange = nullptr;  // and around its preprocess (none: none)
+		const char* range = nullptr;  // the nvperf range around its execution when a capture selects it
+		const char* preprocessRange = nullptr;  // and around its preprocess
 	};
 	/**
-	 * @brief Whether a_call can be recorded: its class has a signature. Without device-generated commands no class has one, and every
-	 * range is drawn by plain buckets instead; a call reaching a recording then is a defect, logged once and skipped (its draws are lost).
+	 * @brief Whether a_call's class has a signature. Without device-generated commands plain buckets draw every range, so a
+	 * call reaching a recording is a defect. It is logged once and its draws are lost.
 	 */
 	bool CallDrawable(const IndirectCall& a_call);
 	/**
-	 * @brief One explicitly preprocessed draw pass (the forward ranges'): the preprocess of every call on the frame slot's state list, set
-	 * up as the execution is (a_begin's attachments, the layout, the topology, the frame push data, the heaps), then the pass executing
-	 * them in order. Nothing without a call.
+	 * @brief One explicitly preprocessed draw pass. Each call is preprocessed on the frame slot's state list, set up exactly
+	 * as the execution will be, then the pass executes them in order.
 	 */
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,
 		rhi::DescriptorHeapHandle a_samplerHeap, rhi::PipelineLayoutHandle a_layout, const std::array<std::uint32_t, kFramePushWords>& a_push, rhi::ResourceHandle a_arguments,
@@ -131,33 +113,21 @@ namespace DCLF::Draws
 		rhi::DescriptorHeapHandle a_samplerHeap, rhi::PipelineLayoutHandle a_layout, const std::array<std::uint32_t, kFramePushWords>& a_push, rhi::CommandSignatureHandle a_signature,
 		rhi::ResourceHandle a_arguments, std::uint64_t a_argumentsOffset, rhi::ResourceHandle a_counts, std::uint64_t a_countOffset, std::uint32_t a_capacity);
 
-	// The frame slots' layout (Resources/FrameSlots.h) is IndirectDraws' implementation: a draw pass outside it pushes their addresses
-	// through these (Passes/Forward.cpp).
-	/** @brief FramePushWords(a_frameConstants, a_frameConstantsRef): the frame push words of the main frame constants at a_frameConstants. */
+	/** @brief The frame push words of the main frame constants, for draw passes outside IndirectDraws. */
 	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef);
-	/**
-	 * @brief The frame push block in the shadow views' layout (kShadowPush*) for the main camera: the colour epoch's frame record and
-	 * slots at a_frameConstants, and the zeroed shared light block as the zero block.
-	 */
+	/** @brief The frame push block in the shadow views' layout for the main camera, with the zeroed shared light block as the zero block. */
 	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords]);
 	/**
-	 * @brief D3D12's form of MainShadowLayoutPush's block words (4-13), which its stages read themselves (Common/DCLFFrameRecord.hlsli,
-	 * DCLF_D3D12_SHADOW_FRAME): the view block, VS_PerFrame and the zero block by ref into the frame constants at a_frameConstantsRef,
-	 * SharedData and FeatureData by their views in a_blocks (the main frame constants' FrameBlockViews). Words 0-3 are left as they are.
+	 * @brief D3D12's form of MainShadowLayoutPush's words 4-13, which its stages read themselves by ref and by view.
+	 * Words 0-3 are left as they are.
 	 */
 	void MainShadowLayoutViews(RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t (&a_out)[kShadowPushWords]);
-	/** @brief The address of the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the main frame constants at a_frameConstants. */
+	/** @brief The address of the frame's LodFadeFrame in the main frame constants. */
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants);
 
 	/**
-	 * @brief One bucket's plain indexed indirect draws (DCLF_PULLED): its range of the sequences from slot a_first, its pipeline, its
-	 * push words (kZDrawPush*: the range's first sequence, a_offsetDepth) and its count word a_bucket of a_counts. The vertex stage
-	 * fetches each draw's vertices and rows through the sequence its instance names, as a plain draw binds no vertex buffer or push
-	 * data of its own.
-	 */
-	/**
-	 * @brief Where a plain draw's arguments start in its sequence: its DrawIndexed arguments, or on D3D12 the word before them, the draw's
-	 * instance, which the Z-prepass's signature writes into kDrawPushInstance first (DrawPipelines::Impl::CreateDrawSignatures).
+	 * @brief Where a plain draw's arguments start in its sequence. On D3D12 it is one word earlier, the instance word the
+	 * Z-prepass's signature writes into kDrawPushInstance first.
 	 */
 	inline std::uint64_t PlainDrawArgumentsOffset() { return ::RenderGraph::Backend::IsD3D12() ? kSequenceDrawOffset - 4 : kSequenceDrawOffset; }
 
@@ -175,7 +145,7 @@ namespace DCLF::Draws
 		a_commands.ExecuteIndirect(a_signature, a_sequences, first + PlainDrawArgumentsOffset(), a_counts, std::uint64_t(a_bucket) * sizeof(std::uint32_t), a_capacity);
 	}
 
-	/** @brief A pass's colour attachments, loaded and stored: a_count of the declared render target views a_tokens, each with its resource. */
+	/** @brief A pass's colour attachments, loaded and stored. */
 	template <std::size_t N>
 	std::array<rhi::ColorAttachment, N> LoadedColours(org::PassRecordContext& a_recording, const std::array<org::DeclaredViewToken, N>& a_tokens, std::uint32_t a_count)
 	{
@@ -188,7 +158,7 @@ namespace DCLF::Draws
 		}
 		return out;
 	}
-	/** @brief A pass's depth attachment through the declared depth view a_view, depth and stencil loaded and stored. */
+	/** @brief A pass's depth attachment, depth and stencil loaded and stored. */
 	inline rhi::DepthAttachment LoadedDepth(org::PassRecordContext& a_recording, const org::DeclaredViewToken& a_view)
 	{
 		rhi::DepthAttachment depth{};

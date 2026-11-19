@@ -1,5 +1,4 @@
-// The CPU cull's AVX-512 kernels (CullSimd.h), sixteen lanes at a time (F and BW); compiled with /arch:AVX512 and without the game's
-// PCH. Reached only where Simd::Supported reports AVX-512.
+// The CPU cull's AVX-512 kernels, sixteen lanes at a time. Compiled with /arch:AVX512 without the game's PCH, and used only where the CPU supports F and BW.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/CullSimd.h"
 
@@ -20,7 +19,7 @@ namespace DCLF::Direct::Simd
 			__mmask16 keep = 0xFFFF;
 			for (std::uint32_t p = 0; p < a_planeCount && keep; ++p) {
 				const float* plane = a_planes[p];
-				// As the SSE pass: ((a * x + b * y) + c * z) - d against -r.
+				// Same order as the SSE pass: ((a * x + b * y) + c * z) - d against -r.
 				const __m512 d = _mm512_sub_ps(_mm512_add_ps(_mm512_add_ps(_mm512_mul_ps(_mm512_set1_ps(plane[0]), x), _mm512_mul_ps(_mm512_set1_ps(plane[1]), y)),
 												   _mm512_mul_ps(_mm512_set1_ps(plane[2]), z)),
 					_mm512_set1_ps(plane[3]));
@@ -47,7 +46,7 @@ namespace DCLF::Direct::Simd
 	std::uint32_t PlaneGroupAvx512(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		std::uint32_t a_lanes)
 	{
-		// Two vectors of sixteen: the second only while a bound of a_lanes is in it.
+		// Two vectors of sixteen. The second is tested only while a bound of a_lanes is in it.
 		const bool high = (a_lanes >> 16) != 0;
 		const __m512 x0 = _mm512_loadu_ps(a_x), y0 = _mm512_loadu_ps(a_y), z0 = _mm512_loadu_ps(a_z), r0 = _mm512_loadu_ps(a_r);
 		const __m512 minus0 = _mm512_sub_ps(_mm512_setzero_ps(), r0);
@@ -112,7 +111,6 @@ namespace DCLF::Direct::Simd
 	void PlaneChunksAvx512(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		const std::uint16_t* a_lanes, std::uint16_t* a_pass, std::uint32_t a_chunks)
 	{
-		// The set's active planes, broadcast once.
 		std::uint32_t mask;
 		std::memcpy(&mask, a_set + 24, 4);
 		__m512 nx[6], ny[6], nz[6], d0[6];

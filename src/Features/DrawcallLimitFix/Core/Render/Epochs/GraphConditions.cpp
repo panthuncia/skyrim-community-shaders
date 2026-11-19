@@ -1,4 +1,3 @@
-// The graph's conditions (see the header).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
@@ -18,10 +17,9 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		// Render thread: the conditions the next builds are for (RefreshGraphConditions), the defaults until the first build point's.
+		// Render thread: the defaults until the first build point.
 		std::shared_ptr<const GraphConditions> requested = std::make_shared<const GraphConditions>();
-		// The conditions the attached graphs were built for (AttachGraphConditions). Every value attached is kept, so a reference
-		// CurrentGraphConditions handed out stays valid while another thread swaps it.
+		// Every attached value is kept, so a reference CurrentGraphConditions handed out stays valid while another thread swaps it.
 		std::mutex attachedMutex;
 		std::vector<std::shared_ptr<const GraphConditions>> attachedKept;  // attachedMutex
 		std::atomic<const GraphConditions*> attachedConditions{ nullptr };
@@ -84,20 +82,16 @@ namespace DCLF::Draws
 		const auto* tes = RE::TES::GetSingleton();
 		next.interior = tes && tes->interiorCell;
 		next.twoPassOcclusion = Toggles::Get().Active().cullMode >= 2;
-		// The pipeline from the newest applied toggles, as the cull mode: the rebuild here makes every recording of the old graph stale, so
-		// the frame waits at its start for a snapshot made for the graph as built (AdoptCurrentSnapshot), whose revision records the
-		// epochs (the CPU pipeline's: its external epochs, RevisionInputs::cpuPipeline).
-		// Which one draws this kind of cell (Auto: interiors CPU-driven): entering or leaving an interior rebuilds the graph anyway. Every
-		// cell without device-generated commands.
+		// A pipeline change makes every recording of the old graph stale, so the frame waits at its start for a snapshot made
+		// for the new graph. Entering or leaving an interior rebuilds the graph anyway.
 		next.cpuPipeline = CpuPipelineForCell(Toggles::Get().Active(), next.interior);
-		// The direct forward families need their epochs' late passes recorded at execution, after the commit: in DXVK's stream (guest's
-		// in-stream epochs) or inline into the epoch's own list (native).
+		// The direct forward families need their epochs' late passes recorded at execution, after the commit.
 		const auto& runtime = RenderGraphRuntime::Get();
 		next.forwardDirect = !next.cpuPipeline && SwitchOnUnlessZero(Switch::ForwardDirect) &&
 		                     runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::Forward));
 		next.firstPersonForwardDirect = next.forwardDirect && runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::FirstPerson));
-		// The first-person forward part has no plain buckets: without device-generated commands only the CPU pipeline or the direct
-		// forward family draws it, and without either the view is the engine's (no epochs, no slots).
+		// The first-person forward part has no plain buckets. Without device-generated commands, the CPU pipeline or the direct
+		// forward family must draw it, or the engine draws the view.
 		next.firstPerson = next.cpuPipeline || next.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
 		if (!next.firstPerson) {
 			static std::atomic<bool> logged{ false };
@@ -116,10 +110,8 @@ namespace DCLF::Draws
 				next.twoPassOcclusion ? "two-pass occlusion" : "no occlusion pass (portal and frustum culling)", next.cpuPipeline ? "CPU" : "GPU",
 				next.forwardDirect ? ", forward draws on the CPU" : "", next.firstPerson ? "" : ", first person the engine's",
 				next.cuts.empty() ? "" : ", passes cut: ", next.cuts);
-		// The epochs the CPU pipeline's sites execute themselves (their passes before the draws), before the build the change requests,
-		// with the ones executed in DXVK's stream (RenderGraphRuntime::InStreamEpochs). Only the builds read the host's list: the running
-		// graphs keep the one they were built with until the new ones attach. A host that records passes at execution inline (native)
-		// submits the sites' epochs itself, their late passes recording the draws (Direct::SitesInline): none is external there.
+		// Set the external epochs before the build the change requests. Running graphs keep the list they were built with.
+		// A native host submits the sites' epochs itself, so none is external there.
 		if (next.cpuPipeline != requested->cpuPipeline) {
 			auto external = RenderGraphRuntime::Get().InStreamEpochs();
 			if (next.cpuPipeline && !a_host.InlineAtExecution())
@@ -130,12 +122,10 @@ namespace DCLF::Draws
 			a_host.SetExternalEpochs(std::move(external));
 		}
 		requested = std::make_shared<const GraphConditions>(std::move(next));
-		// Built on the render thread at this build point (CS_DCLF_ASYNC_BUILDS=0): the frame runs the new graphs, so their conditions are
-		// the attached ones now. Otherwise they become so when the builds attach (PublishAttachedBuildState).
+		// With CS_DCLF_ASYNC_BUILDS=0 the frame runs the new graphs now, so their conditions are attached now.
 		if (!AsyncGraphBuilds())
 			AttachGraphConditions(requested);
-		// The conditions are Drawcall Limit Fix's: its epochs' graphs are built again, the others' (Light Limit Fix's light culling,
-		// the frame anchors') keep theirs. A hosted segment has no graph of its own (its host's carries its passes).
+		// Only DCLF's epochs are rebuilt. A hosted segment has no graph of its own.
 		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
 			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
 				RenderGraph::Builds::Request(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)), "Drawcall Limit Fix's graph conditions changed");
@@ -164,7 +154,6 @@ namespace DCLF::Draws
 
 	const GraphConditions& CurrentGraphConditions()
 	{
-		// Inside a graph build: the conditions it builds for. Elsewhere (the frame, the preparations, the revisions): the attached graphs'.
 		if (const auto* building = ScopedBuildState(); building && building->conditions)
 			return *building->conditions;
 		return AttachedConditions();

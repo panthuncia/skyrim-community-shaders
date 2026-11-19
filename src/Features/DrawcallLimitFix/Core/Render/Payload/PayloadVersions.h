@@ -2,12 +2,10 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// The scene payload (D5): seven parts, each a chain of GPU-built versions (org::services::PublishedBufferVersion, SceneArtifact::PayloadPart
-// on DCLF's state graph). The snapshot builder makes each publication's PayloadSource (immutable) and posts the next version of every part
-// that changed for it: the part's journal's runs since its last version and its tails, uploaded once, the rest GPU-copied from that
-// version on the streaming copy queue. The snapshot is posted once every version is GPU ready, naming them (ScenePayload); the frame that
-// installs it catches nothing up, and the epochs read the versions by value (PayloadVersions). Included by Internal.h, after
-// Builders/ShadowPayload.h.
+// The scene payload is seven parts. Each part is a chain of GPU-built buffer versions.
+// For each part that changed, the snapshot builder uploads the journal's new runs and GPU-copies the rest from the
+// last version on the streaming copy queue. The snapshot is posted only once every version is GPU ready,
+// so the frame that installs it has nothing to catch up.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PayloadProducts.h"
 
@@ -33,7 +31,7 @@ namespace org
 
 namespace DCLF::Draws
 {
-	/** @brief The payload's buffers: one version chain each (PayloadPools, its own backing pool). */
+	/** @brief The payload's buffers, one version chain each. */
 	enum class PayloadPart : std::uint8_t
 	{
 		Objects,       // BindlessObject per object (the stream views' objects)
@@ -47,7 +45,7 @@ namespace DCLF::Draws
 	};
 	inline constexpr std::size_t kPayloadParts = static_cast<std::size_t>(PayloadPart::Count);
 
-	/** @brief One part's buffer as the epochs read it: values only (no recording binds it). */
+	/** @brief One part's buffer as the epochs read it, by value. */
 	struct PayloadBuffer
 	{
 		std::uint32_t srvIndex = 0;  // its SRV slot (0: the part is absent)
@@ -56,11 +54,7 @@ namespace DCLF::Draws
 		std::uint64_t units = 0;     // the elements this payload holds (its rows: BindlessObject, extras row, GeometryDraw, DrawInput...)
 	};
 
-	/**
-	 * @brief A publication's payload source (the snapshot builder's PublishPayload, immutable): where each part's rows are - the
-	 * publication's stream views, its newest main payload and its shadow payload, kept alive with its draws. The parts' versions are built
-	 * from it (PayloadPools::Post: each holds it until its upload completed); the snapshot names them (ScenePayload).
-	 */
+	/** @brief Where each part's rows come from for one publication. Immutable. Each version holds it until its upload completes. */
 	struct PayloadSource
 	{
 		std::shared_ptr<const void> keep;  // the publication's draws (DrawPublication), which the pointers below are into
@@ -72,18 +66,13 @@ namespace DCLF::Draws
 		const std::vector<DrawInput>* mainList = nullptr;
 		const std::vector<DrawInput>* shadowList = nullptr;
 		std::array<std::uint64_t, kPayloadParts> units{};  // each part's elements (PayloadBuffer::units)
-		// The scene list's layout (PayloadPart::Inputs, in DrawInput units): the region at the head, the main payloads' frame inputs
-		// at mainInputsAt, the shadow payload's at shadowInputsAt.
+		// The scene list layout in DrawInput units. The region is at the head, then main inputs, then shadow inputs.
 		std::uint64_t regionCount = 0, mainInputsAt = 0, shadowInputsAt = 0;
-		// The main payload's products (MainBody::products, by registration): installed with the snapshot (Extensions::InstallPayloadProducts).
 		Extensions::PayloadProducts products;
 		std::uint64_t serial = 0;  // process-unique per source
 	};
 
-	/**
-	 * @brief A snapshot's payload (PayloadPools::Finish, the snapshot builder's, immutable): every present part's version, GPU ready
-	 * (a part unchanged for the source keeps its last version), and the source's layout. A kept publication keeps it, and its serial.
-	 */
+	/** @brief A snapshot's payload. Every present part's GPU-ready version. Unchanged parts keep their last version. */
 	struct ScenePayload
 	{
 		std::array<std::shared_ptr<const org::services::PublishedBufferVersion>, kPayloadParts> versions;  // null: the part is absent
@@ -93,16 +82,11 @@ namespace DCLF::Draws
 		bool shadow = false;  // the shadow parts (shadow rows, the shadow inputs) are present
 		Extensions::PayloadProducts products;  // the source's
 		std::uint64_t serial = 0;              // the source's
-		// TEMP (set parity): the main body the source was made from, for identity only (CommitMainPayload's pairing check). The snapshot
-		// holds its draws.
+		// TEMP (set parity): the source's main body, used only as an identity for CommitMainPayload's pairing check.
 		const void* mainBody = nullptr;
 	};
 
-	/**
-	 * @brief The frame's payload (PayloadPools::MakeFramePayload, render thread): every part's installed version, its SRV slot and
-	 * device address, and the source's layout. The epochs read it by value (the BuildDraws latch's payload block, the shadow and occlusion
-	 * latches, the frame records' t-registers).
-	 */
+	/** @brief The frame's payload. Render thread. The epochs read it by value. */
 	struct PayloadVersions
 	{
 		std::array<PayloadBuffer, kPayloadParts> parts{};
@@ -110,69 +94,48 @@ namespace DCLF::Draws
 		bool main = false;    // the main parts (material and pipeline rows, the main inputs) are present
 		bool shadow = false;  // the shadow parts (shadow rows, the shadow inputs) are present
 		std::uint64_t serial = 0;  // the source's
-		// TEMP (set parity): the main body the source was made from, for identity only (CommitMainPayload's pairing check).
+		// TEMP (set parity): the source's main body, used only as an identity for CommitMainPayload's pairing check.
 		const void* mainBody = nullptr;
-		// The parts' versions' backings (diagnostics: the set parity's copy of the scene list), held by the installed snapshot.
+		// Diagnostics only. Set parity reads its copy of the scene list from these.
 		std::array<std::shared_ptr<const org::services::Backing>, kPayloadParts> backings;
 
 		[[nodiscard]] const PayloadBuffer& operator[](PayloadPart a_part) const { return parts[static_cast<std::size_t>(a_part)]; }
 	};
 
 	/**
-	 * @brief Core's payload parts' versions: per part a backing pool (DCLF's retirement clock, a few backings a class, a build suspended
-	 * while none frees) and a chain of versions, each built from the last (BuildVersionedBuffer's predecessor copy, on the graph's
-	 * preparation pool: SceneGraph::PostPayloadPart): the part's journal's runs since the last version's journal position and its tails
-	 * (the stream rows, the main and shadow frame inputs) uploaded, what the leased backing lacks of the last version GPU-copied from it.
-	 * The journals keep their changes back to the oldest position a backing of the part's pool holds (OldestContentEpoch).
+	 * @brief Version chains for the payload parts. Each part has its own backing pool, and a build waits while none is free.
+	 * The journals keep changes back to the oldest position any backing of the part holds.
 	 */
 	namespace PayloadPools
 	{
-		/** @brief Snapshot builder: a publication's source from its draws (a_keep), stream views, newest main payload and shadow payload. */
+		/** @brief Snapshot builder. Makes a publication's source. */
 		std::shared_ptr<const PayloadSource> MakeSource(std::shared_ptr<const void> a_keep, const StreamViews& a_views, const MainPayload* a_main,
 			const ShadowPayload* a_shadow);
-		/**
-		 * @brief Snapshot builder: takes the finished builds into the parts' chains (a failure reported once a part, its last version
-		 * kept); true when none is in flight. Each part's chain is serial: nothing is posted while this is false (a finished build wakes
-		 * the builder).
-		 */
+		/** @brief Snapshot builder. Takes finished builds into the chains. True when none is in flight. Nothing is posted while false. */
 		bool Settle();
-		/** @brief Any thread, read racily (for a stall's message): the parts with a version in flight, by name; "none". */
+		/** @brief Any thread, read racily for stall messages. The parts with a version in flight, or "none". */
 		std::string PendingParts();
-		/**
-		 * @brief Snapshot builder, with Settle true: posts the next version of each part a_source has that changed for it (its journal
-		 * moved, its units, or a tailed part's new source); the others keep theirs. a_uploads: the frame's dedicated uploader. False when
-		 * nothing could be posted (no uploader that copies; a refused post): the source has no payload.
-		 */
+		/** @brief Snapshot builder, with Settle true. Posts a new version of each changed part. False when nothing could be posted. */
 		bool Post(const std::shared_ptr<const PayloadSource>& a_source, const std::shared_ptr<org::runtime::IUploadService>& a_uploads);
-		/** @brief Snapshot builder, once Settle is true after a_source's Post: its payload, the parts' versions; null when one failed. */
+		/** @brief Snapshot builder, once Settle is true after Post. Null when a part failed. */
 		std::shared_ptr<const ScenePayload> Finish(const PayloadSource& a_source);
-		/** @brief Render thread, at the frame's adoption: the payload the frames read (null: none, the parts left empty). */
+		/** @brief Render thread, at adoption. Null leaves the parts empty. */
 		void Install(std::shared_ptr<const ScenePayload> a_payload);
 		/**
-		 * @brief Render thread: the frame's payload, from the installed one's versions; false without one. Each part's version becomes
-		 * the current version of its late-bound buffer (DeclareReads), so the refs and indices it hands out are of declared buffers.
+		 * @brief Render thread. Fills the frame's payload from the installed versions. False without one.
+		 * Each version becomes the current version of its late-bound buffer, so its refs belong to declared buffers.
 		 */
 		bool MakeFramePayload(PayloadVersions& a_out);
-		/**
-		 * @brief Graph build: the pass reads the frame's payload parts (their SRVs, addresses or refs, which latches, frame records and
-		 * the CPU sets carry): declares each part's late-bound buffer, whose version MakeFramePayload publishes. No graph build when it
-		 * changes.
-		 */
+		/** @brief Graph build. Declares each part's late-bound buffer, so changing versions needs no graph rebuild. */
 		void DeclareReads(org::RenderPassBuilder& a_builder);
-		/**
-		 * @brief Render thread: the installed versions' backings are not reused before a_point (SubmittedRetirementPoint): at EndFrame,
-		 * and for the one an adoption replaces (a frame whose EndFrame did not come read it).
-		 */
+		/** @brief Render thread. The installed backings are not reused before a_point. Also covers the backing an adoption replaces. */
 		void BindInstalled(std::uint64_t a_point);
-		/** @brief Render thread: whether the parts' next versions can be built (a graph host whose uploader has a dedicated streaming queue). */
+		/** @brief Render thread. Needs an uploader with a dedicated streaming queue. */
 		bool Available();
-		/**
-		 * @brief Any thread (the snapshot builder): the oldest journal position a backing of a_part's pool holds (its producer's, after
-		 * each build), which the part's journals keep their changes back to; nullopt: none holds anything (everything may be trimmed).
-		 */
+		/** @brief Any thread. The oldest journal position any backing of a_part holds. nullopt means everything may be trimmed. */
 		std::optional<std::uint64_t> OldestContentEpoch(PayloadPart a_part);
 
-		/** @brief One part's report (TakeReport, the snapshot builder's): since the last take, then the pool's census and floor. */
+		/** @brief One part's report since the last take, then the pool's census. */
 		struct PartReport
 		{
 			std::uint64_t built = 0, uploadedBytes = 0, copiedBytes = 0, wholeCopies = 0, suspensions = 0, failures = 0;
@@ -180,12 +143,10 @@ namespace DCLF::Draws
 			std::optional<std::uint64_t> floor;
 		};
 		std::array<PartReport, kPayloadParts> TakeReport();
-		/** @brief The parts' names, in PayloadPart order (diagnostics). */
 		inline constexpr std::array<const char*, kPayloadParts> kPartNames{ "objects", "extras", "geometries", "material rows", "pipeline rows", "inputs",
 			"shadow rows" };
 	}
 
-	/** @brief The participants' view of the payload parts' floors (AheadBuild::payloads): PayloadPools::OldestContentEpoch. */
 	struct PayloadFloors
 	{
 		[[nodiscard]] std::optional<std::uint64_t> OldestContentEpoch(PayloadPart a_part) const { return PayloadPools::OldestContentEpoch(a_part); }
