@@ -25,6 +25,8 @@ public:
 		std::uint32_t groupsX = 0, groupsY = 0;
 		// The D3D11 composite's t0-t15, null where it binds nothing. t0-t5 and t9 are the imported engine targets.
 		std::array<ID3D11ShaderResourceView*, 16> views{};
+		// Its t21 and t22, Skylighting's roof coverage and zenith capture.
+		std::array<ID3D11ShaderResourceView*, 2> skylightingCoverage{};
 	};
 
 	static ORGDeferredComposite& Get();

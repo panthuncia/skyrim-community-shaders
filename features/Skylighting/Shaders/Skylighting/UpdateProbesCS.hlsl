@@ -25,10 +25,12 @@ struct UpdateProbesShadows
 	X(SRV, Texture2D<unorm float>, srcOcclusionDepth, 0)     \
 	X(SRV, Texture2DArray<float4>, ShadowCascadeMap, 1)      \
 	X(SRV, Texture2DArray<float4>, ESRAMShadow, 3)           \
+	X(SRV, Texture2D<float>, srcZenithDepth, 4)              \
 	X(UAV, RWTexture3D<sh2>, outProbeArray, 0)               \
 	X(UAV, RWTexture3D<uint>, outAccumFramesArray, 1)        \
 	X(UAV, RWTexture3D<uint>, outShadowBitmask, 2)           \
 	X(UAV, RWTexture3D<float>, outShadowVisibility, 3)       \
+	X(UAV, RWTexture3D<uint>, outCoverage, 4)                \
 	X(SAMPLER, SamplerComparisonState, comparisonSampler, 0) \
 	X(LATCH, UpdateProbesShadows, Shadows, 0)
 ORG_PUSH_BLOCK(UPDATE_PROBES_RESOURCES(ORG_HANDLE))
@@ -41,9 +43,6 @@ UPDATE_PROBES_RESOURCES(ORG_RESOURCE)
 
 #if !defined(CS_ORG_BINDLESS)
 StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t2);
-// The roof coverage from the zenith capture. D3D11 only: the ORG probe update does not take the zenith capture yet.
-Texture2D<float> srcZenithDepth : register(t4);
-RWTexture3D<uint> outCoverage : register(u4);
 #endif
 
 namespace UpdateProbes
@@ -113,9 +112,7 @@ static const float3 noise3D[32] = {
 	cellCentreOS.y = -cellCentreOS.y;
 	float2 occlusionUV = cellCentreOS.xy * 0.5 + 0.5;
 
-#if !defined(CS_ORG_BINDLESS)
 	outCoverage[dtid] = Skylighting::GetZenithCoverage(srcZenithDepth, cellCentreMS);
-#endif
 
 	if (settings.AccumulateOcclusion && all(occlusionUV > 0) && all(occlusionUV < 1)) {
 		uint accumFrames = isValid ? (outAccumFramesArray[dtid] + 1) : 1;

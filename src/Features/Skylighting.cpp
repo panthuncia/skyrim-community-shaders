@@ -127,10 +127,13 @@ void Skylighting::SetupResources()
 			texOcclusion->CreateDSV(dsvDesc);
 		}
 
-		// The zenith capture is D3D11 only: the engine draws it (RenderSkyOcclusionMap).
-		texZenithOcclusion = new Texture2D(texDesc, "Skylighting::ZenithOcclusion");
-		texZenithOcclusion->CreateSRV(srvDesc);
-		texZenithOcclusion->CreateDSV(dsvDesc);
+		// With the occlusion twin, the graph copies the zenith capture into a graph texture.
+		texZenithOcclusion = ORGSkylighting::Get().MakeZenithMap();
+		if (!texZenithOcclusion) {
+			texZenithOcclusion = new Texture2D(texDesc, "Skylighting::ZenithOcclusion");
+			texZenithOcclusion->CreateSRV(srvDesc);
+			texZenithOcclusion->CreateDSV(dsvDesc);
+		}
 	}
 
 	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes.
@@ -206,7 +209,7 @@ void Skylighting::CreateProbeVolumes()
 	texShadowVisibility->CreateSRV(srvDesc);
 	texShadowVisibility->CreateUAV(uavDesc);
 
-	// Written by the D3D11 probe update only, from the zenith capture.
+	// From the zenith capture.
 	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R8_UINT;
 
 	texProbeCoverage = new Texture3D(texDesc, "Skylighting::ProbeCoverage");
@@ -253,6 +256,19 @@ ID3D11ShaderResourceView* Skylighting::ShadowVisibilitySRV() const
 	if (graph.IsActive())
 		return graph.SRV(ORGSkylighting::Volume::ShadowVisibility);
 	return texShadowVisibility ? texShadowVisibility->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* Skylighting::ProbeCoverageSRV() const
+{
+	const auto& graph = ORGSkylighting::Get();
+	if (graph.IsActive())
+		return graph.SRV(ORGSkylighting::Volume::Coverage);
+	return texProbeCoverage ? texProbeCoverage->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* Skylighting::ZenithSRV() const
+{
+	return texZenithOcclusion ? texZenithOcclusion->srv.get() : nullptr;
 }
 
 void Skylighting::ClearShaderCache()
@@ -409,7 +425,7 @@ void Skylighting::Prepass()
 		srv = ShadowVisibilitySRV();
 		context->PSSetShaderResources(53, 1, &srv);
 
-		std::array<ID3D11ShaderResourceView*, 2> coverageSrvs = { texProbeCoverage ? texProbeCoverage->srv.get() : nullptr, texZenithOcclusion->srv.get() };
+		std::array<ID3D11ShaderResourceView*, 2> coverageSrvs = { ProbeCoverageSRV(), ZenithSRV() };
 		context->PSSetShaderResources(51, (uint)coverageSrvs.size(), coverageSrvs.data());
 	}
 }
@@ -694,15 +710,16 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	auto& dclf = globals::features::drawcallLimitFix;
 	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
 	const bool held = !a_dclf && dclf.OcclusionHeld(DrawcallLimitFix::kSkyOcclusion);
-	// The zenith capture needs the engine's own draw into its own map, and the D3D11 probe update to read it. Drawcall Limit Fix draws
-	// into texOcclusion only, so with it drawing the map, in native mode or with the probe update on the graph, the frame stays a sky
-	// sample.
-	const bool zenith = zenithDue && !a_dclf && !held && !native && !ORGSkylighting::Get().IsActive() && texZenithOcclusion;
+	// With the probe update on the graph, the zenith capture goes into texOcclusion, whoever draws it, and the graph copies it.
+	// On D3D11 it needs the engine's own draw into its own map: Drawcall Limit Fix and native mode draw into texOcclusion only.
+	auto& graph = ORGSkylighting::Get();
+	const bool onGraph = graph.IsActive();
+	const bool zenith = zenithDue && (onGraph ? graph.ZenithReady() : !a_dclf && !held && !native && texZenithOcclusion);
 	zenithFrame = zenith;
-	auto* target = zenith ? texZenithOcclusion : texOcclusion;
+	auto* target = zenith && !onGraph ? texZenithOcclusion : texOcclusion;
 
 	if (!native) {
-		if (zenith) {
+		if (target == texZenithOcclusion) {
 			// Bound to pixel shaders since the last Prepass; unbind before writing it as depth
 			ID3D11ShaderResourceView* nullSrv = nullptr;
 			globals::d3d::context->PSSetShaderResources(52, 1, &nullSrv);
@@ -772,7 +789,6 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		// update read it (ORGSkylighting::Update), unless the engine drew
 		// into the map since; then no D3D11 clear is needed. The reference
 		// and engine-only frames, whose engine draws come first, keep it.
-		auto& graph = ORGSkylighting::Get();
 		const bool clearedOnGraph = graph.TakeOcclusionCleared();
 		if (a_dclf) {
 			if (!native && (!clearedOnGraph || reference || engineOnly))

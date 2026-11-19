@@ -86,6 +86,8 @@ namespace DCLF::Features
 			Integrations::DynamicCubemaps::kReflectionsRegister,
 			Integrations::DynamicCubemaps::kEnvironmentRegister,
 			Integrations::Skylighting::kProbeArrayRegister,
+			Integrations::Skylighting::kCoverageRegister,
+			Integrations::Skylighting::kZenithRegister,
 			Integrations::Skylighting::kShadowVisibilityRegister,
 			Integrations::TerrainShadows::kShadowHeightRegister,
 			Integrations::WaterEffects::kCausticsRegister,

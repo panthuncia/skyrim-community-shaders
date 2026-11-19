@@ -447,7 +447,6 @@ void Deferred::DeferredPasses()
 	{
 		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
 
-		const bool skylightingReady = skylighting.loaded && skylighting.texProbeArray;
 		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
 		const std::array<ID3D11ShaderResourceView*, 16> srvs{
 			Unwrap(specular.SRV),                                                                 // t0  SpecularTexture
@@ -474,9 +473,9 @@ void Deferred::DeferredPasses()
 			physSky.loaded && physSky.texVolLum ? physSky.texVolLum->srv.get() : nullptr,             // t19
 			physSky.loaded && physSky.texShadowVolume ? physSky.texShadowVolume->srv.get() : nullptr,  // t20
 		};
-		ID3D11ShaderResourceView* skylightingCoverageSrvs[2]{
-			skylightingReady && skylighting.texProbeCoverage ? skylighting.texProbeCoverage->srv.get() : nullptr,      // t21 SkylightingProbeCoverage
-			skylightingReady && skylighting.texZenithOcclusion ? skylighting.texZenithOcclusion->srv.get() : nullptr,  // t22 SkylightingZenithDepth
+		const std::array<ID3D11ShaderResourceView*, 2> skylightingCoverageSrvs{
+			skylighting.loaded ? skylighting.ProbeCoverageSRV() : nullptr,  // t21 SkylightingProbeCoverage
+			skylighting.loaded ? skylighting.ZenithSRV() : nullptr,         // t22 SkylightingZenithDepth
 		};
 
 		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them
@@ -487,7 +486,8 @@ void Deferred::DeferredPasses()
 			.normals = static_cast<std::uint32_t>(forwardRenderTargets[2]),
 			.groupsX = dispatchCount.x,
 			.groupsY = dispatchCount.y,
-			.views = srvs });
+			.views = srvs,
+			.skylightingCoverage = skylightingCoverageSrvs });
 		FrameAnchors::Run(FrameAnchors::Anchor::DeferredComposite);
 
 		if (orgComposite.Lagged()) {
@@ -502,7 +502,7 @@ void Deferred::DeferredPasses()
 
 			context->CSSetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
 			context->CSSetShaderResources(static_cast<UINT>(srvs.size()), ARRAYSIZE(physSkySrvs), physSkySrvs);
-			context->CSSetShaderResources(SKYLIGHTING_COVERAGE_SLOT, ARRAYSIZE(skylightingCoverageSrvs), skylightingCoverageSrvs);
+			context->CSSetShaderResources(SKYLIGHTING_COVERAGE_SLOT, static_cast<UINT>(skylightingCoverageSrvs.size()), skylightingCoverageSrvs.data());
 			globals::features::viewAtmosphere.Bind(true);
 
 			ID3D11UnorderedAccessView* uavs[3]{ Unwrap(main.UAV), Unwrap(normals.UAV), Unwrap(motionVectors.UAV) };
