@@ -24,7 +24,8 @@ namespace RenderGraph::Frame::Recipes::Table
 	using Anchor = FrameAnchors::Anchor;
 	using Segment = RenderGraphRuntime::Segment;
 
-	inline constexpr std::size_t kMaxNames = 8;
+	// Prepass holds ten with Physical Sky's cloud clients (cs.physical-sky.cloud-maps and cs.physical-sky.clouds).
+	inline constexpr std::size_t kMaxNames = 10;
 	inline constexpr std::size_t kMaxSteps = 19;
 	inline constexpr std::size_t kMaxEpochs = 10;
 	inline constexpr std::size_t kMaxCommitBefore = 20;
@@ -197,8 +198,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
 				{ .foreign = Segment::LightCulling },
 				{ .anchor = Anchor::Prepass,
-					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.physical-sky", "cs.screen-space-shadows",
-						"cs.skylighting", "cs.view-atmosphere" },
+					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.physical-sky",
+						"cs.physical-sky.clouds", "cs.screen-space-shadows", "cs.skylighting", "cs.view-atmosphere" },
 					.whole = true },
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
