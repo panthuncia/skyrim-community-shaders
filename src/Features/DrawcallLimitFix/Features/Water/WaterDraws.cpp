@@ -234,6 +234,7 @@ namespace DCLF::Features::Water::WaterDraws
 			using Colour = RE::RENDER_TARGET;
 			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
 			a_inputs.Add(Family::RegisteredIdsAt(kHeaderRegisters));
+			a_inputs.Add(Family::RegisteredIdsAt(Integrations::PhysicalSky::kOrgTextureRegisters));
 			for (const auto depth : { Depth::kPOST_ZPREPASS_COPY, Depth::kMAIN_COPY, Depth::kPRECIPITATION_OCCLUSION_MAP })
 				a_inputs.AddEngine(depth);
 			for (const auto colour : { Colour::kMAIN_COPY, Colour::kREFRACTION_NORMALS, Colour::kWATER_DISPLACEMENT, Colour::kWATER_DISPLACEMENT_SWAP,

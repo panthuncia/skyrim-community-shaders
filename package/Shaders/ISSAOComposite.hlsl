@@ -1,15 +1,57 @@
 #if defined(CS_ORG_BINDLESS)
 // The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t6, s0-s6 and s9 from the heap, the
 // shared constants, PerGeometry from the engine-constants capture through the pass's latch, and the included feature headers'
-// resources (IBL's SH, Exponential Height Fog's volumes, Dynamic Cubemaps' environment) as EXTERN entries. The list is the same
-// in every permutation: a header that is not included leaves its handle unread.
+// resources (IBL's SH, Exponential Height Fog's volumes, Dynamic Cubemaps' environment, Physical Sky's transmittance LUT) as EXTERN
+// entries. The list is the same in every permutation: a header that is not included leaves its handle unread. The fog header reads
+// only Physical Sky's transmittance, so the rest of Physical Sky's header and Cloud Shadows', which it includes, are UNREAD.
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 // FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
 #	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
-#	define ISSAOCOMPOSITE_ORG_RESOURCES(X)                                                  		X(SHARED, ConstantBuffer, Shared, 0)                                               		X(SRV, Texture2D<float4>, sourceTex, 0)                                            		X(SRV, Texture2D<float4>, SAOTex, 1)                                               		X(SRV, Texture2D<float4>, depthTex, 2)                                             		X(SRV, Texture2D<float4>, NormalsSSRMaskTex, 3)                                    		X(SRV, Texture2D<float4>, snowSpecAlphaTex, 4)                                     		X(SRV, Texture2D<float4>, shadowMaskTex, 5)                                        		X(SRV, Texture2D<float4>, SSRSourceTex, 6)                                         		X(SAMPLER, SamplerState, sourceSampler, 0)                                         		X(SAMPLER, SamplerState, SAOSampler, 1)                                            		X(SAMPLER, SamplerState, depthSampler, 2)                                          		X(SAMPLER, SamplerState, NormalsSSRMaskSampler, 3)                                 		X(SAMPLER, SamplerState, snowSpecAlphaSampler, 4)                                  		X(SAMPLER, SamplerState, shadowMaskSampler, 5)                                     		X(SAMPLER, SamplerState, SSRSourceSampler, 6)                                      		X(SAMPLER, SamplerState, SampColorSampler, 9)                                      		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) 		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     		X(UNREAD, TextureCube<float3>, EnvReflectionsTexture, 30)                          		X(UNREAD, Texture2D<float4>, DepthTexture, 17)                                     		X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	define ISSAOCOMPOSITE_ORG_RESOURCES(X)                                               \
+		X(SHARED, ConstantBuffer, Shared, 0)                                               \
+		X(SRV, Texture2D<float4>, sourceTex, 0)                                            \
+		X(SRV, Texture2D<float4>, SAOTex, 1)                                               \
+		X(SRV, Texture2D<float4>, depthTex, 2)                                             \
+		X(SRV, Texture2D<float4>, NormalsSSRMaskTex, 3)                                    \
+		X(SRV, Texture2D<float4>, snowSpecAlphaTex, 4)                                     \
+		X(SRV, Texture2D<float4>, shadowMaskTex, 5)                                        \
+		X(SRV, Texture2D<float4>, SSRSourceTex, 6)                                         \
+		X(SAMPLER, SamplerState, sourceSampler, 0)                                         \
+		X(SAMPLER, SamplerState, SAOSampler, 1)                                            \
+		X(SAMPLER, SamplerState, depthSampler, 2)                                          \
+		X(SAMPLER, SamplerState, NormalsSSRMaskSampler, 3)                                 \
+		X(SAMPLER, SamplerState, snowSpecAlphaSampler, 4)                                  \
+		X(SAMPLER, SamplerState, shadowMaskSampler, 5)                                     \
+		X(SAMPLER, SamplerState, SSRSourceSampler, 6)                                      \
+		X(SAMPLER, SamplerState, SampColorSampler, 9)                                      \
+		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       \
+		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       \
+		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)    \
+		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22) \
+		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     \
+		X(EXTERN, Texture2D<float4>, TexTrLut, 61)                                         \
+		X(UNREAD, TextureCube<float3>, EnvReflectionsTexture, 30)                          \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17)                                     \
+		X(UNREAD, TextureCube<float>, CloudShadowsTexture, 25)                             \
+		X(UNREAD, TextureCube<float>, CloudSelfShadowTexture, 26)                          \
+		X(UNREAD, Texture2D<float4>, TexSvLut, 62)                                         \
+		X(UNREAD, Texture3D<float4>, TexApLut, 63)                                         \
+		X(UNREAD, Texture2D<unorm float>, TexApShadow, 64)                                 \
+		X(UNREAD, Texture2D<float4>, TexSkyTail, 66)                                       \
+		X(UNREAD, TextureCube<float4>, TexVolCubeDepth, 67)                                \
+		X(UNREAD, Texture2D<float4>, MeanProfile, 69)                                      \
+		X(UNREAD, Texture2D<float4>, TexDiskPhaseLut, 106)                                 \
+		X(UNREAD, TextureCube<float4>, TexLightningReflection, 109)                        \
+		X(UNREAD, Texture2D<float>, TexVolTr, 110)                                         \
+		X(UNREAD, Texture2D<float4>, TexVolLum, 111)                                       \
+		X(UNREAD, Texture3D<float>, TexShadowVolume, 112)                                  \
+		X(UNREAD, Texture2D<float4>, TexLightningChannels, 113)                            \
+		X(UNREAD, TextureCube<float>, TexVolCubeTr, 114)                                   \
+		X(UNREAD, TextureCube<float4>, TexVolCubeLum, 115)                                 \
+		X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
 ORG_PUSH_BLOCK(ISSAOCOMPOSITE_ORG_RESOURCES(ORG_HANDLE))
 ISSAOCOMPOSITE_ORG_RESOURCES(ORG_RESOURCE)
 #endif

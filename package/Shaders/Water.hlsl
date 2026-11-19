@@ -125,6 +125,7 @@ PS_OUTPUT main(PS_INPUT input)
 #		define DCLF_PULLED_ROWS
 #		define SKYLIGHTING_PROBE_REGISTER t50
 #		include "Common/OrgResources.hlsli"
+#		include "Common/PhysicalSkyOrgHandles.hlsli"
 
 // A draw's latched values, as the engine's SetupTechnique, SetupMaterial and SetupGeometry wrote its constant buffers (c rows in
 // the D3D11 shaders' packoffsets). Matrices are rows: a latch is loaded with Load<T>, which does not keep row_major.
@@ -147,6 +148,7 @@ struct WaterOrgDraw
 	uint2 IndexAddress;
 	uint2 VertexLayout;
 	uint2 Padding2;
+	PhysSkyOrgHandles PhysSky;  // Physical Sky's resources and samplers, the same for every draw of a batch
 };
 
 #		define WATER_ORG_RESOURCES(X)                                                         \
@@ -174,6 +176,8 @@ struct WaterOrgDraw
 			X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
 ORG_PUSH_BLOCK(WATER_ORG_RESOURCES(ORG_HANDLE))
 WATER_ORG_RESOURCES(ORG_RESOURCE)
+// Physical Sky's header reads its resources through these.
+PHYS_SKY_ORG_HANDLES(WaterDraw.PhysSky)
 #	endif
 
 #	include "Common/FrameBuffer.hlsli"
@@ -523,6 +527,10 @@ static SamplerState FlowMapSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2]
 static SamplerState FlowMapNormalsSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].y];
 static SamplerState SSRReflectionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].z];
 static SamplerState RawSSRReflectionSampler = SamplerDescriptorHeap[WaterDraw.Samplers[2].w];
+#			if defined(PHYSICAL_SKY)
+// D3D11 binds Physical Sky's sky-view sampler at s13 for the aerial perspective.
+static SamplerState ApSampler = SamplerDescriptorHeap[WaterDraw.PhysSky.Samplers.y];
+#			endif
 
 static Texture2D<float4> ReflectionTex = ResourceDescriptorHeap[WaterDraw.Textures[0].x];
 static Texture2D<float4> RefractionTex = ResourceDescriptorHeap[WaterDraw.Textures[0].y];

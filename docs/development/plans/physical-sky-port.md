@@ -76,35 +76,51 @@ Per-frame constants: the LUT and AP shadow shaders read `SharedData::physSkyData
 Engine draws in guest mode keep reading the D3D11 binds (`PSSetShaderResources` at Prepass), which now name the exports. In
 graph mode those binds are the only D3D11 work left, and they are state only.
 
-DCLF reads Physical Sky's PS registers as frame textures (`DCLF/Integrations/PhysicalSky`), each with its view callback
-(the export, null when the feature is off) and its published id, so a colour commit reads the graph resource ordered after its
-producer:
+Every program that compiles with `PHYSICAL_SKY` falls in one of four groups. Each reads the same registers from the same source.
 
-| Register | Id |
-| --- | --- |
-| t61 | TransmittanceLut |
-| t62 | SkyViewLut |
-| t63 | ApLut |
-| t64 | ApShadow |
-| t66 | SkyTail |
-| t67 | VolCubeAux |
-| t69 | CloudShadowMean |
-| t106 | DiskPhaseLut |
-| t109 | LightningCubeLum |
-| t110-t112 | VolTr, VolLum, ShadowVolume |
-| t113 | LightningChannels |
-| t114, t115 | VolCubeTr, VolCubeLum |
+| Group | Programs | How Physical Sky's resources are bound |
+| --- | --- | --- |
+| DCLF families | Lighting, Effect, grass, distant tree, pulled and not | frame textures (`DCLF/Integrations/PhysicalSky`), in `Features/Manifest.cpp`'s `kFrameTextureRegisters` |
+| Engine draw families | sky, water | the draw's latch (`PhysSkyOrgHandles`, `Common/PhysicalSkyOrgHandles.hlsli`), resolved per batch |
+| Menu scenes | Lighting, Effect ORG builds | none: the build undefines `PHYSICAL_SKY` with the other world features |
+| ImageSpace | `ISSAOComposite.hlsl` (fog) | the transmittance LUT as a published read (`FeatureBinds`), the rest `UNREAD` |
 
-Each must be added to `Features/Manifest.cpp`'s `kFrameTextureRegisters`. None clashes with Core (t116-t127 are Core's or
-DCLF's); t125-t127 are ViewAtmosphere's (port-viewatmos moves them behind overridable registers).
+Physical Sky's header declares its pixel resources with `ORG_HEADER_SRV` and the sky's samplers with `ORG_HEADER_SAMPLER`. FXC
+and DCLF builds keep the registers. An ORG build with `ORG_HEADER_RESOURCES` reads `OrgHandle_<name>`, so a program that forgets
+one fails to compile.
 
-Samplers: the sky's s3/s4, grass's s7 and water's s13 are set in SetupGeometry hooks. The DCLF sky, grass and water families
-capture samplers at the draw (`SlotSampler`), so the hooks keep working as long as they run before the capture. To check per
-family. The sky VS's b6 swap is a constant buffer the families mirror through the shared constants already.
+| Register | Name | Source in guest mode | Source in native mode |
+| --- | --- | --- | --- |
+| t61, t62, t63, t106 | TrLut, SvLut, ApLut, DiskPhaseLut | the LUT twin's export, read by its published id | the same |
+| t64 | ApShadow | the D3D11 texture the feature binds | zero 2D view |
+| t66 | SkyTail | the same | zero 2D view |
+| t67 | VolCubeDepth | the same | zero cube view |
+| t69 | MeanProfile (cloud shadow mean) | the same | zero 2D view |
+| t109 | LightningReflection | the same | zero cube view |
+| t110, t111 | VolTr, VolLum | the same | zero 2D views |
+| t112 | ShadowVolume | the same | zero 3D view |
+| t113 | LightningChannels | the same | zero 2D view |
+| t114, t115 | VolCubeTr, VolCubeLum | the same | zero cube views |
+| t105 (DCLF only) | the view medium's cloud depth (D3D11 t116) | `texVolFilteredAux` with clouds on | zero 2D view |
+| s3, s4 (sky), s13 (water) | SampTr, SampSv, ApSampler | ORGPhysicalSky's twins of `sampTr` and `sampSv` | the same |
 
-The `PHYSICAL_SKY` strip in `ShaderCache::GetCompileDefines` goes once every register above is registered. A register whose
-producer is still on D3D11 (clouds before phase 4) is imported in guest mode and reads null in native mode, which the shaders
-handle: `enableVolumetricClouds` gates every cloud read.
+The feature off gives zero views of the declared kind everywhere. A zero view means no contribution to every reader: the AP
+shadow multiplies by `1 - shadow`, the shadow mean's validity flag is `w`, and `enableVolumetricClouds` gates every cloud read.
+Native mode reports clouds as off (`VolumetricCloudsEnabled`) until phase 4.
+
+"What the feature binds" is read the way each group reads any D3D11 input: DCLF keeps the colour commit's capture
+(`capturedWhenNull`), and the engine draw families read the bound view with `Family::ResolveHeader`.
+
+Collisions checked:
+
+- DCLF's pixel object rows are t116. The view medium's cloud depth (`Common/ViewMedium.hlsli`) moved to t105 in DCLF builds.
+- t70: Wetness Effects' precipitation occlusion (`TexPrecipOcclusion`) and Physical Sky's `TexCloudDiffuseTransport`. Only
+  compute shaders read the transport (ViewAtmosphere's LightScattering and Reflection, LutGen); pixel shaders declare it unread.
+  No clash.
+- t125-t127: ViewAtmosphere's, moved to t104, t107 and t108 in DCLF builds by port-viewatmos.
+
+Grass's s7 (`sampTileable`, volumetric cloud shadows only) is still set by the D3D11 SetupGeometry hook. Clouds are off in
+native mode, so only guest mode reads it, through the grass family's sampler capture.
 
 ## 5. The composite and the fog
 
@@ -150,18 +166,28 @@ D3D11 maps a staging copy with `DO_NOT_WAIT` and retries on later frames. On the
 
 1. **Composite split.** The separate AP pass is a choice forced by the 32-word push block. The alternative is a handle table for
    the composite (a latch of descriptor indices written at the commit from `PublishedResources::ShaderResourceIndex`), which
-   would also serve ViewAtmosphere and later features. Decide before more features join the composite.
+   would also serve ViewAtmosphere and later features. Decided for now: the separate pass (6).
 2. **DynamicCubemaps off.** The D3D11 composite only binds depth with Dynamic Cubemaps loaded, so without it AP sees depth 0 and
-   does nothing. The graph pass always reads the depth copy. Keep the difference, or match D3D11?
+   does nothing. Decided: match D3D11 (7).
 3. **Fog push block.** See section 5.
 4. **Half-res AP shadow** changes the texture's use, not its size. Keep one full-size twin as D3D11 does.
 5. **Native mode and engine draws.** In native mode engine draws read nothing, so until DCLF registers the frame textures the
    sky, grass and water lose Physical Sky's inputs. Phase 3 is therefore required before native runs with the feature on.
+   Done (section 4).
+6. **The AP pass's cost (decided 2026-11-19, phase 2).** Option (a): the aerial perspective runs as its own pass right after
+   `cs.deferred` (`cs.physical-sky.composite`), reading and writing kMAIN; `cs.deferred`'s push block does not grow. It costs one
+   extra full-screen pass and a second fp16 rounding of opaque pixels. That is a known minor cost, to revisit with a handle table.
+7. **AP depth (decided 2026-11-19).** Keep upstream: the AP reads depth only when Dynamic Cubemaps is loaded, as the D3D11
+   composite binds it. Without Dynamic Cubemaps the AP does nothing. That looks like an upstream bug, or only the cubemap path
+   needs the view. Not changed here.
+8. **ViewAtmosphere in the AP pass.** t125-t127 stay out of the AP pass for now ("no medium"), as agreed with port-viewatmos.
 
-## 9. Status (2026-11-18)
+## 9. Status (2026-11-19)
 
 - Phase 1 done: `ORGPhysicalSky` (`cs.physical-sky.luts`), LutGen and DiskPhaseLut dual-target (FXC bytecode unchanged).
-- Phase 3 partly: DCLF registers t61-t63 and t106; the `PHYSICAL_SKY` strip is removed. t64 and the cloud registers are
-  still captured. Removing the strip needs port-viewatmos's ViewAtmosphere register move, since DCLF's buffers use t125-t127.
+- Phase 3 done (section 4): every Physical Sky pixel register and sampler is bound in every graph program that compiles with
+  `PHYSICAL_SKY`, and the `PHYSICAL_SKY` strip in `ShaderCache::GetCompileDefines` is removed. Checked with DXC (SPIR-V and DXIL)
+  for the menu scenes, sky, water, SAO composite and DCLF Lighting and Effect builds: no register outside the layouts. FXC
+  output is unchanged for every touched shader. Not yet run in the game.
 - Native mode treats volumetric clouds as off (`PhysicalSky::VolumetricCloudsEnabled`) until phase 4.
-- Not started: the AP shadow, the AP composite pass, the fog's inputs, clouds, lightning.
+- Not started: phase 2 (AP shadow, AP composite pass, the fog's inputs; decided, see open questions 6-8), clouds, lightning.

@@ -388,6 +388,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			constexpr std::array<std::uint32_t, kHeaderRegisters.size() + 1> kRegisters{ kHeaderRegisters[0], kHeaderRegisters[1], kHeaderRegisters[2],
 				kHeaderRegisters[3], 17 };
 			a_inputs.Add(Family::RegisteredIdsAt(kRegisters));
+			a_inputs.Add(Family::RegisteredIdsAt(Integrations::PhysicalSky::kOrgTextureRegisters));
 		}
 
 		DrawsState& GetState()

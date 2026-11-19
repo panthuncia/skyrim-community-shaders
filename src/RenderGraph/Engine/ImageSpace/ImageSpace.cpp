@@ -22,6 +22,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "Features/HDRDisplay.h"
 #	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Features/IBL/ORGIBL.h"
+#	include "Features/PhysicalSky/ORGPhysicalSky.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
@@ -135,7 +136,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t cubes = 0;           // bit per slot CS binds the reflection cubemap to itself
 			bool compute = false;              // one UAV at u0, constants at CS b0
 			std::uint32_t targets = 1;
-			// SAO composite only. Adds s9 and the five feature resources CS headers read.
+			// SAO composite only. Adds s9 and the six feature resources CS headers read.
 			bool features = false;
 			// The effect keeps the viewport the previous effect left, so each shape implies the full-target one.
 			bool keepsViewport = false;
@@ -149,7 +150,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t latched = 0;
 		};
 
-		constexpr std::uint32_t kFeatureWords = 6;
+		constexpr std::uint32_t kFeatureWords = 7;
 
 		// Read masks follow each source's code for the effect's defines.
 		constexpr auto kEffects = std::to_array<EffectInfo>({
@@ -1115,8 +1116,10 @@ namespace RenderGraph::Engine::ImageSpace
 				a_missing = std::string(a_id);
 				return false;
 			};
+			// The fog header reads Physical Sky's transmittance LUT for the directional light's inscattering.
 			return read(has("IBL"), ORGIBL::kEnvId, false) && read(has("IBL"), ORGIBL::kSkyId, false) && read(fog, ORGExponentialHeightFog::kNearIntegratedId, true) &&
-			       read(fog, ORGExponentialHeightFog::kFarIntegratedId, true) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId, false);
+			       read(fog, ORGExponentialHeightFog::kFarIntegratedId, true) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId, false) &&
+			       read(fog && has("PHYSICAL_SKY"), ORGPhysicalSky::kTransmittanceLutId, false);
 		}
 
 		/** @brief False when the engine's table has not had the entry yet. */

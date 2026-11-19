@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 
 #include <array>
 #include <cstddef>
@@ -122,8 +123,9 @@ namespace DCLF::Features::Water
 		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
+		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 1152, "WaterOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 1232, "WaterOrgDraw's layout");
 
 	/** @brief Light Limit Fix's PS b3 (StrictLightDataValues), 1232 bytes. */
 	inline constexpr std::size_t kStrictLightBytes = 1232;
@@ -138,7 +140,7 @@ namespace DCLF::Features::Water
 		std::byte strictLights[kStrictLightBytes];
 		std::byte directionalShadow[kDirectionalShadowBytes];
 	};
-	static_assert(sizeof(DrawLatch) == 2656 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
+	static_assert(sizeof(DrawLatch) == 2736 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
 
 	struct Draw
 	{
@@ -167,6 +169,7 @@ namespace DCLF::Features::Water
 		View view = View::Surface;
 		std::vector<Draw> draws;
 		std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};  // every header's heap index (an import, a published id's, a null view)
+		Integrations::PhysicalSky::OrgHandles physSky{};                     // Physical Sky's resources and samplers, latched with every draw
 		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, RevisionOf)
 		Family::Owners owners;                                               // the textures' imports and the buffers' leases
 	};

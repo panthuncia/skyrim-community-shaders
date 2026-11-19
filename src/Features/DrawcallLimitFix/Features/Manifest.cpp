@@ -109,6 +109,18 @@ namespace DCLF::Features
 			Integrations::PhysicalSky::kSkyViewRegister,
 			Integrations::PhysicalSky::kAerialPerspectiveRegister,
 			Integrations::PhysicalSky::kDiskPhaseRegister,
+			Integrations::PhysicalSky::kApShadowRegister,
+			Integrations::PhysicalSky::kSkyTailRegister,
+			Integrations::PhysicalSky::kVolCubeDepthRegister,
+			Integrations::PhysicalSky::kShadowMeanRegister,
+			Integrations::PhysicalSky::kLightningReflectionRegister,
+			Integrations::PhysicalSky::kVolTrRegister,
+			Integrations::PhysicalSky::kVolLumRegister,
+			Integrations::PhysicalSky::kShadowVolumeRegister,
+			Integrations::PhysicalSky::kLightningChannelsRegister,
+			Integrations::PhysicalSky::kVolCubeTrRegister,
+			Integrations::PhysicalSky::kVolCubeLumRegister,
+			Integrations::PhysicalSky::kMediumCloudDepthRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

@@ -2862,9 +2862,6 @@ namespace SIE
 		for (const auto& define : defines) {
 			if (!define.Name)
 				break;
-			// Only render graph builds come here, and the graph binds none of Physical Sky's resources yet.
-			if (std::string_view(define.Name) == "PHYSICAL_SKY")
-				continue;
 			result.emplace_back(define.Name, define.Definition ? define.Definition : "");
 		}
 		return result;
