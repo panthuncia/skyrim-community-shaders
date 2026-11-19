@@ -1,0 +1,4 @@
+# FSR frame generation on native Vulkan (native-frame-generation-plan.md, step 6): the fg scenario in native mode. FSR-FG wraps
+# the swap chain BasicRHI makes through Streamline, and the submission thread replaces it at each on/off change. Background runs
+# generate frames, as in guest. Compose it with hdr for HDR10: native-fg+hdr.
+extends = ["native-vulkan", "fg"]

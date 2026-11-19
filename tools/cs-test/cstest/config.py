@@ -22,6 +22,8 @@ FIXED = {
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
     "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int},
+    # fg.presentmon: the game's presents per second from the PresentMon service, next to the [FGTEST] lines (presentmon.py).
+    "fg": {"presentmon": bool},
 }
 STEP_FIELDS = {"at": str, "frames": int, "do": str, "arg": str, "wait": str, "wait_s": int}
 RAW_TABLES = ("env", "dclf_ini")
@@ -263,6 +265,7 @@ def flatten(merged, schema, name):
         "shader_cache": build.get("shader_cache", "warm"),
         "mods_off": mods_off,
         "uncapped": bool(game.get("uncapped", False)),
+        "presentmon": bool(merged.get("fg", {}).get("presentmon", False)),
         "autoload_off": autoload_mod if autoload_off else "",
         "timeout_s": run.get("timeout_s", 600),
         "stall_s": run.get("stall_s", 90),

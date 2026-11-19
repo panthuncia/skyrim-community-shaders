@@ -60,11 +60,19 @@ The shipped configs:
 | `quality-burst` | XeSS, then FSR, with the quality mode changed many times a few frames apart (new SDK contexts while frames are in flight); compose it, `native-d3d12+quality-burst` |
 | `hdr` | HDR Display turned on mid-session (the `hdr` step), shots in HDR with and without the CS menu, then off again; compose it, `native-d3d12+hdr`, `d3d11+hdr` |
 | `fg` | FSR frame generation switched on (the `fg` step), then the CS menu, the pause menu and a coc with it on, driver presents logged; compose it, `guest+fg`, `d3d11+fg` |
+| `native-fg` | `fg` on native Vulkan (`native-vulkan` + `fg`); with HDR, `native-fg+hdr` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
 
 The converted scenarios map old frame N to world-ready + (N - 100) for their first command, then each command at `previous` plus the old gap.
+
+## PresentMon
+
+`--set fg.presentmon=true` samples the game's presents per second from the PresentMon service (Intel PresentMon's SDK; the console
+PresentMon needs elevation). Each second goes to `presentmon.jsonl` in the run folder. `result.json`'s `presents` has the medians,
+and over the `[FGTEST]` seconds in which FSR-FG presented, PresentMon's presents per second and their ratio to the rendered rate
+(`fg_multiplier_median`).
 
 ## Schema
 
