@@ -18,3 +18,10 @@ final until the user confirms it.
    longer-term fix: cs-test's `previous` anchor after a `shot` waits for the shot's read back.
 4. **The PublishedResources off-thread read** (DCLF's `DeclarePublishedRead` during an async build) is recorded in
    `dclf-open-defects.md` and left for later. It needs the build snapshot to carry each entry's state and view.
+5. **Native frame generation started while the clouds port runs.** The fix round is done (post chain, lens, guest fog, Physical
+   Sky phases 2 and 6 all pass in every mode); only Physical Sky's clouds (phase 4) remain, with a lead agent on them. Native
+   frame generation's parts A (step 1, A7) and C (steps 4-5, swap chains a presentation layer may wrap, and native presentation
+   replacement) touch other code, so they started in parallel rather than waiting hours. Parts B (steps 2-3), D (step 6), E
+   (step 7) and F (step 8, DLSS-G) follow as A and C land.
+6. **DLSS-G in native (step 8) is implemented but not testable here.** The plan needs the RTX 5080; the test machine has the
+   RX 6600. It lands behind its probe, with its tests left for the user.
