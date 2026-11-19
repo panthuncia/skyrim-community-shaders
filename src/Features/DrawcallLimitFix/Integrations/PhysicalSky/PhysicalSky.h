@@ -3,7 +3,7 @@
 // Physical Sky's pixel-stage resources in the graph modes.
 // - DCLF's draws read them as frame textures. So the reflection's faces, drawn before the main pass captures, read them too.
 // - The engine draw families (sky, water) latch their heap indices per draw (OrgHandles, Common/PhysicalSkyOrgHandles.hlsli).
-// The LUTs and the AP shadow are graph textures (ORGPhysicalSky). The rest are still D3D11's. In guest mode a draw reads what the feature binds.
+// The LUTs, the AP shadow and the sky tail are graph textures (ORGPhysicalSky). The rest are still D3D11's. In guest mode a draw reads what the feature binds.
 // In native mode no D3D11 work runs, so a draw reads a zero view of the declared kind. Every reader takes zero as no contribution.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"

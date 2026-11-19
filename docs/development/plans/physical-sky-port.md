@@ -233,6 +233,15 @@ and storm data). It can be a graph pass only once those are graph resources, so 
     composite imports the cloud targets (`texVolTr`, `texVolLum`, `texLightningChannels`) as D3D11 textures. Native mode has
     the clouds off, so these are null there. Terrain Shadows' heights and Cloud Shadows' last layer are read by their published
     ids; a frame where either is not the graph's runs the AP shadow on D3D11.
+14. **Sky tail before ViewAtmosphere's medium (decided by the agent, to confirm).** The tail runs on the graph under the same
+    condition as on D3D11 (`ViewAtmosphere` enabled and its composite on). In the graph modes `ORGViewAtmosphere::CompositeActive()`
+    is off while Physical Sky is on (its plan, 3.4), so the tail does not run there yet, and nothing reads it: the medium says
+    "no medium", so `SampleViewSky` uses the sky-view LUT. The pass is ready for port-viewatmos's shared volume. The multiscatter
+    LUT it reads is published (`PhysicalSky::MultiscatterLut`, since phase 1), which view-atmosphere-port.md 3.6 lists as missing.
+15. **The cloud diffuse transport (decided by the agent).** `Common.hlsli` declares `TexCloudDiffuseTransport` (t70) as a plain
+    register. A graph pass that reads it defines `PS_CLOUD_TRANSPORT_EXTERN` and lists it as an EXTERN entry (the sky tail does);
+    every other build keeps the plain declaration, so FXC output is unchanged. ViewAtmosphere does not publish the transport yet
+    (its plan, 3.7), so the sky tail binds null, which it reads only with the clouds on.
 
 ## 9. Status (2026-11-19)
 
@@ -252,5 +261,35 @@ and storm data). It can be a graph pass only once those are graph resources, so 
   steps are written down (section 6). The query reads the clouds' resources, so the query pass and its readback land with
   phase 4. Until then the lightning query stays on D3D11 (guest mode, with the clouds) and native mode has no lightning, since
   `SkyLightning::Update` requires `VolumetricCloudsEnabled()`.
-- Native mode treats volumetric clouds as off (`PhysicalSky::VolumetricCloudsEnabled`) until phase 4.
-- Not started: clouds, the lightning query pass, sky tail and reflection bindings.
+- Phase 6, Physical Sky's side (not yet run in the game): the sky tail (LutGen `SKY_TAIL`, dual-target, FXC unchanged) runs in
+  `cs.physical-sky` at Prepass into `PhysicalSky::SkyTail`, a published History twin read by DCLF at t66 and the sky and water
+  families by its id, and listed in `kPreviousFrame` (open questions 14 and 15). With the clouds on it stays on D3D11.
+  The reflection bindings need no Physical Sky work beyond phase 3 while the clouds are off: the faces read the LUTs, the AP
+  shadow and the tail through DCLF's frame textures, as the previous frame's (`kPreviousFrame`). The cloud cubes (t114, t115,
+  t67) and the lightning reflection (t109) come with phase 4. ViewAtmosphere's reflection medium (per-epoch views, decided in
+  view-atmosphere-port.md open question 2) is port-viewatmos's.
+- Phase 4 not started. Native mode treats volumetric clouds as off (`PhysicalSky::VolumetricCloudsEnabled`) until it is done.
+  What it holds, measured on 2026-11-19:
+  - Shaders: about 12,000 lines under `PhysicalSky/` with 207 register declarations; `Volumetrics.cs.hlsl` alone has 62 and
+    builds 45 programs (entries and permutations, `CompileVolumetricShaders`).
+  - D3D11 passes: `RenderVolumetricClouds` (27 dispatches over the shadow volume and columns, shadow mean, middle bounds, height
+    bounds, ambient SH, transport, density, sweeps and projection, storm tiles, low trace, voxel view, reproject, filter, history,
+    cube trace and reproject, lightning query and composites), `RenderCloudCrossSection`, `RenderCloudBoundary` (an indexed
+    raster draw), and the managers' generators: NdfManager (4), LocalNdf (1), Storm (1), VoxelCloud (1), CloudNoiseGenerator
+    (3), MidCloudMapManager and CirrusMapManager.
+  - Resources: about 60 textures and buffers made in `SetupVolumetricResources` and the managers, most of them History
+    (temporal reprojection, cube histories, lightning masks) or Persistent (noise, NDF maps, on a settings or weather change).
+  - Swaps by pointer (`texVolCubeTr.swap(texVolCubeHistoryTr)`) become ping-pong pairs whose run picks the declaration, as
+    view-atmosphere-port.md 3.6 does, never pointer swaps.
+  Suggested order, each its own commit, with the gate off until the last:
+  1. Generators as one-shot passes (`Rearm` on a settings or weather change): cloud noise, NDF maps, local NDF, storm, middle
+     and cirrus maps, cross section. Their outputs become Persistent published twins.
+  2. `Volumetrics.cs.hlsl` dual-target, split into resource lists per entry family (shadow, ambient, main view, cube,
+     lightning), with the `CloudDispatch`/`VolumetricCloudConstants` cbuffers as latch regions written at the commit.
+  3. The shadow volume, its columns and resample, and the shadow mean (`PhysicalSky::ShadowVolume`, `CloudShadowMean`,
+     published). Then the AP shadow, the fog and the sky tail read them by id, and their guest-mode D3D11 fallbacks go.
+  4. Ambient (SH, transport, density, sweep, project, layout, view) and height bounds.
+  5. Main view: storm tiles, low trace, voxel view, reproject, filter, history; the cloud boundary as a `RasterProgram` pass.
+  6. Cubes: trace, reproject, history; then the lightning query and composites with the readback of section 6.
+  7. Remove the native-mode gate in `PhysicalSky::VolumetricCloudsEnabled`, and in DCLF's `OrgView` read the cloud textures
+     by their ids in native mode too.

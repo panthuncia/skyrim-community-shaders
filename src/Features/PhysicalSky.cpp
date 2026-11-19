@@ -1691,9 +1691,13 @@ void PhysicalSky::SetupResources()
 		tex2dDesc.Height = kSvLutH;
 
 		makeLut2D(texSvLut, Lut::SkyView);
-		texSkyTail = eastl::make_unique<Texture2D>(tex2dDesc, "PhysicalSky::SkyTail");
-		texSkyTail->CreateSRV(srvDesc);
-		texSkyTail->CreateUAV(uavDesc);
+		if (auto* twin = ORGPhysicalSky::MakeSkyTail(tex2dDesc)) {
+			texSkyTail.reset(twin);
+		} else {
+			texSkyTail = eastl::make_unique<Texture2D>(tex2dDesc, "PhysicalSky::SkyTail");
+			texSkyTail->CreateSRV(srvDesc);
+			texSkyTail->CreateUAV(uavDesc);
+		}
 
 		D3D11_TEXTURE3D_DESC tex3dDesc{
 			.Width = kApLutW,
@@ -2379,6 +2383,9 @@ void PhysicalSky::GenerateLuts()
 void PhysicalSky::GenerateSkyTail()
 {
 	if (!globals::features::viewAtmosphere.settings.enabled || !texSkyTail || !csSkyTailGen || !globals::features::viewAtmosphere.CompositeEnabled())
+		return;
+	// On the render graph the tail runs at the Prepass anchor.
+	if (ORGPhysicalSky::Get().GenerateSkyTail(*this))
 		return;
 	auto* context = globals::d3d::context;
 	ID3D11ShaderResourceView* nullSrv = nullptr;

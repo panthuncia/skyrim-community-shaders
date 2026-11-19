@@ -15,7 +15,7 @@ struct PhysicalSky;
 *
 * Three clients:
 * - cs.physical-sky.luts at EarlyPrepass: the disk phase, transmittance, multiscatter, sky-view and aerial perspective LUTs.
-* - cs.physical-sky at Prepass: the aerial perspective shadow (ShadowAccum).
+* - cs.physical-sky at Prepass: the aerial perspective shadow (ShadowAccum) and the sky tail (LutGen SKY_TAIL).
 * - cs.physical-sky.composite at DeferredComposite, after cs.deferred: the aerial perspective and cloud composite on kMAIN,
 *   which the graph's deferred composite leaves out (ApplyAerialPerspectiveCS.hlsl).
 * The LUTs and the AP shadow are graph textures exported to D3D11, so the feature's D3D11 binds and its remaining D3D11
@@ -33,6 +33,7 @@ public:
 	static constexpr std::string_view kSkyViewLutId = "PhysicalSky::SkyViewLut";
 	static constexpr std::string_view kApLutId = "PhysicalSky::ApLut";
 	static constexpr std::string_view kApShadowId = "PhysicalSky::ApShadow";
+	static constexpr std::string_view kSkyTailId = "PhysicalSky::SkyTail";
 
 	/** @brief The LUTs, in LutGen's LUTGEN order, then the disk phase LUT. */
 	enum class Lut : std::uint32_t
@@ -61,6 +62,9 @@ public:
 
 	/** @brief The AP shadow's twin, as MakeLut2D makes a LUT's. A screen-sized R8 texture. @return Null means make a D3D11 texture. */
 	static Texture2D* MakeApShadow(const D3D11_TEXTURE2D_DESC& a_desc);
+
+	/** @brief The sky tail's twin (LutGen SKY_TAIL), the sky-view LUT's shape. @return Null means make a D3D11 texture. */
+	static Texture2D* MakeSkyTail(const D3D11_TEXTURE2D_DESC& a_desc);
 
 	/** @brief At SetupResources, after the LUTs exist. @return False keeps the LUTs on D3D11. */
 	bool Setup(const PhysicalSky& a_feature);
@@ -99,6 +103,12 @@ public:
 	* composite on frames that one composites. The D3D11 composite applies it itself on the other frames.
 	*/
 	void StageComposite(const PhysicalSky& a_feature);
+
+	/**
+	* @brief At the feature's Prepass in place of GenerateSkyTail's dispatch, when ViewAtmosphere's composite asks for the tail.
+	* @return False means the D3D11 dispatch runs this frame.
+	*/
+	bool GenerateSkyTail(const PhysicalSky& a_feature);
 
 	~ORGPhysicalSky();
 

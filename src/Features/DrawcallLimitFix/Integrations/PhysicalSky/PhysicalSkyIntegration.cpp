@@ -55,9 +55,9 @@ namespace DCLF::Integrations::PhysicalSky
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolCubeLum); } },
 		} };
 
-		// The graph twins' published ids, by slot: the LUTs and the AP shadow. Empty for D3D11's textures.
+		// The graph twins' published ids, by slot: the LUTs, the AP shadow and the sky tail. Empty for D3D11's textures.
 		constexpr std::array<std::string_view, kOrgTextureRegisters.size()> kPhysSkySlotIds{ ORGPhysicalSky::kTransmittanceLutId, ORGPhysicalSky::kSkyViewLutId,
-			ORGPhysicalSky::kApLutId, ORGPhysicalSky::kApShadowId, {}, {}, {}, ORGPhysicalSky::kDiskPhaseLutId };
+			ORGPhysicalSky::kApLutId, ORGPhysicalSky::kApShadowId, ORGPhysicalSky::kSkyTailId, {}, {}, ORGPhysicalSky::kDiskPhaseLutId };
 
 		constexpr std::size_t PhysSkySlotOf(std::uint32_t a_register)
 		{
@@ -122,7 +122,7 @@ namespace DCLF::Integrations::PhysicalSky
 		auto* srv = sky.loaded && sky.cbData.enabled ? slot.srv(sky) : nullptr;
 		if (!srv)
 			return GpuTextures::NullView(kOrgTextureKinds[a_slot]);
-		// The LUTs are graph textures in every graph mode. So is the AP shadow while its twin is the texture (PhysicalSky.h).
+		// The LUTs are graph textures in every graph mode. So are the AP shadow and the sky tail while their twins are the textures.
 		if (slot.lut || (!kPhysSkySlotIds[a_slot].empty() && PublishedResources::IsExportOf(srv, kPhysSkySlotIds[a_slot])))
 			return srv;
 		// Native mode runs none of the D3D11 passes that write the rest.

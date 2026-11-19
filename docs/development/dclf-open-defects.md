@@ -630,8 +630,12 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     handle table.
 -   **Guest: Physical Sky's volumetric clouds keep the AP shadow and the fog's scattering on D3D11.** The cloud shadow volume
     and mean are D3D11 textures until phase 4 of `physical-sky-port.md`, and the graph cannot read a D3D11 3D texture. With the
-    clouds on, each frame logs once "the AP shadow runs on D3D11 this frame (the volumetric clouds are on D3D11)" and the fog's
-    "Physical Sky's cloud shadows are on D3D11". Native mode has the clouds off.
+    clouds on, the log says once (when it starts) "the AP shadow runs on D3D11 this frame (the volumetric clouds are on D3D11)"
+    and the fog's "Physical Sky's cloud shadows are on D3D11". The sky tail stays on D3D11 too.
+-   **Native: no volumetric clouds and no lightning.** `PhysicalSky::VolumetricCloudsEnabled` is false in native mode until
+    phase 4 of `physical-sky-port.md` (the cloud passes, about 12,000 lines of shaders and 60 resources; its Status section
+    lists the order of work). The lightning query reads the clouds' resources, so it lands with them; the replayable readback
+    it uses is in place (`RenderGraph::RunReadback`).
 -   **Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
     black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
     Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN

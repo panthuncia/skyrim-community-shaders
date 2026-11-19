@@ -5,9 +5,14 @@
 #	define LUTGEN 0
 #endif
 
-// Dual-target (Common/OrgResources.hlsli) without SKY_TAIL, which stays on D3D11. The graph passes (ORGPhysicalSky)
-// give every handle; a LUT a variant does not read is handle 0, which DXC drops with the read.
+// Dual-target (Common/OrgResources.hlsli). The graph passes (ORGPhysicalSky) give every handle; a LUT a variant does not
+// read is handle 0, which DXC drops with the read. SKY_TAIL also reads the cloud shadow volume, its mean and the cloud
+// diffuse transport: the tail of the push block. Its ORG build reads the headers' resources by handle (ORG_HEADER_RESOURCES).
 #define ORG_SHARED_CONSTANTS
+#ifdef SKY_TAIL
+#	define ORG_HEADER_RESOURCES
+#	define PS_CLOUD_TRANSPORT_EXTERN
+#endif
 #include "Common/OrgResources.hlsli"
 
 #if LUTGEN == 3
@@ -26,7 +31,18 @@
 	X(SAMPLER, SamplerState, SampTr, 0)             \
 	X(SAMPLER, SamplerState, SampSv, 1)             \
 	X(SAMPLER, SamplerState, SampNoise, 2)
-ORG_PUSH_BLOCK(LUTGEN_RESOURCES(ORG_HANDLE))
+#ifdef SKY_TAIL
+#	define LUTGEN_SKY_TAIL_RESOURCES(X)                           \
+		X(SRV, Texture3D<float>, TexShadowVolume, 112)             \
+		X(EXTERN, Texture2D<float4>, MeanProfile, 69)              \
+		X(EXTERN, Texture2D<float4>, TexCloudDiffuseTransport, 70) \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17)             \
+		X(UNREAD, TextureCube<float>, CloudShadowsTexture, 25)     \
+		X(UNREAD, TextureCube<float>, CloudSelfShadowTexture, 26)
+#else
+#	define LUTGEN_SKY_TAIL_RESOURCES(X)
+#endif
+ORG_PUSH_BLOCK(LUTGEN_RESOURCES(ORG_HANDLE) LUTGEN_SKY_TAIL_RESOURCES(ORG_HANDLE))
 LUTGEN_RESOURCES(ORG_RESOURCE)
 
 #define PS_PREPASS_RSRCS
@@ -36,8 +52,8 @@ LUTGEN_RESOURCES(ORG_RESOURCE)
 #ifdef SKY_TAIL
 #	define PS_ENABLE_DIRLIGHT_TRANSMITTANCE
 #	define PS_LINEAR_SHADOW_SAMPLER
-Texture3D<float> TexShadowVolume : register(t112);
 #endif
+LUTGEN_SKY_TAIL_RESOURCES(ORG_RESOURCE)
 #include "PhysicalSky/Common.hlsli"
 
 float TransmittanceRayDistance(float u, float distance, float closest)

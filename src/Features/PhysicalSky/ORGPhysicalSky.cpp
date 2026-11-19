@@ -66,13 +66,16 @@ namespace
 	constexpr const char* kShadowAccumShader = "PhysicalSky/ShadowAccum.cs.hlsl";
 	constexpr const char* kApplyApShader = "PhysicalSky/ApplyAerialPerspectiveCS.hlsl";
 
-	// The Prepass gate's entries: the full and the half resolution AP shadow.
+	// The Prepass gate's entries: the full and the half resolution AP shadow, then the sky tail.
 	constexpr std::uint32_t kShadowFullEntry = 0;
 	constexpr std::uint32_t kShadowHalfEntry = 1;
-	constexpr std::uint32_t kPrepassEntries = 2;
+	constexpr std::uint32_t kSkyTailEntry = 2;
+	constexpr std::uint32_t kPrepassEntries = 3;
 	// ShadowAccum's push block: the shared handles, depth, shadow map, light latch (two), heights, cloud shadow, shadow volume,
 	// output and sampler.
 	constexpr std::uint32_t kShadowAccumWords = 4 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1;
+	// LutGen's SKY_TAIL: LutGen's, then the cloud shadow volume, its mean and the cloud diffuse transport.
+	constexpr std::uint32_t kSkyTailWords = 4 + 3 + 1 + 3 + 3;
 	// ApplyAerialPerspectiveCS's: the shared handles, kMAIN, depth, five Physical Sky textures and SampSv.
 	constexpr std::uint32_t kApplyApWords = 4 + 1 + 1 + 5 + 1;
 	// Before the fog, which reads none of it, so only the order key decides.
@@ -193,6 +196,13 @@ namespace
 		return s_twin;
 	}
 
+	/** @brief The sky tail's twin. History: the next frame's reflection faces read it. */
+	std::unique_ptr<GraphResources::Texture2D>& SkyTailTwin()
+	{
+		static std::unique_ptr<GraphResources::Texture2D> s_twin;
+		return s_twin;
+	}
+
 	const GraphResources::Resource* TwinOf(Lut a_lut)
 	{
 		if (a_lut == Lut::AerialPerspective)
@@ -261,7 +271,7 @@ struct ORGPhysicalSky::Impl
 	std::optional<std::array<float, 12>> diskPhase;
 
 	// The AP shadow (cs.physical-sky) and the AP composite (cs.physical-sky.composite). Null programs mean neither is on the graph.
-	std::shared_ptr<const ComputeProgram> shadowFull, shadowHalf, applyAp;
+	std::shared_ptr<const ComputeProgram> shadowFull, shadowHalf, applyAp, skyTail;
 	std::shared_ptr<RenderGraph::RunGate> prepassGate, compositeGate;
 	std::shared_ptr<org::LatchBlock> prepassLatch;
 	// The null descriptor, for inputs D3D11 binds null: it reads zero and has zero size, as a null SRV does.
@@ -277,6 +287,7 @@ struct ORGPhysicalSky::Impl
 	std::uint32_t shadowEntry = kShadowFullEntry;
 	std::array<std::uint32_t, 2> shadowGroups{};
 	std::uint32_t compositeFrame = UINT32_MAX;  // the frame StageComposite staged
+	bool tail = false;                          // the sky tail
 
 	void Commit()
 	{
@@ -294,6 +305,8 @@ struct ORGPhysicalSky::Impl
 
 	void CommitPrepass()
 	{
+		if (std::exchange(tail, false))
+			prepassGate->OpenDispatch(kSkyTailEntry, (PhysicalSky::kSvLutW + 7u) >> 3, (PhysicalSky::kSvLutH + 7u) >> 3, 1);
 		if (!shadow)
 			return;
 		prepassLatch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *shadow);
@@ -355,6 +368,15 @@ struct ORGPhysicalSky::Impl
 		builder.Add(std::move(clear));
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow", .program = shadowFull, .bindings = bindings, .gate = kShadowFullEntry });
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow.half", .program = shadowHalf, .bindings = bindings, .gate = kShadowHalfEntry });
+		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. The cloud shadow volume, its mean and ViewAtmosphere's cloud diffuse transport are
+		// D3D11's until the clouds are ported, so they are null, which the shader reads only with the clouds on.
+		const auto& tailOutput = *SkyTailTwin();
+		builder.Add(AnchorPasses::Dispatch{ .name = "sky-tail",
+			.program = skyTail,
+			.bindings = { Bind::Shared(), Bind::Published(ORGPhysicalSky::kTransmittanceLutId), Bind::Published(ORGPhysicalSky::kMultiscatterLutId),
+				Bind::Published(ORGPhysicalSky::kDiskPhaseLutId),
+				Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()), Bind::Handle(samplers[2].Index()), null, null, null },
+			.gate = kSkyTailEntry });
 		if (builder.Failed()) {
 			logger::error("[ORG] Physical Sky: {}; the AP shadow stays on D3D11", builder.Failure());
 			return false;
@@ -364,8 +386,11 @@ struct ORGPhysicalSky::Impl
 		client.sharedConstants = builder.ReadsSharedConstants();
 		client.passes = builder.Take();
 		client.gates = { prepassGate };
-		client.registerResources = [](org::RenderGraph& a_graph) { ApShadowTwin()->Register(a_graph); };
-		client.active = [state = a_self] { return state->shadow.has_value(); };
+		client.registerResources = [](org::RenderGraph& a_graph) {
+			ApShadowTwin()->Register(a_graph);
+			SkyTailTwin()->Register(a_graph);
+		};
+		client.active = [state = a_self] { return state->shadow.has_value() || state->tail; };
 		client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitPrepass(); };
 		if (!FrameAnchors::Register(std::move(client))) {
 			logger::error("[ORG] Physical Sky: the AP shadow client could not be registered; it stays on D3D11");
@@ -488,6 +513,38 @@ Texture3D* ORGPhysicalSky::MakeLut3D(Lut a_lut, const D3D11_TEXTURE3D_DESC& a_de
 	return wrapper;
 }
 
+Texture2D* ORGPhysicalSky::MakeSkyTail(const D3D11_TEXTURE2D_DESC& a_desc)
+{
+	if (!Requested() || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	auto& twin = SkyTailTwin();
+	if (twin)
+		return nullptr;
+	D3D11_TEXTURE2D_DESC desc = a_desc;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+	desc.MiscFlags = 0;
+	desc.CPUAccessFlags = 0;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	// D3D11 writes it on frames the graph does not, and the next frame's reflection faces read it.
+	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV };
+	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(kSkyTailId), options);
+	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->UAV()) {
+		logger::error("[ORG] Physical Sky: {} could not be made on the render graph; it is a D3D11 texture", kSkyTailId);
+		return nullptr;
+	}
+	if (!PublishedResources::Publish(kSkyTailId, *texture)) {
+		logger::error("[ORG] Physical Sky: {} could not be published; it is a D3D11 texture", kSkyTailId);
+		return nullptr;
+	}
+	auto* d3d11 = texture->D3D11();
+	d3d11->AddRef();
+	auto* wrapper = new Texture2D(d3d11, kSkyTailId.data());
+	wrapper->srv.copy_from(texture->SRV());
+	wrapper->uav.copy_from(texture->UAV());
+	twin = std::move(texture);
+	return wrapper;
+}
+
 Texture2D* ORGPhysicalSky::MakeApShadow(const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	if (!Requested() || !RenderGraphRuntime::Get().IsActive())
@@ -603,22 +660,24 @@ bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 	}
 	logger::info("[ORG] Physical Sky: the LUTs run on the render graph at the EarlyPrepass anchor ({})", kLutsClientId);
 
-	// The AP shadow and the AP composite register at their first frame, once their inputs are known. A program build blocks, so here.
-	if (!ApShadowTwin()) {
-		logger::error("[ORG] Physical Sky: {} is a D3D11 texture; the AP shadow stays on D3D11 and the graph composite has no aerial perspective",
-			kApShadowId);
+	// The AP shadow, the sky tail and the AP composite register at their first frame, once their inputs are known. A program
+	// build blocks, so here.
+	if (!ApShadowTwin() || !SkyTailTwin()) {
+		logger::error("[ORG] Physical Sky: {} or {} is a D3D11 texture; the AP shadow and sky tail stay on D3D11 (no graph AP)", kApShadowId, kSkyTailId);
 	} else if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass) || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredComposite)) {
 		logger::error("[ORG] Physical Sky: the Prepass or DeferredComposite anchor has no epoch; the AP shadow stays on D3D11");
 	} else {
 		next->shadowFull = ComputeProgram::Load(host->Device(), { .source = kShadowAccumShader, .constantWords = kShadowAccumWords });
 		next->shadowHalf = ComputeProgram::Load(host->Device(), { .source = kShadowAccumShader, .constantWords = kShadowAccumWords, .defines = { { L"HALF_RES", L"" } } });
 		next->applyAp = ComputeProgram::Load(host->Device(), { .source = kApplyApShader, .constantWords = kApplyApWords });
+		next->skyTail = ComputeProgram::Load(host->Device(),
+			{ .source = kLutShader, .constantWords = kSkyTailWords, .defines = { { L"LUTGEN", L"2" }, { L"SKY_TAIL", L"" } } });
 		next->prepassGate = RenderGraph::RunGate::Create("cs.physical-sky.gate", kPrepassEntries);
 		next->compositeGate = RenderGraph::RunGate::Create("cs.physical-sky.composite.gate", 1);
 		next->prepassLatch = std::make_shared<org::LatchBlock>("cs.physical-sky.latch", static_cast<std::uint32_t>(sizeof(ShadowLatch)));
-		if (!next->shadowFull || !next->shadowHalf || !next->applyAp || !next->prepassGate || !next->compositeGate) {
-			logger::error("[ORG] Physical Sky: the AP shadow or AP composite programs or gates could not be made; the AP shadow stays on D3D11");
-			next->shadowFull = next->shadowHalf = next->applyAp = nullptr;
+		if (!next->shadowFull || !next->shadowHalf || !next->applyAp || !next->skyTail || !next->prepassGate || !next->compositeGate) {
+			logger::error("[ORG] Physical Sky: the AP shadow, sky tail or AP composite programs or gates could not be made; they stay on D3D11");
+			next->shadowFull = next->shadowHalf = next->applyAp = next->skyTail = nullptr;
 		}
 	}
 	return true;
@@ -729,6 +788,29 @@ bool ORGPhysicalSky::AccumShadow(const PhysicalSky& a_feature)
 	return true;
 }
 
+bool ORGPhysicalSky::GenerateSkyTail(const PhysicalSky& a_feature)
+{
+	if (!IsActive() || !impl->skyTail || impl->prepassFailed)
+		return false;
+	auto& state = *impl;
+	// The cloud shadow volume and the cloud diffuse transport are D3D11's until the clouds are ported (phase 4).
+	if (a_feature.VolumetricCloudsEnabled())
+		return false;
+	if (!state.MakeNull()) {
+		state.prepassFailed = true;
+		return false;
+	}
+	// The tail shares the AP shadow's client. Without an AP shadow this frame, it registers with no shadow inputs.
+	if (!state.shadowRegistered && !state.RegisterPrepass({}, impl)) {
+		state.prepassFailed = true;
+		return false;
+	}
+	if (!FrameAnchors::Scheduled(kPrepassClientId, FrameAnchors::Anchor::Prepass))
+		return false;
+	state.tail = true;
+	return true;
+}
+
 void ORGPhysicalSky::StageComposite(const PhysicalSky& a_feature)
 {
 	if (!IsActive() || !impl->applyAp || impl->compositeFailed)
@@ -780,5 +862,7 @@ bool ORGPhysicalSky::GenerateLuts(PhysicalSky&) { return false; }
 Texture2D* ORGPhysicalSky::MakeApShadow(const D3D11_TEXTURE2D_DESC&) { return nullptr; }
 bool ORGPhysicalSky::AccumShadow(const PhysicalSky&) { return false; }
 void ORGPhysicalSky::StageComposite(const PhysicalSky&) {}
+Texture2D* ORGPhysicalSky::MakeSkyTail(const D3D11_TEXTURE2D_DESC&) { return nullptr; }
+bool ORGPhysicalSky::GenerateSkyTail(const PhysicalSky&) { return false; }
 
 #endif
