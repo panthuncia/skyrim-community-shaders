@@ -8819,3 +8819,56 @@ Step 6 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-native-v
   - `native-vulkan+fg-fx` (`c`, Post Processing mode for the run): passed; x2 with Physical Lens's image mapping and Camera on
     and off. Run `a` (ghosts and starburst on) lost the device in `cs.pp.physical-lens.request-plans` before frame generation was on;
     run `b` crashed turning Physical Lens off (`PostProcessing::MakePipelineFeature` had no Physical Lens case, fixed).
+
+## Frame revisions (2026-11-19)
+
+Step 1 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): the rule and a counted check. CS on `org-native/rev-step1`
+from `integ/hard-ports` `2658b7d3c`; ORG `rev-step1-adoption-observer` on `7c5d080`.
+
+- **Rule R1.** Everything a recording binds (declared versioned textures and buffers, graph structure, programs, prepared constants)
+  changes only at the frame's adoption point. Late-bound data (bindless indices, latches, stand-in declarations, frame values) may
+  change any time.
+- **The adoption point** is `Frame::Driver::OnBegin`. Today its whole body is the point. The end state is
+  `Frame::Revision::AdoptLatest()` there: the frame adopts the newest fully prepared revision whole, or nothing changes.
+- **Vocabulary.** Variable, event, `Setting<T>`, derived variable, dependent, frame revision, closure, prepared, adoption, born
+  cleared: section 1 of the plan.
+- **The check.** `src/RenderGraph/Frame/BoundaryCheck.{h,cpp}`. `Boundary::Scope` marks `OnBegin`. On the thread that opened it, and
+  outside it, the census counts:
+  - late versions: adoptions ORG reports through `VersionedResource::SetAdoptionObserver` (Publish, Adopt, Grow; never
+    `PublishLate`), by resource name and caller tag. A new resource's first version is counted apart as "new resources made late";
+  - late changes: `FrameAnchors` `Register`/`Unregister`/`Refresh`/`Rearm`, `RequestStructuralRebuild`, and any other
+    `RenderGraph::Builds` request;
+  - late attaches: builds attached and staged graphs switched in by `BuildManager`, by epoch and build point.
+  DCLF's `AdoptSnapshot` is tagged `dclf` and counted apart (allowed until step 10a). Counted, not fatal. One
+  `[ORG] boundary:` line per statistics window and one at a test run's exit, development builds only.
+- **ORG test.** `OpenRenderGraphVersionedResourceTests` (WARP): the observer sees Create, Adopt, Grow and Publish, not a pending
+  Make, not `PublishLate`, and nothing once removed. Passed; `OpenRenderGraphPersistentTests` passed.
+  `OpenRenderGraphExternalResourceTests` stops early with an uncaught "resource deadlock would occur", with or without this change.
+
+**Census** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv1`; session totals at exit):
+
+| Run | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin |
+|---|---|---|---|---|---|---|
+| `guest-quick` (`d`) | 2 (`twin`: the engine's volumetric lighting accumulation and its copy) | 137 | 70 | 0 | 59 | 10 |
+| `native-quick` (`c`) | 0 | 90 | 43 | 0 | 58 | 56 |
+| `native-d3d12-quick` (`c`) | 0 | 90 | 43 | 0 | 56 | 56 |
+| `d3d11+quick` (`b`) | 0 | 0 | 0 | 0 | 0 | 0 |
+| `native-vulkan+resize` (`b`) | 102 * | * | 47 | 0 | 67 | 86 |
+| `guest+resize` (`b`) | 151 * (`twin` 2) | * | 74 | 0 | 68 | 40 |
+| `native-vulkan+menu` (`b`) | 90 * | * | 43 | 0 | 66 | 64 |
+| `latch-census-short` (`b`) | 141 * (`twin` 4) | * | 90 | 0 | 95 | 10 |
+
+\* `b` runs predate the first-version split: their late versions include new resources (one each, mostly). In the native quick
+runs every late version is a new resource (DCLF's buffers, `Engine::3D::VOLUMETRIC_LIGHTING_NOISE`, SSGI's composites).
+
+- **Late changes, top sites:** "frame anchors: one-shot passes ran" (16 to 22 a run), `refresh cs.dyncubemaps`,
+  `refresh cs.screen-space-shadows`, published resources added (SSGI composites, the fog's scattering volumes), imports added
+  (`cs.d3d11.screenshot.framebuffer`, `cs.d3d11.ssgi.noise`), DCLF's graph conditions (8 to 16 in guest), `rearm cs.ssgi.reset`,
+  `rearm cs.skylighting`.
+- **Late attaches** were 0 in every run: builds attach in `OnBegin` in these runs. The frame-end `Poll(Attach::All)` and guest's
+  DCLF build point would count if they attached.
+- **Behaviour.** No change intended. `guest-quick` (`d`), `native-quick`, `native-d3d12-quick`, `d3d11+quick`, both `resize`, `native-vulkan+menu` and
+  `latch-census-short` passed. Every failed run (`guest-quick` and `native-quick` `b`, `guest-quick` `c`: "never-loaded") logged
+  "LandscapeDefault EDID texture set from TerrainHelper.esp not found": the shared profile had TerrainHelper.esp switched off by
+  then. Each passing run had it on. Shots against the `nfg` stage of the same base: `native-quick` mean channel difference 1.23,
+  `guest-quick` 2.5 to 2.7 (eye adaptation; the image matches).

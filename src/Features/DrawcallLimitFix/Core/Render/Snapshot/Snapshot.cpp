@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
@@ -766,6 +767,8 @@ namespace DCLF
 		}
 		std::shared_ptr<const Impl::SceneSnapshot> snapshot(std::move(taken));
 		TracyCZoneN(adoptVersions, "CS.DCLF.Snapshot.AdoptVersions", true);
+		// The boundary census counts DCLF's own adoption point apart until it moves into the frame's (step 10a).
+		const RenderGraph::Frame::Boundary::Caller boundaryCaller("dclf");
 		const auto versions = snapshot->revision ? snapshot->revision->Get<NamedVersions>(Impl::SceneRevisions::kVersionsSlot) : nullptr;
 		if (versions && versions->AdoptAll()) {
 			if (auto* host = RenderGraphRuntime::Get().Host())

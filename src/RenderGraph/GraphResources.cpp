@@ -10,6 +10,7 @@
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "Utils/D3D.h"
@@ -519,6 +520,7 @@ namespace GraphResources
 		// The build manager builds this off the render thread and attaches it at a frame boundary.
 		if (!RenderGraphRuntime::Get().Host())
 			return;
+		const RenderGraph::Frame::Boundary::Change change(a_reason, "structural rebuild");
 		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
 		const auto reason = fmt::format("structural: {}", a_reason);
 		if (a_epochs.empty()) {
@@ -587,6 +589,7 @@ namespace GraphResources
 			return false;
 		try {
 			if (a_previous && a_sameShape) {
+				const RenderGraph::Frame::Boundary::Caller caller("twin");
 				a_previous->PublishImage(std::move(image));
 				slot = std::move(a_previous);
 				// Tickets prepared before resolved the old version, so they are prepared again.

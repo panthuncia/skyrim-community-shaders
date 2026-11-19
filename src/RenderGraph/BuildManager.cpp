@@ -3,6 +3,7 @@
 #	include "RenderGraph/BuildManager.h"
 
 #	include "RenderGraph/CensusWindow.h"
+#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/Recipe.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
@@ -414,6 +415,8 @@ namespace RenderGraph
 			supersededInARow.erase(epoch);
 			rejectedInARow.erase(epoch);
 			failedAt.erase(epoch);
+			if (a_done.graph)
+				RenderGraph::Frame::Boundary::NoteAttach(Label(epoch));
 			++window.attached;
 			window.attachMs += attachMs;
 			window.attachMaxMs = (std::max)(window.attachMaxMs, attachMs);
@@ -695,6 +698,7 @@ namespace RenderGraph
 			logger::info("[ORG] build manager: {}'s staged graph was refused at its switch ({}); built again", m.Label(a_epoch), result.reason);
 			return false;
 		}
+		RenderGraph::Frame::Boundary::NoteAttach(m.Label(a_epoch));
 		++m.window.attached;
 		const double ms = MillisecondsSince(begin);
 		m.window.attachMs += ms;
@@ -715,6 +719,7 @@ namespace RenderGraph
 	bool BuildManager::Poll(std::string_view a_point, Attach a_attach)
 	{
 		auto& m = *impl;
+		const Frame::Boundary::Caller caller(a_point);
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		bool changed = false;
@@ -753,6 +758,7 @@ namespace RenderGraph
 
 	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
 	{
+		const Frame::Boundary::Caller caller(a_caller);
 		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
 		impl->ApplyPending();
 		return impl->BuildOwnerEpochs(a_caller, true);
@@ -808,26 +814,34 @@ namespace RenderGraph
 
 		void Request(std::uint32_t a_epoch, std::string_view a_reason)
 		{
-			if (auto* manager = Manager())
+			if (auto* manager = Manager()) {
+				Frame::Boundary::NoteBuildRequest(a_reason);
 				manager->Request(a_epoch, a_reason);
+			}
 		}
 
 		void RequestAll(std::string_view a_reason)
 		{
-			if (auto* manager = Manager())
+			if (auto* manager = Manager()) {
+				Frame::Boundary::NoteBuildRequest(a_reason);
 				manager->RequestAll(a_reason);
+			}
 		}
 
 		void RequestFor(std::string_view a_id, std::string_view a_reason)
 		{
-			if (auto* manager = Manager())
+			if (auto* manager = Manager()) {
+				Frame::Boundary::NoteBuildRequest(a_reason);
 				manager->RequestFor(a_id, a_reason);
+			}
 		}
 
 		void Change(std::function<void()> a_change, std::string_view a_reason)
 		{
-			if (auto* manager = Manager())
+			if (auto* manager = Manager()) {
+				Frame::Boundary::NoteBuildRequest(a_reason);
 				manager->Change(std::move(a_change), a_reason);
+			}
 			else if (a_change)
 				a_change();
 		}

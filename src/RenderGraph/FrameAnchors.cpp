@@ -6,6 +6,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDescription.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Recipe.h"
@@ -1485,6 +1486,7 @@ namespace FrameAnchors
 			const auto previous = a_slot.CurrentResource();
 			const bool sameSize = previous && WidthOf(previous.get()) == WidthOf(a_next.get()) && HeightOf(previous.get()) == HeightOf(a_next.get());
 			try {
+				const RenderGraph::Frame::Boundary::Caller caller("engine import");
 				a_slot.PublishImage(std::move(a_next), std::move(a_owner));
 			} catch (const std::exception&) {
 				return Joined::NewShape;
@@ -1869,7 +1871,10 @@ namespace FrameAnchors
 		MarkCurrent(state, *existing);
 		if (replaced)
 			RetireGates(state, *replaced, existing->desc->gates);
-		Rebuild(state, mask, fmt::format("client '{}' registered{}", existing->desc->id, replaced ? " again" : ""));
+		{
+			const RenderGraph::Frame::Boundary::Change change(existing->desc->id, replaced ? "register again" : "register");
+			Rebuild(state, mask, fmt::format("client '{}' registered{}", existing->desc->id, replaced ? " again" : ""));
+		}
 		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
 			InGraphs(*existing->desc) ? "" : "; it joins the graphs once the shared constants exist");
 		// A client registered again every frame never gets a build that switches in, so its stages stay without it.
@@ -1903,6 +1908,7 @@ namespace FrameAnchors
 		state.clients.erase(existing);
 		Publish(state);
 		RetireGates(state, *desc);
+		const RenderGraph::Frame::Boundary::Change change(desc->id, "unregister");
 		Rebuild(state, mask, fmt::format("client '{}' unregistered", desc->id));
 	}
 
@@ -1913,6 +1919,7 @@ namespace FrameAnchors
 		if (auto* client = FindClient(state, a_id)) {
 			Publish(state);
 			MarkCurrent(state, *client);
+			const RenderGraph::Frame::Boundary::Change change(client->desc->id, "refresh");
 			Rebuild(state, AnchorMask(*client->desc), fmt::format("client '{}' refreshed", client->desc->id));
 		}
 	}
@@ -1945,6 +1952,7 @@ namespace FrameAnchors
 		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
 			if (client->armed[i] == 1)
 				client->armed[i] = state.serial;
+		const RenderGraph::Frame::Boundary::Change change(client->desc->id, "rearm");
 		Rebuild(state, AnchorMask(*client->desc, true), fmt::format("client '{}' armed its one-shot passes", client->desc->id));
 	}
 
