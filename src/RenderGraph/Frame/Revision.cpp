@@ -13,6 +13,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "Utils/Setting.h"
 #	if !defined(CS_RELEASE_PROFILE)
 #		include "Testing/Testing.h"
 #	endif
@@ -735,6 +736,8 @@ namespace RenderGraph::Frame::Revision
 		auto& coordinator = GetCoordinator();
 		coordinator.installed = true;
 		GraphResources::Resource::SetSizeWishHook(&OnSizeWish);
+		// Bound settings raise their variable from here on.
+		CS::SettingRegistry::SetRaiseHook(&Vars::RaiseSetting);
 #	if !defined(CS_RELEASE_PROFILE)
 		Testing::RegisterExitReport([] { LogStats(); });
 #	endif
