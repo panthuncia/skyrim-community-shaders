@@ -451,10 +451,10 @@ namespace ORGPostChain
 				stl::report_and_fail(std::format("Community Shaders: the Post Processing readback {} could not be mapped.", name));
 			const auto* region = static_cast<const std::byte*>(mapped) + std::uint64_t(a_lease) * stride;
 			for (std::size_t part = 0; part < sizes.size(); ++part) {
-				std::uint32_t stamp = 0;
-				std::memcpy(&stamp, region + bases[part], sizeof(stamp));
+				std::uint32_t written = 0;
+				std::memcpy(&written, region + bases[part], sizeof(written));
 				// Another stamp means this part's pass was not in the run, or a later uncommitted run wrote over it.
-				if (stamp != run.stamp)
+				if (written != run.stamp)
 					continue;
 				const auto* data = region + bases[part] + kReadbackAlign;
 				latest[part].assign(data, data + sizes[part]);
