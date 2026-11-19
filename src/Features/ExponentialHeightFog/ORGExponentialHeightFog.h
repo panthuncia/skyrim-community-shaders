@@ -27,6 +27,14 @@ public:
 
 	static bool Requested();
 
+	/**
+	* @brief CS_ORG_FOG_DEBUG, a diagnostic of the fog's graph path. 0 when off. Any thread.
+	* 1: the volumes ignore the scene depth (no conservative-depth culling).
+	* 2: the engine's draws and DCLF's get no volume at t19 and t22; the graph readers still read them by published id.
+	* 3: the graph path stays off, so the D3D11 path runs (guest mode only).
+	*/
+	static std::uint32_t Debug();
+
 	static ORGExponentialHeightFog& Get();
 
 	/** @brief Reserves the Prepass anchor when requested. Call before the render graph initializes. */

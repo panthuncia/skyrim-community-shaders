@@ -9,6 +9,21 @@ bool ORGExponentialHeightFog::Requested()
 	return requested;
 }
 
+std::uint32_t ORGExponentialHeightFog::Debug()
+{
+	static const std::uint32_t s_mode = [] {
+		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
+		if (mode > 3) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 3); it is off", mode);
+			return 0u;
+		}
+		if (mode)
+			logger::info("[ORG] Exponential Height Fog: debug mode {}", mode);
+		return static_cast<std::uint32_t>(mode);
+	}();
+	return s_mode;
+}
+
 ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 {
 	static ORGExponentialHeightFog s_fog;
@@ -704,6 +719,7 @@ struct ORGExponentialHeightFog::Impl
 	std::uint32_t lastFrame = UINT32_MAX;
 	bool ranLastFrame = false;
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
+	bool reportedConstants = false;  // the first graph frame's constants are logged once
 
 	void MakeVolume(Volume& a_volume, VolumeTextures& a_textures, bool a_groupReduce, bool a_far) const
 	{
@@ -914,7 +930,7 @@ bool ORGExponentialHeightFog::IsActive() const
 
 bool ORGExponentialHeightFog::Prepass()
 {
-	if (!IsActive())
+	if (!IsActive() || Debug() == 3)
 		return false;
 	auto& fog = globals::features::exponentialHeightFog;
 	impl->pending.reset();
@@ -1050,7 +1066,26 @@ bool ORGExponentialHeightFog::Prepass()
 	inputs.sizes.nearSize = impl->textures->nearVolume.size;
 	inputs.sizes.farSize = impl->textures->farVolume.size;
 	data.fog = fog.BuildConstants(inputs, farEnabled);
+	if (Debug() == 1) {
+		// No conservative depth and no previous one, so no froxel is culled by the scene depth.
+		data.fog.gridSizeAndFlags.w &= ~(2u | 16u);
+		data.fog.farGridSizeAndFlags.w &= ~(2u | 16u);
+	}
 	impl->pending = data;
+	if (!std::exchange(impl->reportedConstants, true)) {
+		const auto& f = data.fog;
+		const auto& s = fog.settings;
+		const auto camera = Util::GetCameraData();
+		logger::info(
+			"[ORG] Exponential Height Fog: the first graph frame: density {:.4f}/{:.4f}, extinction scale {:.3f}, albedo a {:.3f}; "
+			"near {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}); far {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}) range {:.0f}-{:.0f}{}; "
+			"camera data ({:.1f}, {:.2f}, {:.1f}, {:.1f}); depth from {}",
+			s.fogDensity, s.fogDensity2, s.volumetricFogExtinctionScale, s.volumetricFogAlbedo.w, f.gridSizeAndFlags.x, f.gridSizeAndFlags.y,
+			f.gridSizeAndFlags.z, f.gridSizeAndFlags.w, f.gridZParams.x, f.gridZParams.y, f.gridZParams.z, f.farGridSizeAndFlags.x,
+			f.farGridSizeAndFlags.y, f.farGridSizeAndFlags.z, f.farGridSizeAndFlags.w, f.farGridZParams.x, f.farGridZParams.y, f.farGridZParams.z,
+			f.farRange.x, f.farRange.y, farEnabled ? "" : " (off)", camera.x, camera.y, camera.z, camera.w,
+			shape.inputs[kDepth].resource ? "the engine's depth" : shape.inputs[kDepth].name);
+	}
 
 	impl->hasScatteringHistory = shape.temporal;
 	impl->hasDepthHistory = shape.temporal && inputs.depth;
