@@ -1,9 +1,26 @@
+// Dual-target (Common/OrgResources.hlsli). trace.cs.hlsl's push block takes these lists after its own, and each is
+// expanded where its resources were declared, so the D3D11 declarations stay as they were. On ORG every name is its own
+// handle, even where D3D11 names share a register (u3 is WaveTransform and WaveMaxOutput).
+#include "Common/OrgResources.hlsli"
+#define PHYSICAL_LENS_WAVE_PUPIL_RESOURCES(X)               	X(EXTERN_LATCH, DiffractionConstants, Diffraction, 2) 	X(UAV, RWTexture2DArray<float4>, WavePupil, 2)
+#define PHYSICAL_LENS_WAVE_BOUNDARY_RESOURCES(X)         	X(SRV, StructuredBuffer<float4>, WaveBoundary, 3) 	X(UAV, RWStructuredBuffer<float4>, WaveBoundaryOutput, 0)
+#define PHYSICAL_LENS_WAVE_TRANSFORM_RESOURCES(X)          	X(SRV, Texture2DArray<float4>, WaveInput, 1)        	X(UAV, RWTexture2DArray<float4>, WaveTransform, 3)  	X(UAV, RWTexture2DArray<float4>, DiffractionPSF, 4)
+#define PHYSICAL_LENS_WAVE_KERNEL_RESOURCES(X) X(UAV, RWStructuredBuffer<float4>, WaveKernel, 5)
+#define PHYSICAL_LENS_WAVE_MAX_RESOURCES(X) X(UAV, RWTexture2DArray<float>, WaveMaxOutput, 3)
+#define PHYSICAL_LENS_WAVE_SURFACE_RESOURCES(X) X(SRV, StructuredBuffer<float4>, SurfaceNormalization, 2)
+// FXC fails to expand lists through this macro, and its push block is empty anyway.
+#if defined(CS_ORG_BINDLESS)
+#	define PHYSICAL_LENS_TRACE_EXTRA_HANDLES                                                             		PHYSICAL_LENS_WAVE_PUPIL_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_WAVE_BOUNDARY_RESOURCES(ORG_HANDLE) 		PHYSICAL_LENS_WAVE_TRANSFORM_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_WAVE_KERNEL_RESOURCES(ORG_HANDLE) 		PHYSICAL_LENS_WAVE_MAX_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_WAVE_SURFACE_RESOURCES(ORG_HANDLE)
+#else
+#	define PHYSICAL_LENS_TRACE_EXTRA_HANDLES
+#endif
+#define PHYSICAL_LENS_TRACE_EXTRA_RESOURCES
 #include "PostProcessing/PhysicalLensImaging/trace.cs.hlsl"
 
 // Zero padding resolves the PSF core without inventing a larger aperture.
 static const uint WaveTransformSize = 512;
 #include "PostProcessing/PhysicalLensImaging/diffraction_parameters.hlsli"
-RWTexture2DArray<float4> WavePupil : register(u2);
+PHYSICAL_LENS_WAVE_PUPIL_RESOURCES(ORG_RESOURCE)
 #include "PostProcessing/PhysicalLensImaging/diffraction_boundary.hlsli"
 #include "PostProcessing/PhysicalLensImaging/diffraction_domain.hlsli"
 #include "PostProcessing/PhysicalLensImaging/microstructure.hlsli"
@@ -51,9 +68,7 @@ float4 TraceWaveCell(float2 q, float wavelength, float margin)
 	WavePupil[id] = field;
 }
 
-Texture2DArray<float4> WaveInput : register(t1);
-RWTexture2DArray<float4> WaveTransform : register(u3);
-RWTexture2DArray<float4> DiffractionPSF : register(u4);
+PHYSICAL_LENS_WAVE_TRANSFORM_RESOURCES(ORG_RESOURCE)
 // Exact area of the local tangent half-plane within a square pupil cell.
 // Only the boundary cells change; this is quadrature, not optical apodization.
 float PupilCoverage(float clearance, float2 gradient)
@@ -76,7 +91,8 @@ float PupilCoverage(float clearance, float2 gradient)
 	value.xy *= coverage;
 	value.w = dot(value.xy, value.xy);
 	WaveTransform[id] = value;
-} RWStructuredBuffer<float4> WaveKernel : register(u5);
+}
+PHYSICAL_LENS_WAVE_KERNEL_RESOURCES(ORG_RESOURCE)
 groupshared float4 FourierValues[512];
 
 // Two identical row transforms with transposed stores form the 2D FFT.
@@ -237,7 +253,7 @@ groupshared float TailBounds[512];
 
 // Conservative maximum-density hierarchy for screen-tile culling. It keeps
 // narrow physical spikes even when the other pixels of a distant tile are dark.
-RWTexture2DArray<float> WaveMaxOutput : register(u3);
+PHYSICAL_LENS_WAVE_MAX_RESOURCES(ORG_RESOURCE)
 groupshared float WaveMaxValues[64];
 [numthreads(8, 8, 1)] void BuildWaveMax(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint lane : SV_GroupIndex) {
 	WaveMaxValues[lane] = WaveInput.Load(int4(group.xy * 8 + thread.xy, group.z, 0)).z;
@@ -263,7 +279,7 @@ groupshared float WaveMaxValues[64];
 	WaveMaxOutput[id] = peak;
 }
 
-StructuredBuffer<float4> SurfaceNormalization : register(t2);
+PHYSICAL_LENS_WAVE_SURFACE_RESOURCES(ORG_RESOURCE)
 float SampleWaveComponent(float2 p, uint band, uint component)
 {
 	int2 base = int2(floor(p));

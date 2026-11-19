@@ -1,10 +1,6 @@
 #define PHYSICAL_LENS_PLAN_BAKE 1
 #include "PostProcessing/PhysicalLensFlare/flare.cs.hlsl"
-RWStructuredBuffer<float4> PlanOutput : register(u5);
-StructuredBuffer<float4> PlanTable : register(t6);
-RWStructuredBuffer<uint> PlanStatus : register(u0);
-RWStructuredBuffer<uint> PlanRequests : register(u4);
-StructuredBuffer<uint> RequestedPlans : register(t0);
+PHYSICAL_LENS_PLANNING_RESOURCES(ORG_RESOURCE)
 #ifdef PHYSICAL_LENS_PLAN_GRID_CAP
 static const uint PlanningGridCap = PHYSICAL_LENS_PLAN_GRID_CAP;
 #else
