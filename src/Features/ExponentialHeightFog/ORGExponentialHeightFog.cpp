@@ -13,8 +13,8 @@ std::uint32_t ORGExponentialHeightFog::Debug()
 {
 	static const std::uint32_t s_mode = [] {
 		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
-		if (mode > 8) {
-			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 8); it is off", mode);
+		if (mode > 10) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 10); it is off", mode);
 			return 0u;
 		}
 		if (mode)
@@ -62,6 +62,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
+#	include "RenderGraph/UavClearPass.h"
 #	include "State.h"
 #	include "Utils/D3D.h"
 #	include "Utils/Game.h"
@@ -85,9 +86,18 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 namespace
 {
 	constexpr const char* kClientId = "cs.exp-height-fog";
+	// CS_ORG_FOG_DEBUG=10's one-shot history clears. Never active itself, so it keeps no epoch running.
+	constexpr const char* kResetClientId = "cs.exp-height-fog.reset";
 	constexpr const char* kShaderDir = "ExponentialHeightFog/";
 	// After IBL and Skylighting at the Prepass anchor. The graph orders the reads of their outputs anyway.
 	constexpr std::int32_t kOrder = 300;
+	// Mode 10's clears go before every pass of the fog's own client.
+	constexpr std::int32_t kResetOrder = kOrder - 10;
+	// Mode 10 arms its clears again this often, in frames.
+	constexpr std::uint32_t kResetInterval = 600;
+
+	/** @brief Modes 9 and 10 clear the histories. They also turn off the scattering's history guard, so the symptom shows as it was. */
+	bool ClearsHistories() { return ORGExponentialHeightFog::Debug() == 9 || ORGExponentialHeightFog::Debug() == 10; }
 
 	/** @brief Readers return to the D3D11 views. */
 	void WithdrawIntegrated()
@@ -254,6 +264,12 @@ namespace
 				volume->RequestSize(a_size.x, a_size.y, a_size.z);
 			for (auto* depth : { conservativeDepth.get(), conservativeDepthHistory.get() })
 				depth->RequestSize(a_size.x, a_size.y);
+		}
+
+		/** @brief What the debug clears cover: the histories and the textures copied into them. */
+		std::array<const GraphResources::Resource*, 4> Cleared() const
+		{
+			return { scattering.get(), scatteringHistory.get(), conservativeDepth.get(), conservativeDepthHistory.get() };
 		}
 
 		/** @brief All textures take a new extent at the same frame boundary. */
@@ -905,6 +921,49 @@ struct ORGExponentialHeightFog::Impl
 		lastFrame = globals::state->frameCount;
 	}
 
+	/**
+	* @brief The debug clears of each volume's histories and the textures copied into them, to zero. Recorded ahead, since nothing
+	* gates them. Mode 9 adds them to the fog's own client, so they run every run. Mode 10 gives them as one-shot passes here.
+	*/
+	static void AddClears(std::vector<FrameAnchors::PassDesc>& a_passes, const std::shared_ptr<const FogState>& a_state, std::string_view a_prefix,
+		std::int32_t& a_order, bool a_once)
+	{
+		constexpr std::array<const char*, 4> names{ "scattering", "scattering-history", "depth", "depth-history" };
+		for (const bool isFar : { false, true }) {
+			if (isFar && !a_state->shape.farEnabled)
+				continue;
+			for (std::uint32_t i = 0; i < names.size(); ++i)
+				a_passes.push_back({ .name = std::format("{}.{}debug-clear-{}", a_prefix, isFar ? "far." : "near.", names[i]),
+					.anchor = FrameAnchors::Anchor::Prepass,
+					.order = a_order++,
+					.kind = FrameAnchors::PassKind::Compute,
+					.make = [a_state, isFar, i] {
+						const auto& textures = isFar ? a_state->textures->farVolume : a_state->textures->nearVolume;
+						return GraphPasses::MakeUavClear(*textures.Cleared()[i], std::array<float, 4>{});
+					},
+					.once = a_once });
+		}
+	}
+
+	/** @brief Mode 10's one-shot clears, which run at the anchor's next run and again after each Rearm. False, logged, on failure. */
+	static bool RegisterReset(const std::shared_ptr<const FogState>& a_state)
+	{
+		FrameAnchors::ClientDesc client{};
+		client.id = kResetClientId;
+		std::int32_t order = kResetOrder;
+		AddClears(client.passes, a_state, kResetClientId, order, true);
+		client.registerResources = [a_state](org::RenderGraph& a_graph) {
+			a_state->textures->nearVolume.Register(a_graph);
+			a_state->textures->farVolume.Register(a_graph);
+		};
+		client.active = [] { return false; };
+		if (!FrameAnchors::Register(std::move(client))) {
+			logger::error("[ORG] Exponential Height Fog: debug mode 10's clears could not be registered");
+			return false;
+		}
+		return true;
+	}
+
 	/** @brief Only a change of inputs, history or group reduction gets here. A new extent alone is FollowSizes. False, logged, on failure. */
 	bool Build(const Shape& a_shape)
 	{
@@ -925,6 +984,8 @@ struct ORGExponentialHeightFog::Impl
 			client.passes.push_back({ .name = "cs.exp-height-fog." + std::move(a_name), .anchor = FrameAnchors::Anchor::Prepass, .order = order++, .kind = a_kind, .make = std::move(a_make) });
 		};
 		add("upload", FrameAnchors::PassKind::Copy, [shared] { return std::make_shared<UploadPass>(shared); });
+		if (a_shape.temporal && ORGExponentialHeightFog::Debug() == 9)
+			AddClears(client.passes, shared, "cs.exp-height-fog", order, false);
 		const auto addVolume = [&](bool a_far) {
 			const std::string volume = a_far ? "far." : "near.";
 			constexpr std::array<std::pair<Step, const char*>, 4> steps{ { { Step::Depth, "depth" }, { Step::Material, "material" },
@@ -955,6 +1016,11 @@ struct ORGExponentialHeightFog::Impl
 		client.gates = { fixed->gate };
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
+		if (a_shape.temporal && ORGExponentialHeightFog::Debug() == 10 && !RegisterReset(shared))
+			return false;
+		if (a_shape.temporal && ClearsHistories())
+			logger::info("[ORG] Exponential Height Fog: debug mode {} clears the histories {}, and the scattering's history guard is off",
+				ORGExponentialHeightFog::Debug(), ORGExponentialHeightFog::Debug() == 9 ? "every run" : "once, then every 600 frames");
 		this->state = std::move(built);
 		logger::info("[ORG] Exponential Height Fog runs on the render graph (near {}x{}x{}, far {}x{}x{}{}, {})", a_shape.sizes.nearSize.x,
 			a_shape.sizes.nearSize.y, a_shape.sizes.nearSize.z, a_shape.sizes.farSize.x, a_shape.sizes.farSize.y, a_shape.sizes.farSize.z,
@@ -1138,6 +1204,7 @@ bool ORGExponentialHeightFog::Prepass()
 		if (!impl->Build(shape)) {
 			logger::error("[ORG] Exponential Height Fog returns to D3D11 for good");
 			FrameAnchors::Unregister(kClientId);
+			FrameAnchors::Unregister(kResetClientId);
 			WithdrawIntegrated();
 			failed = true;
 			impl.reset();
@@ -1157,6 +1224,13 @@ bool ORGExponentialHeightFog::Prepass()
 	inputs.sizes.nearSize = impl->textures->nearVolume.size;
 	inputs.sizes.farSize = impl->textures->farVolume.size;
 	data.fog = fog.BuildConstants(inputs, farEnabled);
+	if (ClearsHistories())
+		data.fog.historyParameters.w = 1.0f;
+	// The clears registered with the build ran at its first run. Arm them again now and then.
+	if (Debug() == 10 && shape.temporal && frame % kResetInterval == 0) {
+		FrameAnchors::Rearm(kResetClientId);
+		logger::info("[ORG] Exponential Height Fog: debug mode 10 clears the histories again at frame {}", frame);
+	}
 	if (Debug() == 1) {
 		// No conservative depth and no previous one, so no froxel is culled by the scene depth.
 		data.fog.gridSizeAndFlags.w &= ~(2u | 16u);
@@ -1212,6 +1286,7 @@ void ORGExponentialHeightFog::Release()
 	if (!impl || !impl->state)
 		return;
 	FrameAnchors::Unregister(kClientId);
+	FrameAnchors::Unregister(kResetClientId);
 	WithdrawIntegrated();
 	impl->state.reset();
 	impl->textures.reset();
