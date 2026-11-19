@@ -49,7 +49,8 @@ static const uint kDCLFGrassAlphaParams = 256 + 36;
 static const uint kDCLFGrassBucketStride = 224, kDCLFGrassBucketFlags = 12, kDCLFGrassBucketTextures = 32, kDCLFGrassBucketWavePeriod = 64,
 				  kDCLFGrassBucketPbrFlags = 76, kDCLFGrassBucketScaleMask = 80, kDCLFGrassBucketPbrTextures = 96, kDCLFGrassBucketPbrParams1 = 112,
 				  kDCLFGrassBucketPbrParams2 = 128, kDCLFGrassBucketWindDirection = 144, kDCLFGrassBucketPbrParams3 = 160,
-				  kDCLFGrassBucketPbrParams4 = 176, kDCLFGrassBucketFuzzEmissive = 192, kDCLFGrassBucketCanopyHeight = 200;
+				  kDCLFGrassBucketPbrParams4 = 176, kDCLFGrassBucketFuzzEmissive = 192, kDCLFGrassBucketCanopyHeight = 200,
+				  kDCLFGrassBucketFuzzRoughness = 212;
 static const uint kDCLFGrassBucketTruePbr = 1u << 0, kDCLFGrassBucketSphereNormal = 1u << 1;
 // GrassInstances::InstanceFrame (8 bytes): windCur and windPrev as halfs; the fade (unorm16) and, in the high 16 bits, the flags (bits 0-1 the
 // tier, 2 in collision range, 3 simple shading). The vertex stage takes it unpacked (DCLFGrassFrame: windCur, windPrev, fade as floats, flags).
@@ -655,6 +656,7 @@ static float3 PBRParams1;  // roughness scale, specular level, emissive scale
 static float4 PBRParams2;  // subsurface color, subsurface opacity
 static float4 PBRParams3;  // fuzz color, fuzz weight
 static float4 PBRParams4;  // subsurface balance, front/back specular weights, back roughness scale
+static float4 PBRParams5;  // fuzz roughness in x (negative uses base roughness)
 static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, DCLFGrassEmissive, DCLFGrassPbrSampler;
 #			define SampNormalSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
 #			define SampRMAOSSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
@@ -693,6 +695,7 @@ void DCLFGrassPixelStatics(uint a_bucket)
 	PBRParams2 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams2), 4));
 	PBRParams3 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams3), 4));
 	PBRParams4 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams4), 4));
+	PBRParams5 = float4(asfloat(DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFuzzRoughness), 4)), 0, 0, 0);
 	const uint2 fuzzEmissive = DeviceLoad(uint2, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFuzzEmissive), 4);
 	DCLFGrassFuzz = fuzzEmissive.x;
 	DCLFGrassEmissive = fuzzEmissive.y;
