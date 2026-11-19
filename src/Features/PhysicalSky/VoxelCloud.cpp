@@ -275,6 +275,42 @@ void VoxelCloudManager::Bind() const
 	globals::d3d::context->CSSetShaderResources(60, static_cast<UINT>(bindings.size()), bindings.data());
 }
 
+std::optional<std::array<uint32_t, 2>> VoxelCloudManager::PlanLighting(float3 direction)
+{
+	if (active.empty())
+		return std::nullopt;
+	auto geometry = active;
+	for (auto& cloud : geometry) {
+		// As UpdateLighting: placement, density and fade do not change the cached integral.
+		cloud.centerWeight = {};
+		cloud.parameters.y = 0.f;
+		cloud.noise = {};
+	}
+	const bool changed = geometry.size() != lightingGeometry.size() ||
+	                     std::memcmp(geometry.data(), lightingGeometry.data(), geometry.size() * sizeof(VoxelCloudData)) != 0;
+	// A new array size is a new lighting texture, whose contents are not valid yet.
+	const uint32_t slices = Count() * 32u;
+	if (plannedSlices != slices) {
+		plannedSlices = slices;
+		lightingValid = false;
+	}
+	const bool rebuild = changed || !lightingValid;
+	if (rebuild || (lightingRemaining == 0 && (direction - lightingDirection).LengthSquared() > 1e-8f)) {
+		lightingGeometry = std::move(geometry);
+		lightingDirection = direction;
+		lightingNextSlice = 0;
+		lightingRemaining = slices;
+	}
+	if (lightingRemaining == 0)
+		return std::nullopt;
+	const uint32_t count = rebuild ? lightingRemaining : std::min(lightingRemaining, 4u);
+	const std::array<uint32_t, 2> update{ lightingNextSlice, count };
+	lightingNextSlice += count;
+	lightingRemaining -= count;
+	lightingValid = true;
+	return update;
+}
+
 void VoxelCloudManager::UpdateLighting(ID3D11ComputeShader* shader, float3 direction)
 {
 	if (!shader || active.empty())

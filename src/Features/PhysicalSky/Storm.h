@@ -91,6 +91,8 @@ struct CloudStormManager
 	/// Constant data for the single-instance view shader, updated with the motion data.
 	ID3D11Buffer* SingleData() const { return Count() == 1 && generatorCb ? generatorCb->CB() : nullptr; }
 	uint64_t Revision() const { return revision; }
+	/// The instances' data as Data() holds it, for the render graph's latch (ORGVolumetricClouds).
+	const std::vector<CloudStormData>& Instances() const { return active; }
 
 private:
 	std::map<std::string, CloudStormSettings> instances;
