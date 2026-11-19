@@ -67,7 +67,7 @@ namespace DCLF::Integrations::AdvancedSkin
 
 	Api::Feature Integration()
 	{
-		return { .name = "advanced skin", .install = &Install, .status = [] { return FeatureStatus(globals::features::skin) + fmt::format(", {} skin texture sets", globals::features::skin.skinExtraTextures.size()); } };
+		return { .name = "advanced skin", .install = &Install, .status = [] { return FeatureStatus(globals::features::skin); } };
 	}
 
 	std::vector<std::string> GrowthLines()

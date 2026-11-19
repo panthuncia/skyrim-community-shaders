@@ -12,7 +12,6 @@
 #include <vector>
 #include <winrt/base.h>
 
-#include "Utils/ContentHash.h"
 #include "Utils/WinApi.h"
 
 struct ID3D11ComputeShader;

@@ -55,6 +55,9 @@ struct Skin : Feature
 	 */
 	float4 GetWetness(RE::BSGeometry* a_geometry);
 
+	/// The per-geometry wetness the last SetupGeometry uploaded to b7, for Drawcall Limit Fix's parity check. Render thread.
+	float4 currentWetness{ 0, 0, 0, 0 };
+
 	struct Settings
 	{
 		bool EnableSkin = true;

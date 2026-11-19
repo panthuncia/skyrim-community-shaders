@@ -1117,9 +1117,8 @@ void ScreenshotFeature::Capture()
 	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
 	screenshot.notify = captureOutputPath.empty();
 
-	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it. Not for the UI
-	// composite, which is D3D11's.
-	if (ORGScreenshot::Get().IsActive() && !src.uiSRV) {
+	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it.
+	if (ORGScreenshot::Get().IsActive()) {
 		screenshot.cropX = copyX;
 		screenshot.cropY = copyY;
 		auto shared = std::make_shared<PendingScreenshot>(std::move(screenshot));

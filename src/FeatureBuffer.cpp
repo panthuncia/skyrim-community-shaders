@@ -6,6 +6,7 @@
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
+#include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
 #include "Features/ExtendedMaterials.h"
 #include "Features/ExtendedTranslucency.h"
 #include "Features/GrassLighting.h"
@@ -47,6 +48,20 @@ std::pair<unsigned char*, size_t> _GetFeatureBufferData(Ts... feat_datas)
 	return std::make_pair(storage.data(), storage.size());
 }
 
+namespace
+{
+	// The render graph's fog volumes take a new slice count at the next frame boundary, so the readers use the count they have.
+	ViewAtmosphere::Settings ViewAtmosphereBufferData()
+	{
+		auto data = globals::features::viewAtmosphere.settings;
+		if (const auto slices = ORGExponentialHeightFog::Get().Slices()) {
+			data.nearSlices = slices->first;
+			data.middleSlices = slices->second;
+		}
+		return data;
+	}
+}
+
 std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 {
 	return _GetFeatureBufferData(
@@ -72,7 +87,7 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::horizonFix.GetCommonBufferData(),
 		globals::features::physicalSky.cbData,
 		globals::features::rainRefraction.GetCommonBufferData(),
-		globals::features::viewAtmosphere.settings,
+		ViewAtmosphereBufferData(),
 		globals::features::proceduralSun.GetCommonBufferData(),
 		globals::features::proceduralAurora.GetCommonBufferData());
 }
