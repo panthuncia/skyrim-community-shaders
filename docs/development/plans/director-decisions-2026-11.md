@@ -103,3 +103,15 @@ final until the user confirms it.
       rewriting merged history.
 20. **Frame revision step 5 has one lead**, which also does native framegen step 9 (`PresentationConfig` as a variable), as
     both plans say. It reuses the step 4 worktree on `org-native/rev-step5`.
+21. **Frame revision step 5 and native framegen step 9 are merged** (`925add6a1`). On nfg, 9 of 9 runs passed: the standard set, native Vulkan resize, guest HDR, menu, native Vulkan FG with HDR, and latch-census-short. None stuck at load. The lead's calls are in both plans,
+    marked "to confirm". ORGModuleServices `d48c924` (`rev-step5`) is local only. Open from step 5:
+    - Twice, the first launch after a new staged DLL stuck at the loading screen: the main thread logged nothing after
+      `load-start`. It is unexplained, and no dump was taken. `rv1` saw it six times on the same day, before step 5, so it
+      is probably older than step 5.
+    - The `hdr-frames` config does not exist yet. It is needed to judge the 1 to 2 old-content frames native may present
+      into a new swap chain.
+    - Upscaler options are not yet read from the adopted revision. This moved to migration 6.14.
+    - The Dev-Fast PDB hit LNK1140 (the program database size limit) after many incremental links. Deleting the `.pdb` and
+      `.ilk` fixes it.
+22. **Step 6 runs one lead per migration.** 6.1 (EHF) goes alone first, because it lands the declaration API. After it, at
+    most three migrations run at once, on disjoint files.
