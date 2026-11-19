@@ -41,8 +41,9 @@ namespace ORGCloudInputs
 		FrameAnchors::Texture localMaximum;    // t34 TexLocalNdfMaximum, Texture2DArray
 		FrameAnchors::Texture stormHeight;     // t55 TexStormHeight, Texture2DArray
 		FrameAnchors::Texture stormModeling;   // t56 TexStormModeling, Texture2DArray
-		FrameAnchors::Texture voxelModeling;   // t60 TexVoxelModeling, Texture2DArray
-		FrameAnchors::Texture voxelDistance;   // t68 TexVoxelDistance, Texture2DArray
+		// TexVoxelModeling0..7 (t60..t67) and TexVoxelDistance0..7 (t68..t75), Texture2DArray: VoxelCloudManager's bindings.
+		std::array<FrameAnchors::Texture, 8> voxelModeling;
+		std::array<FrameAnchors::Texture, 8> voxelDistance;
 		FrameAnchors::Texture voxelLighting;   // t85 TexVoxelLighting / u0 RWVoxelLighting, Texture2DArray, written by the clouds client
 		FrameAnchors::Texture voxelNoise;      // t76 NoiseVoxel, 3D, with the voxel noise setting
 
