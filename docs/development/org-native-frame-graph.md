@@ -8766,3 +8766,25 @@ replayable") or any other frame tap error.
   D3D11 snapshot; the second used the clean scene (`the copy now reads the clean scene`) in guest, native Vulkan and native D3D12
   (`*-quick-clean`), and those screenshots have no HUD. Before, the copy was never set up at all: with the engine's targets on the
   graph kFRAMEBUFFER's slot has no D3D11 texture. It now takes the description from the slot's view.
+
+## Frame generation's presenter and inputs pass (2026-11-19)
+
+Steps 2 and 3 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-presenter-inputs` from `integ/hard-ports` `e1c469e09`.
+
+- **Presenter.** `FrameGen::DxvkPresenter` (`Features/Upscaling/DxvkPresenter.cpp`) is the DXVK backend of `FramePresenter.h`. It
+  holds DXVK's presenter exports, which left `Streamline.cpp`, the sync present, queue depth and tearing knobs in their measured
+  order, the colour space transition and the torn-down callback. `ActivePresenter()` returns `NativePresenter` in native mode.
+  `FrameGen::Controller` asks for a replacement with `RequestPresentation(method, reason)` and finishes a switch when the presenter's
+  adopted serial reaches its request and the feature loads have settled. The dead fault block inside `Reconcile` is gone.
+- **Inputs pass.** In both graph modes FSR-FG's tags and prepare are the `cs.upscaling.fg-inputs` client of the UI stage's
+  FrameGeneration step. `ORGUpscaling::QueueFrameGenInputs` taps the step again right after the hudless copy, with the prepare in a
+  run slot, and the pass, recorded at execution, records it on the stage's list (DXVK's command buffer in guest) and restores the
+  graph's heaps. It imports kMAIN's depth or its copy, the motion vectors and the graph hudless as legacy interop uses. Plain D3D11
+  keeps the interop ring. `sl.fsr_g` logs a present that finds a frame prepared for another frame ID.
+- **Checks** (RX 6600, background, `DXVK_DEBUG=hang`, stage `fgb`). Baseline from `e1c469e09`: `guest+fg` and `d3d11+fg` (`base`).
+  - `guest+fg` (`new`): passed; the same eight `[FrameGen]` lines and four recreates as `base`; presented x2 (33 "presenting 2"
+    lines against 38 in `base`), up to 147 driver presents a second (`base` 143). The only prepare line is the UI stage pass's.
+    Shots against `base` 0.5 to 2.1 apart, Dragonsreach 5.7 (eye adaptation).
+  - `guest+fg` with `org.epoch_stats=true` (`stats`): passed; every report `0 not replayable`; no tap or replay error.
+  - `d3d11+fg` (`new`): passed; the ring path as in `base` (368 "presenting 2" lines against 391, the known dropouts).
+  - `guest-quick`, `guest+hdr`, `d3d11+hdr`, `guest+menu`, `native-quick` (`new`): passed.

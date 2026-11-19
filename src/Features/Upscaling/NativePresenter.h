@@ -20,9 +20,11 @@ namespace FrameGen
 		/** @brief The swap chain as it was at this frame's begin. Render owner. */
 		SurfaceState Surface() const override;
 		/** @brief Asks for a replacement with a_config. The torn-down step set last runs between the destroy and the create. */
-		void RequestConfig(const PresentationConfig& a_config) override;
+		void RequestConfig(const PresentationConfig& a_config, const char* a_reason) override;
 		/** @brief The request the swap chain was last made for. Any thread. */
 		uint64_t AdoptedSerial() const override;
+		/** @brief The latest request. Any thread. */
+		uint64_t RequestedSerial() const override;
 		void SetTornDown(std::function<bool()> a_tornDown) override;
 
 	private:

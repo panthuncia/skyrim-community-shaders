@@ -3,9 +3,11 @@
 #include <cstdint>
 
 // Serializes DLSS-G and FSR-FG ownership changes on the render thread. Feature
-// load changes are applied together while DXVK's swapchain is torn down.
+// load changes are applied together while the presenter's swap chain is torn down.
 namespace FrameGen
 {
+	struct PresentationConfig;
+
 	enum class Method : uint8_t
 	{
 		kNone,
@@ -39,6 +41,9 @@ namespace FrameGen
 		/** @brief Whether FSR frame generation can consume resources for this render frame. */
 		[[nodiscard]] bool IsFSRPresenterReady() const;
 
+		/** @brief The presentation this frame wants with a_method: its colour space, vsync and present mode. */
+		static PresentationConfig Presentation(Method a_method);
+
 	private:
 		Controller() = default;
 
@@ -52,6 +57,8 @@ namespace FrameGen
 		bool StepModeTeardown(Method a_target);
 		void StepLoadState(Method a_target);
 		void StepFSRDelivery(Method a_target);
+		/** @brief Asks the active presenter for a replacement with a_method, and waits for it before the switch completes. */
+		void RequestPresentation(Method a_method, const char* a_reason);
 
 		static const char* Name(Method a_method);
 
@@ -68,6 +75,8 @@ namespace FrameGen
 		bool fsrWrapVsync = false;
 		bool fsrVsyncRebakePending = false;
 		bool faultRecoveryRequested = false;
-	uint32_t phaseCompletionRetries = 0;
+		uint32_t phaseCompletionRetries = 0;
+		// The presenter's request a switch waits for.
+		uint64_t awaitedSerial = 0;
 	};
 }

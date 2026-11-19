@@ -15,7 +15,8 @@
 * Streamline's evaluate is the Upscale anchor's first pass. It records the SDK's tags and evaluate on the pass's own command list.
 * The upscaled output is exported to D3D11, and a gated draw copies it into kMAIN. The depth upscale runs at the same anchor.
 * A copy has no per-run switch, so the client is rebuilt when the depth upscale starts or stops.
-* Frame generation still runs in the DXVK interop command ring. Its hudless colour is copied at the UI stage's FrameGeneration step.
+* Frame generation's hudless colour is copied at the UI stage's FrameGeneration step, and its inputs (FSR-FG's prepare) are a pass
+* of the same step after the copy. Plain D3D11 mode keeps them in the DXVK interop command ring.
 * On any failure the feature returns to D3D11 once the ring is drained. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGUpscaling
@@ -84,6 +85,16 @@ public:
 	* False when the graph path does not run, holds no upscaled texture, or the inputs cannot be imported.
 	*/
 	bool QueueEvaluate(std::string a_label, EvaluateRecord a_record);
+
+	/** @brief Whether frame generation's inputs are the UI stage's pass: the graph holds the hudless and a stage holds its step. */
+	bool RecordsFrameGenInputs() const;
+
+	/**
+	* @brief Runs frame generation's inputs pass now, after the hudless copy. a_record runs once, in the pass's Record, on whichever
+	* thread records the UI stage. Images in order: depth (kMAIN's, or kMAIN_COPY's when a_depthCopy), motion vectors, hudless.
+	* False when the pass cannot run this frame: no graph hudless, an engine target missing, or its build not switched in yet.
+	*/
+	bool QueueFrameGenInputs(std::string a_label, EvaluateRecord a_record, bool a_depthCopy);
 
 	/** @brief After an evaluate that wrote the upscaled texture. False means copy with D3D11. */
 	bool QueueCopyToMain();

@@ -291,8 +291,9 @@ namespace RenderGraph::Frame::Recipes::Table
 			.segment = SegmentId::Ui,
 			.names = { "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
 			.steps = { {
-				// Main_PostProcessing after the post chain: kFRAMEBUFFER without the HUD, with the pre-exposure divided out.
-				{ .anchor = Anchor::FrameGeneration, .clients = { "cs.upscaling.hudless", "cs.screenshot.clean" }, .whole = true },
+				// Main_PostProcessing after the post chain: kFRAMEBUFFER without the HUD, with the pre-exposure divided out. Then frame
+				// generation's inputs pass, which reads the hudless copy (a whole anchor's taps all reach its first step).
+				{ .anchor = Anchor::FrameGeneration, .clients = { "cs.upscaling.hudless", "cs.upscaling.fg-inputs", "cs.screenshot.clean" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.blood-splatter" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.frozen" } },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" } },

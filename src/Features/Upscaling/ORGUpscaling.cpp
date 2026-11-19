@@ -41,6 +41,8 @@ namespace
 
 	constexpr const char* kClientId = "cs.upscaling";
 	constexpr const char* kHudlessClientId = "cs.upscaling.hudless";
+	// Frame generation's inputs, after the hudless copy in the same step.
+	constexpr const char* kFrameGenInputsClientId = "cs.upscaling.fg-inputs";
 	// On only while an SDK upscaler is the method, so the post stage's build leaves the pass out with TAA or no upscaler.
 	constexpr const char* kEvaluateClientId = "cs.upscaling.evaluate";
 	constexpr const char* kUpscaledName = "Upscaling::UpscaledTexture";
@@ -240,6 +242,11 @@ struct ORGUpscaling::Impl
 	// Native mode: each run's evaluate, stored by the commit.
 	std::shared_ptr<const EvaluateShared> evaluateShared;
 	std::shared_ptr<const EvaluateWork> evaluate;
+	// Frame generation's inputs: each run's prepare, stored by the commit, and the engine targets the pass imports.
+	std::shared_ptr<const EvaluateShared> inputsShared;
+	std::shared_ptr<const EvaluateWork> inputsWork;
+	FrameAnchors::Texture inputsDepth, inputsMotion;
+	bool inputsRegistered = false, inputsArmed = false;
 
 	bool registered = false, hudlessRegistered = false;
 	// Set only around CopyHudless's tap, so the clean scene's tap of the same step does not copy the hudless.
@@ -406,6 +413,77 @@ namespace
 		std::shared_ptr<const EvaluateShared> shared;
 		DepthInputs inputs;
 		std::shared_ptr<org::Resource> output;
+	};
+
+	struct InputsBindings
+	{
+		org::ResourceBindingToken depth, motion, hudless;
+	};
+
+	/**
+	* @brief Records FSR-FG's tags and prepare on this pass's command list, after the hudless copy. Its three images are legacy interop
+	* uses in the common state, which the tags name, and the hudless stays in that state until the present reads it. Recorded at
+	* execution from the run's stored prepare, so a replayed recording records it again. Rebinds the graph's heaps after.
+	*/
+	class FrameGenInputsPass final : public org::TypedRenderGraphPass<FrameGenInputsPass, EvaluateFrame, InputsBindings>
+	{
+	public:
+		FrameGenInputsPass(std::shared_ptr<const EvaluateShared> a_shared, FrameAnchors::Texture a_depth, FrameAnchors::Texture a_motion,
+			std::shared_ptr<org::Resource> a_hudless) :
+			shared(std::move(a_shared)), depth(std::move(a_depth)), motion(std::move(a_motion)), hudless(std::move(a_hudless)) {}
+
+		InputsBindings Declare(org::PassBuilder& a_builder)
+		{
+			a_builder.PreferQueue(org::QueueKind::Graphics);
+			InputsBindings bindings{};
+			bindings.depth = a_builder.LegacyInteropUse(depth).Resource();
+			bindings.motion = a_builder.LegacyInteropUse(motion).Resource();
+			bindings.hudless = a_builder.LegacyInteropUse(hudless).Resource();
+			return bindings;
+		}
+
+		// Recorded at execution from the run's prepare, so nothing here prevents reuse.
+		void Revision(std::vector<std::uint64_t>&) const {}
+
+		EvaluateFrame Prepare(const InputsBindings&, const org::PassPrepareContext&) const { return { shared }; }
+
+		static bool SkipsAtExecution(const InputsBindings&, const EvaluateFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return !a_frame.shared || !a_frame.shared->runs.Find(a_recording.Run());
+		}
+
+		static void Record(const InputsBindings& a_bindings, const EvaluateFrame& a_frame, org::PassRecordContext& a_recording)
+		{
+			const auto work = a_frame.shared ? a_frame.shared->runs.Take(a_recording.Run()) : nullptr;
+			if (!work || !work->record)
+				return;
+			const std::array<rhi::Resource, 3> images{ a_recording.Resolve(a_bindings.depth), a_recording.Resolve(a_bindings.motion),
+				a_recording.Resolve(a_bindings.hudless) };
+			void* nativeList = nullptr;
+			std::vector<RenderGraph::Engine::Native::ExternalImageInfo> infos;
+			std::shared_ptr<const void> views;
+			std::string why;
+			const bool described = RenderGraph::Engine::Native::DescribeForCommands(a_recording.Commands(), images, nativeList, infos, views, why);
+			if (views)
+				a_recording.Retain(std::move(views));
+			if (!described) {
+				static std::once_flag logged;
+				std::call_once(logged, [&] { logger::error("[ORG] Upscaling: {} cannot be recorded ({}); the frame is presented without generation (logged once)", work->label, why); });
+				return;
+			}
+			const bool prepared = work->record(nativeList, infos);
+			// Streamline may bind its own descriptor heaps, so restore the frame's.
+			a_recording.RestoreDescriptorHeaps();
+			if (!prepared) {
+				static std::once_flag logged;
+				std::call_once(logged, [&] { logger::error("[ORG] Upscaling: {} was refused by the SDK; the frame is presented without generation (logged once)", work->label); });
+			}
+		}
+
+	private:
+		std::shared_ptr<const EvaluateShared> shared;
+		FrameAnchors::Texture depth, motion;
+		std::shared_ptr<org::Resource> hudless;
 	};
 
 	void MarkFailed(const std::shared_ptr<Impl>& a_impl, const char* a_why)
@@ -584,6 +662,48 @@ namespace
 		return impl.hudlessRegistered;
 	}
 
+	/** @brief Frame generation's inputs pass. Registering again replaces it. False, logged, on failure. */
+	bool RegisterFrameGenInputs(const std::shared_ptr<Impl>& a_impl)
+	{
+		auto& impl = *a_impl;
+		if (!impl.inputsShared || !impl.hudless || !impl.inputsDepth || !impl.inputsMotion) {
+			FrameAnchors::Unregister(kFrameGenInputsClientId);
+			impl.inputsRegistered = false;
+			return false;
+		}
+		auto shared = impl.inputsShared;
+		auto depth = impl.inputsDepth;
+		auto motion = impl.inputsMotion;
+		auto hudless = impl.hudless->Graph();
+		FrameAnchors::ClientDesc client{};
+		client.id = kFrameGenInputsClientId;
+		client.passes.push_back({ .name = kFrameGenInputsClientId,
+			.anchor = FrameAnchors::Anchor::FrameGeneration,
+			.order = kOrderBase + 1,
+			.kind = FrameAnchors::PassKind::Compute,
+			.make = [shared, depth, motion, hudless]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<FrameGenInputsPass>(shared, depth, motion, hudless);
+			},
+			.atExecution = true });
+		const std::weak_ptr<Impl> weak = a_impl;
+		client.active = [weak] {
+			const auto impl = weak.lock();
+			return impl && impl->inputsArmed;
+		};
+		client.commit = [weak](const FrameAnchors::Point&) {
+			const auto impl = weak.lock();
+			if (!impl || !impl->inputsShared)
+				return;
+			impl->inputsShared->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), impl->inputsWork);
+		};
+		// The third tap of the UI stage's frame generation step, after the clean scene's and the hudless copy's.
+		client.repeats = true;
+		impl.inputsRegistered = FrameAnchors::Register(std::move(client));
+		if (!impl.inputsRegistered)
+			logger::error("[ORG] Upscaling: the frame generation inputs client was refused");
+		return impl.inputsRegistered;
+	}
+
 	/** @brief Remakes the client after a new texture or engine target. */
 	void UpscaleChanged(const std::shared_ptr<Impl>& a_impl)
 	{
@@ -596,6 +716,9 @@ namespace
 	{
 		if (a_impl->hudlessRegistered && !RegisterHudless(a_impl))
 			MarkFailed(a_impl, "its FrameGeneration client could not be registered again");
+		// The inputs pass reads the hudless, so a new one remakes it.
+		if (a_impl->inputsRegistered && !RegisterFrameGenInputs(a_impl))
+			MarkFailed(a_impl, "its frame generation inputs client could not be registered again");
 	}
 }
 
@@ -643,6 +766,8 @@ bool ORGUpscaling::Setup()
 		next->hudlessGate = RenderGraph::RunGate::Create("cs.upscaling.hudless.gate");
 		if (EvaluateInStage())
 			next->evaluateShared = std::make_shared<const EvaluateShared>();
+		if (FrameAnchors::StageStepsAt(FrameAnchors::Anchor::FrameGeneration))
+			next->inputsShared = std::make_shared<const EvaluateShared>();
 		CurrentDepthInputs(next->inputs, next->formats);
 		if (next->inputs.DepthComplete()) {
 			next->depthProgram = LoadDepthProgram(host->Device(), next->formats);
@@ -700,6 +825,7 @@ bool ORGUpscaling::ReleaseAfterFailure()
 	FrameAnchors::Unregister(kClientId);
 	FrameAnchors::Unregister(kEvaluateClientId);
 	FrameAnchors::Unregister(kHudlessClientId);
+	FrameAnchors::Unregister(kFrameGenInputsClientId);
 	impl->upscaled.reset();
 	impl->hudless.reset();
 	impl.reset();
@@ -792,6 +918,45 @@ bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
 	impl->evaluate = std::make_shared<const EvaluateWork>(EvaluateWork{ std::move(a_label), std::move(a_record) });
 	impl->queued |= kEvaluate;
 	return true;
+}
+
+bool ORGUpscaling::RecordsFrameGenInputs() const
+{
+	return IsActive() && impl->hudless && impl->inputsShared;
+}
+
+bool ORGUpscaling::QueueFrameGenInputs(std::string a_label, EvaluateRecord a_record, bool a_depthCopy)
+{
+	if (!RecordsFrameGenInputs())
+		return false;
+	auto* renderer = globals::game::renderer;
+	const auto depthId = a_depthCopy ? RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY : RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN;
+	const auto& depth = renderer->GetDepthStencilData().depthStencils[depthId];
+	const auto& motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+	if (!depth.texture || !motion.texture)
+		return false;
+	auto depthTexture = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depthId));
+	auto motionTexture = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR));
+	if (!depthTexture || !motionTexture)
+		return false;
+	// A new engine target or a switch between kMAIN's depth and its copy remakes the client.
+	if (!impl->inputsRegistered || depthTexture != impl->inputsDepth || motionTexture != impl->inputsMotion) {
+		impl->inputsDepth = std::move(depthTexture);
+		impl->inputsMotion = std::move(motionTexture);
+		if (!RegisterFrameGenInputs(impl)) {
+			MarkFailed(impl, "its frame generation inputs client could not be registered");
+			return false;
+		}
+	}
+	// A new registration prepares once the UI stage's build holds it. Until then the frame is presented without generation.
+	if (!FrameAnchors::Scheduled(kFrameGenInputsClientId, FrameAnchors::Anchor::FrameGeneration))
+		return false;
+	impl->inputsWork = std::make_shared<const EvaluateWork>(EvaluateWork{ std::move(a_label), std::move(a_record) });
+	impl->inputsArmed = true;
+	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration);
+	impl->inputsArmed = false;
+	impl->inputsWork.reset();
+	return ran && IsActive();
 }
 
 bool ORGUpscaling::QueueCopyToMain()
@@ -933,6 +1098,8 @@ bool ORGUpscaling::Holds(Target) const { return false; }
 ID3D11Texture2D* ORGUpscaling::Texture(Target, ID3D11Texture2D* a_d3d11) const { return a_d3d11; }
 const D3D11_TEXTURE2D_DESC* ORGUpscaling::Desc(Target, const D3D11_TEXTURE2D_DESC* a_d3d11) const { return a_d3d11; }
 bool ORGUpscaling::QueueEvaluate(std::string, EvaluateRecord) { return false; }
+bool ORGUpscaling::RecordsFrameGenInputs() const { return false; }
+bool ORGUpscaling::QueueFrameGenInputs(std::string, EvaluateRecord, bool) { return false; }
 bool ORGUpscaling::QueueCopyToMain() { return false; }
 bool ORGUpscaling::QueueDepthUpscale(float2, float) { return false; }
 void ORGUpscaling::RunUpscale() {}
