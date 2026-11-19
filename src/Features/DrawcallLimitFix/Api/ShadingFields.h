@@ -22,6 +22,7 @@ namespace DCLF::Api
 	{
 		SkinPerGeometry,  // Advanced Skin's SkinPerGeometry (PS b7), a float4
 		LandscapeSeams,   // per-quad weight, data and borrowed layer descriptors stored as index + 1, zero when inactive
+		SkinMaterial,     // Advanced Skin's material table row (a uint), zero for the disabled profile
 		Count,
 	};
 
