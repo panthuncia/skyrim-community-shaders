@@ -628,14 +628,11 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
     read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
     handle table.
--   **Guest: Physical Sky's volumetric clouds keep the AP shadow and the fog's scattering on D3D11.** The cloud shadow volume
-    and mean are D3D11 textures until phase 4 of `physical-sky-port.md`, and the graph cannot read a D3D11 3D texture. With the
-    clouds on, the log says once (when it starts) "the AP shadow runs on D3D11 this frame (the volumetric clouds are on D3D11)"
-    and the fog's "Physical Sky's cloud shadows are on D3D11". The sky tail stays on D3D11 too.
--   **Native: no volumetric clouds and no lightning.** `PhysicalSky::VolumetricCloudsEnabled` is false in native mode until
-    phase 4 of `physical-sky-port.md` (the cloud passes, about 12,000 lines of shaders and 60 resources; its Status section
-    lists the order of work). The lightning query reads the clouds' resources, so it lands with them; the replayable readback
-    it uses is in place (`RenderGraph::RunReadback`).
+-   **(Closed) Guest: Physical Sky's volumetric clouds kept the AP shadow, the fog's scattering and the sky tail on D3D11.**
+    Phase 4 of `physical-sky-port.md` put the clouds on the graph (`cs.physical-sky.cloud-maps`, `cs.physical-sky.clouds`).
+    The three read the shadow volume and mean by their published ids, and the D3D11 fallbacks are gone.
+-   **(Closed) Native: no volumetric clouds and no lightning.** The native gate in `PhysicalSky::VolumetricCloudsEnabled`
+    is removed. The lightning query reads its candidates through `RenderGraph::RunReadback`.
 -   **Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
     black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
     Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
