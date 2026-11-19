@@ -35,3 +35,12 @@ final until the user confirms it.
 8. **Washed-out exteriors in today's runs** are Physical Sky on without Linear Lighting (the open upstream question), not a
    regression. Physical Sky's textures are now staged with the test build, so the feature runs where it did not before. Runs that
    compare brightness set `features.PhysicalSky=false`.
+9. **Physical Sky's clouds and lightning are merged** (`267d413f2`), with these items left open:
+   - The graph clouds are about 6% darker than D3D11.
+   - Lightning, storms and the other cloud layers are untested.
+   - The lead's calls are open questions 16-24 in `physical-sky-port.md`.
+   - It added handle tables to `AnchorPasses` (`Dispatch::table`/`Draw::table`, `Bind::Table`), since the clouds need about
+     60 resources against the 32-word push block. That also serves the deferred composite later.
+   - The merge moves `extern/OpenRenderGraph` to `7c5d080` (`org-port/exempt-exit-commit`, "never commit an exempt backing's
+     exit step"). It is a descendant of the previous pointer, is only local, and needs pushing to the ORG remote with the
+     rest.
