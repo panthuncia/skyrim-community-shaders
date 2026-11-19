@@ -165,7 +165,10 @@ public:
 	 */
 	void SeparateFromGraphEpochs();
 
+	/** @brief Frame generation is selected and its presenter's surface is ready for this frame's inputs. */
 	bool IsFrameGenerationActive() const;
+	/** @brief Frame generation is selected and can run, whether or not a presentation replacement is still in flight. */
+	bool IsFrameGenerationSelected() const;
 
 	/** @brief Returns the Reflex state required by the active frame generator. */
 	[[nodiscard]] bool GetEffectiveReflex() const;

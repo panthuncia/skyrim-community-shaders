@@ -48,7 +48,11 @@ namespace FrameGen
 
 	void NativePresenter::SetTornDown(std::function<bool()> a_tornDown)
 	{
-		std::lock_guard guard(lock);
-		tornDown = std::move(a_tornDown);
+		{
+			std::lock_guard guard(lock);
+			tornDown = a_tornDown;
+		}
+		// Also for replacements other callers ask for (HDR's colour space), so a pending feature load change goes through them.
+		RenderGraph::Engine::Native::SetPresentationTornDown(std::move(a_tornDown));
 	}
 }
