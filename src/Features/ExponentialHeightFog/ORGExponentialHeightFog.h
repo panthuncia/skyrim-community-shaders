@@ -32,6 +32,7 @@ public:
 	* 1: the volumes ignore the scene depth (no conservative-depth culling).
 	* 2: the engine's draws and DCLF's get no volume at t19 and t22; the graph readers still read them by published id.
 	* 3: the graph path stays off, so the D3D11 path runs (guest mode only).
+	* 4: the engine's draws and DCLF's get each volume version before any run wrote it, as before that was fixed. To show its effect.
 	*/
 	static std::uint32_t Debug();
 
@@ -51,7 +52,10 @@ public:
 	/** @brief At the feature's Prepass. @return False means the D3D11 path runs this frame. */
 	bool Prepass();
 
-	/** @brief Null when the D3D11 path has them. */
+	/**
+	* @brief Null when the D3D11 path has them, or until a submitted run wrote the volumes' current versions.
+	* A new version (first registration, resize) holds whatever its memory held, which may be NaN or huge values.
+	*/
 	ID3D11ShaderResourceView* NearSRV() const;
 	ID3D11ShaderResourceView* FarSRV() const;
 
@@ -65,6 +69,9 @@ public:
 
 private:
 	ORGExponentialHeightFog() = default;
+
+	/** @brief Whether the readers may have the graph's volumes now. */
+	bool Readable() const;
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

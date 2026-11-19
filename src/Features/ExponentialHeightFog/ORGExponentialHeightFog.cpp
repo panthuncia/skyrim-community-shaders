@@ -13,8 +13,8 @@ std::uint32_t ORGExponentialHeightFog::Debug()
 {
 	static const std::uint32_t s_mode = [] {
 		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
-		if (mode > 3) {
-			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 3); it is off", mode);
+		if (mode > 4) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 4); it is off", mode);
 			return 0u;
 		}
 		if (mode)
@@ -721,6 +721,31 @@ struct ORGExponentialHeightFog::Impl
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
 	bool reportedConstants = false;  // the first graph frame's constants are logged once
 	const FogState* reportedUnbound = nullptr;  // the last state Commit turned flags off for, logged once each
+	// The integrated volumes' versions that a submitted run wrote. A new image holds whatever its memory held.
+	// The D3D11 readers get a version only after a run wrote it, so they never read an unwritten one.
+	std::weak_ptr<org::Resource> writtenNear, writtenFar;
+
+	/** @brief Whether a submitted run wrote the current versions of both integrated volumes. Render thread. */
+	bool Written() const
+	{
+		if (!textures)
+			return false;
+		const auto same = [](const std::weak_ptr<org::Resource>& a_written, const std::shared_ptr<org::Resource>& a_current) {
+			return a_current && !a_written.owner_before(a_current) && !a_current.owner_before(a_written);
+		};
+		return same(writtenNear, textures->nearVolume.integrated->Graph()) && same(writtenFar, textures->farVolume.integrated->Graph());
+	}
+
+	/** @brief After a submitted run of a_state. Its integration (or the far clear) wrote the volumes' current versions. */
+	void Executed(const FogState& a_state)
+	{
+		const bool before = Written();
+		writtenNear = a_state.textures->nearVolume.integrated->Graph();
+		writtenFar = a_state.textures->farVolume.integrated->Graph();
+		if (!before)
+			logger::info("[ORG] Exponential Height Fog: a run wrote the volumes at frame {}; the engine's draws and DCLF read them from the next Prepass",
+				globals::state->frameCount);
+	}
 
 	void MakeVolume(Volume& a_volume, VolumeTextures& a_textures, bool a_groupReduce, bool a_far) const
 	{
@@ -909,6 +934,8 @@ struct ORGExponentialHeightFog::Impl
 			shared->textures->directionalShadowLights->Register(a_graph);
 		};
 		client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
+		// Only a submission confirms the volumes were written. It comes only for runs whose graph holds this registration.
+		client.executed = [this, shared](const FrameAnchors::Point&) { Executed(*shared); };
 		// The fog has work only when Prepass gave the graph this frame.
 		client.active = [this] { return pending.has_value(); };
 		client.sharedConstants = true;
@@ -1131,14 +1158,20 @@ bool ORGExponentialHeightFog::Prepass()
 	return true;
 }
 
+bool ORGExponentialHeightFog::Readable() const
+{
+	// Mode 4 hands out versions no run wrote yet, as before the fix, to show what that does.
+	return IsActive() && impl->state && impl->ranLastFrame && (impl->Written() || Debug() == 4);
+}
+
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const
 {
-	return IsActive() && impl->state && impl->ranLastFrame ? impl->textures->nearVolume.integrated->SRV() : nullptr;
+	return Readable() ? impl->textures->nearVolume.integrated->SRV() : nullptr;
 }
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const
 {
-	return IsActive() && impl->state && impl->ranLastFrame ? impl->textures->farVolume.integrated->SRV() : nullptr;
+	return Readable() ? impl->textures->farVolume.integrated->SRV() : nullptr;
 }
 
 std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const
@@ -1174,6 +1207,7 @@ void ORGExponentialHeightFog::Reserve() {}
 bool ORGExponentialHeightFog::Setup() { return false; }
 bool ORGExponentialHeightFog::IsActive() const { return false; }
 bool ORGExponentialHeightFog::Prepass() { return false; }
+bool ORGExponentialHeightFog::Readable() const { return false; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const { return nullptr; }
 std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const { return std::nullopt; }
