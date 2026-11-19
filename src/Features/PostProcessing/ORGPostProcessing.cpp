@@ -1100,11 +1100,22 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 		s.failedKey.clear();
 	}
 
-	// A stage holds the Tonemap anchor, so the chain's work must land in a stage step whose built graph holds this registration.
-	// Frames of a kind without the post stage, such as the main menu's, have no such step. Neither does the post stage
-	// until a build with a new registration switches in. On those frames D3D11 runs the chain, so the image is still drawn.
-	if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Tonemap) && !FrameAnchors::CanTap(ORGPostChain::kClientId)) {
-		s.SetReason("no stage of this frame holds the chain's build yet, or the frame kind has no post stage");
+	// The Tonemap anchor has no epoch of its own. The chain's work must land in the post stage's Tonemap step.
+	// That step shares the anchor with Effects11 and does not hold it wholly, so HeldByStage is false for it and cannot be the test.
+	// The frame's schedules, taken at Renderer::Begin, say whether a stage of this frame draws this registration.
+	// A frame kind without the post stage, such as the main menu's, has none. Nor does the post stage after a rebuild,
+	// until the build with the new registration switches in. Those are D3D11 frames for the chain, so D3D11 draws it.
+	if (!FrameAnchors::ScheduledThisFrame(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
+		s.SetReason("this frame's schedule has no post stage that holds the chain's build (a frame kind without one, or a build not switched in yet)");
+		return;
+	}
+	// The frame's schedule holds the chain, so the open stage must take the tap now. If it does not, that is a schedule bug.
+	// It is logged, and D3D11 draws the chain this frame, since no stage would take the graph's work.
+	if (!FrameAnchors::Scheduled(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
+		static Util::ReasonLog s_lag("[ORG] Post Processing: the post stage does not take the Tonemap tap, though the frame's schedule holds the chain",
+			spdlog::level::err);
+		s_lag.Report("not scheduled at the tap");
+		s.SetReason("the post stage does not take the Tonemap tap this frame (logged above)");
 		return;
 	}
 
