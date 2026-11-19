@@ -234,14 +234,27 @@ namespace FrameAnchors
 
 		std::uint32_t EpochOfDeclared(std::uint32_t a_declared) { return RenderGraphRuntime::EpochOf(declaredInfo[a_declared].segment); }
 
+		/** @brief The versions a segment recording binds. Null versions mean the current ones. The serial tells sets apart in the cache. */
+		struct RecordVersions
+		{
+			std::shared_ptr<const org::IResourceVersions> versions;
+			std::uint64_t serial = 0;
+		};
+
 		/** @brief The frame description fields a segment recording is made for. Passes of clients that are off record only barriers. */
 		struct SegmentHostData final : org::IHostExecutionData
 		{
 			std::uint32_t segment = 0;
 			RenderGraph::Frame::SegmentFields fields;
+			// The versions it binds, which may be pending. Null binds the current ones.
+			std::shared_ptr<const org::IResourceVersions> versions;
 			const void* TryGet(std::type_index a_type) const noexcept override
 			{
-				return a_type == std::type_index(typeid(SegmentHostData)) ? this : nullptr;
+				if (a_type == std::type_index(typeid(SegmentHostData)))
+					return this;
+				if (a_type == std::type_index(typeid(org::IResourceVersions)))
+					return versions.get();
+				return nullptr;
 			}
 		};
 
@@ -251,6 +264,7 @@ namespace FrameAnchors
 		{
 			std::uint64_t hash = 0;
 			std::uint32_t slot = 0;
+			std::uint64_t versionsSerial = 0;  // RecordVersions::serial; 0 for the current versions
 			RenderGraph::Frame::SegmentFields fields;
 			std::shared_ptr<const org::GraphHost::EpochRecording> recording;  // set once the host's thread recorded every copy
 			bool done = false; // recorded, failed or dropped
@@ -2317,12 +2331,16 @@ namespace FrameAnchors
 		/**
 		* @brief The segment recording for a_fields, kept or newly requested from the host's thread. Never waits. Render owner.
 		* A kept one that failed stops the game. Requests outside BeginFrame count as mid-frame re-records.
+		* a_versions names the versions it binds, which may be pending. A recording for other versions is another entry.
 		*/
 		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
-			std::uint64_t a_frame, std::string_view a_why, bool* a_asked = nullptr)
+			std::uint64_t a_frame, std::string_view a_why, bool* a_asked = nullptr, const RecordVersions& a_versions = {})
 		{
 			if (a_asked)
 				*a_asked = false;
+			if (static_cast<bool>(a_versions.versions) != (a_versions.serial != 0))
+				stl::report_and_fail(fmt::format("[ORG] frame segments: {} was asked for named versions without a serial, or a serial without versions",
+					declaredInfo[a_declared].names.label));
 			auto& recordings = a_state.declaredRecordings[a_declared];
 			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
 			std::string reason;
@@ -2331,7 +2349,7 @@ namespace FrameAnchors
 				std::unique_lock lock(recordings.mutex);
 				for (auto it = recordings.entries.begin(); it != recordings.entries.end(); ++it) {
 					auto& kept = **it;
-					if (kept.hash != hash || kept.slot != a_slot || !(kept.fields == a_fields))
+					if (kept.hash != hash || kept.slot != a_slot || kept.versionsSerial != a_versions.serial || !(kept.fields == a_fields))
 						continue;
 					if (kept.done && !kept.recording) {
 						if (!kept.dropped)
@@ -2344,14 +2362,20 @@ namespace FrameAnchors
 				}
 				reason = recordings.any ? RenderGraph::Frame::DiffFields(recordings.last, a_fields) : std::string("the first description");
 				if (reason.empty()) {
-					// The description recorded for another slot already, or a recording of it that a build dropped.
+					// The description recorded for another slot or other versions already, or a recording of it that a build dropped.
 					const bool other = std::ranges::any_of(recordings.entries, [&](const auto& a_entry) { return a_entry->hash == hash && a_entry->slot != a_slot; });
-					reason = other ? fmt::format("the same description, for slot {}", a_slot) : std::string("the same description, a build dropped its last recording");
+					const bool otherVersions = std::ranges::any_of(recordings.entries, [&](const auto& a_entry) {
+						return a_entry->hash == hash && a_entry->slot == a_slot && a_entry->versionsSerial != a_versions.serial;
+					});
+					reason = other ? fmt::format("the same description, for slot {}", a_slot) :
+					         otherVersions ? fmt::format("the same description, for named versions {}", a_versions.serial) :
+					                         std::string("the same description, a build dropped its last recording");
 				}
 				recordings.last = a_fields;
 				recordings.any = true;
 				entry->hash = hash;
 				entry->slot = a_slot;
+				entry->versionsSerial = a_versions.serial;
 				entry->fields = a_fields;
 				entry->lastFrame = a_frame;
 				// Recordings of an older build keep its graph and alias pools alive, tens of MB each, so they go.
@@ -2381,6 +2405,7 @@ namespace FrameAnchors
 			auto data = std::make_shared<SegmentHostData>();
 			data->segment = a_declared;
 			data->fields = a_fields;
+			data->versions = a_versions.versions;
 			const bool posted = a_state.host->RequestEpochRecording(EpochOfDeclared(a_declared), std::move(data),
 				[&recordings, entry](std::shared_ptr<const org::GraphHost::EpochRecording> a_recording, std::exception_ptr a_error) {
 					std::string error;
