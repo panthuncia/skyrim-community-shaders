@@ -144,6 +144,10 @@ ExponentialHeightFog::GpuSettings ExponentialHeightFog::GetCommonBufferData() co
 
 	if (IsSuppressed())
 		data.enabled = 0;
+	// On the graph the shaders read the volumes only once a run wrote the bound versions, as the D3D11 readers get them.
+	const auto& orgFog = ORGExponentialHeightFog::Get();
+	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3 && !orgFog.NearSRV())
+		data.volumetricFogEnabled = 0;
 	return data;
 }
 
@@ -324,12 +328,23 @@ void ExponentialHeightFog::ClearShaderCache()
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;
-	uint32_t pixelSize = std::clamp(quality.nearPixelSize.Get(), 4u, 64u);
-	const uint32_t gridZ = std::clamp(quality.nearSlices.Get(), 16u, 160u);
-	uint32_t farPixelSize = std::clamp(quality.middlePixelSize.Get(), 4u, 64u);
-	const uint32_t farGridZ = std::clamp(quality.middleSlices.Get(), 16u, 160u);
 	float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
-	auto renderSize = Util::ConvertToDynamic(screenSz);
+	return GridSizesFor(Util::ConvertToDynamic(screenSz), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
+}
+
+bool ExponentialHeightFog::VolumesOn(uint32_t a_enabled, uint32_t a_volumetricFogEnabled, float a_extinctionScale, float a_fogDensity, float a_fogDensity2)
+{
+	return a_enabled && a_volumetricFogEnabled && a_extinctionScale > 0.0f && (a_fogDensity > 0.0f || a_fogDensity2 > 0.0f);
+}
+
+ExponentialHeightFog::GridSizes ExponentialHeightFog::GridSizesFor(float2 a_size, uint32_t a_nearPixelSize, uint32_t a_nearSlices, uint32_t a_middlePixelSize,
+	uint32_t a_middleSlices)
+{
+	uint32_t pixelSize = std::clamp(a_nearPixelSize, 4u, 64u);
+	const uint32_t gridZ = std::clamp(a_nearSlices, 16u, 160u);
+	uint32_t farPixelSize = std::clamp(a_middlePixelSize, 4u, 64u);
+	const uint32_t farGridZ = std::clamp(a_middleSlices, 16u, 160u);
+	const float2 renderSize = a_size;
 
 	auto getGridSize = [&renderSize](uint32_t a_pixelSize, uint32_t a_gridZ) {
 		return DirectX::XMUINT4{
@@ -361,8 +376,8 @@ ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 	sizes.nearSize = gridSize;
 	sizes.farSize = farGridSize;
 	// From 8-pixel cells up, one thread group per cell reduces the cell's depth footprint in parallel.
-	sizes.nearGroupReduce = std::clamp(quality.nearPixelSize.Get(), 4u, 64u) >= 8;
-	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(quality.middlePixelSize.Get(), 4u, 64u) >= 8;
+	sizes.nearGroupReduce = std::clamp(a_nearPixelSize, 4u, 64u) >= 8;
+	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(a_middlePixelSize, 4u, 64u) >= 8;
 	return sizes;
 }
 
@@ -489,7 +504,6 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 
 void ExponentialHeightFog::ReleaseVolumetricResources()
 {
-	ORGExponentialHeightFog::Get().Release();
 	vBufferA.reset();
 	vBufferAFar.reset();
 	conservativeDepth.reset();
@@ -823,6 +837,17 @@ void ExponentialHeightFog::Prepass()
 			ReleaseVolumetricResources();
 		return;
 	}
+	// The render-graph path: its volumes and passes follow the adopted revision, and run in the Prepass anchor's epoch.
+	// A frame it cannot run has no volumetric fog. Debug mode 3 runs the D3D11 path instead.
+	auto& orgFog = ORGExponentialHeightFog::Get();
+	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3) {
+		if (vBufferA || vBufferAFar)
+			ReleaseVolumetricResources();
+		if (!IsSuppressed() && orgFog.Prepass())
+			BindIntegratedLightScattering();
+		return;
+	}
+
 	if (!settings.enabled || !settings.volumetricFogEnabled || settings.volumetricFogExtinctionScale <= 0.0f) {
 		ReleaseVolumetricResources();
 		return;
@@ -830,12 +855,6 @@ void ExponentialHeightFog::Prepass()
 
 	if (IsSuppressed())
 		return;
-
-	// The render-graph path: its passes run in the Prepass anchor's epoch, right after the features' Prepass.
-	if ((settings.fogDensity > 0.0f || settings.fogDensity2 > 0.0f) && ORGExponentialHeightFog::Get().Prepass()) {
-		BindIntegratedLightScattering();
-		return;
-	}
 
 	EnsureD3D11Objects();
 	EnsureVolumetricResources();

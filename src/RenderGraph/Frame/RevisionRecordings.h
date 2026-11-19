@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace org
@@ -40,6 +41,27 @@ namespace FrameAnchors
 	*/
 	std::shared_ptr<RevisionRecordings> MakeRevisionRecordings(std::span<const std::uint32_t> a_epochs, std::shared_ptr<const org::IResourceVersions> a_versions,
 		std::uint64_t a_serial, std::vector<std::uint32_t>& a_others);
+
+	/**
+	* @brief Builds a revision must install: every declared segment in a_segments (a bit per SegmentId) takes a build made from
+	* the anchors' snapshot a_serial or a newer one. A client registered or removed for a revision needs this, so the revision
+	* adopts its values and the stage builds that hold the client in one frame.
+	*/
+	struct StageBuildNeed
+	{
+		std::uint64_t segments = 0;
+		std::uint64_t serial = 0;
+		std::string what;  // for the logs, as "client 'cs.exp-height-fog'"
+	};
+
+	/** @brief Render owner. The declared segments that hold client a_id now, a bit each. 0 when it is not registered. */
+	std::uint64_t ClientSegments(std::string_view a_id);
+
+	/** @brief Render owner. The serial of the anchors' newest snapshot. A build made from it holds every registration so far. */
+	std::uint64_t ClientsSerial();
+
+	/** @brief Render owner. The builds a_revision waits for, replacing the ones given before. */
+	void RequireBuilds(RevisionRecordings& a_revision, std::vector<StageBuildNeed> a_needs);
 
 	/** @brief Render owner. Whether a CS stage has a staged build, which only a frame revision attaches. */
 	bool StagedStages();

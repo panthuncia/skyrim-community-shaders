@@ -25,8 +25,8 @@ namespace CS
 	class SettingRegistry
 	{
 	public:
-		/// Receives a raise. The lead wires it to the frame variables. Called outside the registry lock.
-		using RaiseHook = void (*)(std::uint32_t a_id, std::string_view a_name);
+		/// Receives a raise with the value's bytes (null for an unbound id). Wired to the frame variables. Called outside the registry lock.
+		using RaiseHook = void (*)(std::uint32_t a_id, std::string_view a_name, const void* a_bytes, std::size_t a_size);
 
 		/** @brief The id for a_name, made on first use. Never zero. The same name always gives the same id. */
 		static SettingVariableId Declare(std::string_view a_name);
@@ -56,6 +56,12 @@ namespace CS
 		 * An address with no binding does nothing.
 		 */
 		static void RaiseAt(const void* a_address);
+
+		/**
+		 * @brief Copies the bytes a_id last raised (or had when bound) into a_out.
+		 * @return False when a_id is not bound or its size is not a_size.
+		 */
+		static bool RaisedBytes(SettingVariableId a_id, void* a_out, std::size_t a_size);
 
 		/** @brief The bound ids whose bytes differ from the ones last raised. For the missed-writer check. */
 		static std::vector<SettingVariableId> Unraised();

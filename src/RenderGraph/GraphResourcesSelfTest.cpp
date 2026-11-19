@@ -225,13 +225,13 @@ namespace GraphResources::SelfTest
 		}
 
 		// Counts the pilot's raises and passes every raise on to the hook it replaced.
-		void CountPilotRaise(std::uint32_t a_id, std::string_view a_name)
+		void CountPilotRaise(std::uint32_t a_id, std::string_view a_name, const void* a_bytes, std::size_t a_size)
 		{
 			auto& raises = Raises();
 			if (a_id == raises.id)
 				++raises.count;
 			if (raises.previous)
-				raises.previous(a_id, a_name);
+				raises.previous(a_id, a_name, a_bytes, a_size);
 		}
 
 		/** @brief Runs the pilot's checks once. @return The first failed check, or empty when every one held. */

@@ -192,8 +192,14 @@ public:
 private:
 	friend class ORGExponentialHeightFog;
 
-	/** @brief The volumes' grid sizes for the current render size and settings. */
+	/** @brief The volumes' grid sizes for the current render size and live settings. The D3D11 path's. */
 	GridSizes ComputeGridSizes() const;
+
+	/** @brief The volumes' grid sizes for a_size (the area the grid covers) and the grid settings. */
+	static GridSizes GridSizesFor(float2 a_size, uint32_t a_nearPixelSize, uint32_t a_nearSlices, uint32_t a_middlePixelSize, uint32_t a_middleSlices);
+
+	/** @brief Whether the volumetric fog's volumes exist for these settings. */
+	static bool VolumesOn(uint32_t a_enabled, uint32_t a_volumetricFogEnabled, float a_extinctionScale, float a_fogDensity, float a_fogDensity2);
 
 	/** @brief The frame's volumetric fog constants; a_farGridEnabled says whether the far volume covers any depth. */
 	VolumetricFogCB BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const;
