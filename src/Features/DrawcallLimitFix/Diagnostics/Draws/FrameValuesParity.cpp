@@ -1,4 +1,4 @@
-// CS_DCLF_PERSISTENT_PARITY: the frame values' rows and palettes against the engine's now.
+// Frame value rows and palettes against the engine's current values.
 
 #include "DrawsState.h"
 #include "Observers.h"
@@ -10,7 +10,6 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		// The first of a row's fields that differs.
 		const char* DifferingField(const BindlessPlacement& a_expected, const BindlessPlacement& a_got)
 		{
 			const auto differs = [](const auto& a_a, const auto& a_b) { return std::memcmp(a_a, a_b, sizeof(a_a)) != 0; };
@@ -22,7 +21,7 @@ namespace DCLF::Diagnostics
 			                                                                "forward sort";
 		}
 
-		// A differing row's cause key: the first field that differs, the geometry's name and owner, and its fade node's name and kind.
+		// A differing row's cause key. The first differing field, the geometry's name and owner, and its fade node.
 		void NoteCause(DrawsState::FrameValuesParity& a_s, std::uint32_t a_slot, const RE::BSGeometry* a_geometry, const BindlessPlacement& a_expected,
 			const BindlessPlacement& a_got)
 		{
@@ -33,7 +32,7 @@ namespace DCLF::Diagnostics
 			const auto* base = ref ? ref->GetBaseObject() : nullptr;
 			const auto* property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
 			const auto* fadeNode = property ? property->fadeNode : nullptr;
-			// The chain up to the nearest BSOrderedNode: the node classes on it (a billboard rotates in the cull), and the ordered node's.
+			// The chain up to the nearest BSOrderedNode. A billboard rotates in the cull.
 			std::string chain;
 			const RE::NiAVObject* ordered = nullptr;
 			for (const RE::NiAVObject* at = a_geometry->parent; at; at = at->parent) {
@@ -46,7 +45,7 @@ namespace DCLF::Diagnostics
 				if (name == "BSOrderedNode" || at == fadeNode)
 					break;
 			}
-			// Whether the ordered node holds a billboard anywhere below it (the cull turns it: the node's bound follows the camera).
+			// Whether the ordered node holds a billboard below it, since the cull turns it and its bound follows the camera.
 			const auto holdsBillboard = [](const auto& a_self, const RE::NiAVObject* a_object, int a_depth) -> bool {
 				const auto* node = a_object && a_depth < 12 ? const_cast<RE::NiAVObject*>(a_object)->AsNode() : nullptr;
 				if (!node)
@@ -77,7 +76,7 @@ namespace DCLF::Diagnostics
 
 	void CheckFrameValues(const SceneTables& a_tables, const PlacementPlan* a_fresh)
 	{
-		// A diagnostics frame: the render thread waits for the frame's producer.
+		// The render thread waits for the frame's producer.
 		const auto* producedRows = FrameValues::Get().RowsIfDone(true);
 		if (!producedRows)
 			return;
@@ -97,9 +96,7 @@ namespace DCLF::Diagnostics
 		for (std::uint32_t slot = 0; slot < count; ++slot) {
 			if (!FrameValues::SampleSlot(a_tables, slot, expected))
 				continue;
-			// A palette rows member's row is its class's (a particle system's snapshot's, Features/Particles), not the engine's transforms
-			// now: the item class the coordinator plans it as (Coordinator::PlacedKeyOf: a palette block of a skinless geometry of the class's
-			// type).
+			// A palette block member's row is its class's, such as a particle snapshot, not the engine's transforms now.
 			const bool paletteBlock = (a_tables.objects[slot].flags & kObjectPaletteBlock) && slot < a_tables.boneRows.size() && a_tables.boneRows[slot];
 			if (auto* geometry = a_tables.objectGeometry[slot]; geometry &&
 				Extensions::PlannedItemClass(paletteBlock, static_cast<std::uint8_t>(geometry->GetType().get()), geometry->GetGeometryRuntimeData().skinInstance != nullptr) !=
@@ -139,10 +136,8 @@ namespace DCLF::Diagnostics
 
 	void CheckShadingSampled(const SceneTables& a_tables)
 	{
-		// Every resident slot's shading row is sampled once named (NameShading: a static object's accumulate patch, the only time it is),
-		// and every sampler sets written. A row still zero at two checks running was never sampled, and draws with alpha 0: a refused
-		// engine-read lease's item, before FrameValues handed those back, left every decal of a session drawing nothing. CS_DCLF_SET_PARITY,
-		// on the colour epoch, never waiting for the producer (a frame whose rows are not done is skipped): waiting keeps every lease.
+		// A shading row is sampled once, when named. A row still zero at two checks was never sampled and draws with alpha 0.
+		// Never wait for the producer here, since waiting holds every lease. Frames whose rows are not done are skipped.
 		const auto* shading = FrameValues::Get().ShadingIfDone(false);
 		if (!shading)
 			return;

@@ -1,4 +1,4 @@
-// Diagnostics::Install: the areas' installs, once, at PostPostLoad (before DCLF's threads start).
+// Runs the areas' installs once at PostPostLoad, before DCLF's threads start.
 #include "Install.h"
 
 #include "Hooks.h"

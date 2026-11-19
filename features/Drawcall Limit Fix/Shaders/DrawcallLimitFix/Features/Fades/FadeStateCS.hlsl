@@ -1,14 +1,11 @@
-// Drawcall Limit Fix: the fade roots' state on the GPU (dclf-architecture.md, "Fades on the GPU"; Records.h, FadeRootStatic).
+// Drawcall Limit Fix. Fade root state on the GPU.
 //
-// The engine updates a BSFadeNode's fade and LOD state in its OnVisible, for the main camera's cull, whenever the node's bound
-// passes the cull's frustum test. This pass does the same for every fade root a DCLF member draws under, from the depth
-// segment's view-projection: one thread per root slot. A state row whose generation is not its static row's is new (a listed
-// node) and starts from the node's values. The update is Features/Fades/FadeState.cpp's port of the engine's functions, instruction
-// for instruction; keep the two the same.
-//
-// A frame ahead, on the compute queue in the Z-prepass epoch: the state rows are this pass's alone, and every root's state
-// after the update is published into the frame's output of two (by the scene frame's parity). The builds read the other one,
-// the frame before's (BuildDrawsLatch::fadeStatesIndex), so nothing waits for this pass.
+// The engine updates a BSFadeNode's fade and LOD state in OnVisible whenever the main camera's cull finds its bound in view.
+// This pass does the same for every fade root a DCLF member draws under, one thread per root slot. A row whose generation differs
+// from its static row's is new and starts from the node's values. The update ports Features/Fades/FadeState.cpp instruction for
+// instruction, so keep the two the same.
+// It runs a frame ahead on the compute queue and publishes into one of two outputs by frame parity. The builds read the other
+// one, so nothing waits for this pass.
 
 #include "DrawcallLimitFix/CullEye.hlsli"
 #include "DrawcallLimitFix/PortalPrograms.hlsli"
@@ -20,23 +17,22 @@ cbuffer FadeStateConstants : register(b0)
 	uint RootsIndex;   // StructuredBuffer<FadeRootStatic>
 	uint StatesIndex;  // RWStructuredBuffer<FadeNodeState>
 	uint FrameIndex;   // StructuredBuffer<FadeFrame>, one row
-	uint LatchIndex;   // ByteAddressBuffer: the depth segment's BuildDrawsLatch (its view-projection)
+	uint LatchIndex;   // ByteAddressBuffer, the depth segment's BuildDrawsLatch
 	uint LatchOffset;
 	uint LogIndex;           // RWStructuredBuffer<FadeLogEntry> (CS_DCLF_FADE_PARITY)
-	uint OutIndex0;          // RWStructuredBuffer<FadeNodeState>: the published states of the even frames
+	uint OutIndex0;          // RWStructuredBuffer<FadeNodeState>, published states of even frames
 	uint OutIndex1;          // and of the odd
-	uint ReservedProgramsWord;  // the programs are the depth latch's portalProgramsIndex (kLatchPortalPrograms)
-	uint RootProgramsIndex;  // StructuredBuffer<uint>: each root's program (its room's; kPortalNoProgram: the frustum alone)
-	uint AnimatedIndex;      // StructuredBuffer<uint>: per root, the scene frame whose animation batch updated it
-	uint EventsIndex;        // RWStructuredBuffer<uint>: the write-back's events, after a count word (FadeRecords.h, FadeEvent)
-	uint ReportedIndex;      // RWStructuredBuffer<uint2>: per root, the generation and the milestone last reported
-	uint EventCapacity;      // the events the list holds (and every readback of it)
+	uint ReservedProgramsWord;  // the programs are the depth latch's portalProgramsIndex
+	uint RootProgramsIndex;  // StructuredBuffer<uint>, each root's program, or kPortalNoProgram for frustum only
+	uint AnimatedIndex;      // StructuredBuffer<uint>, per root the scene frame whose animation batch updated it
+	uint EventsIndex;        // RWStructuredBuffer<uint>, the write-back's events after a count word
+	uint ReportedIndex;      // RWStructuredBuffer<uint2>, per root the generation and milestone last reported
+	uint EventCapacity;      // the events the list holds
 	uint PortalQueriesIndex;
 	uint PortalResultsIndex;
 }
 
-// FadeNodeState, FadeRootStatic and FadeFrame must match Records.h's (and VisibilityEventsCS.hlsl's copies), FadeLogEntry
-// Features/Fades/FadeRecords.h's.
+// Must match Records.h, VisibilityEventsCS.hlsl's copies, and FadeRecords.h for FadeLogEntry.
 struct FadeNodeState
 {
 	uint Flags;
@@ -99,13 +95,12 @@ struct FadeFrame
 	float TreeHeightLimit;
 	uint Padding;
 	float4 Divisors[4];
-	// The pass's per-frame values (the pass is prepared ahead of the commit that writes this row): the root slots, the scene
-	// frame and the parity log's first root (~0u: none).
+	// Per-frame values. The pass is prepared before the commit that writes this row. ~0u log root means none.
 	uint RootCount;
 	uint SceneFrame;
 	uint LogBase;
 	uint Reserved;
-	// The animation job's update's inputs (Records.h, FadeFrame anim*).
+	// The animation job's update inputs.
 	float3 AnimEye;
 	float AnimLodAdjust;
 	int AnimCounter;
@@ -121,7 +116,7 @@ struct FadeLogEntry
 	uint Root;
 };
 
-// The placement rows (LightingConstants.h, BindlessPlacement).
+// The placement rows, as BindlessPlacement.
 struct PlacementRows
 {
 	float4 Rows[10];
@@ -148,11 +143,11 @@ static const uint kObjectFadeNodeRow = 8;
 static const uint kNoObject = 0xFFFFFFFFu;
 static const uint kFadeRootStoodIn = 1u << 19;
 static const uint kFadeEventHeaderWords = 4;
-static const uint kFadeEventWords = 8;  // Features/Fades/FadeRecords.h, FadeEvent
+static const uint kFadeEventWords = 8;  // FadeRecords.h, FadeEvent
 
 static FadeFrame F;
 
-// MINSS a, b: a when a < b, else b. MAXSS: a when a > b, else b. UCOMISS's equality: equal, or unordered.
+// MINSS and MAXSS semantics. UCOMISS equality means equal or unordered.
 float MinSS(float a, float b) { return a < b ? a : b; }
 float MaxSS(float a, float b) { return a > b ? a : b; }
 bool UnorderedEqual(float a, float b) { return !(a < b) && !(a > b); }
@@ -162,7 +157,7 @@ int SinceVisible(FadeNodeState s) { return int(uint(F.Counter) - uint(s.LastVisi
 bool LongUnseen(FadeNodeState s) { return s.LastVisible < int(uint(F.Counter) - 20u); }
 float Divisor(uint a_type) { return F.Divisors[a_type >> 2][a_type & 3]; }
 
-// FUN_14147b110: the fade value; writes the LOD metric and the unscaled distance.
+// FUN_14147b110. The fade value. Writes the LOD metric and the unscaled distance.
 float FadeValue(inout FadeNodeState s, FadeRootStatic r, float3 c, out float distance)
 {
 	const uint type = TypeOf(s);
@@ -195,7 +190,7 @@ float FadeValue(inout FadeNodeState s, FadeRootStatic r, float3 c, out float dis
 	return value;
 }
 
-// FUN_14147a430: the LOD level and its cross-fade.
+// FUN_14147a430. The LOD level and its cross-fade.
 void LodStep(inout FadeNodeState s, FadeRootStatic r, float distance)
 {
 	uint l152 = s.Levels & 0xFFu;
@@ -251,7 +246,7 @@ void LodStep(inout FadeNodeState s, FadeRootStatic r, float distance)
 	s.Levels = (s.Levels & 0xFFFF0000u) | l152 | (l153 << 8);
 }
 
-// FUN_14147a160: the fade state machine.
+// FUN_14147a160. The fade state machine.
 void FadeUpdate(inout FadeNodeState s, FadeRootStatic r, float3 c, float amount)
 {
 	float distance;
@@ -301,7 +296,7 @@ void FadeUpdate(inout FadeNodeState s, FadeRootStatic r, float3 c, float amount)
 			return;
 		}
 	}
-	// 0x14147a36a: fading out, or nothing.
+	// 0x14147a36a. Fading out, or nothing.
 	if (!((s.Flags & kFadeFlagFadedIn) != 0 && (alwaysOut || value < F.FadeOutBelow))) {
 		const float current = s.CurrentFade;
 		if (!(current > 0.0f) || !(current < one))
@@ -320,7 +315,7 @@ void FadeUpdate(inout FadeNodeState s, FadeRootStatic r, float3 c, float amount)
 	s.Flags &= ~kFadeFlagFadedIn;
 }
 
-// BSFadeNode::OnVisible for the main camera: whether it goes on into the children.
+// BSFadeNode::OnVisible for the main camera. Whether it goes on into the children.
 bool FadeNodeOnVisible(inout FadeNodeState s, FadeRootStatic r, float3 c)
 {
 	const float amount = r.FadeAmount;
@@ -354,7 +349,7 @@ bool FadeNodeOnVisible(inout FadeNodeState s, FadeRootStatic r, float3 c)
 	return s.CurrentFade > 0.0f && !UnorderedEqual(amount, 0.0f);
 }
 
-// The root's update for a frame its bound is in view: the tree height test, then the OnVisible of its class.
+// The root's update for a frame its bound is in view. The tree height test, then its class's OnVisible.
 uint OnVisible(inout FadeNodeState s, FadeRootStatic r, float3 c)
 {
 	uint verdict = kFadeVerdictInView;
@@ -378,9 +373,8 @@ uint OnVisible(inout FadeNodeState s, FadeRootStatic r, float3 c)
 	return verdict | (drawn ? kFadeVerdictDrawn : 0u);
 }
 
-// The cull's sphere test against the main camera's frustum: the depth segment's camera-relative view-projection, its planes
-// normalised, and the centre made relative to its eye. NoNearPlane (the latch's cull flags, bit 9) drops the near plane, as
-// BuildDraws does.
+// The cull's sphere test against the depth segment's frustum, centre made relative to its eye. NoNearPlane drops the near plane
+// as BuildDraws does.
 bool InView(float3 a_centre, float a_radius)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -404,20 +398,17 @@ bool InView(float3 a_centre, float a_radius)
 	return true;
 }
 
-// The main camera's cull test for the root, as the list processes' Process1 (AE 0x140e28390) makes it before the node's
-// OnVisible, through DCLF's portal programs (PortalPrograms.hlsli): the node's always-draw and preprocessed flags, its room's
-// cull mode, the view planes, then its room's (or unbound space's) compound frustum.
+// The main camera's cull test for the root, as Process1 (AE 0x140e28390) makes it before OnVisible, through DCLF's portal programs.
 static const uint kFadeRootAlwaysDraw = 1u << 20;
 static const uint kFadeRootPreprocessed = 1u << 21;
 static const uint kFadeRootPreprocessHidden = 1u << 22;
-// The seeds (FrameValues' fade seeds, the latch's fadeSeedsIndex: two rows a slot, this bit picks the generation's).
+// Picks which of the slot's two seed rows is this generation's.
 static const uint kFadeRootSeedOdd = 1u << 23;
-static const uint kFadeRootWritten = 1u << 24;  // Records.h: the node is DCLF's alone to write (every listed root)
+static const uint kFadeRootWritten = 1u << 24;  // the node is DCLF's alone to write
 static const uint kFadeRootNodeBits = kFadeRootPlanMask | (0xFFu << kFadeRootBitsShift) | kFadeRootTreeThresholds | kFadeRootAlwaysDraw | kFadeRootPreprocessed |
                                       kFadeRootPreprocessHidden;
 
-// The row the update takes (Records.h, MergeFadeSeed: keep the two the same): the seed's node values and state, as the frame's
-// values sampled the node, with the coordinator's object, generation, fadeAmount and bits. False: no seed of its generation yet.
+// The row the update takes, matching Records.h's MergeFadeSeed. False when there is no seed of its generation yet.
 bool MergeSeed(uint a_slot, inout FadeRootStatic a_root)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -440,21 +431,15 @@ bool MergeSeed(uint a_slot, inout FadeRootStatic a_root)
 	return true;
 }
 
-// The cull test without a program: the frustum, after the node flags Process1 tests first (AE 0x140e28390): an always-draw node passes
-// untested (kAccumulated is this verdict, as the engine's cull sets it). A preprocessed node (an actor's root: the actor pre-cull,
-// BSFadeNodeCuller, sets bit 12 and, off screen, kNotVisible every frame in Main::Draw's camera setup) passes in the engine unless
-// kNotVisible, whatever its room; the seed's copy of bit 20 is the listing frame's, so DCLF makes the pre-cull's test itself: the main
-// camera's frustum on the root's bound.
+// The cull test without a program. An always-draw node passes untested. A preprocessed actor root passes in the engine unless
+// kNotVisible, but the seed's flags are stale, so DCLF makes the actor pre-cull's frustum test itself.
 bool FrustumInView(float3 a_centre, float a_radius, uint a_rootBits)
 {
 	return (a_rootBits & kFadeRootAlwaysDraw) != 0u || InView(a_centre, a_radius);
 }
 
-// The fade write-back (dclf-architecture.md, "The fade write-back"): the engine reads a stood-in root's node (the
-// tree LOD's crossfade, the occlusion maps' cull, the animation gate, the next listing), which only this pass updates. Its
-// milestones: 0 faded out, 1 fading, 2 faded in; with them the leaf LOD's level (+0x152 & 0xF) and transition
-// (+0x153 & 0x70), so a level step or its settling is written too, not every blend step. A root that is not stood in has parts the
-// engine draws, which read the node's fade: while it fades, each of 32 fade steps is a milestone too (bits 9-13).
+// The engine reads a stood-in root's node, so this pass reports milestones for the write-back. 0 faded out, 1 fading, 2 faded in,
+// plus LOD level and transition steps. A root that is not stood in also reports each of 32 fade steps while it fades.
 uint FadeMilestone(FadeNodeState a_state, uint a_rootBits)
 {
 	const uint fade = a_state.CurrentFade <= 0.0 ? 0u : (a_state.CurrentFade >= 1.0 ? 2u : 1u);
@@ -462,9 +447,8 @@ uint FadeMilestone(FadeNodeState a_state, uint a_rootBits)
 	return fade | ((a_state.Levels & 0xFu) << 2) | (((a_state.Levels >> 12) & 0x7u) << 6) | (step << 9);
 }
 
-// A root DCLF writes (kFadeRootWritten) whose milestone is not the one last reported appends an event, and counts it reported once
-// it is in the list; one that does not fit tries again next frame (the count tells the host to grow the list). Any other root's
-// node is the engine's own, so its milestone is what the node holds. The list's header (its frame) is the depth commit's.
+// A root DCLF writes appends an event when its milestone changed. One that does not fit retries next frame. Other roots' nodes
+// are the engine's own.
 void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 {
 	// One relational compare and no early return after an || of equalities.
@@ -502,7 +486,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	const uint index = dispatchID.x + dispatchID.y * (64u * 65535u);
 	StructuredBuffer<FadeFrame> frames = ResourceDescriptorHeap[FrameIndex];
 	F = frames[0];
-	// The dispatch covers every slot the buffers hold; the frame row's count ends it.
+	// The dispatch covers every slot. The frame row's count ends it.
 	if (index >= F.RootCount)
 		return;
 	StructuredBuffer<FadeRootStatic> roots = ResourceDescriptorHeap[RootsIndex];
@@ -510,7 +494,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	FadeRootStatic root = roots[index];
 	RWStructuredBuffer<FadeNodeState> published = ResourceDescriptorHeap[(F.SceneFrame & 1u) != 0 ? OutIndex1 : OutIndex0];
 	FadeNodeState state = states[index];
-	// No root, or its seed not sampled yet: not updated this frame.
+	// No root, or its seed not sampled yet, so not updated this frame.
 	if (min(root.Object ^ kNoObject, root.Generation) == 0u || !MergeSeed(index, root)) {
 		published[index] = state;
 		return;
@@ -528,18 +512,16 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 		return;
 	}
 	const FadeNodeState before = state;
-	// The frame's placement rows (the latch's BuildDrawsLatch::placementsIndex): a root's centre is its member's fade node row.
+	// A root's centre is its member's fade node placement row.
 	ByteAddressBuffer frameLatch = ResourceDescriptorHeap[LatchIndex];
 	StructuredBuffer<PlacementRows> placements = ResourceDescriptorHeap[frameLatch.Load(LatchOffset + 252)];
 	const float3 centre = placements[root.Object].Rows[kObjectFadeNodeRow].xyz;
-	// The bound's radius as the engine reads it now: the member's sun entry node is its reference root, which is the fade
-	// root (the placement row's sun entry, kept by the placements; a negative or unbounded radius: none, the listed radius instead).
+	// The bound's radius as the engine reads it now, from the member's sun entry row. A negative or unbounded radius falls back to the listed one.
 	const float entryRadius = placements[root.Object].Rows[kObjectSunEntryRow].w;
 	const float radius = entryRadius >= 0.0f && entryRadius < 1e30f ? entryRadius : root.Radius;
 	state.Verdict = 0;
-	// The animation job's update since the last cull (FUN_1402cff60 -> FUN_14147a160): an animated reference its cull did not
-	// reach, from the camera and globals of that update; before this cull's test, as the engine's frame has it.
-	// The word: the batch's scene frame (low 28 bits) and its count of updates (Records.h, FadeAnimatedWord).
+	// The animation job's update since the last cull (FUN_1402cff60 -> FUN_14147a160), for a reference its cull did not reach.
+	// The word holds the batch's scene frame in the low 28 bits and its update count.
 	uint updates = 0;
 	if (AnimatedIndex != 0) {
 		StructuredBuffer<uint> stamps = ResourceDescriptorHeap[AnimatedIndex];
@@ -592,7 +574,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	PortalQuery query = (PortalQuery)0;
 	query.Destination = (id.x + id.y * (64u * 65535u));
 	query.Generation = F.SceneFrame;
-	query.Flags = 0x80000000u;  // Immediate rejection unless a live, seeded root fills this slot.
+	query.Flags = 0x80000000u;  // rejected unless a live, seeded root fills this slot
 	if ((id.x + id.y * (64u * 65535u)) < F.RootCount) {
 		StructuredBuffer<FadeRootStatic> roots = ResourceDescriptorHeap[RootsIndex];
 		FadeRootStatic root = roots[(id.x + id.y * (64u * 65535u))];
@@ -608,7 +590,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 				program = programs[(id.x + id.y * (64u * 65535u))];
 			}
 			uint programCount = 0;
-			// The frame's published programs, from the depth latch (0: none this frame, the frustum alone).
+			// The frame's published programs, 0 for frustum only.
 			const uint programsIndex = latch.Load(LatchOffset + kLatchPortalPrograms);
 			if (programsIndex != 0) {
 				ByteAddressBuffer programs = ResourceDescriptorHeap[programsIndex];

@@ -14,8 +14,7 @@
 #include <ranges>
 #include <sstream>
 
-// The coordinator's report lines (Coordinator's scene pass): the pump, the set, the membership, and under CS_DCLF_STATS the scene walk's
-// statistics and the observers' lines that ride with them.
+// The coordinator's report lines, composed in its scene pass. With CS_DCLF_STATS they include the walk's statistics and observer lines.
 
 namespace DCLF::Reports
 {
@@ -23,10 +22,7 @@ namespace DCLF::Reports
 	{
 		using V = Diagnostics::SceneView;
 
-		/**
-		 * @brief The table families' kept counts and the publications that replayed their marked rows instead of copying them whole ("<name>
-		 * kept N (M replayed)", joined by ", ": Features/TreeWind's trees, then the fade roots).
-		 */
+		/** @brief Each table family's kept count and how many publications replayed marked rows instead of copying whole. */
 		std::string FamiliesKept(const std::array<std::uint64_t, Extensions::kTableFamilySlots>& a_kept)
 		{
 			std::string line;
@@ -46,7 +42,7 @@ namespace DCLF::Reports
 				"light-path entries written in full at the merge {}; join rounds {} ({} on the pool), joins {}",
 				ConfiguredFanout(), SceneScheduler::PreparationWorkers(), f.rounds, f.parallelRounds, f.entries, f.parallelEntries, f.chunks, f.lightMissed, f.joinRounds,
 				f.joinParallelRounds, f.joinEntries);
-			// AddSubtrees' prepares (the pool from kSubtreeFanoutMin roots) and merges; their times in modes 1 and 2.
+			// AddSubtrees' prepares and merges, and their times in modes 1 and 2.
 			line += fmt::format("; subtree rounds {} ({} on the pool), roots {} ({} on the pool), geometries {}, prepare {:.2f} ms, merge {:.2f} ms", f.subtreeRounds,
 				f.subtreeParallelRounds, f.subtreeRoots, f.subtreeParallelRoots, f.subtreeGeometries, f.subtreePrepareMs, f.subtreeMergeMs);
 			f = {};
@@ -55,7 +51,7 @@ namespace DCLF::Reports
 
 		std::string ParallelForLine()
 		{
-			// Cumulative per name in the executor: the differences since the last report (this one's alone), the peaks taken.
+			// The executor's counts are cumulative, so report differences since the last report.
 			static std::unordered_map<std::string, SceneExecutor::ParallelForStatistics> last;
 			std::string line;
 			for (const auto& now : SceneScheduler::Executor().GetParallelForStatistics(true)) {
@@ -167,7 +163,7 @@ namespace DCLF::Reports
 			auto& delta = V::delta(s);
 			auto& reportedChangeCounts = V::reportedChangeCounts(s);
 			std::string text;
-			// The change log (Tables::changeLog): notes per frame by cause, and its completeness check.
+			// Change log notes per frame by cause, and its completeness check.
 			if (const double n = delta.walks) {
 				std::uint64_t total = 0;
 				std::string causes;
@@ -181,7 +177,6 @@ namespace DCLF::Reports
 				text += fmt::format("[DCLF] change log: {:.1f} changes a frame, by column: {} ({} entries held)\n", static_cast<double>(total) / n,
 					causes.empty() ? "-" : causes, tables.changeLog.Size());
 			}
-			// The material records kept by the scene work (RefreshMaterialRecords), per scene pass.
 			if (auto& r = V::materialRecordStats(s); r.passes) {
 				const double n = static_cast<double>(r.passes);
 				text += fmt::format("[DCLF] material records (the scene work's, from captures and the frame's sources): {:.1f} captures applied, {:.2f} records "
@@ -191,14 +186,13 @@ namespace DCLF::Reports
 					r.transformsWritten / n, r.uncovered ? " <- MATERIAL PORT" : "");
 				r = {};
 			}
-			// The features' lines here (Features/Decals' order parity), the components' with their context.
 			V::componentsReportText(s, Api::ReportPoint::SceneCoordinatorMaterials, text);
 			if (auto& ms = V::materialSnapshotStats(s); ms.captured || ms.made || ms.requested) {
 				text += fmt::format("[DCLF] material captures (T6b2a: the scene work's records): {} captured ({} replacing an older one, {} older than the held one), {} "
 									"let go unused, {} held; {} records made by the scene work, {} uncovered, {} asked of the render thread{}\n",
 					ms.captured, ms.replaced, ms.stale, ms.aged, V::materialSnapshots(s).size(), ms.made, ms.uncovered, ms.requested, ms.uncovered ? " <- MATERIAL PORT" : "");
 				if (ms.fieldsMoved) {
-					// The words that moved most (offset: count), the reference count's (+0x8) aside.
+					// The most-moved words as offset and count. The reference count at +0x8 is set aside.
 					std::vector<std::pair<std::uint32_t, std::uint32_t>> words;
 					for (std::uint32_t w = 0; w < ms.wordMoved.size(); ++w)
 						if (ms.wordMoved[w] && w != 2)
@@ -216,7 +210,6 @@ namespace DCLF::Reports
 				}
 				ms = {};
 			}
-			// The material bindings the scene work makes.
 			if (auto& mb = V::materialBindings(s); mb.stats.requested || mb.stats.answered || mb.stats.versioned || !mb.inFlight.empty()) {
 				std::size_t waiting = 0, holding = 0;
 				Tables::ForEachBit(tables.usedMaterialBits, [&](std::uint32_t a_slot) {
@@ -233,10 +226,9 @@ namespace DCLF::Reports
 					mb.inFlight.size(), waiting, holding);
 				mb.stats = {};
 			}
-			// The shared, projected, mask and shadow texture bindings the scene work makes.
 			if (auto& sb = V::sharedBindings(s); sb.stats.fixedPublished || sb.stats.projectedCaptures || sb.stats.shadowAdded || sb.stats.shadowRemoved ||
 											 sb.stats.writtenShared || sb.stats.writtenMasks || sb.stats.writtenShadow || !sb.inFlight.empty()) {
-				// What is still asked for now, by the kinds waiting on each view in flight; the projected textures and masks waiting, by entry.
+				// What is still waiting, by kind per view in flight, and the projected textures and masks waiting, by entry.
 				std::array<std::size_t, SharedBindings::kKinds> waitingByKind{};
 				for (const auto& waitingView : sb.inFlight)
 					for (std::uint32_t kind = 0; kind < SharedBindings::kKinds; ++kind)
@@ -260,7 +252,6 @@ namespace DCLF::Reports
 					sb.shadowPending, ss.stale, ss.writtenShared, ss.writtenMasks, ss.writtenShadow, byKind);
 				sb.stats = {};
 			}
-			// The features' lines here (Features/Lod's object LOD segments), the components' with their context.
 			V::componentsReportText(s, Api::ReportPoint::SceneCoordinatorSegments, text);
 			if (auto& c = Diagnostics::SceneDiagnostics().changeLog; c.checks || c.skipped) {
 				text += fmt::format("[DCLF] change log parity: {} checks ({} skipped), {} slots compared, {} changed, {} changed with no log entry{}{}\n", c.checks, c.skipped, c.slots,
@@ -274,7 +265,7 @@ namespace DCLF::Reports
 									"{} tracked geometries' properties held anew, {} with no pin{}{}\n",
 					r.pins, r.pinned, r.live, r.refused, " (a refusal is checked after the next batch: the mirror reads' \"unpinned geometry\")", r.properties, r.propertiesRefused,
 					r.propertiesRefused ? " <- UNPINNED PROPERTY; first: " : "", r.firstPropertyRefused);
-				// The fade nodes the tree and fade-root owners are copied from: pins, root owners, the render thread's answers.
+				// The fade nodes the tree and fade-root owners are copied from.
 				if (r.fadeNodes || r.fadeNodesRefused || r.fadeRootsUnowned || r.fadeNodesAnswered || r.fadeNodesAnsweredNone)
 					text += fmt::format("[DCLF] fade node references (T6b3e): {} held anew from pins, {} with no pin ({} copied from a root owner, {} asked of the render "
 										"thread: {} answered, {} answered none), {} tree or fade roots left unlisted for want of one (until an answer){}{}{}\n",
@@ -292,7 +283,7 @@ namespace DCLF::Reports
 				text += fmt::format("[DCLF] scene capture (6e F3): {} attaches in the world captured ({} records, {:.1f} us in all; {} on the main thread, {:.1f} us), {} out of the "
 									"world left to their world attach\n",
 					c.attaches, c.records, static_cast<double>(c.ns) / 1000.0, c.mainThread, static_cast<double>(c.mainThreadNs) / 1000.0, c.outOfWorld);
-			// The coordinator's half of the frame capture's line (the subtrees its passes waited for, the category nodes it took).
+			// The coordinator's half of the frame capture line.
 			if (auto &subtreesPended = V::subtreesPended(s), &subtreesDropped = V::subtreesDropped(s), &categoryChildrenMissing = V::categoryChildrenMissing(s);
 				subtreesPended || subtreesDropped || categoryChildrenMissing) {
 				text += fmt::format("[DCLF] subtrees (T6b1c, the coordinator's): {} waited for the mirror, {} dropped with no chain after; {} new category nodes without the "
@@ -302,7 +293,7 @@ namespace DCLF::Reports
 			}
 			if (auto& t = delta; t.walks) {
 				const double n = t.walks;
-				// The catch-ups are the render thread's, at the frame's start (FrameView's CatchUpSwitches).
+				// Catch-ups are the render thread's, at frame start.
 				t.switchCatchUps = Scene::Channels::Get().catchUpsBySwitch.exchange(0, std::memory_order_relaxed);
 				t.attachCatchUps = Scene::Channels::Get().catchUpsByAttach.exchange(0, std::memory_order_relaxed);
 				const double catchUpUs = static_cast<double>(Scene::Channels::Get().catchUpNs.exchange(0, std::memory_order_relaxed)) / 1000.0 / n;
@@ -320,7 +311,6 @@ namespace DCLF::Reports
 					t.walks, t.full, t.evaluated / n, t.evaluatedMax, t.perFrame / n, t.kept / n, t.moved / n, t.pending / n, t.property / n, t.node / n, t.roots / n,
 					t.geometryDirty / n, t.restored / n, t.live / n, t.propertyEvents / n, t.nodeEvents / n,
 					t.switchEvents / n, t.switchChanges / n, t.switchCatchUps / n, t.attachCatchUps / n, catchUpUs, t.switchReclassified / n);
-				// The features' fragments of the line (Features/Faces' publications), the components' with their context.
 				V::componentsReportText(s, Api::ReportPoint::SceneCoordinatorDelta, text);
 				text += '\n';
 				if (auto& rootMotion = V::rootMotion(s); rootMotion.size() > (1u << 16))
@@ -332,8 +322,8 @@ namespace DCLF::Reports
 
 		void Coordinator(Scene::Coordinator& s, std::uint32_t a_sceneFrame)
 		{
-			// The coordinator's own lines, composed in its pass from its own state as its frame crosses the report window; the frame's report
-			// reads only the frame's. "A frame" in the lines below that the walk counts is a walk (a pass).
+			// The coordinator's own lines, composed from its own state as its frame crosses the report window.
+			// A frame in these lines means a walk.
 			auto& ps = V::pumpStats(s);
 			auto& stats = V::stats(s);
 			{
@@ -345,8 +335,8 @@ namespace DCLF::Reports
 					ps.passes, span, span ? double(ps.passes) / double(span) : 0.0, ps.maxPassesInFrame, span > ps.framesWithPass ? span - ps.framesWithPass : 0u,
 					ps.passes - ps.eventsOnly, ps.perFrameWalks, ps.eventWalks, ps.eventsOnly, ps.loading, ps.inlinePasses, ps.failed, Spread(ps.passMs),
 					Percentiles(ps.passEvents), ps.published, ps.unchanged, Percentiles(ps.publishMs), Percentiles(ps.publishFrames));
-				// By source: the passes it woke / those of them that changed nothing (a pass counts under every source it took; "none": a pass
-				// woken by no source, inline or a burst's continuation).
+				// Passes woken by each source and how many changed nothing. A pass counts under every source it took.
+				// "none" means inline or a burst's continuation.
 				std::string bySource;
 				for (std::size_t source = 0; source <= static_cast<std::size_t>(SceneWake::Count); ++source)
 					if (ps.bySource[source])
@@ -360,27 +350,24 @@ namespace DCLF::Reports
 						deferred += fmt::format("{}{} {}", deferred.empty() ? "" : ", ", kSceneWakeNames[source], held[source]);
 				logger::info("[DCLF] scene pump pushes inside the frame's render, not woken (T6b3d: the frame's next pass takes them): {}",
 					deferred.empty() ? "-" : deferred);
-				// The walk's rounds and the joins evaluated on the pool.
 				if (const auto fanout = FanoutLine(s); !fanout.empty())
 					logger::info("{}", fanout);
-				// The attach burst's mirror prepares, subtree geometries and category index (W8).
+				// The attach burst's mirror prepares, subtree geometries and category index.
 				if (const auto attach = V::attachLine(s); !attach.empty())
 					logger::info("{}", attach);
-				// The executor's ParallelFors: what their callers waited for chunks a helper had claimed.
+				// How long ParallelFor callers waited for chunks a helper had claimed.
 				if (const auto parallel = ParallelForLine(); !parallel.empty())
 					logger::info("{}", parallel);
-				// CS_DCLF_RELEASE_GUARD: the engine's last releases on DCLF's threads (any is a defect).
+				// Engine releases on DCLF's threads. Any is a defect.
 				if (const auto releases = ReleaseGuardLine(); !releases.empty())
 					logger::info("{}", releases);
-				// The LOD gates' line (opened, flipped, retired; the open ones' age and what they wait for: their component's, the first registered here)
-				// and the features' lines here.
 				V::componentsReportLines(s, Api::ReportPoint::SceneCoordinatorGates, a_sceneFrame);
 			}
 			const std::uint64_t wholePasses = ps.passes - ps.eventsOnly;
 			const double fullPasses = std::max<double>(1.0, static_cast<double>(wholePasses));
 			const double fullMs = ps.fullMs, fullMaxMs = ps.fullMaxMs;
 			ps = {};
-			// The set (its commits are the passes'), and the claims its passes took back.
+			// The set, and the claims its passes took back.
 			{
 				const auto set = s.TakeSetStats();
 				const auto commit = std::exchange(Diagnostics::SceneDiagnostics().commit, {});
@@ -392,9 +379,8 @@ namespace DCLF::Reports
 					set.publications, set.waitingBy[0], set.waitingBy[1], set.waitingBy[2], set.waitingBy[3], set.waitingBy[4], set.waitingBy[5], set.waitingBy[6], set.waitingBy[7], set.waitingBy[8],
 					set.waitingBy[9], set.waitingBy[10], set.waitingBy[12], set.waitingBy[13], set.firstWaiting.empty() ? "" : "; first: ", set.firstWaiting, set.patchedMember, set.patchedMember ? " <- SET PATCHED" : "", set.leftAfterCommit, commit.commitParityChecks, commit.commitParityDiffer,
 					commit.commitParityChecks ? (commit.commitParityDiffer ? " <- COMMIT" : " <- OK") : "");
-				// The features' set lines (Features/FirstPerson's root view filing and the slots its decisions leave out).
 				V::componentsReportLines(s, Api::ReportPoint::SceneCoordinatorSet, a_sceneFrame);
-				// Why the members that left did (each leave once, by its commit's verdict).
+				// Why members left, once each, by their commit's verdict.
 				std::string waitingText;
 				for (std::size_t why = 0; why < set.leftWaiting.size(); ++why)
 					if (set.leftWaiting[why])
@@ -402,11 +388,10 @@ namespace DCLF::Reports
 				logger::info("[DCLF] set leaves by cause (T6b3d): {} left; scene not built {}, no phase to take part in (freed, ineligible, phases off) {}, not bound (the joins "
 							 "dropped its membership) {}, waiting {} (by the waiting-for index: {}), its layer partner or a phase of the whole object {}",
 					set.left, set.leftBy[0], set.leftBy[1], set.leftBy[2], set.leftBy[3], waitingText.empty() ? "-" : waitingText, set.leftBy[4]);
-				// A claim the publication cannot draw: a defect (CheckClaimsDrawable). Claims are never taken back from a publication.
+				// A claim the publication cannot draw is a defect. Claims are never taken back from a publication.
 				if (const auto [undrawn, first] = s.TakeUndrawnClaims(); undrawn)
 					logger::warn("[DCLF] claims published that their records do not draw: {} (first: {}) <- UNDRAWN CLAIM", undrawn, first);
 			}
-			// The joins' membership.
 			if (V::residentStats(s).frames) {
 				const auto r = s.TakeResidentStats();
 				auto& reg = Diagnostics::SceneDiagnostics().registrations;
@@ -414,7 +399,7 @@ namespace DCLF::Reports
 				logger::info("[DCLF] scene membership: {:.0f} objects bound a frame ({} frames); {} records queued, {} joined, {} failed ({} the engine's pass, {} no record, {} a frame verdict, {} material or extras; {} waited for a material record, {} served, {} stale), {} rewritten ({} kept their binding), {} released, {} layers or bases unpaired; {} registrations of eligible objects not bound{}{}",
 					r.resident / rf, r.frames, r.membershipQueued, r.joined, r.failed, r.failedBy[0], r.failedBy[1], r.failedBy[2], r.failedBy[3], r.materialWaits, r.materialsServed, r.materialsStale, r.rewritten, r.membershipKept, r.released,
 					r.layerUnpaired, reg.registeredUnbound, reg.registeredUnboundFirst.empty() ? "" : ", first ", reg.registeredUnboundFirst);
-				// The capture drain is an observer: the registrations above are counted only on the frames it observed.
+				// Registrations are counted only on frames the capture drain observed.
 				if (reg.registrationFrames)
 					logger::info("[DCLF] registration parity (the capture drain, an observer): {} frames observed, {} main-camera registrations checked, {} of eligible objects DCLF has not bound, {} Lighting passes of another shader{}",
 						reg.registrationFrames, reg.registrationsChecked, reg.registeredUnbound, reg.lightingShaderDiffers,
@@ -438,7 +423,7 @@ namespace DCLF::Reports
 					ineligibleText += fmt::format(" {}={}", kIneligibleNames[i], stats.ineligible[i]);
 			if (const auto& u = stats.unstableCauses; u[0] || u[1] || u[2])
 				ineligibleText += fmt::format(" (unstable: {} mappable, {} refused, {} no source)", u[0], u[1], u[2]);
-			// The per-part breakdown appears only under CS_DCLF_PROFILE=1, because that is the only time it is measured (per whole pass).
+			// The per-part breakdown is measured only under CS_DCLF_PROFILE=1.
 			std::string partText;
 			if (Diagnostics::Observe().profile) {
 				for (std::size_t i = 0; i < stats.partMs.size(); ++i)
@@ -454,7 +439,6 @@ namespace DCLF::Reports
 					V::projectedTextures().valid ? "captured" : "not seen yet");
 			if (const auto [fading, fadingFrames] = s.TakeFadingDrawn(); fading)
 				logger::info("[DCLF] fading: {} screen-door fading objects drawn by DCLF over {} frames", fading, fadingFrames);
-			// The features' lines here (Features/Skins' skinned line, then Features/Decals' candidates), the components' with their context.
 			V::componentsReportLines(s, Api::ReportPoint::SceneCoordinatorLastPass, a_sceneFrame);
 			logger::info("[DCLF] derived cache (the last pass): {} served, {} recomputed and compared, {} differ{}; slots alive {} geometries / {} pipelines / {} materials, {} swept, {} geometries refreshed in place ({} for moved buffers), {} slot violations{}",
 				stats.derivedHits, stats.derivedChecked, stats.derivedDiffers, stats.derivedDiffers ? " <- STALE" : "",
@@ -481,7 +465,7 @@ namespace DCLF::Reports
 				stats.tracked, stats.categoryNodes, stats.objects, stats.geometries, stats.pipelines, stats.materials, ineligibleText,
 				stats.attachedEvents, stats.detachedEvents, stats.detachMoves, stats.validationDrops, stats.validationDrops ? " <- DETACH" : "", partText);
 			{
-				// What the coordinator's references alone keep alive (its thread's: it holds every one it reads).
+				// What only the coordinator's references keep alive.
 				Diagnostics::SoleHolds geometries, properties, sources, fadeNodes, takenPins, takenNodes, renderRoots;
 				for (const auto& [key, entry] : V::tracked(s)) {
 					geometries.Add(entry.geometry.get());
@@ -528,7 +512,6 @@ namespace DCLF::Reports
 				logger::info("[DCLF] retirement (6e E3: nothing freed while a publication names it): {}", s.TakeRetirementReport());
 			}
 			{
-				// The scene pass by sub-zone (ScenePart), per whole pass.
 				std::string sceneParts;
 				double covered = 0.0;
 				for (std::size_t i = 0; i < stats.scenePartMs.size(); ++i) {
@@ -576,8 +559,7 @@ namespace DCLF::Reports
 
 	void ScenePassEnd(Scene::Coordinator& a_store, std::uint32_t a_sceneFrame)
 	{
-		// When its frame crossed the window (a pass in that frame, or the first after it). The passes run one at a time (the pump, or the
-		// render thread inline), so the clock needs no lock.
+		// When its frame crossed the window. Passes run one at a time, so the clock needs no lock.
 		static Crossing crossing;
 		if (crossing.Due(a_sceneFrame))
 			Coordinator(a_store, a_sceneFrame);

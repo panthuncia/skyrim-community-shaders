@@ -1,6 +1,5 @@
-// CS_DCLF_SET_PARITY: the frame's set against what the GPU drew. Each colour epoch's visibility words (its stamps and verdicts) are
-// copied with the CPU's side that explains them, and read three frames later: a member drawn by nobody, an object drawn outside the
-// set, the depth and colour segments disagreeing, the registration hooks' claims against the set, and the gaps.
+// Set parity. The frame's set against what the GPU drew. Each colour epoch's visibility words are copied with the CPU's side
+// and read three frames later. It reports members drawn by nobody, double draws, segment disagreements, claim mismatches and gaps.
 
 #include "DrawsState.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
@@ -26,7 +25,7 @@ namespace DCLF::Diagnostics
 		auto& gapHistory = diagnostics.gapHistory;
 		auto& fadeLogFocus = diagnostics.fadeLogFocus;
 		using SetParityFrame = DrawsState::SetParityFrame;
-		// A gap's first frame, by what rejected it: the frustum stamp and its fade bit, the root's ownership.
+		// A gap's first frame, by what rejected it.
 		static constexpr const char* kGapClasses[] = { "?", "the frustum", "an owned fade root", "the resident fade test",
 			"past the frustum and fade (HZB or tree height)", "no frustum stamp", "no verdict this frame" };
 		auto* context = globals::d3d::context;
@@ -41,7 +40,7 @@ namespace DCLF::Diagnostics
 			return a_state < kSkipNames.size() ? std::string("skipped: ") + kSkipNames[a_state] : fmt::format("state {}", a_state);
 		};
 
-		// The oldest snapshot, once its frame's copy has had time to land.
+		// The oldest snapshot, once its copy has had time to land.
 		for (auto& waiting : setParityFrames)
 			if (waiting.framesLeft)
 				--waiting.framesLeft;
@@ -55,7 +54,7 @@ namespace DCLF::Diagnostics
 			}
 			const auto* words = static_cast<const std::uint32_t*>(mapped.pData);
 			const std::uint32_t stamp = snapshot.frame & 0x0FFFFFFFu;
-			// TEMP: the word's writers (BuildDrawsCS.hlsl, RecordWriter): per segment the stamp, scene list descriptor, input position, site.
+			// TEMP. Per segment, the word's writers as BuildDrawsCS's RecordWriter stores them.
 			const auto writersOf = [&](std::size_t a_object) -> std::string {
 				if (!snapshot.writersStaging)
 					return "; writers not copied";
@@ -74,7 +73,7 @@ namespace DCLF::Diagnostics
 				context->Unmap(snapshot.writersStaging.get(), 0);
 				return text;
 			};
-			// TEMP: where the GPU's scene list (the inputs backing copied with the words) names an object.
+			// TEMP. Where the GPU's scene list names an object.
 			const auto gpuInputs = [&](std::size_t a_object) -> std::string {
 				if (!snapshot.inputsStaging)
 					return "; GPU inputs not copied";
@@ -101,14 +100,13 @@ namespace DCLF::Diagnostics
 				snapshot.frustumStaging->GetDesc(&frustumDesc);
 				frustum = static_cast<const std::uint32_t*>(frustumMapped.pData);
 				frustumWords = frustumDesc.ByteWidth / sizeof(std::uint32_t);
-				// No stamp of this frame at all: phase 1 wrote no feedback (a frame before the first cull), nothing to read.
+				// No stamp of this frame at all means phase 1 wrote no feedback yet.
 				if (std::none_of(frustum, frustum + std::min(frustumWords, snapshot.flags.size()), [&](std::uint32_t a_word) { return (a_word & 0x0FFFFFFFu) == stamp; })) {
 					context->Unmap(snapshot.frustumStaging.get(), 0);
 					frustum = nullptr;
 				}
 			}
 			bool damaged = false;
-			// The snapshot's listed roots (the fade checks below read them by object).
 			const Api::RootListView roots = snapshot.tables ? Extensions::RootListOf(*snapshot.tables) : Api::RootListView{};
 			for (std::size_t o = 0; o < snapshot.flags.size(); ++o) {
 				const std::uint32_t word = words[o];
@@ -122,10 +120,10 @@ namespace DCLF::Diagnostics
 				counts.depthDrawnTotal += depthDrawn;
 				counts.colourDrawnTotal += colourDrawn;
 				const char* kind = nullptr;
-				// A forward object is colour-only like a decal (no depth segment input, no frustum stamp).
+				// A forward object is colour-only like a decal, with no depth input and no frustum stamp.
 				const bool forward = snapshot.tables && o < snapshot.tables->objects.size() && (snapshot.tables->objects[o].flags & kObjectForward);
 				const bool decal = (o < snapshot.colourState.size() && snapshot.colourState[o] == kObjectStateDecal) || forward;
-				// The GPU builds none of them with the forward family on the CPU (GraphConditions::forwardDirect): its words say nothing of them.
+				// With the forward family on the CPU the GPU builds none of them, so its words say nothing.
 				const bool forwardOnCpu = forward && Draws::CurrentGraphConditions().forwardDirect;
 				counts.recordDisagrees += (flags & 8) ? 1 : 0;
 				if (!withheld && (depthDrawn || colourDrawn)) {
@@ -137,8 +135,7 @@ namespace DCLF::Diagnostics
 							o < snapshot.listedBy.size() ? snapshot.listedBy[o] : 0, o < snapshot.listedFlags.size() ? snapshot.listedFlags[o] : 0, gpuInputs(o));
 					}
 				}
-				// A decal is drawn by the colour segment's decal pass only (the depth segment never draws one), so it
-				// is only checked for being withheld and undrawn.
+				// Only the colour segment's decal pass draws a decal, so a decal is only checked for being withheld and undrawn.
 				if (!decal && depthDrawn && !colourDrawn) {
 					kind = "depth without colour";
 					++counts.depthOnly;
@@ -149,22 +146,20 @@ namespace DCLF::Diagnostics
 					counts.colourUnpublished += verdict == 3;
 					counts.alphaColourOnly += alpha;
 				} else if (withheld && !colourDrawn && !forwardOnCpu) {
-					// The frustum stamp is this frame's for an object phase 1 found inside the frustum, with the fade test's drop in its
-					// top bit: one without it was rejected by the frustum, one with it and no drop by the HZB (phase 2's final verdict).
+					// The frustum stamp is set for objects phase 1 found inside, with the fade drop in the top bit. Without the stamp the frustum
+					// rejected it. With it and no drop, the HZB did.
 					const std::uint32_t frustumWord = frustum && o < frustumWords ? frustum[o] : 0u;
 					const bool passedFrustum = (frustumWord & 0x0FFFFFFFu) == stamp;
 					const bool fadeHidden = passedFrustum && (frustumWord & 0x80000000u);
 					if (verdict == 2 && frustum && !decal && (fadeHidden || !passedFrustum) && o < snapshot.inView.size() && snapshot.inView[o]) {
-						// Rejected as final with its live bound in view. By the frustum: the bound the culling read was not the live one,
-						// and the engine would have drawn it. By the fade test: a root FadeStateCS has faded out, counted (a far root
-						// fades out in view; the fade parities judge the fade), flagged where the engine's node has it fully faded in.
+						// Rejected with its live bound in view. By the frustum means culling read a stale bound. By fade it is counted, and flagged
+						// only where the engine's node has it fully faded in.
 						++(fadeHidden ? counts.fadeHiddenInView : counts.rejectedInView);
 						const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr;
 						const bool alive = geometry != nullptr;  // held by snapshot.tables
 						if (fadeHidden && alive) {
-							// The engine's verdict where it still runs the root's OnVisible (not stood in): its node fully faded in
-							// (currentFade and fadeAmount 1) draws the members. FadeStateCS models that node, so dropping them is a
-							// fade the engine does not have: a missed input or a port difference.
+							// Where the engine still runs the root's OnVisible, a fully faded-in node draws the members. Dropping them then is a missed
+							// input or a port difference.
 							const std::uint32_t root = roots.RootOf(static_cast<std::uint32_t>(o));
 							const auto* rootNode = static_cast<const RE::NiAVObject*>(roots.NodeOf(root));
 							const auto* fadeNode = rootNode ? const_cast<RE::NiAVObject*>(rootNode)->AsFadeNode() : nullptr;
@@ -179,10 +174,8 @@ namespace DCLF::Diagnostics
 						}
 						const bool skinned = alive && geometry->GetGeometryRuntimeData().skinInstance;
 						counts.skinnedInView += skinned;
-						// A frustum rejection judged again on the CPU: the root's program judged now (the room the walk puts the root node
-						// in) and run on the frame's words, as PreparePortalQueries does on the GPU (the member's bound, the root's program
-						// and node flags). The program also culls an object behind an occluder or outside the portals; in view there, the
-						// GPU's cull was wrong.
+						// Judge a frustum rejection again on the CPU, running the root's program on the frame's words as PreparePortalQueries does.
+						// The program also culls behind occluders and outside portals. In view there means the GPU's cull was wrong.
 						int cpuVerdict = -2;
 						std::uint32_t cpuProgram = ~0u;
 						std::string cpuWhy;
@@ -213,7 +206,7 @@ namespace DCLF::Diagnostics
 							else if (cpuWhy == "preprocessed")
 								++counts.programPreprocessed;
 							else
-								++counts.programInView;  // in view by the program, or no program and in view (the frustum alone)
+								++counts.programInView;  // in view by the program, or by the frustum when there is no program
 						}
 						if (alive && (fadeHidden ? counts.fadeSamples++ < 24 : counts.inViewSamples++ < 24)) {
 							const RE::TESObjectREFR* owner = nullptr;
@@ -241,8 +234,7 @@ namespace DCLF::Diagnostics
 									cpuVerdict == 1 ? "in view" : cpuVerdict == 0 ? "culled" : "no program", cpuProgram == ~0u ? -1 : static_cast<std::int64_t>(cpuProgram),
 									input && cpuProgram == input->contribution.noProgram ? ", none" : "", cpuWhy.empty() ? "" : "; " + cpuWhy);
 							}
-							// The centre FadeStateCS tests the root at: its chosen member's placement row 8 (LodFadeNodeOf: the member's
-							// property's fade node), against the root node's own bound.
+							// FadeStateCS tests the root at its chosen member's placement row 8, against the root node's own bound.
 							if (fadeHidden && root < roots.Size()) {
 								fadeLogFocus.store(root, std::memory_order_relaxed);
 								const std::uint32_t member = roots.rows[root].object;
@@ -259,14 +251,14 @@ namespace DCLF::Diagnostics
 						}
 					}
 					if (verdict == 0 || verdict == 2) {
-						++counts.withheldCulled;  // the GPU culling rejected it: not drawn by anyone, as intended
+						++counts.withheldCulled;  // GPU culling rejected it, as intended
 					} else {
 						kind = "in the set, drawn by nobody";
 						++counts.withheldUndrawn;
 						counts.alphaWithheldUndrawn += alpha;
 					}
 				}
-				// The registration hooks' main claim against the set: claimed outside it, nobody draws the object.
+				// A main claim outside the set means nobody draws the object.
 				if (o < snapshot.claims.size() && ((snapshot.claims[o] & kSetMain) != 0) != withheld) {
 					const bool claimed = (snapshot.claims[o] & kSetMain) != 0;
 					++(claimed ? counts.claimedOutside : counts.unclaimedMembers);
@@ -284,8 +276,7 @@ namespace DCLF::Diagnostics
 							depthDrawn || colourDrawn ? ", drawn by DCLF" : "");
 					}
 				}
-				// The gap detector, by geometry (object indices are rebuilt every frame): a run of one to eight frames withheld and
-				// GPU-culled between frames something drew it.
+				// Gap detector by geometry, since object indices are rebuilt every frame. A gap is 1 to 8 frames withheld and GPU-culled.
 				if (const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr) {
 					const bool kept = flags & 2;
 					const std::uint8_t state = !kept ? 0 : (withheld && !colourDrawn) ? 2 : 1;
@@ -322,7 +313,7 @@ namespace DCLF::Diagnostics
 						if (contiguous && history.last == 2) {
 							history.run = static_cast<std::uint8_t>(std::min(history.run + 1, 255));
 						} else {
-							// The run's first frame: what rejected it.
+							// What rejected the run's first frame.
 							const std::uint32_t frustumWord = frustum && o < frustumWords ? frustum[o] : 0u;
 							const bool passedFrustum = (frustumWord & 0x0FFFFFFFu) == stamp;
 							std::uint8_t cls = !current ? 6 : !frustum ? 5 : !passedFrustum ? 1 : 4;
@@ -351,7 +342,7 @@ namespace DCLF::Diagnostics
 					const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr;
 					const bool alive = geometry != nullptr;  // held by snapshot.tables
 					static constexpr const char* kVerdicts[] = { "occluded (retest)", "visible", "rejected", "no verdict" };
-					// TEMP: the payload's tables against the snapshot's (a payload built from newer tables names objects these lack).
+					// TEMP. A payload built from newer tables names objects these lack.
 					const auto* payloadGeometry = snapshot.payloadTables && o < snapshot.payloadTables->objectGeometry.size() ? snapshot.payloadTables->objectGeometry[o] : nullptr;
 					logger::info("[DCLF] set parity, frame {}: listed by {:#x} (input flags {:#x})", snapshot.frame, o < snapshot.listedBy.size() ? snapshot.listedBy[o] : 0,
 						o < snapshot.listedFlags.size() ? snapshot.listedFlags[o] : 0);
@@ -380,10 +371,8 @@ namespace DCLF::Diagnostics
 					counts.colourUnpublished, counts.withheldUndrawn, counts.alphaWithheldUndrawn, counts.withheldCulled, counts.outsideDrawn, counts.recordDisagrees,
 					double(counts.depthDrawnTotal) / counts.frames, double(counts.colourDrawnTotal) / counts.frames,
 					counts.depthOnly || counts.colourOnly || counts.withheldUndrawn || counts.outsideDrawn || counts.recordDisagrees ? " <- SET PARITY" : " <- OK");
-				// Counted, not flagged: the fade test's are a far root's fade, and the frustum's an occluder's or a portal's (the CPU's
-				// program culls them too) or a decision on the preprocessed flags the CPU reads later than the GPU. Flagged: a frustum
-				// rejection the CPU's program has in view (a wrong cull: the GPU's evaluation disagrees), and a fade rejection the
-				// engine's own node, where its cull still runs, contradicts.
+				// Counted only are fade rejections and frustum rejections the CPU program also culls or reads from later flags.
+				// Flagged are frustum rejections the CPU has in view, and fade rejections the engine's own node contradicts.
 				logger::info("[DCLF] set parity over {} frames: members rejected with their live bound in view: {} by the frustum (the CPU's program: {} culled "
 							 "too, {} in view{}, {} in view by the preprocessed flags, {} not judged), {} by the fade test (roots faded out), {} of all of them skinned; "
 							 "{} fade rejections the engine's node contradicts (the last at frame {}){}{}",
@@ -403,13 +392,12 @@ namespace DCLF::Diagnostics
 						counts.gapsByClass[1], counts.gapsByClass[2], counts.gapsByClass[3], counts.gapsByClass[4], counts.gapsByClass[5], counts.gapsByClass[6],
 						counts.gapsInView, counts.gapsNew, counts.gapsBeforeNative, counts.gapsAfterNative, counts.gapsTree);
 				counts = {};
-				// Forget geometries not seen for a while, so the history does not keep every object ever drawn.
+				// Forget geometries not seen for a while, so the history stays bounded.
 				std::erase_if(gapHistory, [&](const auto& a_entry) { return a_entry.second.frame + 8 < snapshot.frame; });
 			}
 		}
 
-		// This frame: the words as the colour epoch left them, and the CPU side that explains them. Only when
-		// the depth build is this frame's too.
+		// Copy this frame's words and the CPU side, only when the depth build is this frame's too.
 		if (&a_depth == &a_colour || setParityFrames.size() >= 8)
 			return;
 		auto* const visibilityView = diagnostics.setParityVisibility.Of(a_resources->visibility);
@@ -419,7 +407,7 @@ namespace DCLF::Diagnostics
 		SetParityFrame snapshot;
 		D3D11_BUFFER_DESC desc{};
 		visibilityView->GetDesc(&desc);
-		// A released staging of another size (the visibility buffer grew since) is dropped.
+		// Drop released stagings of another size, since the visibility buffer grew.
 		while (!setParityStaging.empty() && !snapshot.staging) {
 			D3D11_BUFFER_DESC held{};
 			setParityStaging.back()->GetDesc(&held);
@@ -454,12 +442,12 @@ namespace DCLF::Diagnostics
 			if (snapshot.frustumStaging || SUCCEEDED(globals::d3d::device->CreateBuffer(&staging, nullptr, snapshot.frustumStaging.put())))
 				context->CopyResource(snapshot.frustumStaging.get(), frustumView);
 		}
-		// The frame the epochs drew (their visibility stamps), not the one the payloads were built in (ahead).
+		// The frame the epochs drew, not the one the payloads were built in ahead.
 		snapshot.frame = Scene::FrameView::Get().GetFrame();
 		snapshot.framesLeft = 3;
 		snapshot.depthState = a_depth.body->objectState;
 		snapshot.colourState = a_colour.body->objectState;
-		// Only a publication's tables: the coordinator's own (none accepted yet) are not the render thread's to hold.
+		// Only a publication's tables. The coordinator's own are not the render thread's to hold.
 		snapshot.tables = Scene::FrameView::Get().AcceptedTables();
 		snapshot.payloadTables = a_colour.body->streams ? a_colour.body->streams->tables : nullptr;
 		{
@@ -490,8 +478,7 @@ namespace DCLF::Diagnostics
 		}
 		const auto& tables = Scene::FrameView::Get().GetTables();
 		const std::size_t objects = tables.objects.size();
-		// The frame's set: the engine withholds every member from the main camera's views, so one the GPU culling kept and
-		// neither segment drew is drawn by nobody.
+		// The engine withholds every member from the main views, so one GPU culling kept and neither segment drew is drawn by nobody.
 		snapshot.flags.assign(objects, 0);
 		snapshot.geometry.assign(objects, nullptr);
 		for (std::size_t o = 0; o < objects && o < tables.objectGeometry.size(); ++o) {
@@ -505,13 +492,12 @@ namespace DCLF::Diagnostics
 				flags |= 2;
 			if (objectFlags & kObjectAlphaTest)
 				flags |= 4;
-			// The record the builds read must say the same (kObjectMember is the set's bit).
+			// The record the builds read must agree, since kObjectMember is the set's bit.
 			if (((objectFlags & kObjectMember) != 0) != ((flags & 1) != 0))
 				flags |= 8;
 			snapshot.flags[o] = flags;
 		}
-		// The engine's frustum verdict for each member: its live bound against the depth build's ViewProj, the corner test the
-		// culling makes (BuildDrawsCS: Culled).
+		// The engine's frustum verdict per member, using the same corner test as BuildDrawsCS's Culled.
 		if (a_depth.culled) {
 			const auto& m = a_depth.cullViewProj;
 			snapshot.inView.assign(objects, 0);
@@ -526,7 +512,7 @@ namespace DCLF::Diagnostics
 					continue;
 				const auto& b = geometry->worldBound;
 				snapshot.bound[o] = { b.center.x, b.center.y, b.center.z, b.radius };
-				std::uint32_t outside = 0x3F;  // -x, +x, -y, +y, near, far: every corner outside
+				std::uint32_t outside = 0x3F;  // -x, +x, -y, +y, near, far, every corner outside
 				for (std::uint32_t corner = 0; corner < 8; ++corner) {
 					const float p[3] = { b.center.x + ((corner & 1) ? b.radius : -b.radius), b.center.y + ((corner & 2) ? b.radius : -b.radius),
 						b.center.z + ((corner & 4) ? b.radius : -b.radius) };
@@ -546,7 +532,7 @@ namespace DCLF::Diagnostics
 			}
 		}
 		{
-			// The claims the registration hooks withhold by this frame, by the object's geometry.
+			// The claims the registration hooks withhold this frame, by geometry.
 			if (const auto set = PassCapture::Get().CurrentSet()) {
 				snapshot.claims.assign(objects, 0);
 				for (std::size_t o = 0; o < objects; ++o)
@@ -554,7 +540,7 @@ namespace DCLF::Diagnostics
 						snapshot.claims[o] = set->PhasesOf(snapshot.geometry[o]);
 			}
 		}
-		// TEMP: who wrote each word (BuildDrawsCS.hlsl, RecordWriter).
+		// TEMP. Who wrote each word.
 		if (a_resources->writers) {
 			if (auto* const writersView = diagnostics.setParityWriters.Of(a_resources->writers)) {
 				D3D11_BUFFER_DESC staging{};
@@ -568,7 +554,7 @@ namespace DCLF::Diagnostics
 					context->CopyResource(snapshot.writersStaging.get(), writersView);
 			}
 		}
-		// TEMP: the GPU's scene list (the installed inputs version's backing), copied after the colour epoch like the words.
+		// TEMP. The GPU's scene list, copied after the colour epoch like the words.
 		if (const auto* versions = a_epoch.payloadVersions) {
 			snapshot.inputsSrv = (*versions)[Draws::PayloadPart::Inputs].srvIndex;
 			if (const auto& lease = versions->backings[static_cast<std::size_t>(Draws::PayloadPart::Inputs)]; lease && lease->buffer) {

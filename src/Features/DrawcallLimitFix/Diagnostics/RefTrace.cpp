@@ -23,19 +23,19 @@ namespace DCLF::Diagnostics::RefTrace
 {
 	namespace
 	{
-		// Common/DeviceRef.hlsli: kDeviceRefTraceEntries entries of four words (key, ref, hits).
+		// Matches Common/DeviceRef.hlsli's kDeviceRefTraceEntries, four words each.
 		constexpr std::uint32_t kEntries = 1024;
 		constexpr std::uint32_t kEntryWords = 4;
 		constexpr std::uint32_t kLinesPerReport = 48;
 
-		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process (Vulkan)
-		rhi::ResourcePtr committed;           // D3D12's: a committed buffer (the graph's allocator takes only the standard heaps)
+		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process on Vulkan
+		rhi::ResourcePtr committed;           // on D3D12 a committed buffer, since the graph's allocator takes only the standard heaps
 		std::atomic<std::uint32_t> slot{ 0 };
 		std::atomic<volatile std::uint32_t*> words{ nullptr };
 		std::atomic<std::uint64_t> traced{ 0 }, untraced{ 0 };
 		bool refused = false;
 
-		// The render thread's: each entry's hits as last logged, and the source lines a site's line can be.
+		// Render thread. Each entry's hits as last logged, and the source lines a site can be.
 		std::vector<std::uint32_t> loggedHits(kEntries, 0);
 		std::map<std::uint32_t, std::string> sites;
 		bool sitesRead = false;
@@ -47,9 +47,8 @@ namespace DCLF::Diagnostics::RefTrace
 			return on;
 		}
 
-		// The lines of the shader sources with a load or store through a ref, by line number: a site is its line, and a line number can
-		// be in more than one file. A pulled Lighting build's own lines can sit a few lines later than the file's (PulledSource adds lines);
-		// the headers' are exact.
+		// Shader source lines with a load or store through a ref. A site is its line number, which can be in more than one file.
+		// A pulled Lighting build's lines can sit a few lines later than the file's. The headers' are exact.
 		void ReadSites()
 		{
 			sitesRead = true;
@@ -89,8 +88,8 @@ namespace DCLF::Diagnostics::RefTrace
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !host->Graph())
 			return;
-		// A mapped buffer the shaders write: host-coherent memory on Vulkan; on D3D12 a committed buffer in host-cached system memory
-		// (an UPLOAD buffer cannot have UAV access).
+		// A mapped buffer the shaders write. Host-coherent memory on Vulkan. On D3D12 a committed buffer in host-cached memory,
+		// since an UPLOAD buffer cannot have UAV access.
 		const std::uint64_t bytes = std::uint64_t(kEntries) * kEntryWords * sizeof(std::uint32_t);
 		rhi::Resource resource{};
 		if (::RenderGraph::ShaderTarget::IsSpirv()) {
@@ -163,7 +162,7 @@ namespace DCLF::Diagnostics::RefTrace
 				++nullEntries;
 				nullHits += hits;
 			}
-			// A ref with a slot is logged once, as a sample; a null or odd one whenever its hits grow.
+			// A ref with a slot is logged once as a sample. A null or odd one is logged whenever its hits grow.
 			const bool grew = hits != loggedHits[e] && (kind != 0 || loggedHits[e] == 0);
 			if (!grew || lines >= kLinesPerReport)
 				continue;

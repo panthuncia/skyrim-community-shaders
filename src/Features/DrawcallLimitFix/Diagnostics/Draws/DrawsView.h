@@ -5,17 +5,14 @@
 namespace DCLF::Diagnostics
 {
 	/**
-	 * @brief The draws area's read-only view for its observers: IndirectDraws' implementation (the installed draws, the payloads, the
-	 * latch layouts, the kept builds, the resources and their readback buffers), read at the hook points, where the main path has
-	 * finished with what it reads. Impl names the type for the observers' events and state. (The reports, Diagnostics/Reports/Draws*.cpp,
-	 * are IndirectDraws' own report functions: they take its counters themselves.)
+	 * @brief Read-only view of IndirectDraws' implementation for the draws observers, read at hook points after the main path is done with it.
 	 */
 	struct DrawsView
 	{
 		using Impl = IndirectDraws::Impl;
 
 		static const Impl& Get() { return *IndirectDraws::Get().impl; }
-		/** @brief The implementation, or null before it is made (a hook point every frame, DCLF running or not). */
+		/** @brief The implementation, or null before it is made. */
 		static const Impl* Find() { return IndirectDraws::Get().impl.get(); }
 	};
 }

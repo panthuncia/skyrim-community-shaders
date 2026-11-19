@@ -1,6 +1,5 @@
-// CS_DCLF_PERSISTENT_PARITY: every 60th publication, the snapshot the replay brought up to date against the tables it was made from: the
-// material records, the object and geometry slots (with the per-object columns replayed by slot beside them: set phases, decal ordinals,
-// layer links), the kept families (the pipeline family whether kept or copied) and the logs.
+// Replay parity. Every 60th publication, the replayed snapshot against the tables it was made from, including material records,
+// slots, the per-object columns replayed by slot, the kept families and the logs.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -14,7 +13,7 @@ namespace DCLF::Diagnostics
 	{
 		using V = SceneView;
 
-		/** @brief The kept table families (a_kept, a bit by registration) against the tables' (Extensions::TableFamilies::Same). */
+		/** @brief The kept table families, a bit per registration, against the tables'. */
 		void CheckKeptFamilies(std::uint32_t a_kept, const SceneTables& a_snapshot, const SceneTables& a_tables, std::uint64_t& a_differ)
 		{
 			const auto families = Extensions::RegisteredTableFamilies();
@@ -65,7 +64,7 @@ namespace DCLF::Diagnostics
 								tables.geometryLog.End());
 					}
 				}
-				// The kept families against the tables' (vectors by their bytes, maps by their entries, the journal by its version).
+				// Vectors compare by bytes, maps by entries, the journal by version.
 				auto sameMember = [](const auto& a_left, const auto& a_right) {
 					using T = std::decay_t<decltype(a_left)>;
 					if constexpr (requires { a_left.find(a_left.begin()->first); }) {
@@ -99,7 +98,7 @@ namespace DCLF::Diagnostics
 				}
 				if (!sameFamily([](auto& a_x, auto& a_y, auto&& a_member) { SceneTables::PipelineFamily(a_x, a_y, a_member); }) && replay.parityFamiliesDiffer++ == 0)
 					logger::error("[DCLF] tables replay (6d): the pipeline family (stamp {}, the snapshot's {}) differs from the tables'", tables.pipelinesStamp, snapshot.pipelinesStamp);
-				// The per-object columns replayed by slot beside the logged ones, against the tables' whole.
+				// Per-object columns replayed by slot, against the tables' whole.
 				auto sameColumn = [&](const char* a_name, const auto& a_left, const auto& a_right) {
 					if (sameMember(a_left, a_right))
 						return;
@@ -114,7 +113,6 @@ namespace DCLF::Diagnostics
 				sameColumn("decalOrdinal", snapshot.rangeOrdinal, tables.rangeOrdinal);
 				sameColumn("layerBase", snapshot.layerBase, tables.layerBase);
 				sameColumn("layerOf", snapshot.layerOf, tables.layerOf);
-				// The logs compare their base and entries (SharedEventLog's equality).
 				auto sameLog = [](const auto& a_left, const auto& a_right) { return a_left == a_right; };
 				if (!sameLog(snapshot.changeLog, tables.changeLog) || !sameLog(snapshot.geometryLog, tables.geometryLog) || !sameLog(snapshot.materialLog, tables.materialLog) ||
 					!sameLog(snapshot.publicationLog, tables.publicationLog) ||

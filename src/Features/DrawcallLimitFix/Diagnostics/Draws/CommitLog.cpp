@@ -1,5 +1,4 @@
-// The main commits' warnings and setup log (always on, render thread): frame buffers the mirror cannot fill, the fade updates' varied
-// inputs, a draw past its buffers, and the culling setup (once) with each epoch's viewport and ViewProj z row (periodic).
+// Main commit warnings and setup log, always on, on the render thread.
 
 #include "DrawsState.h"
 #include "Events.h"
@@ -42,7 +41,7 @@ namespace DCLF::Diagnostics
 		if (!std::exchange(state.cullingSetupLogged, true))
 			logger::info("[DCLF] culling setup: mode {}, ViewProj {}, VS_PerFrame b{} {}", shape.cullMode, a_setup.hasViewProj ? "yes" : "no", kPerFrameVertexRegister,
 				perFrameBuffer ? "bound" : "not bound");
-		// Logged periodically: both epochs must rasterise identically (viewport, depth range) for the colour EQUAL test.
+		// Both epochs must rasterise identically for the colour EQUAL depth test.
 		if (state.epochLines[a_setup.depthOnly ? 1 : 0]++ % 480 != 0)
 			return;
 		// The packed ViewProj's z row, which produces the compared depth.

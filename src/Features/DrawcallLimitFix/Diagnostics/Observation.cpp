@@ -1,4 +1,4 @@
-// Observe(): the run's Observation, read from the switches once on first use.
+// The run's Observation, read from the switches once on first use.
 #include "Observation.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"

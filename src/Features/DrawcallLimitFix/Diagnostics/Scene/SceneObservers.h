@@ -1,6 +1,6 @@
 #pragma once
 
-// The scene area's observers (Diagnostics/Scene/*.cpp): what SceneInstall.cpp registers, and what one observer shares with another.
+// The scene observers registered by SceneInstall.cpp, and what one observer shares with another.
 
 #include "SceneView.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -27,7 +27,7 @@ namespace DCLF::Diagnostics
 	void InstallCommitParity();
 	void InstallMirrorWatchPlacement();
 
-	/** @brief The coordinator's report: the mirror parity's lines since the last call (newline-terminated), or empty. */
+	/** @brief The mirror parity's lines since the last call, newline-terminated, or empty. */
 	std::string TakeMirrorParityLines();
 
 }

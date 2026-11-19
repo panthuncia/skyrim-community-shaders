@@ -1,5 +1,4 @@
-// The main commit's frame textures (always on): a register the drawn pipelines read that the commit could not resolve, described
-// once per register (the view's dimension and format; a buffer's size, stride, usage and flags; the resource's debug name).
+// Describes a frame texture register the commit could not resolve, once per register. Always on.
 
 #include "Events.h"
 #include "Observers.h"

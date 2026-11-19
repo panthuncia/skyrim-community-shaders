@@ -1,6 +1,5 @@
-// CS_DCLF_SET_PARITY: every 60th commit (one commit a pass) every slot's phases and waiting decided again (Coordinator::DecideSlot) against
-// what the commit's queue (its events and requeues by cause) left: a slot the requeues missed differs. The check's decisions that leave a
-// slot out of a root view are announced (SetSlotRedecided: Features/FirstPerson's observer, with the commit's own, SetSlotDecided).
+// Commit parity. Every 60th commit decides every slot again and compares with what the commit's queue left, so a slot the
+// requeues missed differs. Decisions that leave a slot out of a root view are announced.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -25,8 +24,7 @@ namespace DCLF::Diagnostics
 			const auto& setWaitCause = V::setWaitCause(store);
 			const auto& setWaitWhy = V::setWaitWhy(store);
 			const std::size_t objects = tables.objects.size();
-			// A decision of the check's, a slot it leaves out of a root view announced with the waiting reason the commit left.
-			std::string whys;  // the full evaluation's waiting reasons for the slot last decided (SetStats::waitingBy's indices)
+			std::string whys;  // the full evaluation's waiting reasons for the slot last decided
 			auto wanted = [&](std::uint32_t a_slot, bool& a_wait) {
 				const auto decision = V::DecideSlot(store, a_slot, a_event.live, a_event.drawn);
 				a_wait = decision.wait;
@@ -49,7 +47,7 @@ namespace DCLF::Diagnostics
 					if (!(phases & kSetMain) != !(wanted(partner, partnerWait) & kSetMain))
 						phases = 0;
 				}
-				// The vetoed entries' withholding (the gates'), as the commit applies it.
+				// Vetoed entries are withheld as the commit applies it.
 				if (a_event.gatesLive && V::EntryVetoed(store, slot))
 					phases = 0;
 				if (phases == setPhases[slot] && wait == (setWaitingMark[slot] != 0))

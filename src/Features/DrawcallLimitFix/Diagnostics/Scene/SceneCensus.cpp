@@ -1,5 +1,4 @@
-// CS_DCLF_CENSUS: the coordinator's verdicts on the geometries the registration census saw the engine draw (Diagnostics/Engine/
-// RegistrationCensus), answered after the joins of the pass that takes the request.
+// The coordinator's verdicts on the geometries the registration census saw the engine draw, answered after the joins.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -14,10 +13,8 @@ namespace DCLF::Diagnostics
 
 		void OnJoinsEnd(const On<ScenePoint::JoinsEnd>&)
 		{
-			// The geometries the census saw the engine draw, each with the coordinator's verdict - what the render thread cannot read while
-			// the passes run beside the frame. The pins go back with the reply: the render thread lets go of them (engine references are
-			// never released on DCLF's threads). One request in flight (the census posts the next once it took this reply), so the reply
-			// slot is empty here.
+			// The render thread cannot read these verdicts while passes run beside the frame. The pins go back with the reply, since engine
+			// references are never released on DCLF's threads. Only one request is in flight, so the reply slot is empty here.
 			auto& state = SceneDiagnostics();
 			auto request = state.censusRequest.exchange(nullptr, std::memory_order_acq_rel);
 			if (!request)
@@ -34,8 +31,7 @@ namespace DCLF::Diagnostics
 
 	CensusVerdict CensusVerdictOf(const Scene::Coordinator& a_store, const RE::BSGeometry* a_geometry)
 	{
-		// The tracked entry by pointer: its verdict this pass - the joins' (accumulateReason) if they made one this frame, else the walk's
-		// (candidateReason) - then its record, residency and phases. Nothing of the geometry is read.
+		// The joins' verdict if they made one this frame, else the walk's, then record, residency and phases. Nothing of the geometry is read.
 		CensusVerdict out;
 		const auto& tracked = V::tracked(a_store);
 		const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));

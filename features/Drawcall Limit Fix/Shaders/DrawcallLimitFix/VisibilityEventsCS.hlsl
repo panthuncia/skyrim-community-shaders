@@ -1,46 +1,32 @@
-// Drawcall Limit Fix: the main camera's visibility as change events (dclf-architecture.md, "The visibility events").
+// Drawcall Limit Fix. The main camera's visibility as change events.
 //
-// The engine's main-camera cull leaves kAccumulated (NiAVObject flag bit 26) on what passed it: on a reference root when its
-// bound passed the cull's test, on a geometry when the cull reached it in view. Its readers (the animated references' update,
-// the dynamic lights' receivers, the tree clock: skyrim-engine-notes.md, "Engine side effects of the culls") need it
-// once the engine's culls stop. DCLF already has both verdicts on the GPU: a fade root's is FadeStateCS's kFadeVerdictInView
-// (the list processes' Process1 test through the root's portal program), a geometry's is depth phase 1's frustum stamp
-// (cs.dclf.frustum: stamped this frame, and not dropped by its root's fade). Neither is DCLF's HZB occlusion, which the engine's cull
-// does not make: kAccumulated means in the main camera's view (frustum, portals, occlusion planes), not app-culled, and for a geometry
-// not under a root whose OnVisible stops (dclf-architecture.md, "What kAccumulated means"). Phase 1 stamps every main input,
-// the decal, forward and refraction ones too, which the depth segment draws none of. This pass compares them, once a frame after both,
-// with what it last reported per slot, and appends only the changes to the event list, which the host reads back
-// asynchronously (VisibilityReadback) and decodes on DCLF's executor.
-//
-// One thread per root slot, then one per object slot. A root's reported word is keyed by its listing's generation: a new
-// listing (or a zeroed word: a new backing) reports its verdict when it is in view, and the host takes a generation it has no
-// event of as out of view. An object slot has no generation on the GPU: its word is the slot's (whatever occupies it), and the
-// host resolves the occupant with the tables of the event's frame. A change that does not fit the list leaves its word as it
-// was, so it is appended again next frame; the count past the list tells the host to grow it (no change is ever dropped).
-//
-// The normal path runs this pass: DCLF writes kAccumulated on the roots the cut stands in for from these events (dclf-architecture.md,
-// "kAccumulated written by DCLF"); CS_DCLF_ACCUMULATED_PARITY adds the observer against the engine's bits. InMargin (a verdict against
-// widened planes, for the readback's latency) stays reserved: this pass binds no camera planes (the host's rule keeps two decoded frames
-// instead).
+// The engine's cull leaves kAccumulated, NiAVObject flag bit 26, on roots and geometries it found in view. Animation updates,
+// dynamic light receivers and the tree clock read it, so it must still be written once the engine's culls stop.
+// DCLF has both verdicts on the GPU. A fade root's is FadeStateCS's kFadeVerdictInView, and a geometry's is depth phase 1's
+// frustum stamp. HZB occlusion is not part of it, since the engine's cull does not make that test.
+// This pass compares them once a frame with what it last reported per slot and appends only the changes. The host reads the
+// list back asynchronously and decodes it on DCLF's executor.
+// A root's word is keyed by its listing's generation. An object slot has no generation, so the host resolves its occupant with
+// the tables of the event's frame. A change that does not fit stays unreported and is appended next frame, so none is dropped.
 
-// Must match VisibilityEventsConstants (Draws/IndirectDraws/Core/GpuLayouts.h).
+// Must match VisibilityEventsConstants in GpuLayouts.h.
 cbuffer VisibilityEventsConstants : register(b0)
 {
-	uint RootsIndex;           // StructuredBuffer<FadeRootStatic>: the listings' generations
-	uint StatesIndex;          // StructuredBuffer<FadeNodeState>: FadeStateCS's state rows (this frame's after it)
-	uint FrameIndex;           // StructuredBuffer<FadeFrame>, one row: the scene frame, the root count, the camera
-	uint FrustumIndex;         // ByteAddressBuffer: per object, depth phase 1's frustum stamp (BuildDrawsCS)
-	uint RootReportedIndex;    // RWStructuredBuffer<uint2>: per root, the generation and the bits last reported
-	uint ObjectReportedIndex;  // RWStructuredBuffer<uint>: per object, the bits last reported
-	uint EventsIndex;          // RWStructuredBuffer<uint>: the header, then the events (GpuLayouts.h, VisibilityEvent)
+	uint RootsIndex;           // StructuredBuffer<FadeRootStatic>, the listings' generations
+	uint StatesIndex;          // StructuredBuffer<FadeNodeState>, FadeStateCS's rows after this frame's update
+	uint FrameIndex;           // StructuredBuffer<FadeFrame>, one row
+	uint FrustumIndex;         // ByteAddressBuffer, per object depth phase 1's frustum stamp
+	uint RootReportedIndex;    // RWStructuredBuffer<uint2>, per root the generation and bits last reported
+	uint ObjectReportedIndex;  // RWStructuredBuffer<uint>, per object the bits last reported
+	uint EventsIndex;          // RWStructuredBuffer<uint>, the header then the events
 	uint EventCapacity;        // the events the list and every readback slot hold
-	uint RootSlots;            // the root threads (the root buffers' capacity); the object threads follow
-	uint ObjectSlots;          // the object threads (the scene's object capacity)
+	uint RootSlots;            // root threads, followed by the object threads
+	uint ObjectSlots;          // object threads, the scene's object capacity
 	uint Padding0;
 	uint Padding1;
 }
 
-// FadeStateCS.hlsl's rows: keep the three the same as there and as Records.h's FadeNodeState, FadeRootStatic and FadeFrame.
+// Keep these the same as FadeStateCS.hlsl's and Records.h's.
 struct FadeNodeState
 {
 	uint Flags;
@@ -116,24 +102,23 @@ struct FadeFrame
 
 static const uint kNoObject = 0xFFFFFFFFu;
 static const uint kFadeVerdictInView = 1u << 0;
-// BuildDrawsCS's frustum stamp word: the stamp in the low 28 bits, the fade test's drop in bit 31.
+// The stamp in the low 28 bits, the fade drop in bit 31.
 static const uint kFrustumStampMask = 0x0FFFFFFFu;
 static const uint kFrustumFadeHidden = 0x80000000u;
-// The events (GpuLayouts.h: kVisibilityEvent*): a header of four words (the count appended, which may pass the capacity; the
-// scene frame), then four words an event (slot, generation, kind, bits).
+// A four-word header with the appended count, which may pass capacity, and the scene frame. Then four words per event.
 static const uint kHeaderWords = 4;
 static const uint kKindRoot = 0;
 static const uint kKindObject = 1;
-static const uint kBitVisible = 1u << 0;   // a root: InView (its kAccumulated); an object: stamped and not fade-hidden
-static const uint kBitInMargin = 1u << 1;  // reserved (InView against widened planes: not yet produced)
-static const uint kBitVerdict = 1u << 2;   // a root: FadeStateCS updated its listing this frame (else DCLF has no verdict for it)
-static const uint kBitFadeHidden = 1u << 3;  // an object: stamped (in view) but dropped by its root's fade
-// An object's reported word: these bits, and kReportedValid once a verdict has been reported for the slot.
+static const uint kBitVisible = 1u << 0;   // root InView, or an object stamped and not fade-hidden
+static const uint kBitInMargin = 1u << 1;  // reserved for widened planes, not produced yet
+static const uint kBitVerdict = 1u << 2;   // FadeStateCS updated the root's listing this frame
+static const uint kBitFadeHidden = 1u << 3;  // an object stamped in view but dropped by its root's fade
+// An object's reported word, with kReportedValid once a verdict was reported for the slot.
 static const uint kReportedValid = 1u << 31;
 
 static uint SceneFrame;
 
-// Appends an event; false when it does not fit (the caller leaves its reported word, so it is appended again next frame).
+// Appends an event. False when it does not fit, so the caller keeps its word and it is appended next frame.
 bool Append(uint a_slot, uint a_generation, uint a_kind, uint a_bits)
 {
 	RWStructuredBuffer<uint> events = ResourceDescriptorHeap[EventsIndex];
@@ -149,10 +134,10 @@ bool Append(uint a_slot, uint a_generation, uint a_kind, uint a_bits)
 	return true;
 }
 
-// A root slot: its InView this frame against what was reported for its listing.
+// A root slot's InView this frame against what was reported for its listing.
 void RootSlot(uint a_slot, FadeFrame a_frame)
 {
-	// No camera this frame: FadeStateCS updated nothing, so nothing is known (the words stand).
+	// No camera this frame means FadeStateCS updated nothing, so the words stand.
 	const uint rootCount = a_frame.LodAdjust != 0.0f ? a_frame.RootCount : 0u;
 	if (a_slot >= rootCount)
 		return;
@@ -162,7 +147,7 @@ void RootSlot(uint a_slot, FadeFrame a_frame)
 		return;
 	StructuredBuffer<FadeNodeState> states = ResourceDescriptorHeap[StatesIndex];
 	const FadeNodeState state = states[a_slot];
-	// The state of this frame's update of this listing: one not updated this frame (no seed yet, no member drawn) has no verdict.
+	// A listing not updated this frame has no verdict.
 	const bool updated = state.Generation == root.Generation && state.Frame == SceneFrame;
 	const uint bits = updated ? (kBitVerdict | ((state.Verdict & kFadeVerdictInView) != 0 ? kBitVisible : 0u)) : 0u;
 	RWStructuredBuffer<uint2> reported = ResourceDescriptorHeap[RootReportedIndex];
@@ -177,21 +162,21 @@ void RootSlot(uint a_slot, FadeFrame a_frame)
 		reported[a_slot] = uint2(root.Generation, bits);
 }
 
-// An object slot: stamped by this frame's depth phase 1 and not fade-hidden, against what was reported for the slot.
+// An object slot's verdict against what was reported for the slot.
 void ObjectSlot(uint a_slot)
 {
 	ByteAddressBuffer frustum = ResourceDescriptorHeap[FrustumIndex];
 	RWStructuredBuffer<uint> reported = ResourceDescriptorHeap[ObjectReportedIndex];
 	uint reportedSlots, stride;
 	reported.GetDimensions(reportedSlots, stride);
-	// ObjectSlots bounds the frustum stamps. A raw GetDimensions would read a structured view's element count on D3D12.
+	// ObjectSlots bounds the stamps. A raw GetDimensions would read a structured view's element count on D3D12.
 	if (a_slot >= reportedSlots)
 		return;
 	const uint stamp = frustum.Load(a_slot * 4u);
 	const bool stamped = (stamp & kFrustumStampMask) == (SceneFrame & kFrustumStampMask);
 	const uint bits = stamped ? ((stamp & kFrustumFadeHidden) == 0 ? kBitVisible : kBitFadeHidden) : 0u;
 	const uint last = reported[a_slot];
-	// A slot with no report yet (a new backing) was out of view as far as the host knows (its decoder starts again with it).
+	// A slot with no report yet was out of view as far as the host knows.
 	const uint lastBits = (last & kReportedValid) != 0 ? (last & ~kReportedValid) : 0u;
 	if (lastBits == bits) {
 		reported[a_slot] = kReportedValid | bits;
@@ -208,7 +193,7 @@ void ObjectSlot(uint a_slot)
 	SceneFrame = frame.SceneFrame;
 	const uint index = dispatchID.x;
 	if (index == 0) {
-		// The list's frame: the host checks it against the frame it armed the readback for.
+		// The host checks the list's frame against the one it armed the readback for.
 		RWStructuredBuffer<uint> events = ResourceDescriptorHeap[EventsIndex];
 		events[1] = SceneFrame;
 	}

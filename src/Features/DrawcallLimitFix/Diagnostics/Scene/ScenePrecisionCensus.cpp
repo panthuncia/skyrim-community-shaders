@@ -1,6 +1,6 @@
-// CS_DCLF_PRECISION_CENSUS: how much translation precision the engine's float transforms lose, by distance from the origin. Each
-// report recomposes every record's translation (and each of its skin's bones') down its parent chain in double, and compares it with the
-// float the engine stored. It answers whether a row's high and low translation pair would recover anything (dclf-validation.md).
+// Precision census. Measures how much translation precision the engine's float transforms lose by distance from the origin.
+// Each report recomposes every record's translation, and its bones', down the parent chain in double and compares with the
+// engine's float. It answers whether a high and low translation pair in the rows would recover anything.
 
 #include "Events.h"
 #include "SceneObservers.h"
@@ -28,11 +28,11 @@ namespace DCLF::Diagnostics
 		struct Bucket
 		{
 			std::uint64_t count = 0;
-			std::uint64_t localZero = 0;    // no translation of its own: its parent's value, so nothing to recover at this link
+			std::uint64_t localZero = 0;    // no translation of its own, so nothing to recover at this link
 			std::uint64_t none = 0;         // under 1/16 of a float step lost
 			std::uint64_t recoverable = 0;  // a quarter of a float step or more lost
 			std::uint64_t refused = 0;      // the chain disagrees with the engine
-			double largestLoss = 0.0;       // units, of those not refused
+			double largestLoss = 0.0;       // in units, of those not refused
 		};
 		using Buckets = std::array<Bucket, kMaxExponent - kMinExponent + 1>;
 
@@ -42,7 +42,7 @@ namespace DCLF::Diagnostics
 			return static_cast<double>(std::nextafter(magnitude, std::numeric_limits<float>::infinity())) - magnitude;
 		}
 
-		/** @brief a_object's translation composed down its parent chain in double, from its root's world; false for a chain too deep. */
+		/** @brief a_object's translation composed down its parent chain in double. False for a chain too deep. */
 		bool ComposedTranslation(const RE::NiAVObject& a_object, std::array<double, 3>& a_out)
 		{
 			std::array<const RE::NiAVObject*, kMaxChain> chain;
@@ -105,8 +105,8 @@ namespace DCLF::Diagnostics
 		}
 
 		/**
-		 * @brief Count, surviving a dangling pointer: the tables' geometries and a skin's bones are not pinned here, and across a cell
-		 * change either can point at freed memory. False when the read faulted. A diagnostic's guard only: a live path reads pinned items.
+		 * @brief Counts while surviving a dangling pointer, since geometries and bones are not pinned here and a cell change can free them.
+		 * False when the read faulted. A diagnostic guard only. Live paths read pinned items.
 		 */
 		bool CountGuarded(const RE::NiAVObject* a_object, Buckets& a_buckets, float& a_farthest)
 		{
@@ -118,7 +118,7 @@ namespace DCLF::Diagnostics
 			}
 		}
 
-		/** @brief Each bone of a_geometry's skin through CountGuarded; false when reading the skin itself faulted. */
+		/** @brief Counts each bone of a_geometry's skin. False when reading the skin itself faulted. */
 		bool CountBonesGuarded(const RE::BSGeometry* a_geometry, Buckets& a_buckets, float& a_farthest, std::uint64_t& a_faults)
 		{
 			__try {
@@ -150,13 +150,13 @@ namespace DCLF::Diagnostics
 
 		void OnPrepassBegin(const On<ScenePoint::PrepassConstantsBegin>&)
 		{
-			// The render thread, inside the engine-read window: the scene lane's passes mostly run after it closes.
+			// Render thread, inside the engine-read window. The scene lane's passes mostly run after it closes.
 			const std::uint32_t frame = V::frame();
 			static bool due = false;
 			due = due || frame % kReportFrames == 0;
 			if (!due)
 				return;
-			// The window can be shut at this point of a frame: the report waits for a frame where it is open.
+			// The window can be shut at this point of a frame, so wait for a frame where it is open.
 			if (const EngineReadWindow::Lease lease; !lease)
 				return;
 			due = false;
@@ -167,7 +167,7 @@ namespace DCLF::Diagnostics
 			for (const auto* geometry : Scene::FrameView::Get().GetTables().objectGeometry) {
 				if (!geometry)
 					continue;
-				// A lease per record: its bones are read under it too.
+				// One lease per record, covering its bones too.
 				const EngineReadWindow::Lease lease;
 				if (!lease) {
 					++refusedLeases;

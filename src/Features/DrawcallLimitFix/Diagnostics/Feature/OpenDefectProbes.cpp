@@ -1,5 +1,4 @@
-// The open defects' probes (render thread): DrawcallLimitFix::ProbeOpaqueTarget (CS_DCLF_TARGET_PROBE) and the player claims check (the
-// tree LOD audit is Features/TreeLod's).
+// Probes for open defects, on the render thread. The opaque target probe and the player claims check.
 #include "OpenDefectProbes.h"
 #include "TargetDump.h"
 
@@ -16,21 +15,21 @@
 void DrawcallLimitFix::ProbeOpaqueTarget(std::uint32_t a_stage)
 {
 	const bool a_afterDCLF = a_stage != 0;
-	// CS_DCLF_TARGET_DUMP's points here (Deferred's hooks), with DCLF on or off.
+	// Target dump points from the deferred hooks, with DCLF on or off.
 	static constexpr const char* kDumpPoints[4] = { "opaque end", "after DCLF colour", "after terrain blending", "after deferred composite" };
 	if (a_stage < 4)
 		DCLF::TargetDump::Point(kDumpPoints[a_stage]);
 	const std::string& pixel = DCLF::SwitchValue(DCLF::Switch::TargetProbe);
 	if (pixel.empty())
 		return;
-	// The eight colour targets, then the bound depth buffer (rt8) and the pixel stage's t55 (rt9: Terrain Blending's mask).
+	// The eight colour targets, then the bound depth buffer as rt8 and Terrain Blending's mask at t55 as rt9.
 	constexpr std::uint32_t kTargets = 10;
-	constexpr std::uint32_t kBlock = 64;  // the mean over a block: one pixel is too noisy under TAA jitter
+	constexpr std::uint32_t kBlock = 64;  // one pixel is too noisy under TAA jitter
 	struct Slot
 	{
 		std::array<winrt::com_ptr<ID3D11Texture2D>, kTargets> staging;
 		std::array<DXGI_FORMAT, kTargets> format{};
-		std::array<std::uint32_t, kTargets> x{}, y{};  // where the block is in the staging copy (a depth buffer is copied whole)
+		std::array<std::uint32_t, kTargets> x{}, y{};  // the block's place in the staging copy, since a depth buffer is copied whole
 		bool running = false;
 	};
 	// Before and after DCLF's colour epoch, after Terrain Blending's passes, after the deferred composite.
@@ -55,14 +54,13 @@ void DrawcallLimitFix::ProbeOpaqueTarget(std::uint32_t a_stage)
 						continue;
 					D3D11_MAPPED_SUBRESOURCE mapped{};
 					if (SUCCEEDED(context->Map(slot.staging[t].get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-						// The block's mean per channel.
 						auto f11 = [](std::uint32_t a_bits, std::uint32_t a_mantissaBits) {
 							const std::uint32_t exponent = a_bits >> a_mantissaBits, mantissa = a_bits & ((1u << a_mantissaBits) - 1);
 							return exponent == 0 ? std::ldexp(float(mantissa), -14 - int(a_mantissaBits)) : std::ldexp(1.0f + float(mantissa) / float(1u << a_mantissaBits), int(exponent) - 15);
 						};
 						std::array<double, 4> sum{};
 						std::uint32_t channels = 0;
-						// The fourth channel's spread over the block: near 0, near 1, between.
+						// The fourth channel's spread over the block, near 0, near 1, or between.
 						std::array<std::uint32_t, 3> alphas{};
 						auto alphaOf = [&](double a_value) { ++alphas[a_value < 0.01 ? 0 : a_value > 0.99 ? 1 : 2]; };
 						for (std::uint32_t row = 0; row < kBlock; ++row) {
@@ -164,7 +162,7 @@ void DrawcallLimitFix::ProbeOpaqueTarget(std::uint32_t a_stage)
 			depthView->Release();
 			textures[8] = resource.try_as<ID3D11Texture2D>();
 		}
-		// Terrain Blending's mask texture itself (t55 of its passes; nothing need be bound to t55 here).
+		// Terrain Blending's mask texture itself. Nothing need be bound to t55 here.
 		if (globals::features::terrainBlending.loaded && globals::features::terrainBlending.terrainDepth.texture) {
 			textures[9].copy_from(reinterpret_cast<ID3D11Texture2D*>(globals::features::terrainBlending.terrainDepth.texture));
 		}
@@ -193,7 +191,7 @@ void DrawcallLimitFix::ProbeOpaqueTarget(std::uint32_t a_stage)
 		textures[t]->GetDesc(&desc);
 		const auto x = std::min<std::uint32_t>(std::strtoul(pixel.substr(0, sep).c_str(), nullptr, 10), desc.Width - kBlock);
 		const auto y = std::min<std::uint32_t>(std::strtoul(pixel.substr(sep + 1).c_str(), nullptr, 10), desc.Height - kBlock);
-		// A depth buffer is copied whole (D3D11 copies no box of one).
+		// D3D11 copies no box of a depth buffer, so copy it whole.
 		const bool whole = (desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 		D3D11_TEXTURE2D_DESC stagingDesc = desc;
 		if (!whole)
@@ -236,7 +234,7 @@ namespace DCLF
 		++observed.frames;
 		std::uint32_t claimed = 0;
 		std::string example;
-		// The geometry under a_root claimed for the main view (a safe point: the engine's update is done, the culls not begun).
+		// Geometry under a_root claimed for the main view. A safe point, after the engine's update and before the culls.
 		auto count = [&](RE::NiAVObject* a_root) {
 			RE::BSVisit::TraverseScenegraphGeometries(a_root, [&](RE::BSGeometry* a_geometry) {
 				if (claims->PhasesOf(a_geometry) & kSetMain) {

@@ -1,14 +1,11 @@
 #pragma once
 
-// DCLF's profiling zones: a Tracy zone, as before, and while a telemetry phase records (the diagnostic capture, dclf:telemetry), a
-// BasicTelemetry scope and a per-thread tally too. So a capture holds DCLF's own CPU time by scope and by thread, in every build,
-// Tracy or not.
-//
-// Outside a phase a zone costs one relaxed load and a branch on top of Tracy's. BasicTelemetry's own scope is not opened then: its
-// constructor reads the active session through an atomic shared pointer, which takes a lock.
-//
-// Use DCLF_ZONE("CS.DCLF.Name") where ZoneScopedN was, and DCLF_ZONE_NAMED(variable, "CS.DCLF.Name", true) where ZoneNamedN was. The
-// name must be a string literal: the callsite keeps a view of it.
+// DCLF's profiling zones. Each is a Tracy zone, and while a telemetry phase records it is also a BasicTelemetry scope and a
+// per-thread tally, so a capture holds DCLF's CPU time by scope and thread in any build.
+// Outside a phase a zone costs one relaxed load on top of Tracy. The BasicTelemetry scope is not opened then, because its
+// constructor reads the session through an atomic shared pointer, which takes a lock.
+// Use DCLF_ZONE("CS.DCLF.Name") and DCLF_ZONE_NAMED(variable, "CS.DCLF.Name", true). The name must be a string literal,
+// since the callsite keeps a view of it.
 
 #include <BasicTelemetry/Telemetry.h>
 
@@ -20,10 +17,10 @@
 
 namespace DCLF::Zones
 {
-	/** @brief True while a telemetry phase records (TelemetryProfile.cpp sets it). */
+	/** @brief True while a telemetry phase records. */
 	inline std::atomic<bool> recording{ false };
 
-	// The BasicTelemetry scope is built in place only while a phase records; its alignment pads the class (C4324).
+	// The BasicTelemetry scope is built in place only while a phase records. Its alignment pads the class, hence C4324.
 #pragma warning(push)
 #pragma warning(disable: 4324)
 	/** @brief One zone's extent on one thread, recorded while a phase records. */
@@ -54,20 +51,20 @@ namespace DCLF::Zones
 	};
 #pragma warning(pop)
 
-	/** @brief One scope's time on one thread over a phase (TakeThreadRows). */
+	/** @brief One scope's time on one thread over a phase. */
 	struct ThreadRow
 	{
 		std::uint32_t threadId = 0;
 		std::string thread;  // the thread's description, when it has one
 		std::string scope;
 		std::uint64_t count = 0, totalNs = 0, maxNs = 0;
-		std::uint64_t topLevelNs = 0;  // of totalNs, entered with no other DCLF zone open on the thread: these add up to its DCLF time
+		std::uint64_t topLevelNs = 0;  // time with no other DCLF zone open on the thread, so these add up to its DCLF time
 	};
 
-	/** @brief A phase's start (TelemetryPhase): every thread's tallies cleared. */
+	/** @brief Clears every thread's tallies at a phase's start. */
 	void ResetThreadRows();
 
-	/** @brief A phase's end (TelemetryPhase): every thread's tallies since ResetThreadRows. */
+	/** @brief Every thread's tallies since ResetThreadRows, at a phase's end. */
 	std::vector<ThreadRow> TakeThreadRows();
 }
 

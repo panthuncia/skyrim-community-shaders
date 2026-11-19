@@ -1,6 +1,6 @@
 #pragma once
 
-// The capture's shared state between its threads (Capture.cpp: the render thread and the scene lane; Bundle.cpp: the worker).
+// The capture's state shared between the render thread, the scene lane and the packaging worker.
 
 #include "Capture.h"
 
@@ -36,7 +36,7 @@ namespace DCLF::Capture
 		bool interior = false;
 	};
 
-	/** @brief What the main thread reads for the bundle (the load order, the player's place). */
+	/** @brief What the main thread reads for the bundle. */
 	struct MainThreadInfo
 	{
 		std::string loadOrder;
@@ -57,19 +57,19 @@ namespace DCLF::Capture
 
 		std::shared_ptr<spdlog::sinks::sink> tee;
 
-		std::vector<FrameSample> frames;  // reserved at the start; nothing is added past its capacity
+		std::vector<FrameSample> frames;  // reserved at the start, nothing is added past capacity
 		std::uint64_t framesDropped = 0;
 
-		// The scene lane's sections: asked for at the start and the end, each acknowledged once written.
+		// The scene lane's sections, asked for at the start and the end, each acknowledged once written.
 		std::atomic<std::uint32_t> laneAsked{ 0 }, laneDone{ 0 };
 		std::chrono::steady_clock::time_point finishDeadline;
 		std::uint32_t finishFrames = 0;  // Presents since the end, so the render thread's flushed report has run
 
-		// The render thread's parts, written before packaging (JSON text).
+		// The render thread's parts as JSON text, written before packaging.
 		std::string environment, features, settings;
 		std::shared_future<MainThreadInfo> mainThread;
 
-		// What the manifest says about each section: "ok", "skipped: <why>" or "failed: <why>".
+		// The manifest's note per section, "ok", "skipped: <why>" or "failed: <why>".
 		std::mutex notesMutex;
 		std::vector<std::pair<std::string, std::string>> sections;
 
@@ -80,12 +80,9 @@ namespace DCLF::Capture
 		}
 	};
 
-	/**
-	 * @brief Worker thread: writes the bundle's remaining files, zips the folder and deletes it. Returns the zip's path, or the folder's
-	 * when the zip failed (a_error says why).
-	 */
+	/** @brief Writes the remaining files and zips the folder. Returns the zip's path, or the folder's when zipping failed. Worker thread. */
 	std::filesystem::path Package(Session& a_session, std::string& a_error);
 
-	/** @brief Any thread: the text with the user's profile path replaced by %USERPROFILE%. */
+	/** @brief Replaces the user's profile path with %USERPROFILE%. Any thread. */
 	std::string Redact(std::string a_text);
 }

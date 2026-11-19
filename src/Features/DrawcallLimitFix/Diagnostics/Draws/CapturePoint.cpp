@@ -1,5 +1,4 @@
-// CS_DCLF_CAPTURE_POINT_PARITY: at the frame's first deferred lighting draw the engine makes, what is bound there against the colour
-// epoch's capture, in everything the colour epoch takes from it.
+// Capture point parity. At the frame's first deferred lighting draw, what is bound against the colour epoch's capture.
 
 #include "DrawsState.h"
 #include "DrawsView.h"
@@ -16,8 +15,7 @@ namespace DCLF::Diagnostics
 			return;
 		const auto& captured = *pending;
 		auto now = CaptureBindings();
-		// Only what the colour epoch takes from a capture: the frame registers, the frame textures, the targets, the
-		// viewport and the eye (the per-draw registers and textures are the draw's own).
+		// Only what the colour epoch takes from a capture. Per-draw registers and textures are the draw's own.
 		auto& p = DrawsState::Get().capturePoint;
 		bool any = false;
 		auto note = [&](std::string a_what) {

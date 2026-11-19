@@ -1,5 +1,4 @@
-// CS_DCLF_PERSISTENT_PARITY: the stores the builds keep against a rebuild from the tables (the object records, the geometry table, the
-// extras rows as each payload backing holds them, the draw bound, the kept shadow build, the exclusions' reuse). Each runs on its store's thread.
+// Kept stores against a rebuild from the tables. Each check runs on its store's thread.
 
 #include "DrawsState.h"
 #include "Events.h"
@@ -9,7 +8,7 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		/** @brief One buffer's rows as uploaded (a_mirror) against the view it was sent from. A mirror shorter than the view's rows differs (rows the buffer was never sent). a_first, when given, gets the first difference. */
+		/** @brief One buffer's uploaded rows against the view they were sent from. A shorter mirror differs. a_first gets the first difference. */
 		bool CompareExtras(const std::vector<float>& a_mirror, const ExtrasOut& a_out, const SceneTables* a_tables, std::uint64_t& a_freedRows,
 			std::string* a_first)
 		{
@@ -19,8 +18,7 @@ namespace DCLF::Diagnostics
 					*a_first = fmt::format("{} rows (version {}), the mirror holds {}: rows never sent", rows, a_out.ContentEpoch(), a_mirror.size() / 4);
 				return false;
 			}
-			// The blocks a live object owns: a freed block's rows are neither read nor journalled (its owner's change is skipped once
-			// the block is gone), so they are not compared.
+			// A freed block's rows are neither read nor journalled, so only blocks a live object owns are compared.
 			std::vector<std::uint8_t> owned;
 			if (a_tables) {
 				owned.assign((std::size_t(rows) + kExtraRows - 1) / kExtraRows, 0);
@@ -48,7 +46,7 @@ namespace DCLF::Diagnostics
 
 	void MirrorExtras(const ExtrasSending& a_sending)
 	{
-		// The version's mirror: its predecessor's (kept: a failed build is made again from it), the delta written over it; the others go.
+		// Keep the predecessor's mirror, since a failed build is made again from it, and write the delta over it.
 		auto& mirrors = DrawsState::Get().kept.extrasMirrors;
 		std::vector<float> base;
 		if (const auto it = mirrors.find(a_sending.previous); a_sending.previous && it != mirrors.end())
@@ -61,8 +59,7 @@ namespace DCLF::Diagnostics
 
 	void CheckExtras(const ExtrasSent& a_sent)
 	{
-		// Every version: its predecessor's rows with its delta, against the rows it was built to (a delta that missed a change since the
-		// predecessor's journal position differs here).
+		// Each version's predecessor rows plus its delta, against the rows it was built to. A delta that missed a change differs here.
 		auto& kept = DrawsState::Get().kept;
 		const auto it = kept.extrasMirrors.find(a_sent.version);
 		static const std::vector<float> none;
@@ -74,7 +71,6 @@ namespace DCLF::Diagnostics
 
 	void CheckObjectRecords(const StoreUpdated<Draws::ObjectRecordStore>& a_updated)
 	{
-		// Every record against one built from the tables now.
 		if (!ParityDue(a_updated.frame))
 			return;
 		const auto& a_tables = a_updated.tables;
@@ -93,7 +89,6 @@ namespace DCLF::Diagnostics
 
 	void CheckGeometryDraws(const StoreUpdated<Draws::GeometryStore>& a_updated)
 	{
-		// Every slot against one packed from the tables now.
 		if (!ParityDue(a_updated.frame))
 			return;
 		const auto& a_tables = a_updated.tables;
@@ -110,7 +105,6 @@ namespace DCLF::Diagnostics
 
 	void CheckDrawBound(const StoreUpdated<Draws::DrawBoundStore>& a_updated)
 	{
-		// The kept bound against a scan.
 		if (!ParityDue(a_updated.frame))
 			return;
 		const auto& s = a_updated.store;
@@ -141,9 +135,8 @@ namespace DCLF::Diagnostics
 
 	void CheckKeptShadow(const ShadowBuilt& a_built)
 	{
-		// A kept shadow build against the same build made the per-frame way (BuildShadowPayload without kept state: the reference).
-		// Per used mode, the same casters with the same inputs (the record's number apart), records binding the same textures and
-		// samplers with the same texcoord values.
+		// A kept shadow build against the same build made the per-frame way. Per used mode, the same casters with the same inputs,
+		// binding the same textures and samplers with the same texcoord values.
 		const auto& a_in = a_built.in;
 		const auto& a_tables = a_built.tables;
 		const auto& a_kept = a_built.payload;
@@ -168,8 +161,7 @@ namespace DCLF::Diagnostics
 				++parity.checks;
 				const auto it = keptInputs.find(input.objectIndex);
 				if (it == keptInputs.end()) {
-					// Why the kept build lacks it: no record, waiting on a pipeline or texture, in the frame's face list, or
-					// held nowhere (an object no change named since it became a caster).
+					// Why the kept build lacks it. No record, waiting on a pipeline or texture, in the frame's face list, or held nowhere.
 					const std::uint32_t o = input.objectIndex;
 					const auto& mode = k.modes[m];
 					const std::uint32_t record = o < k.objectRecord.size() ? k.objectRecord[o] : ShadowKept::kNoRecord;
@@ -189,7 +181,7 @@ namespace DCLF::Diagnostics
 					return;
 				}
 				++matched;
-				// What the shadow views read of the two (a scene entry's main part is the main build's).
+				// What the shadow views read of the two.
 				const DrawInput x = ShadowPartOf(it->second), y = ShadowPartOf(input);
 				const std::uint32_t xr = it->second.shadowRow, yr = input.shadowRow;
 				if (std::memcmp(&x, &y, sizeof(DrawInput)) != 0) {
@@ -197,7 +189,7 @@ namespace DCLF::Diagnostics
 												x.flags, y.flags));
 					return;
 				}
-				// The rows by value: the two builds number them differently.
+				// Compare rows by value, since the two builds number them differently.
 				const auto* a = a_kept.materialRows.At(xr);
 				const auto* b = reference.materialRows.At(yr);
 				if (!a || !b) {

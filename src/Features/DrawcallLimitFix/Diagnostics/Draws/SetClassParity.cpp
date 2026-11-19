@@ -1,9 +1,7 @@
-// CS_DCLF_SET_PARITY: every Reports::kInterval-th colour epoch, BuildDraws' state class sub-ranges (the colour segment's sequences, the
-// classCounts words and the count words) copied to staging and read a few colour epochs later, never waiting for the copies, against the
-// shape the epoch recorded with: its class plan (the latch's class table and map) and its indirect state. Every sequence a call draws
-// (index count > 0, below its sub-range's count) must name a pipeline its class's execution sets hold, at the index its own input's set
-// index maps to in that class: a draw in another class's sub-range is drawn with that class's fixed-function state. Not the first-person
-// view's forward range (its own sequences and bucket counts: a follow-up).
+// Set class parity. Every kInterval-th colour epoch, BuildDraws' state class sub-ranges and count words are copied to staging and
+// read a few epochs later without waiting. Each drawn sequence must name a pipeline its class's execution sets hold, at the
+// index its input's set index maps to. A draw in another class's sub-range would get that class's fixed-function state.
+// The first-person forward range is not checked.
 
 #include "DrawsState.h"
 #include "DrawsView.h"
@@ -15,9 +13,9 @@ namespace DCLF::Diagnostics
 	namespace
 	{
 		constexpr std::uint32_t kReadDelay = 3;   // colour epochs before the first read
-		constexpr std::uint32_t kReadTries = 60;  // colour epochs a copy still in flight is tried again before the check gives up
+		constexpr std::uint32_t kReadTries = 60;  // colour epochs to retry a copy still in flight before giving up
 
-		/** @brief A sub-range's name for the report: its range (GpuLayouts.h, kClassRangeMain). */
+		/** @brief A sub-range's name for the report. */
 		std::string RangeName(std::uint32_t a_range)
 		{
 			if (a_range == Draws::kClassRangeMain)
@@ -28,7 +26,7 @@ namespace DCLF::Diagnostics
 			return slot < kDecalGroups ? fmt::format("decal group {}", slot + 1) : fmt::format("terrain group {}", slot - kDecalGroups + 1);
 		}
 
-		/** @brief A staging copy of a_source, after the epoch in D3D11 stream order (null: none made). */
+		/** @brief A staging copy of a_source, after the epoch in D3D11 stream order. Null when none was made. */
 		winrt::com_ptr<ID3D11Buffer> Staging(ID3D11Buffer* a_source)
 		{
 			winrt::com_ptr<ID3D11Buffer> buffer;
@@ -54,7 +52,7 @@ namespace DCLF::Diagnostics
 			return desc.ByteWidth;
 		}
 
-		/** @brief The staged buffers, mapped together without waiting (false: one is still in flight, or a map failed; none stays mapped). */
+		/** @brief The staged buffers mapped together without waiting. False if one is still in flight or a map failed, and then none stays mapped. */
 		struct Mapped
 		{
 			std::array<D3D11_MAPPED_SUBRESOURCE, 3> maps{};
@@ -83,17 +81,14 @@ namespace DCLF::Diagnostics
 			~Mapped() { Unmap(); }
 		};
 
-		/** @brief A class's sub-range of a range as CheckSequences reads it: its pipelines, its drawn slots, whether it is in pipeline order. */
+		/** @brief A class's sub-range as CheckSequences reads it. */
 		struct SubRange
 		{
 			std::uint32_t c = 0, r = 0, pipelines = 0, drawn = 0;
 			bool sorted = false;  // a main sub-range DrawSort wrote
 		};
 
-		/**
-		 * @brief The drawn slots of a sub-range (a_sequences: its first; a_half: which forward half, for the report): each sequence with an
-		 * index count names a pipeline its class's sets hold, at the index one of its object's inputs' set indices maps to in the class.
-		 */
+		/** @brief Each sequence with an index count must name a pipeline its class's sets hold, at an index one of its object's set indices maps to. */
 		void CheckSequences(const DrawsState::SetClassReadback& a_readback, std::span<const std::uint32_t> a_classOf, const DrawSequence* a_sequences, const SubRange& a_sub,
 			const char* a_half, ParityCounter& a_parity, std::uint64_t& a_draws)
 		{
@@ -101,14 +96,14 @@ namespace DCLF::Diagnostics
 			for (std::uint32_t k = 0; k < a_sub.drawn; ++k) {
 				const DrawSequence& sequence = a_sequences[k];
 				if (sequence.indexCount == 0)
-					continue;  // draws nothing: a culled decal, another class's decal's filler
+					continue;  // draws nothing, a culled decal or another class's filler
 				++a_draws;
 				const std::uint32_t object = sequence.objectIndex & kObjectIndexMask;
 				const auto where = [&] { return fmt::format("class {} {} sub-range{} slot {} (object {})", a_sub.c, RangeName(a_sub.r), a_half, k, object); };
 				a_parity.Check(sequence.pipelineIndex < a_sub.pipelines, [&] {
 					return fmt::format("{}: pipeline index {} past the class's {} pipelines", where(), sequence.pipelineIndex, a_sub.pipelines);
 				});
-				// Its object's inputs' set indices: one maps to this class at this index.
+				// One of its object's set indices must map to this class at this index.
 				const std::uint32_t word = (a_sub.c << kSetClassShift) | sequence.pipelineIndex;
 				const auto found = a_readback.setsOf.find(object);
 				const std::span<const std::uint32_t> sets = found != a_readback.setsOf.end() ? std::span<const std::uint32_t>(found->second) : std::span<const std::uint32_t>();
@@ -120,7 +115,7 @@ namespace DCLF::Diagnostics
 					return fmt::format("{}: pipeline index {} (word {:#x}), its inputs': {}", where(), sequence.pipelineIndex, word,
 						inputs.empty() ? std::string("none in the payload") : inputs);
 				});
-				// DrawSort: each class's main sub-range in pipeline order.
+				// DrawSort leaves each class's main sub-range in pipeline order.
 				if (a_sub.sorted) {
 					a_parity.Check(sequence.pipelineIndex >= previous, [&] {
 						return fmt::format("{}: pipeline index {} after {} (the class's main sub-range is sorted)", where(), sequence.pipelineIndex, previous);
@@ -130,11 +125,7 @@ namespace DCLF::Diagnostics
 			}
 		}
 
-		/**
-		 * @brief The shape's class plan against its sub-ranges and indirect state (the latch's plan is the shape's: its classes the shape's
-		 * sub-ranges, its map the indirect state's class words). Returns the class words BuildDraws read: the plan's map (the latch's), else
-		 * the indirect state's.
-		 */
+		/** @brief Checks the shape's class plan against its sub-ranges and indirect state. Returns the class words BuildDraws read. */
 		std::span<const std::uint32_t> CheckPlan(const DrawsState::SetClassReadback& a_readback, ParityCounter& a_parity)
 		{
 			const auto* plan = a_readback.plan.get();
@@ -147,7 +138,7 @@ namespace DCLF::Diagnostics
 				a_parity.Check(false, [&] { return std::string("the shape has no class map"); });
 				return a_readback.classOf;
 			}
-			// The set indices' class words (the forward buckets' words follow them: SetClassPlan::map).
+			// The forward buckets' words follow the set indices' class words.
 			const auto words = std::span<const std::uint32_t>(plan->map).subspan(Draws::kClassHeaderWords).first(
 				std::min<std::size_t>(plan->map[0], plan->map.size() - Draws::kClassHeaderWords));
 			a_parity.Check(std::ranges::equal(words, a_readback.classOf), [&] {
@@ -156,7 +147,7 @@ namespace DCLF::Diagnostics
 			return words;
 		}
 
-		/** @brief The readback against its shape; logs the verdict line. */
+		/** @brief Checks the readback against its shape and logs the verdict. */
 		void CheckReadback(const DrawsState::SetClassReadback& a_readback, const Mapped& a_mapped)
 		{
 			const auto* sequences = static_cast<const DrawSequence*>(a_mapped.maps[0].pData);
@@ -168,13 +159,13 @@ namespace DCLF::Diagnostics
 			const auto& classes = a_readback.classes;
 			ParityCounter parity;
 			std::uint64_t subRanges = 0, draws = 0, decalDraws = 0, forwardDraws = 0, otherDraws = 0;
-			// The words BuildDraws counts a draw it dropped in: none may be (a dropped draw is an object not drawn).
+			// BuildDraws counts dropped draws here. There must be none, since a dropped draw is an object not drawn.
 			const std::uint32_t unplanned = kCountClassUnplannedWord < countWords ? count[kCountClassUnplannedWord] : 0;
 			const std::uint32_t overflow = kCountClassOverflowWord < countWords ? count[kCountClassOverflowWord] : 0;
 			parity.Check(unplanned == 0, [&] { return fmt::format("{} colour draws had no class sub-range (kCountClassUnplannedWord)", unplanned); });
 			parity.Check(overflow == 0, [&] { return fmt::format("{} colour draws were past their class sub-range's capacity (kCountClassOverflowWord)", overflow); });
 			const std::span<const std::uint32_t> classOf = CheckPlan(a_readback, parity);
-			// With the decal buckets (CS_DCLF_DECAL_PLAIN) the classes' decal sub-ranges are never written: their buckets are checked below.
+			// With plain decals the classes' decal sub-ranges are never written. Their buckets are checked below.
 			const bool plainDecals = a_readback.plan && !a_readback.plan->decals.empty();
 			for (std::uint32_t c = 0; c < classes.size(); ++c) {
 				const std::uint32_t pipelines = c < a_readback.pipelines.size() ? a_readback.pipelines[c] : 0;
@@ -184,12 +175,12 @@ namespace DCLF::Diagnostics
 					const auto& range = classes[c].ranges[r];
 					const bool decal = r >= Draws::ClassRangeOfSlot(0) && r < Draws::ClassRangeOfSlot(kDecalGroups);
 					const bool forward = r == Draws::kClassRangeForward;
-					// The count the calls read: a decal group's word (each of its classes' sub-ranges), else the class's classCounts word.
+					// A decal group's count word covers all its classes' sub-ranges. Otherwise it is the class's own word.
 					const std::uint32_t countWord = decal ? Draws::DecalCountWord(r - Draws::ClassRangeOfSlot(0)) : Draws::ClassCountWord(c, r);
 					const bool counted = decal ? countWord < countWords : countWord < classCountWords;
 					const std::uint32_t drawn = !counted ? 0 : decal ? count[countWord] : classCounts[countWord];
 					if (!range.capacity) {
-						// No sub-range: nothing may have been routed there (a decal group's count is its other classes').
+						// No sub-range, so nothing may have been routed there. A decal group's count belongs to its other classes.
 						if (!decal)
 							parity.Check(drawn == 0, [&] { return fmt::format("class {} has no {} sub-range, yet counted {} draws there", c, RangeName(r), drawn); });
 						continue;
@@ -209,7 +200,7 @@ namespace DCLF::Diagnostics
 					});
 					if (std::uint64_t(range.first) + (forward ? 2ull : 1ull) * range.capacity > sequenceSlots)
 						continue;
-					// The forward range's staging half (BuildDraws') and sorted half (ForwardSortCS', which the forward epoch draws).
+					// The forward range has BuildDraws' staging half and ForwardSortCS's sorted half, which the forward epoch draws.
 					const SubRange sub{ c, r, pipelines, std::min(drawn, range.capacity), r == Draws::kClassRangeMain && a_readback.sorted };
 					const std::uint64_t drawsBefore = draws;
 					CheckSequences(a_readback, classOf, sequences + range.first, sub, forward ? " (staging)" : "", parity, draws);
@@ -218,9 +209,8 @@ namespace DCLF::Diagnostics
 					(decal ? decalDraws : forward ? forwardDraws : otherDraws) += draws - drawsBefore;
 				}
 			}
-			// The plain draws' buckets (CS_DCLF_FORWARD_PLAIN, CS_DCLF_MAIN_PLAIN, CS_DCLF_TERRAIN_PLAIN): each bucket's count within its capacity,
-			// and each drawn sequence (a forward bucket's sorted half, a main or terrain bucket's range) its set index's (one of its object's inputs has it), its first
-			// instance its slot (the plain draw finds it by its instance).
+			// Plain buckets. Each count must be within capacity, each drawn sequence must carry a set index its object's inputs have,
+			// and its first instance must be its slot, since the plain draw finds it by instance.
 			const auto checkBuckets = [&](const char* a_kind, std::span<const SetClassPlan::PlainBucket> a_buckets, auto&& a_countWord, std::uint32_t a_halves,
 										   std::uint64_t& a_draws) {
 				for (std::size_t b = 0; b < a_buckets.size(); ++b) {
@@ -275,7 +265,7 @@ namespace DCLF::Diagnostics
 				return;
 			Mapped mapped;
 			if (!mapped.Map(*readback)) {
-				// Still in flight: the next colour epoch tries again (never a wait), for a while.
+				// Still in flight, so retry on the next colour epoch for a while. Never wait.
 				if (mapped.failure != DXGI_ERROR_WAS_STILL_DRAWING || ++readback->tries >= kReadTries) {
 					logger::warn("[DCLF] set classes (GPU, colour epoch {}): the readback could not be mapped ({:#x}, {} tries); not checked", readback->armedEpoch,
 						static_cast<std::uint32_t>(mapped.failure), readback->tries);
@@ -288,19 +278,19 @@ namespace DCLF::Diagnostics
 			readback.reset();
 			return;
 		}
-		// Half a window after the build parity's copies, so the two do not stage on one epoch.
+		// Half a window after the build parity's copies, so the two never stage on one epoch.
 		if ((state.setClassEpochs++ % Reports::kInterval) != Reports::kInterval / 2)
 			return;
 		const auto& resources = a_epoch.resources;
 		if (!resources || !resources->countD3D11 || !resources->classCounts)
 			return;
-		// The shape the epoch was committed into (the adopted revision's), and its sub-ranges.
+		// The adopted revision's shape and its sub-ranges.
 		const auto& active = DrawsView::Get().revisions.active;
 		const auto epoch = Draws::EpochOfShape(Draws::ShapeKind::Main, static_cast<std::uint32_t>(kColourShape));
 		const auto shape = active ? active->Get<PassFrame>(DrawsView::Impl::SceneRevisions::kShapeSlot + epoch) : nullptr;
 		if (!shape || shape->classes.empty())
 			return;
-		// The versions the adopted set names (what the epoch's recording wrote), which need not be the buffers' current ones.
+		// The versions the adopted set names, which need not be the buffers' current ones.
 		const auto& adopted = DrawsView::Get().Adopted();
 		auto namedSequences = adopted.Find(*resources->sequences);
 		auto* const sequencesView = state.setClassSequences.Of(namedSequences ? std::move(namedSequences) : resources->sequences->Current());
@@ -317,8 +307,7 @@ namespace DCLF::Diagnostics
 		armed.sequenceDraws = shape->sequenceDraws;
 		armed.sequenceDecals = shape->sequenceDecals;
 		armed.sorted = resources->sort != nullptr;
-		// Each object's set indices, from the payload's inputs (the resident region's lead its list): its draws' (refraction's is a
-		// plain draw, outside the classes).
+		// Each object's set indices, from the payload's inputs. Refraction is a plain draw outside the classes.
 		const Draws::MainPayload& payload = a_epoch.payload;
 		auto note = [&](const Draws::DrawInput& a_input) {
 			if (a_input.view.mask & Draws::kViewRefraction)

@@ -1,6 +1,5 @@
-// CS_DCLF_FOLIAGE_PARITY: the colour pass's alpha-tested draws' pixels (the foliage record, Policy::RecordFoliagePixels) against the frame
-// before's, reprojected, and within the frame against the Z-prepass's owners (FoliageParityCS.hlsl): the compare pass and its readback,
-// appended after the colour draws, and the report of each frame's results.
+// Foliage parity. The colour pass's alpha-tested pixels against the frame before, reprojected, and within the frame against the
+// Z-prepass's owners. Holds the compare pass, its readback and the report.
 
 #include "DrawsState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -12,18 +11,18 @@ namespace DCLF::Diagnostics
 	constexpr const char* kFoliageParityShader = "DrawcallLimitFix/FoliageParityCS.hlsl";
 	struct FoliageParityConstants
 	{
-		// Both pairs (by the epoch's parity): which is this frame's is the frame block's, as the colour pass read it.
+		// Two pairs by the epoch's parity. The frame block says which one the colour pass read.
 		RenderGraph::BufferRef ids[2]{}, colours[2]{};  // buffer view refs
-		RenderGraph::BufferRef frameBlock;  // the colour epoch's words in the frame lighting block (PS b13, c14: DCLFFoliageParity)
+		RenderGraph::BufferRef frameBlock;  // the colour epoch's words in the frame lighting block, PS b13 c14
 		std::uint32_t resultsIndex = 0;  // the results' UAV (RWByteAddressBuffer)
-		std::uint32_t ownersIndex = 0;   // the Z-prepass's owners (RWStructuredBuffer<uint64_t>), cleared as read
+		std::uint32_t ownersIndex = 0;   // the Z-prepass's owners, cleared as read
 		std::uint32_t depthIndex = 0;    // the main depth (SRV)
 		std::uint32_t padding0 = 0;
 		std::uint32_t width = 0, height = 0, padding1 = 0, padding2 = 0;
 	};
 	constexpr std::uint32_t kFoliageParityConstantWords = sizeof(FoliageParityConstants) / 4;
 
-	// One frame's results (GpuLayouts.h, FoliageCounter), read back (the readback pass's recording, on ORG's host thread).
+	// One frame's results, reported from the readback pass's recording on ORG's host thread.
 	void FoliageParityReport(std::uint32_t a_frame, const std::uint32_t* a_results)
 	{
 		auto& a_foliage = DrawsState::Get().foliage;
@@ -43,15 +42,15 @@ namespace DCLF::Diagnostics
 		for (std::uint32_t c = 0; c < kFoliageCounters; ++c)
 			a_foliage.totals[c] += a_results[c];
 
-		// Within the frame: coverage against the Z-prepass, and motion. A defect at any count past a few pixels.
+		// Coverage against the Z-prepass and motion within the frame. A defect past a few pixels.
 		constexpr std::uint32_t kFlaggedInFrame = 16, kFlagged = 256;
 		const std::uint32_t coverage = a_results[kFoliageUnshaded] + a_results[kFoliageOtherObject], motion = a_results[kFoliageMotion];
 		if (coverage >= kFlaggedInFrame || motion >= kFlaggedInFrame) {
 			++a_foliage.inFrameFlagged;
-			// The first few, then the first of each report's span (the first are often the load's).
+			// The first few, then the first of each span, since the first are often the load's.
 			if (a_foliage.inFrameLogged < 10 || a_foliage.inFrameFlagged == 1) {
 				++a_foliage.inFrameLogged;
-				std::map<std::uint32_t, std::uint32_t> objects;  // the sampled defects by object: one object's draw, or edges everywhere
+				std::map<std::uint32_t, std::uint32_t> objects;  // sampled defects by object, telling one object's draw from edges everywhere
 				std::string samples;
 				const std::uint32_t count = std::min(a_results[kFoliageInFrameSampleCount], kFoliageInFrameSamples);
 				for (std::uint32_t s = 0; s < count; ++s) {
@@ -64,7 +63,7 @@ namespace DCLF::Diagnostics
 						samples += fmt::format("; ({},{}) motion: object {} albedo {:08X}, error {:.1f} px of ({:.1f}, {:.1f})", sample[0] & 0xFFFF, sample[0] >> 16, sample[2],
 							sample[3], std::bit_cast<float>(sample[4]), mx, my);
 					} else {
-						// An object word (index + 1): its name, and its chain up to the LOD root (each node's name and app-culled bit).
+						// An object word is index + 1. Log its name and its chain up to the LOD root.
 						auto describe = [&](std::uint32_t a_word) -> std::string {
 							const auto& tables = Scene::FrameView::Get().GetTables();
 							const std::uint32_t index = a_word - 1;
@@ -84,7 +83,7 @@ namespace DCLF::Diagnostics
 				std::vector<std::pair<std::uint32_t, std::uint32_t>> byCount(objects.begin(), objects.end());
 				std::ranges::sort(byCount, [](const auto& a, const auto& b) { return a.second > b.second; });
 				std::string tally = fmt::format("{} objects in {} samples:", byCount.size(), count);
-				// The sampled objects by name (their words are the object's index + 1), and whether each is terrain LOD.
+				// The sampled objects by name, and whether each is terrain LOD.
 				const auto& tables = Scene::FrameView::Get().GetTables();
 				for (std::size_t o = 0; o < byCount.size() && o < 8; ++o) {
 					const std::uint32_t index = byCount[o].first - 1;
@@ -99,7 +98,7 @@ namespace DCLF::Diagnostics
 			}
 		}
 
-		// Near-white foliage: a frame well above the running average (a jump, not the scene's own white flowers).
+		// Near-white foliage. A frame well above the running average is a jump, not the scene's own white flowers.
 		{
 			const std::uint32_t white = a_results[kFoliageWhiteAlbedo] + a_results[kFoliageWhiteDiffuse];
 			a_foliage.whiteMax = std::max(a_foliage.whiteMax, white);
@@ -120,8 +119,7 @@ namespace DCLF::Diagnostics
 			a_foliage.whiteAverage = a_foliage.frames <= 16 ? white : 0.95 * a_foliage.whiteAverage + 0.05 * white;
 		}
 
-		// Against the frame before, reprojected: a frame whose foliage changes colour or flashes brighter all at once is a jump of
-		// these over their running average (the camera's own changes - shadows sweeping, specular angles - are the average).
+		// Reprojected changes against the frame before. A jump over the running average is a defect. Camera-driven changes make up the average.
 		{
 			const std::uint32_t changed = a_results[kFoliageRecoloured] + a_results[kFoliageBrightened] + a_results[kFoliageWhitened];
 			a_foliage.changeMax = std::max(a_foliage.changeMax, changed);
@@ -152,8 +150,7 @@ namespace DCLF::Diagnostics
 			a_foliage.changeAverage = a_foliage.frames <= 16 ? changed : 0.95 * a_foliage.changeAverage + 0.05 * changed;
 		}
 
-		// Terrain LOD's coverage (its owners, bit 31): the frames it lost pixels in, and the most in one. Its pixels no draw shaded are
-		// sampled apart (the others are equal-depth ties), and a frame with a few dozen of them is logged with its samples.
+		// Terrain LOD coverage, owner bit 31. Unshaded pixels are sampled apart from equal-depth ties, and a frame with dozens is logged.
 		auto& landFrames = a_foliage.landFrames;
 		auto& landMax = a_foliage.landMax;
 		auto& landLogged = a_foliage.landLogged;
@@ -216,10 +213,7 @@ namespace DCLF::Diagnostics
 		std::uint32_t groupsX = 0, groupsY = 0;
 	};
 
-	/**
-	 * @brief The compare pass (FoliageParityCS.hlsl), after the colour pass: this frame's pixels of the
-	 * alpha-tested draws against the frame before's, into the results (GpuLayouts.h, FoliageCounter).
-	 */
+	/** @brief Compares this frame's alpha-tested pixels against the frame before's, after the colour pass. */
 	class FoliageParityPass final : public org::TypedRenderGraphPass<FoliageParityPass, FoliageParityPrepared, FoliageParityBindings>
 	{
 	public:
@@ -243,7 +237,7 @@ namespace DCLF::Diagnostics
 			return bindings;
 		}
 
-		// The colour shape is the revision's (the ticket's host data).
+		// The colour shape is the revision's.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		FoliageParityPrepared Prepare(const FoliageParityBindings&, const org::PassPrepareContext&) const
@@ -293,8 +287,8 @@ namespace DCLF::Diagnostics
 	};
 
 	/**
-	 * @brief The compare pass's results, copied to the run's host buffer (a range per lease index); what that buffer held from the
-	 * index's last run (finished by now: the lease retired before it was opened again) is read first and reported (FoliageParityReport).
+	 * @brief Copies the compare results to the run's host buffer, one range per lease index. Reports what the range held from its
+	 * last run first, which has finished since the lease retired before reopening.
 	 */
 	class FoliageReadbackPass final : public org::TypedRenderGraphPass<FoliageReadbackPass, FoliageReadbackPrepared, FoliageReadbackBindings>
 	{
@@ -310,7 +304,7 @@ namespace DCLF::Diagnostics
 			return bindings;
 		}
 
-		// The colour shape is the revision's (the ticket's host data).
+		// The colour shape is the revision's.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		FoliageReadbackPrepared Prepare(const FoliageReadbackBindings&, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
@@ -328,8 +322,7 @@ namespace DCLF::Diagnostics
 			if (!a_frame.foliage)
 				return;
 			auto& foliage = *a_frame.foliage;
-			// The run's range: one per lease index of a stable run (a published copy's), given on its first use (one recording thread
-			// at a time records this pass). A leased run is not reported.
+			// One range per lease index of a stable run, given on first use. Leased runs are not reported.
 			if (!a_recording.Run().Stable())
 				return;
 			const auto lease = a_recording.Run().lease;
@@ -361,7 +354,7 @@ namespace DCLF::Diagnostics
 
 	void MakeFoliageCompare(const FoliageRecordMade& a_made)
 	{
-		// The compare pass's program and a host copy of its results per range; the record stands only with them.
+		// The record stands only with the compare program and a host copy per range.
 		auto& foliage = a_made.record;
 		foliage.program = ComputeProgram::Load(a_made.device, { .source = kFoliageParityShader, .constantWords = kFoliageParityConstantWords });
 		for (std::uint32_t i = 0; i < a_made.slots; ++i) {
@@ -390,7 +383,7 @@ namespace DCLF::Diagnostics
 			std::static_pointer_cast<org::RenderPass>(std::make_shared<FoliageParityPass>(resources)))
 				.PreferQueue(org::QueueKind::Graphics)
 				.Epoch(colour));
-		// After the parity pass, on its queue (see CullCounters' readback).
+		// After the parity pass, on its queue.
 		a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.dclf.foliage-readback",
 			std::static_pointer_cast<org::RenderPass>(std::make_shared<FoliageReadbackPass>(resources)))
 				.PreferQueue(org::QueueKind::Graphics)

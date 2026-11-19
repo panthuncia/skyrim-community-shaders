@@ -1,6 +1,5 @@
-// CS_DCLF_PERSISTENT_PARITY at Prepass (render thread; the scene work runs inline under the parities): the used sets against the installed
-// records, the technique rows against the engine's values now, the extras rows against the engine's routines, and every drawn slot's
-// shading against the frame's rows.
+// Persistent parity at Prepass on the render thread, with the scene work inline. Checks used sets against installed records,
+// technique rows and extras rows against the engine, and each drawn slot's shading against the frame's rows.
 
 #include "SceneObservers.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -23,11 +22,10 @@ namespace DCLF::Diagnostics
 		{
 			const auto& view = Scene::FrameView::Get().GetTables();
 			const std::uint32_t frame = V::frame();
-			// The installed tables' used sets against the slots their bound records name.
 			if (!ParityDue(frame, 45))
 				return;
-			// The used sets are kept by membership changes. On a parity frame compare them against the slots the bound records
-			// name, before trusting their absence to skip descriptor/import work.
+			// Membership changes keep the used sets. Compare them with the slots the bound records name before trusting their absence
+			// to skip descriptor and import work.
 			{
 				std::vector<std::uint64_t> pipelines(view.usedPipelineBits.size()), materials(view.usedMaterialBits.size());
 				auto set = [](std::vector<std::uint64_t>& a_bits, std::uint32_t a_slot) {
@@ -59,9 +57,8 @@ namespace DCLF::Diagnostics
 
 		void CheckTechniqueRows()
 		{
-			// Each technique row the frame draws (the frame's tables: the coordinator's rows), once, against an evaluation from the engine's
-			// values now. A row differs late when the live sample's witness moved since the row's write (a change reaches the draws with the
-			// next publication); otherwise it differs. In the order the pipeline loop visits them (the used pipelines).
+			// Each technique row the frame draws, against the engine's current values. It differs late when the live sample moved since
+			// the row's write, since changes reach the draws with the next publication.
 			const std::uint32_t frame = V::frame();
 			auto& g = SceneDiagnostics().techniques;
 			const bool parityFrame = ParityDue(frame, 30);
@@ -76,8 +73,7 @@ namespace DCLF::Diagnostics
 					const std::uint32_t i = static_cast<std::uint32_t>(word * 64 + std::countr_zero(remaining));
 					if (i >= view.pipelines.size())
 						continue;
-					// A program family's key (the Effect port's): its technique row is the plain technique's (its family's shader reads none of
-					// it: Effect.hlsl, DCLF_BINDLESS): the check leaves it out.
+					// A program family's technique row is the plain technique's and its shader reads none of it, so it is skipped.
 					const bool familyKey = KeyFamily(view.pipelines[i].rasterFlags) != Api::ProgramFamily::Count;
 					if (const std::uint32_t r = i < view.pipelineTechnique.size() ? view.pipelineTechnique[i] : ~0u;
 						!familyKey &&r < techniqueChecked.size() && !techniqueChecked[r] && view.techniqueConstants[r].valid) {
@@ -100,7 +96,7 @@ namespace DCLF::Diagnostics
 			}
 		}
 
-		/** @brief The rows complete as the engine's own routines make them now (render thread, under a lease). */
+		/** @brief The rows completed by the engine's own routines now. Render thread, under a lease. */
 		bool ReferenceExtras(const Scene::Coordinator& a_store, std::uint32_t a_object, float* a_out)
 		{
 			EngineReadWindow::Touch("Diagnostics::ReferenceExtras");
@@ -122,16 +118,14 @@ namespace DCLF::Diagnostics
 				land[3] = frameInputs.landBlend[1] - geometry->world.translate.y;
 			}
 			if (object.flags & kObjectProjectedUV) {
-				// How the draw makes TextureProj, which a slot without a land blend keeps in its land blend row (WriteObjectExtras): a
-				// multi-index shape's own projection, the projection alone (Envmap), or the projection onto the world matrix.
+				// A slot without a land blend keeps TextureProj in its land blend row.
 				if (!(object.flags & kObjectLandBlend)) {
 					const bool multiIndex = const_cast<RE::BSGeometry*>(geometry)->GetType().get() == RE::BSGeometry::Type::kMultiIndexTriShape;
 					const std::uint32_t technique = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f;
 					a_out[kExtraRowLandBlend * 4] = multiIndex ? kTextureProjShape : technique == 1 ? kTextureProjProjection : kTextureProjWorld;
 				}
-				// The texture matrix as SetupGeometry builds it for a ProjectedUV pass (engine notes), through the engine's own routines:
-				// for every technique but Envmap the projection multiplied onto the geometry's world matrix, converted the same way and with
-				// posAdjust added back.
+				// The texture matrix as SetupGeometry builds it for a ProjectedUV pass. Except for Envmap, the projection is multiplied onto the
+				// world matrix and posAdjust is added back.
 				using ToMatrix = void (*)(float*, const RE::NiTransform*);
 				using Multiply = void* (*)(float*, const float*, const float*);
 				static const REL::Relocation<ToMatrix> toMatrix{ REL::Offset(Engine::Address::kTransformToMatrix) };
@@ -179,12 +173,11 @@ namespace DCLF::Diagnostics
 
 		void CheckExtras(Scene::Coordinator& a_store)
 		{
-			// The rows complete as the draw completes them against the engine's own routines now (render thread, the parities' inline scene
-			// work: the coordinator's tables). A static row a write since would change is stale with no event: the write is undone.
+			// Rows completed against the engine's routines now. A static row a later write would change is stale with no event, and the write is undone.
 			auto& tables = V::RestorableTables(a_store);
 			if (lodFadeEventsInstalled) {
 				auto& ep = SceneDiagnostics().extras;
-				// The engine's globals and routines under leases, an item each (the scene work may run beside the engine's update).
+				// Engine globals and routines under a lease each, since the scene work may run beside the engine's update.
 				const auto frameInputs = [] {
 					const EngineReadWindow::Lease lease;
 					return lease ? SampleExtrasFrame() : ExtrasFrame{};
@@ -214,8 +207,7 @@ namespace DCLF::Diagnostics
 						if (const float d = std::abs(completed[c] - reference[c]); d > worst)
 							worst = d, worstAt = c;
 					ep.maxDifference = std::max(ep.maxDifference, worst);
-					// TextureProj's translation column: the engine subtracts the eye and adds it back, the draw does not (an ulp of the
-					// world position).
+					// The engine subtracts and re-adds the eye in TextureProj's translation and the draw does not, which costs an ulp of world position.
 					if (worst > 0.05f && ep.differ++ == 0) {
 						const auto* geometry = tables.objectGeometry[o];
 						ep.first = fmt::format("slot {} '{}' (flags {:#x}): differs by {} at component {} (completed {}, reference {}; mode {}, technique {})", o,
@@ -230,12 +222,12 @@ namespace DCLF::Diagnostics
 		{
 			auto& sp = SceneDiagnostics().shading;
 			const auto& tables = V::tables(a_store);
-			// A diagnostics frame: waits for the frame's values.
+			// Waits for the frame's values.
 			const auto* rows = FrameValues::Get().ShadingIfDone(true);
 			if (!rows || !lodFadeEventsInstalled)
 				return;
 			++sp.checks;
-			// Named for the next frame: by the walk (its events) and the accumulate phase, this frame.
+			// Slots named for the next frame by the walk and the accumulate phase.
 			std::vector<std::uint8_t> named(tables.objects.size(), 0);
 			auto items = Scene::FrameView::Get().PeekShadingItems();
 			items.insert(items.end(), V::shadingNamed(Scene::Coordinator::Get()).begin(), V::shadingNamed(Scene::Coordinator::Get()).end());
@@ -252,14 +244,12 @@ namespace DCLF::Diagnostics
 				++sp.slots;
 				BindlessShading now = (*rows)[o];
 				SampleShading(*property, tables.pipelines[tables.objects[o].pipelineIndex].passDescriptor, V::IsResidentSlot(a_store, o), now);
-				// The feature block (the tree's wind) is the row's as the slot was named (a member's until its tree's entry), not kept current:
-				// not compared.
+				// The feature block is not kept current, so it is not compared.
 				if (std::memcmp(&now, &(*rows)[o], offsetof(BindlessShading, featureBlock)) != 0)
 					changed.push_back(o);
 			}
-			// A write after the walk took the events (the animation job runs the controllers alongside the render thread; the culls'
-			// GetRenderPasses) is not missed: its event is queued. Those events are taken now and their dependents named for the next
-			// frame, so each changed slot is named, queued or missed.
+			// A write after the walk took its events has a queued event. Take those now and name their dependents, so each changed slot
+			// is named, queued or missed.
 			std::vector<const void*> late;
 			DrainLodFadeEvents(late);
 			DrainEmittanceEvents(late);
@@ -290,9 +280,7 @@ namespace DCLF::Diagnostics
 						now.shading.emitColor[1], now.shading.emitColor[2], held.shading.emitColor[0], held.shading.emitColor[1], held.shading.emitColor[2]);
 				}
 			}
-			// The wetness, as the frame's start captured it: Integrations/AdvancedSkin's. Against the frame's tables (the installed
-			// publication's), whose membership writes are the ones the capture has: the coordinator's may hold a member a newer
-			// publication brings.
+			// AdvancedSkin wetness against the installed publication's tables, which match the capture. The coordinator's may hold newer members.
 			Integrations::AdvancedSkin::CheckRowWetness(Scene::FrameView::Get().GetTables(), *rows, named);
 		}
 

@@ -1,36 +1,27 @@
-// Drawcall Limit Fix: tree wind on the GPU (src/Features/DrawcallLimitFix/Features/TreeWind; dclf-architecture.md, "Tree wind on the
-// GPU"; Records.h, TreeStatic).
-//
-// The engine's tree manager (FUN_1404381e0, from Main::Update) advances each BSTreeNode's clock and takes its gust from it;
-// BSLightingShader::SetupGeometry (case 0xc) turns the node into TreeParams and WindTimers. DCLF's members draw with what
-// this pass makes of the same inputs, so nothing reads the tree nodes per frame.
-//
-// One thread per entry of the frame's wind buffer, on the compute queue in the Z-prepass epoch: entry 0 the nodeless trees',
-// entry s + 1 tree slot s, whose clock row it first brings to this frame (a row whose generation is not its static row's is new,
-// a listed node, and starts from the node's values). The entry is what SetupGeometry's case 0xc makes of the tree, which is the
-// same for every member drawing under it (TreeParams, WindTimers with the distance and amplitude in zw), then the listing's
-// generation. The buffers alternate by frame: this frame's is drawn by the next one (Common/DCLFObjects.hlsli, DCLFTreeWind),
-// so nothing waits for this pass.
+// Drawcall Limit Fix. Tree wind on the GPU.
+// The engine's tree manager (FUN_1404381e0) advances each BSTreeNode's clock and gust, and SetupGeometry case 0xc turns the node into
+// TreeParams and WindTimers. This pass makes the same from the same inputs, so nothing reads tree nodes per frame.
+// One thread per wind entry. Entry 0 is the nodeless trees', entry s + 1 is tree slot s. A row with a new generation starts from the
+// node's values. The buffers alternate by frame and the next frame draws this one's, so nothing waits for this pass.
 
-// Must match TreeWindConstants (Features/TreeWind/TreeWind.h).
+// Must match TreeWindConstants in TreeWind.h.
 cbuffer TreeWindConstants : register(b0)
 {
 	uint TreesIndex;    // StructuredBuffer<TreeStatic>
 	uint ClocksIndex;   // RWStructuredBuffer<TreeClock>
 	uint FrameIndex;    // StructuredBuffer<TreeWindFrameRow>, one row (every commit's)
 	uint Padding0;
-	uint2 WindIndices;  // RWStructuredBuffer<float4>: the two wind buffers, written by the frame's parity
+	uint2 WindIndices;  // RWStructuredBuffer<float4>, the two wind buffers, by frame parity
 	uint2 Padding1;
 }
 
-// The frame's values (TreeWind.h, TreeWindFrameRow), a buffer rather than constants: the pass is prepared ahead of the
-// commit that knows them. The dispatch covers every slot the buffers hold; the counts end it.
+// A buffer, not constants, because the pass is prepared before the commit that knows them. The counts end the dispatch.
 struct TreeWindFrameRow
 {
 	uint TreeCount;    // tree slots
 	uint ObjectCount;  // members (unused)
 	uint Frame;
-	uint TreeSeedsIndex;  // StructuredBuffer<TreeStatic>, the seeds' frame-value pool (two rows a slot)
+	uint TreeSeedsIndex;  // StructuredBuffer<TreeStatic>, the seeds' pool, two rows a slot
 	float DeltaTime;
 	float CameraX;
 	float CameraY;
@@ -47,7 +38,7 @@ struct TreeWindFrameRow
 
 static TreeWindFrameRow W;
 
-// Records.h's TreeStatic and TreeWind.h's TreeClock: must match.
+// Must match Records.h's TreeStatic and TreeWind.h's TreeClock.
 struct TreeStatic
 {
 	float3 Position;
@@ -74,8 +65,8 @@ struct TreeClock
 
 static const uint kNodelessTree = 0xFFFFFFFEu;
 
-// FUN_140438950(x, 3): a quarter of the sum of sin(k pi x) over k = 1, 3, 5, 7, each with the engine's argument reduction
-// to [-pi, pi] and its odd polynomial (constants at 0x141846e64), summed in its order.
+// FUN_140438950(x, 3). A quarter of the sum of sin(k pi x) for k = 1, 3, 5, 7, using the engine's argument reduction and odd
+// polynomial (constants at 0x141846e64), summed in its order.
 float Gust(float a_x)
 {
 	precise float4 v = a_x * float4(3.14159274f, 9.42477798f, 15.7079639f, 21.9911499f);
@@ -88,7 +79,7 @@ float Gust(float a_x)
 	return (s.w + s.z) + (s.y + s.x);
 }
 
-// The engine's square root of the squared distance (0x5f3759df and one Newton step; LightingDescriptors.cpp FastSqrt).
+// The engine's square root, 0x5f3759df and one Newton step, as LightingDescriptors.cpp's FastSqrt.
 float FastSqrt(float a_value)
 {
 	const int bits = asint(a_value);
@@ -110,7 +101,7 @@ float Distance2(float3 a_position)
 	W = frames[0];
 	if (entry > W.TreeCount)
 		return;
-	// SetupGeometry's case 0xc (DeriveTreeAnim): with no node, distance 0, maximum amplitude 1, leaf frequency 1, no clock.
+	// SetupGeometry case 0xc with no node. Distance 0, amplitude 1, leaf frequency 1, no clock.
 	float distance2 = 0.0f, amplitude = 1.0f, leafFrequency = 1.0f, timer = 0.0f, previousTimer = 0.0f;
 	uint generation = kNodelessTree;
 	if (entry != 0) {
@@ -118,8 +109,7 @@ float Distance2(float3 a_position)
 		StructuredBuffer<TreeStatic> trees = ResourceDescriptorHeap[TreesIndex];
 		RWStructuredBuffer<TreeClock> clocks = ResourceDescriptorHeap[ClocksIndex];
 		TreeStatic tree = trees[slot];
-		// The node's values are its seed's (TreeWind.h, MergeTreeSeed: keep the two the same); none of the listing's generation yet:
-		// no clock step and no entry this frame (a member draws with its shading row's until there is one).
+		// The node's values come from its seed, matching TreeWind.h's MergeTreeSeed. With no seed of this generation, no clock step and no entry.
 		{
 			if (W.TreeSeedsIndex == 0)
 				return;
@@ -141,8 +131,7 @@ float Distance2(float3 a_position)
 			clock.Generation = tree.Generation;
 			clock.Frame = W.Frame;
 		} else if (clock.Frame != W.Frame) {
-			// SetupGeometry kept last frame's timer as the previous one; the manager advances a node with a model, and takes
-			// its gust only within its range.
+			// SetupGeometry kept last frame's timer as the previous one. The manager advances a node with a model, and takes its gust only within range.
 			clock.PreviousTimer = clock.Timer;
 			if (tree.Animated != 0) {
 				clock.Timer = clock.Timer + W.DeltaTime;

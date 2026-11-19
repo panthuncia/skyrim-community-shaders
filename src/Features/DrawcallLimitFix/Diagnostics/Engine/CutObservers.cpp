@@ -1,5 +1,4 @@
-// The primary cull's observers (CutObservers.h): the render thread's at PrimaryCull's hook points, and the list jobs' per-slot counts
-// on their job threads (read after Finish).
+// Primary cull observers. Render thread at PrimaryCull's hook points, plus per-slot counts on the list job threads, read after Finish.
 
 #include "CutObservers.h"
 
@@ -22,25 +21,24 @@ namespace DCLF::Diagnostics::CutObservers
 
 		constexpr std::size_t kLightData = Engine::kPropertyLightData;
 
-		/** @brief One list job's counts: written by its job thread only, read after Finish. */
+		/** @brief One list job's counts. Written by its job thread only and read after Finish. */
 		struct Slot
 		{
 			std::uint64_t walkMissed = 0, filterChecked = 0, filterMissed = 0;
 			std::string walkMissedFirst;
 		};
 		std::array<Slot, 16> slots;
-		Counts counts;  // render thread (the list parity's: the build's job, read after Finish)
+		Counts counts;  // render thread, except the list parity's, written by the build job and read after Finish
 
-		// The scene lists' whole frames: the roots the filter would have left out (read by the list jobs), and whether the engine's
-		// build is checked.
+		// On whole frames, the roots the filter would have left out, read by the list jobs, and whether the engine's build is checked.
 		std::shared_ptr<const void> dryHold;
 		const ankerl::unordered_dense::set<const RE::NiAVObject*>* dryRoots = nullptr;
 		bool checkLists = false;
 
-		// The cut parity: the roots of the entries that differed from the whole plan at the last check (CheckCut).
+		// Roots of entries that differed from the whole plan at the last cut check.
 		ankerl::unordered_dense::set<const RE::NiAVObject*> cutDiffering;
-		std::uint32_t sunBits = 0;  // the sun's cascade bits as the list jobs ended (the light masks')
-		std::uint32_t sunBitsNow = 0;  // ... as last set (SunBitsSet)
+		std::uint32_t sunBits = 0;  // the sun's cascade bits as the list jobs ended
+		std::uint32_t sunBitsNow = 0;  // ... as last set
 
 		// ---- The cut.
 
@@ -55,9 +53,8 @@ namespace DCLF::Diagnostics::CutObservers
 			++counts.cutChecks;
 			std::string first;
 			std::uint32_t differ = 0;
-			// The whole plan walks the subtrees as they are now; the kept one as they were when planned. An engine change under a root
-			// reaches the cut with the snapshot that follows it, so an entry differing at one check only is the snapshot's lag behind the
-			// engine (counted); one whose root differs at two checks in a row (a second apart) is a finding.
+			// The whole plan walks subtrees as they are now, the kept one as they were planned. An engine change reaches the cut with the next
+			// snapshot, so one differing check is lag and is counted. A root differing at two checks in a row, a second apart, is a finding.
 			ankerl::unordered_dense::set<const RE::NiAVObject*> differing;
 			std::uint32_t lagging = 0;
 			std::string firstLagging;
@@ -78,7 +75,7 @@ namespace DCLF::Diagnostics::CutObservers
 			};
 			if (whole.roots.size() != cut.roots.size() && !differ++)
 				first = "the index space";
-			// Entries waiting for their plan from the pool are Rejected meanwhile (the engine culls them): not compared.
+			// Entries waiting for their plan from the pool are Rejected meanwhile and culled by the engine, so not compared.
 			std::size_t awaitingEligible = 0;
 			for (std::uint32_t e = 0; e < std::min(whole.roots.size(), cut.roots.size()); ++e) {
 				if (e < cut.awaiting.size() && cut.awaiting[e]) {
@@ -116,7 +113,7 @@ namespace DCLF::Diagnostics::CutObservers
 						whole.switches.begin() + whole.switchEnd[e]))
 					note(e, "switches");
 			}
-			// The eligible count follows the plans: a finding only when no entry is lagging.
+			// The eligible count follows the plans, so it is a finding only when no entry is lagging.
 			if (!lagging && whole.eligible.size() != cut.eligible.size() + awaitingEligible && !differ++)
 				first = "the eligible roots";
 			cutDiffering = std::move(differing);
@@ -136,7 +133,7 @@ namespace DCLF::Diagnostics::CutObservers
 			}
 		}
 
-		// ---- The list jobs (each slot on its job's thread).
+		// ---- The list jobs, each slot on its job's thread.
 
 		void ResetSlots(const CutSlotsReset& a_event)
 		{
@@ -149,7 +146,7 @@ namespace DCLF::Diagnostics::CutObservers
 			return dryRoots && dryRoots->contains(PrimaryCullView::Cut().roots[a_entry]);
 		}
 
-		/** @brief A whole frame's dry run of the list filter: a root it would have left out must be one the stand-in does nothing for. */
+		/** @brief Dry run of the list filter on a whole frame. A root it would leave out must be one the stand-in does nothing for. */
 		void EntryReached(const StandInEntry& a_event)
 		{
 			if (!Dry(a_event.entry))
@@ -165,10 +162,10 @@ namespace DCLF::Diagnostics::CutObservers
 			const auto& cut = PrimaryCullView::Cut();
 			auto& slot = slots[a_event.slot];
 			const std::uint32_t e = a_event.entry;
-			// An entry only Policy::WalkEveryEntry walks (Cut::walk clear): normally nothing would have handed this one over.
+			// Only WalkEveryEntry walks this entry, so normally nothing would have handed it over.
 			if (!cut.walk[e]) {
 				++slot.walkMissed;
-				// What the walk's decision missed (the first few a job, a frame).
+				// What the walk's decision missed, the first few per job per frame.
 				if (slot.walkMissed <= 4) {
 					const auto& view = Scene::FrameView::Get().GetTables();
 					const auto* geometry = a_event.geometry;
@@ -205,7 +202,7 @@ namespace DCLF::Diagnostics::CutObservers
 			}
 		}
 
-		/** @brief After the registration jobs: a property an engine-drawn geometry shares holds that one's bits until its main registration. */
+		/** @brief After the registration jobs. A property an engine-drawn geometry shares holds that geometry's bits until its main registration. */
 		void CheckLightMasks(const On<FramePoint::RegistrationsDone>&)
 		{
 			const auto& cull = PrimaryCull::Get();
@@ -238,7 +235,7 @@ namespace DCLF::Diagnostics::CutObservers
 			checkLists = a_event.keepable;
 		}
 
-		/** @brief The build's job: the engine's lists (whole) against DCLF's enumeration: every root of theirs is DCLF's, every root of DCLF's not theirs hidden. */
+		/** @brief The engine's whole lists against DCLF's enumeration. Every engine root must be DCLF's, and every other DCLF root hidden. */
 		void CheckLists(const On<EnginePoint::EngineSceneListsBuilt>&)
 		{
 			if (!checkLists)
@@ -249,7 +246,7 @@ namespace DCLF::Diagnostics::CutObservers
 			auto* lists = Global<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>*>(Engine::Address::kSceneLists);
 			if (!lists || !count || !PrimaryCullView::ListRoots(objectRoot, roots))
 				return;
-			// The object root's entries: a portal graph's rooms and occlusion planes, which the engine adds every frame, are not.
+			// The object root's entries. A portal graph's rooms and occlusion planes, which the engine adds every frame, are not.
 			const auto underRoot = [&](const RE::NiAVObject* a_object) {
 				for (; a_object; a_object = a_object->parent)
 					if (a_object->parent == objectRoot)
@@ -275,7 +272,7 @@ namespace DCLF::Diagnostics::CutObservers
 			for (const auto* root : engine) {
 				++missing;
 				if (first.empty()) {
-					// Where it hangs: each node up to the scene with the child index it is under, and whether it is hidden.
+					// Each node up to the scene with its child index and hidden state.
 					std::string chain;
 					for (const RE::NiAVObject* object = root; object; object = object->parent) {
 						int index = -1;
@@ -296,7 +293,7 @@ namespace DCLF::Diagnostics::CutObservers
 				counts.listFirst = first;
 		}
 
-		/** @brief The build's job, a kept frame: the kept lists hold exactly what RebuildSceneLists would list (hidden roots included). */
+		/** @brief On a kept frame, the kept lists must hold exactly what RebuildSceneLists would list, hidden roots included. */
 		void CheckKeptLists(const KeptSceneListsBuilt& a_event)
 		{
 			const RE::NiAVObject* objectRoot = nullptr;

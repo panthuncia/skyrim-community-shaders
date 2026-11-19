@@ -11,17 +11,17 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 
-// The engine area's report lines (Engine.h), but the primary cull's (EnginePrimaryCull.cpp).
+// The engine area's report lines, except the primary cull's.
 
 namespace DCLF::Reports
 {
 	std::string EngineReadWindowLine()
 	{
-		// The scene work's accesses without a lease (any is a defect).
+		// Scene work accesses without a lease. Any is a defect.
 		const auto c = EngineReadWindow::Take();
 		if (!c.any)
 			return {};
-		// The cell animations job's update inside the window (WindowWriters.h): its waits for the frame's sampling, its suspensions'.
+		// The cell animations job's waits for the frame's sampling inside the window, and its suspensions.
 		std::string writers;
 		if (WindowWriters::Installed()) {
 			const auto w = WindowWriters::Take();

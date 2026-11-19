@@ -1,5 +1,4 @@
-// CS_DCLF_PERSISTENT_PARITY: the shadow dependency index kept by changes against a reconstruction from the same tables (the walk makes the
-// sets whole again on the passes Policy::RebuildShadowSets names).
+// Shadow set parity. The shadow dependency index kept by changes against a rebuild from the same tables.
 
 #include "SceneObservers.h"
 #include "SceneState.h"

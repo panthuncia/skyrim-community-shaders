@@ -1,5 +1,4 @@
-// The joins' and the slots' observers: CS_DCLF_RESIDENT_PARITY (the residents' passes built again) and CS_DCLF_PERSISTENT_PARITY's drained
-// material slot check.
+// Resident parity, which builds the residents' passes again, and the persistent parity's drained material slot check.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -29,8 +28,7 @@ namespace DCLF::Diagnostics
 				const auto* geometry = tables.objectGeometry[slot];
 				if (!geometry)
 					continue;
-				// A root the engine updates that has started to fade: its pass is not compared. A listed root's node is not its
-				// state (the GPU's alone: every listed root is DCLF's to write), and its members' passes are the settled state's.
+				// Skip a root the engine updates that has started to fade. A listed root's node state is the GPU's, and its members' passes are the settled state's.
 				if (const auto leaf = mirror.Leaf(geometry);
 					leaf.fadeNode && !(leaf.property->fadeNode && roots.Contains(static_cast<const RE::NiAVObject*>(leaf.property->fadeNode))) && leaf.fadeNode->currentFade < 1.0f) {
 					++residentStats.parityPending;

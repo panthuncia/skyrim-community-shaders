@@ -1,6 +1,5 @@
-// CS_DCLF_MIRROR_PARITY, the reads: each of the lane's reads ported to the mirror checked against the live read (the object alive: the lane
-// holds it), under a live check's lease; a difference is checked again after the next batch (Coordinator's DeferredRead: lagged, or it
-// differs). The passes run their evaluations on their own thread while this observes (Policy::SerialFanout).
+// Mirror read parity. Each lane read ported to the mirror is checked against the live read under a lease. A difference is
+// checked again after the next batch, to tell lag from a real difference. Evaluations stay on the pass's thread while observed.
 
 #include "SceneObservers.h"
 #include "SceneState.h"
@@ -28,7 +27,7 @@ namespace DCLF::Diagnostics
 			Ineligible liveReason = Ineligible::None;
 			const auto* live = V::FindCategoryNodeLive(store, a_object, &liveReason);
 			V::NoteMirrorRead(store, MirrorRead::CategoryNode, live != found || (found && liveReason != reason), [&] {
-				// Both chains, to where they part (the live one named).
+				// Both chains up to where they part.
 				std::string chains;
 				const auto mirrored = V::MirrorChain(store, a_object, nullptr);
 				std::size_t at = 0;
@@ -49,7 +48,7 @@ namespace DCLF::Diagnostics
 
 		void OnSunEntry(const SunEntryRead& a_event)
 		{
-			// The mirror's entry against the live chain's: a live walk's path gives the live one, the lane's is checked under a lease.
+			// The mirror's entry against the live chain's. The lane's is checked under a lease.
 			const auto& store = a_event.store;
 			const auto& a_geometry = a_event.geometry;
 			const void* entry = a_event.entry;
@@ -130,7 +129,7 @@ namespace DCLF::Diagnostics
 			});
 		}
 
-		/** @brief The tracked geometries below a_root, live and by the mirror (each walk bounded as an event's), sorted. */
+		/** @brief The tracked geometries below a_root, live and by the mirror, sorted. */
 		template <class Tracked>
 		std::pair<std::vector<const void*>, std::vector<const void*>> TrackedBelow(const SceneMirror& a_mirror, RE::NiAVObject* a_root, const Tracked& a_tracked)
 		{
@@ -150,7 +149,6 @@ namespace DCLF::Diagnostics
 
 		void OnTrackedBelow(const TrackedBelowRead& a_event)
 		{
-			// A walk below a root: the tracked geometries the mirror gives against the live ones.
 			const auto& store = a_event.store;
 			const auto lease = V::LiveCheckLease(store, a_event.read);
 			if (!lease)
@@ -162,7 +160,7 @@ namespace DCLF::Diagnostics
 				return fmt::format("'{}' {}: {} tracked geometries below by the mirror, {} live", a_root->name.c_str() ? a_root->name.c_str() : "", static_cast<const void*>(a_root),
 					mirrored.size(), live.size());
 			}, [&mirror, key = static_cast<const void*>(a_root), live] {
-				// The mirror's walk again, the live list as tracked then (what was tracked since is not the read's).
+				// Run the mirror's walk again against the live list as tracked then.
 				std::vector<const void*> now;
 				ForEachMirror(mirror, key, [&](const void* a_key, const SceneCapture::NodeRecord& a_record) {
 					if ((a_record.kind & SceneCapture::kKindGeometry) && std::ranges::binary_search(live, a_key))
@@ -199,7 +197,7 @@ namespace DCLF::Diagnostics
 			const auto& a_geometry = a_event.geometry;
 			const auto* a_categoryNode = a_event.category;
 			const void* key = a_event.key;
-			// The one reference on the live chain up to the category node (none: none, or more than one): MoveKeyOf's rule.
+			// MoveKeyOf's rule. The one reference on the live chain up to the category node, or none for none or several.
 			const void* live = nullptr;
 			for (const RE::NiAVObject* object = &a_geometry; object && object != a_categoryNode; object = object->parent) {
 				const void* reference = object->GetUserData();

@@ -17,10 +17,10 @@ namespace DCLF::Reports
 {
 	namespace
 	{
-		// The last primary cull lines' entries with engine-drawn parts culled by the engine a frame (CutMixedPerFrame).
+		// Entries with engine-drawn parts the engine culled per frame, from the last primary cull lines.
 		double mixedPerFrame = 0.0;
 
-		/** @brief The scene lists' line's filter part: why entries stay in the lists, and the filter's deltas. */
+		/** @brief The scene lists line's filter part. Why entries stay in the lists, and the filter's deltas. */
 		std::string ListReasons(const PrimaryCull::ListCounters& a_l)
 		{
 			const double frames = std::max<double>(static_cast<double>(a_l.reasonFrames), 1.0);
@@ -32,7 +32,7 @@ namespace DCLF::Reports
 				a_l.keptBy[0] / frames, reasons, a_l.filterJudged, a_l.filterInserted, a_l.filterErased, a_l.deltaKept, a_l.deltaOut, a_l.deltaIn, a_l.deltaRebuilt);
 		}
 
-		/** @brief The scene lists' line (a_diagnostics: the dry runs' stand-in counts and the engine's lists against DCLF's). */
+		/** @brief The scene lists line. */
 		void SceneListsLine(const Diagnostics::CutObservers::Counts& a_diagnostics)
 		{
 			const auto l = PrimaryCull::Get().TakeListCounters();
@@ -60,10 +60,8 @@ namespace DCLF::Reports
 		}
 
 		/**
-		 * @brief The culls off line: what the engine's culls still visit of the entries DCLF lists, by the cut's verdict on each candidate
-		 * entry of its snapshot. Whole (admitted, nothing engine-drawn, nothing to hand over): no cull of the engine's reaches it (the lists
-		 * leave it out or the list jobs stand in, the sun's exclusion, the point lights' filter). Every other entry keeps the engine's culls,
-		 * each class named: mixed (the first engine-drawn geometry), waiting for admission, walked for an unbound member, rejected (why).
+		 * @brief What the engine's culls still visit of the entries DCLF lists. A whole entry is reached by no engine cull.
+		 * Every other entry keeps the engine's culls, and each class is named.
 		 */
 		void CullsOffLine()
 		{
@@ -124,7 +122,7 @@ namespace DCLF::Reports
 		// The counters stand until a window with frames reports them.
 		if (!View::CutFrames())
 			return;
-		// The views the engine culled whole while DCLF draws them (Core/Handoff/EngineOnlyCull.h): each one a view DCLF does not cover yet.
+		// Views the engine culled whole while DCLF draws them, which DCLF does not cover yet.
 		if (const auto whole = EngineOnlyCull::WholeCullLine(); !whole.empty())
 			logger::warn("{}", whole);
 		const auto s = cull.TakeCutCounters();
@@ -140,12 +138,10 @@ namespace DCLF::Reports
 			s.undrawable / applied, s.hiddenSkipped / applied, s.excluded / applied,
 			s.engineMembers / applied, s.switchStale / applied, s.unselected / applied, s.liveAll, s.liveEntries, s.prepareTicks * toMs / applied, s.afterTicks * toMs / applied,
 			s.plansKicked, s.plansSpliced, s.plansStale, s.plansRefused, s.awaiting / applied);
-		// The scene membership, registration and resident lines are the coordinator's (from its pass: the joins' statistics are its own).
+		// The membership, registration and resident lines come from the coordinator's pass.
 		SceneListsLine(d);
 		CullsOffLine();
-		// The features' lines here (Features/TreeWind: the tree animation list's).
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCull, a_frame);
-		// The shadow sources' lines here (Features/Shadows/Local: the point lights' Accumulate timing, culls, category filter and bits).
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullSources, a_frame);
 		if (View::WalkEverything())
 			logger::info("[DCLF] stand-in walk parity: {} geometries handed to the registration from entries the stand-in would not walk{}", d.walkMissed,
@@ -156,14 +152,12 @@ namespace DCLF::Reports
 			logger::info("[DCLF] light masks (owned members in view, which no main registration clears): {} checked, {} with the sun's bits, {} with other lights' bits{}{}",
 				d.maskChecked, d.maskSun, d.maskOther, d.maskSun || d.maskOther ? " <- LIGHT MASKS" : " <- OK", d.maskFirst.empty() ? "" : "; first: " + d.maskFirst);
 		mixedPerFrame = s.mixed / applied;
-		// The features' parity lines here (Features/Fades: the fade port's).
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullParity, a_frame);
-		// CS_DCLF_ACCUMULATED_PARITY: BeginFrameCamera's main camera against the list processes'.
+		// BeginFrameCamera's main camera against the list processes'.
 		if (const auto camera = Diagnostics::Accumulated::TakeFrameCamera(); camera.checked)
 			logger::info("[DCLF] frame camera (T7f preparation: FadeEye, the camera cut and the height test from the main camera at BeginSceneFrame): {} frames, {} with "
 						 "another camera on the list processes{}",
 				camera.checked, camera.differ, camera.differ ? " <- FRAME CAMERA" : " <- OK");
-		// The features' last lines here (Features/Fades: the fade roots', with mixedPerFrame).
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullLast, a_frame);
 	}
 

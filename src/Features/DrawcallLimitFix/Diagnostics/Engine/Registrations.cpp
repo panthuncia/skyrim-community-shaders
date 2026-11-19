@@ -1,4 +1,4 @@
-// The withheld passes' observers (Registrations.h): counted on the registering threads, taken on the render thread.
+// Withheld pass observers. Counted on the registering threads, taken on the render thread.
 
 #include "Registrations.h"
 

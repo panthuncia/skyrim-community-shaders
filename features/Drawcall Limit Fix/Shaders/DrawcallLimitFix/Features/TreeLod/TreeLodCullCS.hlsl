@@ -1,31 +1,25 @@
-// Drawcall Limit Fix: tree LOD's instances culled for the main camera, in the depth segment's two phases like every other
-// object (dclf-architecture.md, "Tree LOD: the draws"; Features/TreeLod/TreeLod.h; Passes/MainExtension.cpp, "The two-phase tail").
+// Drawcall Limit Fix. Culls tree LOD instances for the main camera in the depth segment's two phases, like every other object.
 //
-// Phase 1 (before the Z-prepass's draw): one thread per instance record, shape slot (id / 75), record (id % 75). A record past
-// its slot's count, or hidden (scale 0, as the engine packs a hidden instance), draws nothing; the rest are tested against the
-// depth segment's frustum, then against the HZB the previous frame left (HzbTest.hlsli). One in view and not occluded is
-// appended to the visible list for phase 1's depth draw; one occluded goes on the retest list.
-//
-// Phase 2 (after the HZB is rebuilt from this frame's depth, phase 1's draws included): one thread per retest entry, tested
-// again against the rebuilt HZB. One it brings back is appended to the visible list after phase 1's, for phase 2's depth draw.
-//
-// The colour pass draws both phases' (its arguments count every append). The depth commit zeroes the counts; the dispatch covers
-// every record the tables hold, and the draw row bounds the slots.
+// Phase 1 runs one thread per instance record, shape slot id / 75, record id % 75. Records past the slot's count, or hidden with
+// scale 0, draw nothing. The rest are tested against the frustum and last frame's HZB. Visible ones are appended for phase 1's
+// depth draw, occluded ones go on the retest list.
+// Phase 2 retests each entry against the rebuilt HZB and appends survivors after phase 1's. The colour pass draws both phases'.
+// The depth commit zeroes the counts.
 #include "DrawcallLimitFix/CullEye.hlsli"
 #include "DrawcallLimitFix/HzbTest.hlsli"
 
-// Must match TreeLodCullConstants (Features/TreeLod/TreeLodTables.h).
+// Must match TreeLodCullConstants in TreeLodTables.h.
 cbuffer TreeLodCullConstants : register(b0)
 {
 	uint ShapesIndex;     // ByteAddressBuffer: TreeLod::ShapeRow per shape slot
 	uint InstancesIndex;  // ByteAddressBuffer: TreeLod::Instance, kMaxGroupInstances per shape slot
-	uint VisibleIndex;    // RWByteAddressBuffer: the list's header (TreeLod::VisibleHeader), the visible indices, the retest indices
-	uint LatchIndex;      // ByteAddressBuffer: the depth segment's BuildDrawsLatch (its view-projection, its HZB's UV scale)
+	uint VisibleIndex;    // RWByteAddressBuffer, the header, the visible indices, the retest indices
+	uint LatchIndex;      // ByteAddressBuffer, the depth segment's BuildDrawsLatch
 	uint LatchOffset;
-	uint DrawIndex;       // ByteAddressBuffer: TreeLod::DrawRow, whose shapeSlots (0: tree LOD does not draw this frame) bounds the slots
+	uint DrawIndex;       // ByteAddressBuffer, TreeLod::DrawRow, whose shapeSlots bounds the slots, 0 when not drawing
 	uint Phase;           // 1 or 2
-	uint RetestOffset;    // bytes: the retest list's first index (past the visible list's)
-	uint HzbIndex;        // Texture2D<float>: 0 when there is no HZB to test against
+	uint RetestOffset;    // bytes to the retest list's first index
+	uint HzbIndex;        // Texture2D<float>, 0 when there is no HZB
 	uint HzbSizePacked;   // mip 0: width in the low 16 bits, height in the high 16
 	uint HzbMips;
 	uint Padding0;
@@ -34,15 +28,14 @@ cbuffer TreeLodCullConstants : register(b0)
 static const uint kMaxGroupInstances = 75;
 static const uint kShapeRowBytes = 32;
 static const uint kInstanceBytes = 32;
-// TreeLod::VisibleHeader: the three draws' arguments (non-indexed DrawInstanced: vertices per instance, instances, 0, 0), the
-// retest count, then the visible indices.
+// TreeLod::VisibleHeader. The three draws' DrawInstanced arguments, the retest count, then the visible indices.
 static const uint kPhaseOneInstances = 4;
 static const uint kPhaseTwoInstances = 20;
 static const uint kColourInstances = 36;
 static const uint kRetestCount = 48;
 static const uint kVisibleHeaderBytes = 64;
 
-// The depth segment's camera-relative view-projection, as BuildDrawsCS's. A world position projects less the latch's eye.
+// The depth segment's camera-relative view-projection. A world position projects less the latch's eye.
 float4x4 LatchViewProj()
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -50,8 +43,7 @@ float4x4 LatchViewProj()
 		asfloat(latch.Load4(LatchOffset + 64)), asfloat(latch.Load4(LatchOffset + 80)));
 }
 
-// The cull's sphere test against the main camera's frustum, as FadeStateCS's InView: its planes normalised, the centre relative to
-// the latch's eye; NoNearPlane (the latch's cull flags, bit 9) drops the near plane.
+// The sphere test against the main camera's frustum, as FadeStateCS's InView. NoNearPlane drops the near plane.
 bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -71,7 +63,7 @@ bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 	return true;
 }
 
-// The HZB the phase tests against: the latch's cull mode 2 (frustum then the HZB) and an HZB bound.
+// Tests the HZB only in cull mode 2 with an HZB bound.
 bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
@@ -87,9 +79,8 @@ bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius)
 	return HzbTest(view, a_centre, a_radius).Occluded;
 }
 
-// A record's bound: the engine's group AABB pads each instance's position by its type's larger extent (width or height) times
-// its scale, which holds the billboard whichever way it turns. HzbTest projects the sphere's cube, which is that box; the frustum's
-// sphere holds it at sqrt(3) times the radius.
+// The engine's group AABB pads each instance by its type's larger extent times scale, holding the billboard any way it turns.
+// HzbTest projects the sphere's cube, which is that box. The frustum's sphere holds it at sqrt(3) times the radius.
 bool Bound(uint a_index, out float3 a_centre, out float a_radius)
 {
 	const uint slot = a_index / kMaxGroupInstances;
@@ -131,7 +122,7 @@ bool Bound(uint a_index, out float3 a_centre, out float a_radius)
 	if (!Bound(index, centre, radius))
 		return;
 	const float4x4 viewProj = LatchViewProj();
-	// Phase 2 has had its frustum answer from phase 1 and only revisits occlusion.
+	// Phase 2 already has its frustum answer from phase 1 and only revisits occlusion.
 	if (Phase != 2 && !InView(viewProj, centre, radius * 1.7320508))
 		return;
 	uint at;
@@ -145,7 +136,7 @@ bool Bound(uint a_index, out float3 a_centre, out float a_radius)
 	uint scratch;
 	visible.InterlockedAdd(kColourInstances, 1u, scratch);
 	if (Phase == 2) {
-		// After phase 1's, which phase 2's draw starts at (DistantTree.hlsl reads phase 1's count).
+		// After phase 1's. DistantTree.hlsl reads phase 1's count, where phase 2's draw starts.
 		visible.InterlockedAdd(kPhaseTwoInstances, 1u, at);
 		at += visible.Load(kPhaseOneInstances);
 	} else {

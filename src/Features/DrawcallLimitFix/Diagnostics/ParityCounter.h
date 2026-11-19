@@ -5,16 +5,13 @@
 
 namespace DCLF::Diagnostics
 {
-	/**
-	 * @brief A parity check's counters, for its report line: what was checked, what differed, and the first difference.
-	 * Every kept structure checks itself against a rebuild from the tables (CS_DCLF_PERSISTENT_PARITY) through one.
-	 */
+	/** @brief A parity check's counters for its report line. Checked, differed, and the first difference. */
 	struct ParityCounter
 	{
 		std::uint64_t checks = 0, mismatches = 0;
 		std::string first;
 
-		/** @brief One comparison; a_describe() names the first difference. Returns a_equal. */
+		/** @brief Counts one comparison. a_describe() names the first difference. Returns a_equal. */
 		template <class F>
 		bool Check(bool a_equal, F&& a_describe)
 		{
@@ -24,7 +21,7 @@ namespace DCLF::Diagnostics
 			return a_equal;
 		}
 		bool Check(bool a_equal) { return Check(a_equal, [] { return std::string(); }); }
-		/** @brief The report's verdict: " <- OK", " <- DIFFER" (with the first difference when a_first), or nothing unchecked. */
+		/** @brief The verdict, " <- OK" or " <- DIFFER", or nothing when unchecked. */
 		std::string Verdict(bool a_first = false) const
 		{
 			if (!checks)

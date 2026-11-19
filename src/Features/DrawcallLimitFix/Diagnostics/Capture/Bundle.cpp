@@ -1,4 +1,4 @@
-// The capture's worker side: the files the render thread left to it, the logs, the manifest, and the zip (Windows' own tar.exe).
+// The capture's worker side. Files the render thread left, the logs, the manifest, and the zip made with Windows' tar.exe.
 
 #include "CaptureInternal.h"
 
@@ -14,8 +14,8 @@ namespace DCLF::Capture
 {
 	namespace
 	{
-		constexpr std::uintmax_t kLogHead = 1ull << 20;   // the start of a long log: the session's setup lines
-		constexpr std::uintmax_t kLogTail = 32ull << 20;  // and its end: the lines leading up to the capture
+		constexpr std::uintmax_t kLogHead = 1ull << 20;   // the start of a long log, the session's setup lines
+		constexpr std::uintmax_t kLogTail = 32ull << 20;  // and its end, the lines leading up to the capture
 
 		std::string Lower(std::string a_text)
 		{
@@ -43,7 +43,7 @@ namespace DCLF::Capture
 			return ok;
 		}
 
-		/** @brief The text of a_path, its head and tail only past a_head + a_tail bytes. Empty when it cannot be read. */
+		/** @brief The text of a_path, only its head and tail past a_head + a_tail bytes. Empty when it cannot be read. */
 		std::optional<std::string> ReadClipped(const std::filesystem::path& a_path, std::uintmax_t a_head, std::uintmax_t a_tail)
 		{
 			std::error_code error;
@@ -99,7 +99,7 @@ namespace DCLF::Capture
 			return fmt::format("{}.{}.{}.{}", HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS), HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
 		}
 
-		/** @brief The process's loaded DLLs, game-folder paths shown relative to the game folder. */
+		/** @brief The loaded DLLs, with game-folder paths shown relative. */
 		std::string Modules()
 		{
 			std::vector<HMODULE> modules(1024);
@@ -138,7 +138,7 @@ namespace DCLF::Capture
 			return out;
 		}
 
-		/** @brief Zips a_dir into a_zip with Windows' tar.exe (Windows 10 1803 and later). Empty when it worked, or why not. */
+		/** @brief Zips a_dir with Windows' tar.exe, from Windows 10 1803. Returns empty on success, or why not. */
 		std::string Zip(const std::filesystem::path& a_dir, const std::filesystem::path& a_zip)
 		{
 			wchar_t system[MAX_PATH]{};
@@ -222,7 +222,7 @@ namespace DCLF::Capture
 		} else
 			s.Note("loadorder.txt", "skipped: the main thread did not answer within 5 s");
 
-		// The logs beside CommunityShaders.log: its own, DXVK's (and its device fault dump), the switch files.
+		// The logs beside CommunityShaders.log, DXVK's with its device fault dump, and the switch files.
 		if (const auto logDir = logger::log_directory()) {
 			std::error_code error;
 			for (const auto& entry : std::filesystem::directory_iterator(*logDir, error)) {
@@ -231,7 +231,7 @@ namespace DCLF::Capture
 				const auto name = Lower(entry.path().filename().string());
 				const bool text = name == "communityshaders.log" || name.ends_with("_d3d11.log") || name.ends_with("_dxgi.log") ||
 				                  name == "communityshaders-dclf.ini" || name == "communityshaders.env";
-				// The watchdog's hang reports (HangWatchdog.h): every thread's stack when the render thread stopped presenting.
+				// The watchdog's hang reports, with every thread's stack from when the render thread stopped presenting.
 				const bool hangReport = name.starts_with("communityshaders-hang-") && name.ends_with(".txt");
 				if (text || hangReport)
 					CopyLog(s, entry.path(), true);
@@ -239,7 +239,7 @@ namespace DCLF::Capture
 					CopyLog(s, entry.path(), false);
 			}
 		}
-		// capture.log was written by the tee: redact it in place.
+		// The tee wrote capture.log, so redact it in place.
 		if (auto text = ReadClipped(s.dir / "capture.log", kLogHead * 64, 0))
 			Write(s, s.dir / "capture.log", Redact(std::move(*text)), "capture.log");
 

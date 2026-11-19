@@ -7,16 +7,15 @@
 
 namespace DCLF::Diagnostics
 {
-	// The scene mirror's writes (SceneMirror, the coordinator's), for the mirror parity's observers (Events.h's other hook points name
-	// Coordinator; these do not, so SceneMirror.cpp includes this alone).
+	// Scene mirror writes, for the mirror parity's observers. Kept apart from Events.h so SceneMirror.cpp need not include Coordinator.
 
-	/** @brief The coordinator: a capture's records applied to the mirror. */
+	/** @brief A capture's records were applied to the mirror. Coordinator thread. */
 	struct MirrorCaptureApplied
 	{
 		const SceneCapture::Records& records;
 	};
 
-	/** @brief The coordinator: a detached subtree's records taken out of the mirror. */
+	/** @brief A detached subtree's records were taken out of the mirror. Coordinator thread. */
 	struct MirrorDetached
 	{
 		std::span<RE::BSGeometry* const> geometries;
@@ -24,8 +23,8 @@ namespace DCLF::Diagnostics
 	};
 
 	/**
-	 * @brief The coordinator: a subtree the mirror held, named by an attach out of the world, so it left the world by no detach a hook saw
-	 * (SceneMirror::Evict; lights and cameras aside). a_rtti is static data.
+	 * @brief A held subtree was named by an attach outside the world, so it left the world by no detach a hook saw. Lights and
+	 * cameras aside. a_rtti is static data. Coordinator thread.
 	 */
 	struct MirrorEvicted
 	{
@@ -35,12 +34,12 @@ namespace DCLF::Diagnostics
 		std::string_view what;
 	};
 
-	/** @brief The coordinator: every record of the mirror dropped. */
+	/** @brief Every mirror record was dropped. Coordinator thread. */
 	struct MirrorCleared
 	{
 	};
 
-	/** @brief A reference's 3D placed in its cell (the engine's thread): its fade node's statics just set. */
+	/** @brief A reference's 3D was placed in its cell and its fade node's statics just set. Engine thread. */
 	struct FadeStaticsPlaced
 	{
 		const RE::NiAVObject* fade;

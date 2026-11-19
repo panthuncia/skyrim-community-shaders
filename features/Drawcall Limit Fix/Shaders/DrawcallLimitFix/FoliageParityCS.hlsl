@@ -1,41 +1,27 @@
-// Drawcall Limit Fix: CS_DCLF_FOLIAGE_PARITY's compare pass (Diagnostics/Draws/Foliage.cpp; its constants must match FoliageParityConstants
-// there, its counters GpuLayouts.h's FoliageCounter).
+// Drawcall Limit Fix. The foliage parity compare pass. Constants must match FoliageParityConstants in Foliage.cpp, and the counters
+// GpuLayouts.h's FoliageCounter.
 //
-// The colour pass's alpha-tested draws write what each pixel shows (Lighting.hlsl, DCLF_FOLIAGE_PARITY): its object word (the
-// object's index + 1 in the low 24 bits, the frame's tag above them), and four words: its albedo (RGB8, and its motion vector's
-// error against a static object's in tenths of a pixel), its diffuse and specular (RGBA8) and its motion vector (half2, pixels).
-// A word whose tag is not its frame's was not written that frame (a pixel no alpha-tested draw shaded), so nothing is cleared.
-//
-// Within the frame, whatever the camera does:
-// - owned: the Z-prepass's alpha-tested stages keep each pixel's closest fragment their alpha test passed (its owner: depth and
-//   object, Lighting.hlsl). Where the owner's depth is the pixel's, the colour pass must have shaded that object there: an
-//   owned pixel it left unshaded, or shaded with another object, is counted;
-// - near white: the frame's foliage pixels whose albedo, or diffuse, is near white;
-// - motion: with the trees' clocks frozen the foliage is static, so its motion vector is the camera's alone; one more than a
-//   pixel from that is counted (and more than kMotionFar).
-// Against the frame before, where the motion vector says the pixel was (the vectors are checked above), so whatever the camera
-// does - the best of the same object's pixels around that point:
-// - recoloured: its albedo, diffuse or specular moved by more than kColourStep in a channel;
-// - brightened: its lit colour (diffuse and specular) by more than kBrightStep in luminance (whitened: and its albedo to near
-//   white).
-// With a still camera also: vanished (the frame before had an object here, and this frame has none of it here or beside) and
-// appeared (the reverse); a moving camera covers and uncovers, so these count edges then.
+// The colour pass's alpha-tested draws record what each pixel shows. A word whose tag is not its frame's was not written that
+// frame, so nothing is cleared.
+// Within the frame it counts owned pixels left unshaded or shaded by another object, near-white pixels, and motion errors with
+// tree clocks frozen. Against the reprojected frame before it counts recoloured, brightened and whitened pixels.
+// With a still camera it also counts vanished and appeared pixels. A moving camera makes these count edges.
 #include "Common/DeviceRef.hlsli"
 
 cbuffer FoliageParityConstants : register(b0)
 {
-	uint4 Ids;          // both frames' pairs of buffer view refs, by the epoch's parity
+	uint4 Ids;          // both frames' buffer view ref pairs, by epoch parity
 	uint4 Colours;
-	uint2 FrameBlock;   // the colour epoch's words, by buffer view ref (Lighting.hlsl, DCLFFoliageParity*): which pair is this frame's, and its tag
+	uint2 FrameBlock;   // the colour epoch's words, saying which pair is this frame's and its tag
 	uint ResultsIndex;  // RWByteAddressBuffer: the counters, then the samples (GpuLayouts.h, FoliageCounter)
-	uint OwnersIndex;   // RWStructuredBuffer<uint64_t>: the Z-prepass's owner per pixel (64 bits), cleared here for the next frame
+	uint OwnersIndex;   // RWStructuredBuffer<uint64_t>, the Z-prepass owner per pixel, cleared here for the next frame
 	uint DepthIndex;    // Texture2D<float>: the main depth
 	uint Padding0;
 	uint Width;
 	uint Height;
 	uint2 Padding;
 }
-// This frame's (from the frame block) and the frame before's.
+// This frame's and the frame before's.
 static uint2 CurrentIds, CurrentColours, PreviousIds, PreviousColours;
 static uint Frame;
 
@@ -44,7 +30,7 @@ static const uint kCompared = 0, kVanished = 1, kAppeared = 2, kRecoloured = 3, 
 				  kOtherObject = 8, kWhiteAlbedo = 9, kWhiteDiffuse = 10, kEpochTag = 11, kMotion = 12, kMotionFarCount = 13, kInFrameSampleCount = 14,
 				  kLandOwned = 17, kLandUnshaded = 18, kLandOtherObject = 19, kLandSampleCount = 20,
 				  kWhiteSampleCount = 15, kBrightened = 16, kCounters = 24;
-// The samples, kSampleWords each: the frame before's comparisons', the in-frame checks', the near-white pixels'.
+// kSampleWords each, for the frame-before comparisons, in-frame checks and near-white pixels.
 static const uint kSampleWords = 8, kFrameSamples = 24, kInFrameSamples = 32, kWhiteSamples = 16, kLandSamples = 16;
 static const uint kFrameSampleBase = 0, kInFrameSampleBase = kFrameSampleBase + kFrameSamples, kWhiteSampleBase = kInFrameSampleBase + kInFrameSamples,
 				  kLandSampleBase = kWhiteSampleBase + kWhiteSamples;
@@ -52,10 +38,10 @@ static const uint kColourWords = 4;
 static const float kColourStep = 0.35;
 static const float kBrightStep = 0.3;
 static const float kMotionFar = 8.0;
-// The depth buffer's unit (D24): the owner's depth is the fragment's, the buffer's that depth rounded to it.
+// D24 depth unit. The buffer holds the owner's depth rounded to it.
 static const float kDepthUnit = 1.0 / 16777215.0;
 
-// The object at a pixel of a frame's buffer, 0 for none (not written that frame).
+// The object at a pixel of a frame's buffer, 0 when not written that frame.
 uint ObjectAt(uint2 a_buffer, int2 a_pixel, uint a_tag)
 {
 	if (a_pixel.x < 0 || a_pixel.y < 0 || uint(a_pixel.x) >= Width || uint(a_pixel.y) >= Height)
@@ -80,8 +66,7 @@ float4 Unpack(uint a_word)
 
 float2 UnpackHalf2(uint a_word) { return float2(f16tof32(a_word), f16tof32(a_word >> 16)); }
 
-// A sample in a range: its slot from the range's counter, its words if the range has room. a_spread keeps one pixel in 31 (by a
-// hash of its position), so a range covers the screen rather than its top rows.
+// Takes a sample slot if the range has room. a_spread keeps one pixel in 31, so a range covers the screen rather than its top rows.
 void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_capacity, int2 a_pixel, bool a_spread, uint4 a_first, uint4 a_second)
 {
 	if (a_spread && ((uint(a_pixel.x) * 73856093u) ^ (uint(a_pixel.y) * 19349663u)) % 31u != 0)
@@ -127,12 +112,11 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 		Texture2D<float> depthBuffer = ResourceDescriptorHeap[DepthIndex];
 		const float ownerDepth = asfloat(0xFFFFFFFFu - uint(owner >> 32));
 		const uint ownerObject = uint(owner) & 0x00FFFFFFu;
-		// The owner's depth as the buffer stores it (D24): one of the two levels either side of it, as the conversion rounds. Another
-		// fragment a unit or more in front (a draw the engine keeps, which records nothing) is not the owner's depth.
+		// The owner's depth as D24 stores it, one of the two levels either side. A fragment a unit or more in front is not the owner's.
 		if (abs(round(depthBuffer.Load(int3(pixel, 0)) * 16777215.0) - ownerDepth * 16777215.0) < 1.0) {
 			results.InterlockedAdd(kOwned * 4, 1);
 			const uint failure = object == 0 ? kUnshaded : object != ownerObject ? kOtherObject : 0;
-			// Terrain LOD's owners (bit 31, Lighting.hlsl) are counted apart as well.
+			// Terrain LOD owners, bit 31, are counted apart as well.
 			const bool land = (uint(owner) & 0x80000000u) != 0;
 			if (land)
 				results.InterlockedAdd(kLandOwned * 4, 1);
@@ -140,7 +124,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 				results.InterlockedAdd(failure * 4, 1);
 				if (land) {
 					results.InterlockedAdd((failure == kUnshaded ? kLandUnshaded : kLandOtherObject) * 4, 1);
-					// Terrain LOD's own samples of the pixels no draw shaded (the others are its equal-depth ties).
+					// Terrain LOD's own samples of unshaded pixels. The others are equal-depth ties.
 					if (failure == kUnshaded)
 						Sample(results, kLandSampleCount, kLandSampleBase, kLandSamples, pixel, false, uint4(position, failure, ownerObject, object),
 							uint4(asuint(ownerDepth), colours.x, 0, 0));
@@ -162,7 +146,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 		if (whiteAlbedo || whiteDiffuse)
 			Sample(results, kWhiteSampleCount, kWhiteSampleBase, kWhiteSamples, pixel, true, uint4(position, whiteAlbedo ? kWhiteAlbedo : kWhiteDiffuse, object, colours.x),
 				uint4(colours.y, 0, 0, 0));
-		// Motion: the error the colour pass measured against a static object's motion vector, in pixels.
+		// Motion error against a static object's motion vector, in pixels.
 		const float errorLength = float(colours.x >> 24) / 10.0;
 		if (errorLength > 1.0) {
 			results.InterlockedAdd(kMotion * 4, 1);
@@ -173,13 +157,13 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 		}
 	}
 
-	// Against the frame before, where the motion vector puts the pixel then.
+	// Against the frame before, where the motion vector puts the pixel.
 	const float2 motion = UnpackHalf2(colours.w);
 	const int2 then = object != 0 ? int2(floor(float2(pixel) + 0.5 + motion)) : pixel;
 	uint kind = 0;
 	uint4 best = uint4(0, 0, 0, 0);
 	if (object != 0) {
-		// The same object's pixel nearest in colour among the point's and its neighbours'.
+		// The same object's pixel nearest in colour among the point and its neighbours.
 		float bestStep = 1e9, bestBright = 0;
 		bool found = false;
 		[unroll] for (int y = -1; y <= 1; ++y) {
@@ -215,14 +199,14 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 			kind = kAppeared;
 		}
 	} else if (previous != 0 && !Near(CurrentIds, pixel, tag, previous)) {
-		// Only meaningful for a still camera (the frame before's pixel has no motion of its own here).
+		// Only meaningful for a still camera.
 		kind = kVanished;
 	}
 	if (kind == 0)
 		return;
 	results.InterlockedAdd(kind * 4, 1);
-	// The samples are the colour changes' (a moving camera's vanished pixels are its own edges).
-	// kind is not 0 here, so this is kVanished or kAppeared as one compare.
+	// Sample colour changes only, since a moving camera's vanished pixels are its own edges.
+	// kind is not 0 here, so this tests kVanished or kAppeared as one compare.
 	if (kind <= kAppeared)
 		return;
 	Sample(results, kFrameSampleCount, kFrameSampleBase, kFrameSamples, pixel, true, uint4(position, kind, object, colours.y),

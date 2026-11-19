@@ -4,9 +4,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsState.h"
 #include "Engine.h"
 
-// The views' epochs' report lines (taken by IndirectDraws::AsyncReport): the shared epochs' point, the accumulated visibility, the shadow
-// capability. (The forward epoch's: Features/Forward; the reflection's and the first-person view's: Features/Reflection,
-// Features/FirstPerson; the effects': Features/Effects.)
+// View epoch report lines. The shared epochs' point, the accumulated visibility and the shadow capability.
 
 namespace DCLF
 {
@@ -14,7 +12,7 @@ namespace DCLF
 	{
 		if (!impl)
 			return {};
-		// On a report where a shared epoch reached a frame since the last, or its gate class is on (the forward epoch's: its toggle).
+		// Report when a shared epoch reached a frame since the last report, or its gate class is on.
 		const ToggleSet toggles = ActiveToggles();
 		bool due = false;
 		for (std::uint32_t e = 0; e < EpochCount() && !due; ++e) {
@@ -25,8 +23,7 @@ namespace DCLF
 		}
 		if (!due)
 			return {};
-		// Features/Forward's forward and refraction lines (taking the counters: TakeSharedEpochStats), then the forward epoch's features'
-		// (Features/Effects: the Effect port's members and its Lighting variant's parity).
+		// The forward and refraction lines, then the forward epoch's features' lines.
 		std::string text;
 		Extensions::ReportTextAt(Api::ReportPoint::AsyncWorkForward, text);
 		return text;
@@ -50,13 +47,12 @@ namespace DCLF
 			return {};
 		auto& r = *impl->scene->visibilityReadback;
 		const auto take = [](std::atomic<std::uint64_t>& a_counter) { return a_counter.exchange(0, std::memory_order_relaxed); };
-		// The writes (the normal path).
+		// The writes, on the normal path.
 		std::string text = fmt::format(
 			"[DCLF] accumulated writes (T7b2): {} write lists made at Main::Update's entry ({} full), {} set, {} cleared, {} already so, "
 			"{} clears held by a camera cut ({} cuts, {} roots set by them), {} of a released publication (oldest list {} frames); {:.1f} us on the main thread\n",
 			take(r.writeBatches), take(r.fullWrites), take(r.writesSet), take(r.writesCleared), take(r.writesUnchanged), take(r.writesHeldByCut),
 			take(r.cuts), take(r.cutWrites), take(r.writesExpired), r.writeAgeMax.exchange(0, std::memory_order_relaxed), double(take(r.writeNs)) / 1000.0);
-		// Every listed root.
 		{
 			text += fmt::format(
 				"[DCLF] accumulated, every listed root (T7f checklist item 1): wide writes {} set, {} cleared, {} already so; {} nodes between "
@@ -66,7 +62,6 @@ namespace DCLF
 				text += fmt::format("[DCLF] accumulated, geometries whose walk missed their root (T7f): {}\n", r.wideNoChainFirst);
 			r.wideNoChainFirst.clear();
 		}
-		// The accumulated writes' features' lines here (Features/Actors: the actors' animation stamp).
 		Extensions::ReportTextAt(Api::ReportPoint::AccumulatedWrites, text);
 		if (!Diagnostics::Observe().accumulated)
 			return text;

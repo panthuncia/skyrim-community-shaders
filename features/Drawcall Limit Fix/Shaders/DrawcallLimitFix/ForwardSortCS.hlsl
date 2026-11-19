@@ -1,43 +1,30 @@
-// Drawcall Limit Fix: the forward range's sort, back to front. The colour segment's BuildDrawsCS appended every visible forward
-// draw (Records.h, kObjectForward: blended Lighting geometry and the Effect port's meshes) to the staging half of the forward range,
-// each with its sort key in three words nothing executes there: its view depth (the clip w of its bound centre, or of its BSOrderedNode's
-// centre for a leaf of an ordered group) in firstInstance, and for such a leaf its group (a hash of that centre) in instanceCount and its
-// ordinal under the node in vertexOffset. Each thread takes one staged draw, counts the draws that come before it in the engine's blended
-// order, and writes it to that rank of the sorted half with those three words put back (instanceCount 1, vertexOffset 0, firstInstance
-// 0). Every slot of [0, count) of the sorted half is written exactly once; the forward epoch draws the sorted half through the count word.
+// Drawcall Limit Fix. Sorts the forward range back to front. BuildDrawsCS staged each visible forward draw with its sort key in
+// three words. Each thread ranks one staged draw in the engine's blended order and writes it to that rank of the sorted half,
+// restoring the three words. Every sorted slot below the count is written exactly once.
 //
-// The engine's order (FUN_1414b39d0): the blended list sorted by the view axis distance of the bound centre, farthest first
-// (FUN_1414e8fc0, stable), merged with the ordered nodes' groups sorted by their node's distance (qsort, 0x1414f55e0) - a group drawn
-// whole, its passes in their registration order (FUN_1414f19d0: the node's child order), before a list pass nearer than it and after one
-// at its distance or farther (FUN_1414f5330). So: farther first; at one depth a plain draw before a group's; then by group, by ordinal,
-// and last by the object index and the first index, so the order is the same every frame whatever order the atomic append gave.
+// The engine's order (FUN_1414b39d0) sorts the blended list by view distance, farthest first (FUN_1414e8fc0, stable), and merges
+// in ordered node groups by their node's distance (0x1414f55e0). A group draws whole in child order, before a nearer list pass
+// and after one at its distance or farther (FUN_1414f5330). Ties break by group, ordinal, object index and first index, so the
+// order is the same every frame whatever the atomic append gave.
 //
-// The rank is O(n^2) in the visible forward draws, with no cap: the range holds every draw the forward slots can produce (IndirectDraws:
-// ReserveMainSequences). The keys are read through groupshared memory a tile of 64 at a time, so each thread group reads every key once
-// per tile rather than each thread on its own. A much larger class would take a radix or bitonic sort here; the contract (staging half
-// in, sorted half out, the count word) stays.
-//
-// The forward range is split by state class (GpuLayouts.h, kClassRangeForward): each class's staging and sorted halves are their own,
-// sorted by one dispatch of this program each, its count the class's word (kSortCountOffset): the colour segment's classCounts word,
-// the first-person view's forward range's class entry's bucket count word (its keys staged by the first-person BuildDraws with the
-// first-person camera's view depth). A class's blended draws keep the engine's order among themselves; across classes the order is the
-// classes' (each class's call draws after the one before).
+// The rank is O(n^2) with no cap, reading keys through groupshared memory a tile of 64 at a time. A much larger class would need
+// a radix or bitonic sort with the same contract. Each state class sorts in its own dispatch, so order across classes is the classes'.
 
-// Must match ForwardSortConstants (Draws/IndirectDraws/Main/FrameLayout.h).
+// Must match ForwardSortConstants in Main/FrameLayout.h.
 cbuffer ForwardSortConstants : register(b0)
 {
 	uint SequencesIndex;  // RWByteAddressBuffer: DrawSequence[], the main sequences
-	uint CountIndex;      // ByteAddressBuffer: the count words (with kSortCountOffset, the class's: its draws appended to the staging half)
-	uint StagingBase;     // the staging half's first slot; the sorted half follows it, Capacity slots on
-	uint Capacity;        // each half's slots (the class's forward sub-range's capacity)
-	uint SequenceStride;  // bytes (sizeof(DrawSequence))
-	uint CountOffset;     // with kSortCountOffset, the byte offset of the count word in CountIndex (the first-person forward range's bucket count)
+	uint CountIndex;      // ByteAddressBuffer, the count words
+	uint StagingBase;     // the staging half's first slot, the sorted half follows Capacity slots on
+	uint Capacity;        // each half's slots
+	uint SequenceStride;  // bytes
+	uint CountOffset;     // with kSortCountOffset, the count word's byte offset in CountIndex
 	uint Options;         // kSortCountOffset, kSortRankInstance
 	uint Padding2;
 }
 
 static const uint kSortCountOffset = 1;   // ForwardSortConstants::kCountOffset
-static const uint kSortRankInstance = 2;  // ForwardSortConstants::kRankInstance: firstInstance is the rank (a forward bucket's plain draw)
+static const uint kSortRankInstance = 2;  // ForwardSortConstants::kRankInstance, firstInstance is the rank
 
 static const uint kCountForward = 128;     // GpuLayouts.h, kCountForwardWord
 static const uint kObjectWordOffset = 20;  // DrawSequence::objectIndex
@@ -46,13 +33,13 @@ static const uint kFirstIndexOffset = 124;  // the DrawIndexed arguments' firstI
 static const uint kVertexOffsetOffset = 128;
 static const uint kFirstInstanceOffset = 132;
 static const uint kObjectIndexMask = (1u << 26) - 1;  // Records.h, kObjectIndexMask
-static const uint kTile = 64;                         // the thread group (IndirectDraws: kForwardSortGroup)
+static const uint kTile = 64;                         // the thread group, IndirectDraws' kForwardSortGroup
 
 struct SortKey
 {
 	float depth;
 	uint group;
-	uint ordinal;  // 0: a plain draw
+	uint ordinal;  // 0 for a plain draw
 	uint object;
 	uint first;
 };
@@ -96,7 +83,7 @@ groupshared uint sharedFirst[kTile];
 	ByteAddressBuffer counts = ResourceDescriptorHeap[CountIndex];
 	const uint count = min(counts.Load((Options & kSortCountOffset) != 0 ? CountOffset : kCountForward), Capacity);
 	if (groupID.x * kTile >= count)
-		return;  // the whole group past the count (uniform in the group, so before any barrier)
+		return;  // the whole group is past the count, uniform, so before any barrier
 	RWByteAddressBuffer sequences = ResourceDescriptorHeap[SequencesIndex];
 	const uint index = dispatchID.x;
 	const bool staged = index < count;
@@ -140,7 +127,7 @@ groupshared uint sharedFirst[kTile];
 #if defined(__spirv__)
 		const uint value = word == kInstanceCountOffset ? 1u : word == kVertexOffsetOffset ? 0u : word == kFirstInstanceOffset ? firstInstance : sequences.Load(source + word);
 #else
-		// D3D12: the word before the draw's arguments carries the first instance too (BuildDrawsCS, StoreShadowSequence).
+		// On D3D12 the word before the draw's arguments carries the first instance too.
 		const uint value = word == kInstanceCountOffset ? 1u : word == kVertexOffsetOffset ? 0u : (word == kFirstInstanceOffset || word == kInstanceCountOffset - 8) ? firstInstance : sequences.Load(source + word);
 #endif
 		sequences.Store(target + word, value);

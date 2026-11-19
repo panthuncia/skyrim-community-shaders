@@ -1,5 +1,5 @@
-// The diagnostic capture's state machine (see Capture.h). The render thread owns the session; the scene lane writes its sections at a
-// pass's end; Bundle.cpp's worker writes the rest and zips it.
+// The diagnostic capture's state machine. The render thread owns the session, the scene lane writes its sections at a pass's end,
+// and Bundle.cpp's worker writes the rest and zips it.
 
 #include "CaptureInternal.h"
 
@@ -68,7 +68,6 @@ namespace DCLF::Capture
 		std::uint32_t presentCount = 0;
 		int menuSeconds = 10;
 
-		// The scene lane's requests.
 		struct LaneRequest
 		{
 			std::weak_ptr<Session> session;
@@ -96,7 +95,7 @@ namespace DCLF::Capture
 			a_session.Note(std::string(a_section), written ? "ok" : "failed: could not write the file");
 		}
 
-		/** @brief Render thread: the start's or the end's snapshot.txt and vram.json, under a_label. */
+		/** @brief Writes the start or end snapshot.txt and vram.json under a_label. Render thread. */
 		void WriteRenderSnapshot(Session& a_session, std::string_view a_label)
 		{
 			const auto dir = a_session.dir / a_label;
@@ -138,7 +137,7 @@ namespace DCLF::Capture
 			}
 		}
 
-		/** @brief Render thread: asks the scene lane for its sections (the fade census, the growth census) under a_label. */
+		/** @brief Asks the scene lane for its census sections under a_label. Render thread. */
 		void AskLane(const std::shared_ptr<Session>& a_session, std::string a_label)
 		{
 			const auto dclf = Dclf();
@@ -166,7 +165,7 @@ namespace DCLF::Capture
 			return text;
 		}
 
-		/** @brief Render thread: the environment section (environment.json). */
+		/** @brief The environment.json section. Render thread. */
 		std::string BuildEnvironment()
 		{
 			const auto dclf = Dclf();
@@ -213,7 +212,7 @@ namespace DCLF::Capture
 			return j.dump(1);
 		}
 
-		/** @brief Render thread: every feature, loaded or not (features.json). */
+		/** @brief Every feature, loaded or not, for features.json. Render thread. */
 		std::string BuildFeatures()
 		{
 			json list = json::array();
@@ -230,7 +229,7 @@ namespace DCLF::Capture
 			return j.dump(1);
 		}
 
-		/** @brief Main thread (an SKSE task): the load order and the player's place. */
+		/** @brief The load order and the player's place. Main thread, in an SKSE task. */
 		MainThreadInfo ReadMainThread()
 		{
 			MainThreadInfo info;
@@ -284,7 +283,7 @@ namespace DCLF::Capture
 				phase = Phase::Idle;
 				return;
 			}
-			// The tee first, so the flushed window before the capture (the time leading up to the click) is in the bundle too.
+			// The tee first, so the flushed window leading up to the click is in the bundle too.
 			try {
 				auto tee = std::make_shared<spdlog::sinks::basic_file_sink_mt>((s->dir / "capture.log").string(), true);
 				tee->set_pattern(Util::LogTee::kPattern);
@@ -396,8 +395,7 @@ namespace DCLF::Capture
 			const auto asked = s.laneAsked.load(std::memory_order_acquire), done = s.laneDone.load(std::memory_order_acquire);
 			if (done < asked)
 				s.Note("scene", fmt::format("timed out: {} of {} scene sections written", done, asked));
-			// The flushed reports have run (the render thread's at the frame after the end, the scene lane's at its pass), so the
-			// statistics go quiet again.
+			// The flushed reports have run on both threads, so statistics go quiet again.
 			Reports::captureStatistics.store(false, std::memory_order_relaxed);
 			logger::info("[DCLF] capture {}: packaging {}", s.id, s.dir.string());
 			DetachTee(s);

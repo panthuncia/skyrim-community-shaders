@@ -2,15 +2,14 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsState.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/ExclusionBuild.h"
 
-// The scene revisions' and snapshots' report lines: the frame's (SnapshotReport, RevisionReport) and the snapshot builder's, composed in
-// its pass and posted for the frame's report (ProducerReport: the revisions, the growths, the shapes made, the draw bound, and the stores
-// the builds ahead write - main rows, object records, shadow state, extras rows, geometry table, exclusions).
+// Report lines for scene revisions and snapshots. The frame's lines, and the snapshot builder's, composed in its pass and posted
+// for the frame's report.
 
 namespace DCLF
 {
 	std::string IndirectDraws::Impl::SnapshotReport()
 	{
-		// The builder's times since the last report (its queue, drained here alone).
+		// The builder's times since the last report. Its queue is drained only here.
 		std::vector<double> ahead, shapes, recordings;
 		snapshotTimings.Drain([&](SnapshotTiming&& a_timing) {
 			if (a_timing.ahead)
@@ -32,8 +31,7 @@ namespace DCLF
 		text += fmt::format("[DCLF] snapshot builds (ms, avg/p95/max): draws ahead {} ({} built), shapes {}, recordings wait {}; commit to adoption (frames): p50 {}, p95 {}, "
 							"max {}\n",
 			Reports::Spread(ahead, 2), aheadBuilt, Reports::Spread(shapes, 2), Reports::Spread(recordings, 2), percentile(50), percentile(95), adoptionLatency.empty() ? 0u : adoptionLatency.back());
-		// From the oldest event a publication carried to the frame that installed it (the publications the builder skipped past
-		// included: FrameView::HandOverAtFrameStart walks their log nodes).
+		// From the oldest event a publication carried to the frame that installed it, skipped publications included.
 		if (!eventAdoptionMs.empty()) {
 			std::sort(eventAdoptionFrames.begin(), eventAdoptionFrames.end());
 			const auto framesAt = [this](std::size_t a_percent) {
@@ -48,7 +46,7 @@ namespace DCLF
 			eventAdoptionMs.clear();
 			eventAdoptionFrames.clear();
 		}
-		// The growths' adoption to the first draws embedding their versions (DecideCoverage).
+		// From a growth's adoption to the first draws embedding its versions.
 		std::sort(growthToDraws.begin(), growthToDraws.end());
 		text += fmt::format("[DCLF] snapshot draws: growth adoption to draws embedding it (frames): {} growths, p50 {}, max {}\n", growthToDraws.size(),
 			growthToDraws.empty() ? 0u : growthToDraws[growthToDraws.size() / 2], growthToDraws.empty() ? 0u : growthToDraws.back());
@@ -56,7 +54,7 @@ namespace DCLF
 		snapshotsAdopted = snapshotFramesKept = 0;
 		snapshotsStale = {};
 		adoptionLatency.clear();
-		// The builder's own lines (the last it posted: a report behind), and the next asked for.
+		// The builder's own lines are a report behind.
 		producerReportSlot.TakeInto(producerReport);
 		text += producerReport;
 		producerReportWanted.store(true, std::memory_order_release);
@@ -66,13 +64,13 @@ namespace DCLF
 
 	std::string IndirectDraws::Impl::ProducerReport()
 	{
-		// The snapshot builder's (composed in its pass, posted for the frame's report): nothing here is the frame's.
+		// Composed in the snapshot builder's pass. Nothing here is the frame's.
 		auto& rv = revisions;
 		std::string epochs;
 		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e) {
 			auto& s = rv.epochs[e];
 			const auto recorded = s.recorded.exchange(0), failedCount = s.failed.exchange(0), dropped = s.dropped.exchange(0), shapes = s.shapes.exchange(0);
-			// A hosted epoch (the reflection's): its shape's changes alone; its host's recordings carry its passes.
+			// A hosted epoch reports only its shape's changes. Its host's recordings carry its passes.
 			if (const auto hostedBy = EpochTraitsOf(e).hostedBy; hostedBy != kNoEpoch) {
 				epochs += fmt::format("{}{} {} changed (recorded in the {} epoch's)", epochs.empty() ? "" : "; ", EpochTraitsOf(e).name, s.changed, EpochTraitsOf(hostedBy).name);
 				s.changed = s.requested = s.refused = 0;
@@ -92,13 +90,11 @@ namespace DCLF
 		if (!madeBy.empty())
 			madeBy += ")";
 		std::string text = fmt::format("[DCLF] revision shapes: made at {} makes{}, kept at {}\n", std::exchange(shapesMade, 0), madeBy, std::exchange(shapesKept, 0));
-		// The builder's wakes: its passes, those that found nothing, the publications it passed through (only deltas moved: the last
-		// snapshot posted again), and the scene passes' ends that woke nobody (no publication waiting).
+		// Builder wakes, passes that found nothing, publications passed through with only deltas, and scene pass ends that woke nobody.
 		text += fmt::format("[DCLF] snapshot builder: {} passes, {} found nothing to do, {} publications passed through (deltas only); scene pass ends not waking it: {}\n",
 			std::exchange(snapshotBuilder.passes, 0), std::exchange(snapshotBuilder.idlePasses, 0), std::exchange(snapshotBuilder.passedThrough, 0),
 			passDoneWakesSkipped.exchange(0, std::memory_order_relaxed));
-		// One build per adoption: the draws built and those replaced before a snapshot posted them, the passes that held work for the
-		// frame's take; the builds ahead whose stages ran on the builder for a small change, and on the pool.
+		// One build per adoption. Draws built, draws replaced before posting, and builds ahead run on the builder or on the pool.
 		{
 			auto& b = snapshotBuilder;
 			text += fmt::format("[DCLF] snapshot builder pacing: {} builds started, {} discarded unposted; {} passes held work for the frame's take; build stages on "
@@ -106,9 +102,7 @@ namespace DCLF
 				std::exchange(b.buildsStarted, 0), std::exchange(b.buildsDiscarded, 0), std::exchange(b.heldPasses, 0), std::exchange(b.stagesInline, 0),
 				std::exchange(b.stagesPooled, 0), std::exchange(b.contextsReplaced, 0));
 		}
-		// The makes that kept the last revision (their requirement pass's inputs unchanged: RevisionReuse) and those that ran it (with no
-		// last revision to keep, or by what of the key moved), and the parities (CS_DCLF_PERSISTENT_PARITY): the pass run anyway for an
-		// unchanged key, the shapes made anyway for an unchanged shapes key.
+		// Revision makes that kept the last revision, those that ran and why, and the parity runs for unchanged keys.
 		if (auto& reuse = revisionReuse; reuse.kept || reuse.ran) {
 			std::string moved;
 			for (std::size_t part = 0; part < reuse.movedBy.size(); ++part)
@@ -139,7 +133,7 @@ namespace DCLF
 			bound.updates = bound.changes = bound.resyncs = 0;
 			parity.Reset();
 		}
-		// The stores the builds write (the builder's alone).
+		// The stores the builds write, the builder's alone.
 		text += StoresReport();
 		return text;
 	}
@@ -149,7 +143,7 @@ namespace DCLF
 		auto& rv = revisions;
 		std::string covered;
 		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e) {
-			// A hosted epoch's (the reflection's): its host's submissions with its passes' work.
+			// A hosted epoch's work is in its host's submissions.
 			const auto unrevised = std::exchange(rv.unrevised[e], 0), clamped = std::exchange(rv.latchClamped[e], 0), variants = std::exchange(rv.variants[e], 0);
 			const auto hostedBy = EpochTraitsOf(e).hostedBy;
 			covered += fmt::format("{}{} {}{}{}{}{}", covered.empty() ? "" : "; ", EpochTraitsOf(e).name, std::exchange(rv.submitted[e], 0),
@@ -158,7 +152,7 @@ namespace DCLF
 				unrevised ? fmt::format(", {} without the revision's shape <- UNREVISED", unrevised) : std::string(),
 				clamped ? fmt::format(", {} with values past its latch <- LATCH", clamped) : std::string());
 		}
-		// The occlusion maps', drawn in the shadow epoch: its submissions with a map's view latched.
+		// The occlusion maps are drawn in the shadow epoch.
 		if (const auto shadow = EpochOfShape(ShapeKind::Shadow, kShadowShape); shadow != kNoEpoch)
 			covered += fmt::format("{}occlusion {} (in the {} epoch)", covered.empty() ? "" : "; ", std::exchange(rv.occlusionSubmitted, 0), EpochTraitsOf(shadow).name);
 		std::string text;
@@ -187,8 +181,7 @@ namespace DCLF
 
 	std::string IndirectDraws::Impl::StoresReport()
 	{
-		// The snapshot builder's (its pass, with ProducerReport): the stores RunAhead writes, read and reset here alone - the render thread's
-		// report never touches them.
+		// The stores RunAhead writes, read and reset only here in the builder's pass. The render thread's report never touches them.
 		std::string text;
 		if (auto& rows = mainRows; rows.builds) {
 			text += fmt::format("[DCLF] main rows: {} builds; a build: {:.1f} material and {:.1f} pipeline rows written; {} material and {} pipeline rows held, "
@@ -198,7 +191,7 @@ namespace DCLF
 				rows.keyMoved[0], rows.keyMoved[1], rows.keyMoved[2], rows.keyMoved[3], rows.keyMoved[4], rows.keyMoved[5], rows.keyMoved[6] + rows.keyMoved[7]);
 			rows.builds = rows.materialsWritten = rows.pipelinesWritten = rows.resyncs = 0;
 			rows.keyMoved = {};
-			// The material rows' copies since the last report (KeptArray copies only the chunks a held view shares).
+			// Material row copies since the last report. KeptArray copies only the chunks a held view shares.
 			static KeptCopyStats lastCopies;
 			const KeptCopyStats copies = rows.material.CopyStats();
 			text += fmt::format("[DCLF] material rows copied: {} tables, {} chunks ({:.1f} KB), {} chunks reused, {} allocated\n", copies.tableCopies - lastCopies.tableCopies,
@@ -208,10 +201,8 @@ namespace DCLF
 		}
 		text += Draws::MainPairsReport(mainRows);
 		{
-			// The payloads installed (each for a snapshot the frame takes), the sealed draws whose publication waited for the frame and those
-			// newer work replaced before it; then per part its versions since the last report (built, the CPU bytes uploaded and the GPU bytes
-			// copied from their predecessors, the copies that were whole, the builds suspended for a free backing, the failures), its pool
-			// (backings and their MB) and its journals' floor.
+			// Payloads installed, sealed draws that waited or were replaced, then per part its versions, uploads, copies, suspensions and failures,
+			// its pool and its journals' floor.
 			auto& b = snapshotBuilder;
 			text += fmt::format("[DCLF] scene payload (D5): {} installed; {} draws waited for the frame to publish, {} replaced unpublished\n",
 				payloadsInstalled.exchange(0, std::memory_order_relaxed), std::exchange(b.publicationsWaited, 0), std::exchange(b.replacedUnpublished, 0));
@@ -243,7 +234,7 @@ namespace DCLF
 			parity.Reset();
 		}
 		if (auto& k = shadowEngine->shadowKept; k.builds) {
-			// The objects it holds (their words are the scene list's entries'; its own region only under CS_DCLF_BUILD_PARITY).
+			// The objects it holds. Its own region exists only under CS_DCLF_BUILD_PARITY.
 			const std::size_t entries = static_cast<std::size_t>(std::count_if(k.heldModes.begin(), k.heldModes.end(), [](std::uint8_t a_modes) { return a_modes != 0; }));
 			text += fmt::format(
 				"[DCLF] persistent shadow state: {} builds, {:.1f} entries and {:.1f} material rows written a build, {:.1f} list entries recounted a build, {} entries "
@@ -262,7 +253,7 @@ namespace DCLF
 			kept.shadow.Reset();
 		}
 		if (auto* store = &extrasStore; store->updates || kept.extras.checks) {
-			// The payload's extras versions, each against its own mirror (KeptChecks.cpp, every version built).
+			// Each extras version against its own mirror.
 			text += fmt::format("[DCLF] persistent extras rows: {} updates, {} resyncs; payload versions parity {} versions checked ({} mirrored), {} differ "
 								"({} rows of freed blocks not compared){}\n",
 				store->updates, store->resyncs, kept.extras.checks, kept.extrasMirrors.size(), kept.extras.mismatches,
@@ -277,7 +268,7 @@ namespace DCLF
 			store->updates = store->rewritten = store->resyncs = 0;
 			kept.geometry.Reset();
 		}
-		// The exclusions' caches are the shadow exclusion contribution's (Features/Shadows/Local), on this thread.
+		// The exclusion caches belong to the local shadow contribution, on this thread.
 		auto& sunExclusionCache = Features::Shadows::Local::ExclusionCacheOf(Api::ShadowSource::Sun);
 		for (auto* cache : { &sunExclusionCache, &Features::Shadows::Local::ExclusionCacheOf(Api::ShadowSource::Point) }) {
 			if (auto& c = *cache; c.builds) {

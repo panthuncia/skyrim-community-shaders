@@ -1,29 +1,25 @@
-// Drawcall Limit Fix: the occlusion test against the hierarchical depth buffer (HzbCS.hlsl), shared by everything the main
-// camera's two-phase culling tests: BuildDrawsCS's objects (object and terrain LOD among them) and TreeLodCullCS's instances.
-// Phase 1 tests against the HZB the previous frame left, phase 2 what phase 1 rejected against the one rebuilt from this
-// frame's depth (Passes/MainExtension.cpp, "The two-phase tail").
+// Drawcall Limit Fix. The occlusion test against the HZB, shared by BuildDrawsCS's objects and TreeLodCullCS's instances.
+// Phase 1 tests against last frame's HZB. Phase 2 retests phase 1's rejections against the one rebuilt from this frame's depth.
 #ifndef DCLF_HZB_TEST_HLSLI
 #define DCLF_HZB_TEST_HLSLI
 
 struct HzbView
 {
-	// The main pass's camera-relative view-projection, and the eye a world position is made relative to (BuildDrawsLatch::cullEye).
+	// The main pass's camera-relative view-projection and the eye world positions are made relative to.
 	float4x4 ViewProj;
 	float3 Eye;
-	uint Index;       // Texture2D<float>: the HZB; 0 when there is none to test against
+	uint Index;       // Texture2D<float>, 0 when there is none
 	uint2 BaseSize;   // mip 0's
 	uint Mips;
-	// The HZB covers a power-of-two area larger than the rendered image, so a texture coordinate in the image is NOT one in
-	// the HZB: the ratio between them, per axis (BuildDrawsLatch::hzbUvScalePacked, 16-bit fixed point).
+	// The HZB covers a larger power-of-two area than the image, so image UVs must be scaled into HZB UVs. 16-bit fixed point per axis.
 	float2 UvScale;
 };
 
 uint2 HzbUnpackSize(uint a_packed) { return uint2(a_packed & 0xFFFF, a_packed >> 16); }
 float2 HzbUnpackUvScale(uint a_packed) { return float2(a_packed & 0xFFFF, a_packed >> 16) / 65535.0; }
 
-// The bounding sphere's screen-space extent and its nearest depth, in the same clip space the draws use.
-// Returns false when the projection cannot be trusted - a corner behind the near plane - so that the
-// object is kept.
+// The bound's screen extent and nearest depth, in the draws' clip space. False when a corner is behind the near plane,
+// so the object is kept.
 bool HzbScreenExtent(float4x4 a_viewProj, float3 a_eye, float3 boundCentre, float boundRadius, out float2 uvMin, out float2 uvMax, out float nearestZ)
 {
 	uvMin = float2(1, 1);
@@ -45,16 +41,14 @@ bool HzbScreenExtent(float4x4 a_viewProj, float3 a_eye, float3 boundCentre, floa
 		ndcMax = max(ndcMax, ndc.xy);
 		minZ = min(minZ, ndc.z);
 	}
-	// Clip space to texture space. The y axis flips: the draws use a y-flipped viewport, which puts clip
-	// y = +1 at the top of the image, where v = 0 (checked: the other orientation gives far more false negatives).
+	// Clip to texture space. The y axis flips because the draws use a y-flipped viewport. The other orientation gives far more false negatives.
 	uvMin = saturate(float2(ndcMin.x, -ndcMax.y) * 0.5 + 0.5);
 	uvMax = saturate(float2(ndcMax.x, -ndcMin.y) * 0.5 + 0.5);
 	nearestZ = minZ;
 	return true;
 }
 
-// One test: whether the HZB was sampled (a view with an HZB, the bound's projection trusted and past the near plane), and
-// what it held under the bound against the bound's nearest depth.
+// Whether the HZB was sampled, and what it held under the bound against the bound's nearest depth.
 struct HzbResult
 {
 	bool Sampled;
@@ -65,17 +59,12 @@ struct HzbResult
 	int Mip;
 };
 
-// Occluded when every depth under the object's screen extent is NEARER than the object's nearest point, which
-// means the object is entirely behind what has already been drawn.
-//
-// The HZB holds the FARTHEST depth under each texel, so one value per corner of the extent at a mip whose
-// texels are large enough that four of them cover it. Taking the maximum of those four and requiring it to
-// be nearer than the object is conservative twice over: the mip is a max reduction, and the object is
-// represented by the nearest point of a box that already contains its sphere.
+// Occluded when every depth under the extent is nearer than the object's nearest point. Four corner taps at a mip coarse
+// enough to cover the extent, against the nearest point of a box holding the sphere, are conservative twice over.
 HzbResult HzbTest(HzbView a_view, float3 boundCentre, float boundRadius)
 {
 	HzbResult result = (HzbResult)0;
-	// One unsigned relational compare, not `Index == 0 || Mips == 0`: AMD's RDNA2 compiler folds Index to 0 past such a guard
+	// One unsigned relational compare, not `Index == 0 || Mips == 0`. AMD's RDNA2 compiler folds Index to 0 past such a guard
 	// (AGENTS.md), and the taps then read heap slot 0.
 	if (min(a_view.Index, a_view.Mips) < 1u)
 		return result;
@@ -84,15 +73,15 @@ HzbResult HzbTest(HzbView a_view, float3 boundCentre, float boundRadius)
 	if (!HzbScreenExtent(a_view.ViewProj, a_view.Eye, boundCentre, boundRadius, uvMin, uvMax, nearestZ))
 		return result;
 	if (nearestZ <= 0.0)
-		return result;  // in front of the near plane: nothing can occlude it
+		return result;  // in front of the near plane, nothing can occlude it
 
-	// Image texture space to HZB texture space, before anything is measured in HZB texels.
+	// Image UVs to HZB UVs, before anything is measured in HZB texels.
 	uvMin *= a_view.UvScale;
 	uvMax *= a_view.UvScale;
 
 	const uint2 baseSize = a_view.BaseSize;
 	const float2 extent = (uvMax - uvMin) * float2(baseSize);
-	// A mip whose texels are at least half the extent, so the four corner taps cover the whole rectangle.
+	// A mip whose texels are at least half the extent, so four corner taps cover it.
 	int mip = (int)ceil(log2(max(max(extent.x, extent.y), 1.0)));
 	mip = clamp(mip, 0, (int)a_view.Mips - 1);
 	const int2 mipSize = max(int2(baseSize) >> mip, int2(1, 1));
@@ -104,12 +93,8 @@ HzbResult HzbTest(HzbView a_view, float3 boundCentre, float boundRadius)
 		max(hzb.Load(int3(texelMin.x, texelMin.y, mip)), hzb.Load(int3(texelMax.x, texelMin.y, mip))),
 		max(hzb.Load(int3(texelMin.x, texelMax.y, mip)), hzb.Load(int3(texelMax.x, texelMax.y, mip))));
 
-	// A margin, because the two sides of this comparison are not in the same space. nearestZ is raw clip
-	// space, while the HZB holds what was actually stored, which the viewport depth range has scaled - and
-	// the native depth pass and DCLF's own draws do not even use the same range ([0, 0.999968] against
-	// [0, 0.999998]). The gap is small but it is systematically in the direction that culls, and it bites
-	// hardest on flat objects lying against the surface behind them, whose nearest corner is barely in
-	// front of their own stored depth. Erring towards drawing is free; erring the other way loses objects.
+	// nearestZ is raw clip space, but the HZB holds stored depth, scaled by viewport depth ranges that differ between the native pass
+	// and DCLF's draws. The error leans toward culling and hurts flat objects on surfaces, so err toward drawing.
 	const float kDepthMargin = 1e-4;
 	result.Sampled = true;
 	result.Occluded = farthest < nearestZ - kDepthMargin;

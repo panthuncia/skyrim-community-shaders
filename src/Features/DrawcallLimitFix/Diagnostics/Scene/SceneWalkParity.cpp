@@ -1,5 +1,5 @@
-// CS_DCLF_WALK_PARITY: every 60 passes, right after the walk, the slot tables against a dense rebuild (Coordinator's reference walk,
-// which leaves the coordinator as it found it), object by object, and the kept verdicts and traits against a classification from scratch.
+// Walk parity. Every 60 passes, right after the walk, the slot tables against a dense rebuild that leaves the coordinator unchanged,
+// and the kept verdicts and traits against a classification from scratch.
 
 #include "SceneObservers.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -16,8 +16,7 @@ namespace DCLF::Diagnostics
 		void CheckWalkParity(Scene::Coordinator& store)
 		{
 			using Tables = SceneTables;
-			// What the delta walk evaluated (the reference walk's order overwrites the entries' scheduledWalk), for the stale verdicts'
-			// report.
+			// What the delta walk evaluated, read before the reference walk overwrites scheduledWalk.
 			const auto& tracked = V::tracked(store);
 			ankerl::unordered_dense::set<const RE::BSGeometry*> evaluated;
 			for (const auto& [geometry, entry] : tracked)
@@ -32,7 +31,7 @@ namespace DCLF::Diagnostics
 			auto& walkParity = SceneDiagnostics().walk;
 
 			++walkParity.checks;
-			// A slot is its geometry's base record or its layer's (Tables::layerBase): the two walks pair them by both.
+			// A slot is its geometry's base record or its layer's, so the two walks pair them by both.
 			auto keyOf = [](const Tables& a_tables, std::uint32_t a_slot) {
 				return std::pair{ a_tables.objectGeometry[a_slot], a_tables.IsLayer(a_slot) };
 			};
@@ -66,8 +65,7 @@ namespace DCLF::Diagnostics
 				const std::uint32_t d = it->second;
 				denseIndex.erase(it);
 				const char* what = nullptr;
-				// A member keeps its accumulated half across walks (keepMember): compared as the walk left it, which
-				// is the scene half alone (the accumulated half's columns are the accumulate phase's, checked by the change log).
+				// A member keeps its accumulated half across walks, so compare only the scene half. The change log checks the accumulated half.
 				auto objectRecord = slots.objects[s];
 				auto drawRecord = slots.draws[s];
 				objectRecord.flags = slots.sceneFlags[s];
@@ -110,8 +108,7 @@ namespace DCLF::Diagnostics
 				}
 			}
 			walkParity.missing += static_cast<std::uint32_t>(denseIndex.size());
-			// The classifications themselves, records or not: a kept verdict the reference no longer reaches is stale
-			// whether or not it decides a record (a negative one leaves the object to the engine).
+			// A kept verdict the reference no longer reaches is stale even without a record, since a negative verdict leaves the object to the engine.
 			for (const auto& [geometry, entry] : tracked) {
 				if (entry.candidateFrame == 0)
 					continue;
@@ -120,7 +117,7 @@ namespace DCLF::Diagnostics
 					continue;
 				++walkParity.staleVerdicts;
 				if (walkParity.firstStale.empty()) {
-					// The chain as the two walks read it: each node's live hidden bit and the walk's (HiddenForWalk).
+					// The chain as the two walks read it, each node's live hidden bit and the walk's.
 					std::string chain;
 					for (const RE::NiAVObject* object = geometry; object && chain.size() < 600; object = object->parent) {
 						chain += fmt::format(" > {}{}{}", object->name.c_str() ? object->name.c_str() : "?", IsHidden(object) ? "[H]" : "",
@@ -135,8 +132,7 @@ namespace DCLF::Diagnostics
 						kIneligibleNames[static_cast<std::size_t>(it->second)], chain);
 				}
 			}
-			// The traits: an entry a fresh classification would evaluate every frame, or on a heavier path, is one whose event
-			// was missed, even while its record still matches.
+			// An entry a fresh classification would evaluate every frame or on a heavier path had its event missed, even if its record matches.
 			{
 				ankerl::unordered_dense::map<const RE::NiAVObject*, bool> freshMotion;
 				for (auto& [geometry, entry] : tracked) {
@@ -147,8 +143,7 @@ namespace DCLF::Diagnostics
 						continue;
 					std::uint32_t traits = 0;
 					const auto [perFrame, light] = V::PerFrameOfFresh(store, entry, *geometry, it->second, traits, freshMotion);
-					// An actor's light path places its record every frame (its owner class's own motion): motion it gained since is served
-					// already.
+					// An actor's light path places its record every frame, so motion it gained since is already served.
 					if ((entry.lightTraits & V::kTraitOwnerClass) && entry.owner.ownMotion)
 						traits &= ~(V::kTraitMoves | V::kTraitRootMoves);
 					if (!perFrame || (entry.perFrame && (!entry.lightTraits || (light && !(traits & ~entry.lightTraits)))))
@@ -165,9 +160,7 @@ namespace DCLF::Diagnostics
 				++walkParity.differ;
 				note("the live count", nullptr);
 			}
-			// The per-frame lists, as sets: the rows were compared per object above (the slot tables keep each palette's
-			// block, so their palette arrays have holes the dense walk's have not), and the actors are mapped to geometries
-			// below.
+			// The per-frame lists compare as sets. Slot tables keep each palette's block, so their palette arrays have holes the dense walk's lack.
 			auto sorted = [](auto a_list) {
 				std::sort(a_list.begin(), a_list.end());
 				return a_list;

@@ -1,4 +1,4 @@
-// CaptureParity's checks (CS_DCLF_CAPTURE_PARITY): each native Lighting draw of the main pass and the reflection faces against the
+// Capture parity checks. Each native Lighting draw of the main pass and the reflection faces is compared against the
 // installed tables, from the SetupGeometry, DrawIndexed and Map/Unmap detours. Render thread.
 
 #include "CaptureParity.h"
@@ -31,25 +31,21 @@ namespace DCLF
 	{
 		constexpr std::size_t kMaxSamples = 24;
 
-		// Constant buffers that change per draw by design, from b3 (Extensions::PerDrawMask): the permutation (b4, checked separately),
-		// bone palettes (VS b9, b10; SKINNED) and the alpha-test reference (PS b11), Core's; and the integrations' declared per-draw
-		// buffers: LLF's StrictLightData (PS b3, Integrations/LightLimitFix's parity) and Skin's SkinPerGeometry (PS b7; SKIN).
+		// Constant buffers that change per draw by design, from b3 up. These are the permutation, bone palettes, the alpha-test
+		// reference, and the integrations' declared per-draw buffers.
 		std::uint32_t PerDrawVSBuffers() { return Extensions::PerDrawMask(Api::ShaderStage::Vertex) & ~0x7u; }
 		std::uint32_t PerDrawPSBuffers() { return Extensions::PerDrawMask(Api::ShaderStage::Pixel) & ~0x7u; }
 
 		/**
-		 * @brief Descriptor bits a DCLF draw decides on the GPU rather than in its pipeline (excluded from the comparison):
-		 * - A sun-test record's shadow bits (ShadowDir, DefShadow, shadow light count), dropped by BuildDraws on a cascade miss;
-		 *   checked by the culling readback's sun counters.
-		 * - LOD fades: an object whose fades apply keeps Specular and the Envmap technique at any distance and the draw fades them
-		 *   to zero, where GetRenderPasses drops them; checked by the shading parity.
+		 * @brief Descriptor bits a DCLF draw decides on the GPU, so excluded from comparison. These are a sun-test record's shadow bits,
+		 * which BuildDraws drops on a cascade miss, and LOD-faded Specular and Envmap, which the draw fades where the engine drops them.
 		 */
 		struct PerDrawBits
 		{
 			std::uint32_t pass = 0, vertex = 0, pixel = 0;
-			bool envmap = false;  // Envmap technique (1) faded by the draw: the engine's pass is None (0) past the fade's end
+			bool envmap = false;  // the draw fades Envmap, where the engine's pass is None past the fade's end
 
-			/** @brief The native descriptor with DCLF's technique where the engine dropped a faded Envmap. */
+			/** @brief The native descriptor, with DCLF's technique where the engine dropped a faded Envmap. */
 			std::uint32_t Native(std::uint32_t a_native, std::uint32_t a_dclf) const
 			{
 				return envmap && ((a_dclf >> 24) & 0x3f) == 1 && ((a_native >> 24) & 0x3f) == 0 ? a_native | (1u << 24) : a_native;
@@ -62,9 +58,9 @@ namespace DCLF
 			if (a_tables.objects[a_object].flags & kObjectSunTest) {
 				bits.pass |= kShadowBits;
 				bits.pixel |= kShadowBits & ~0x1c0u;  // the pixel stage drops the count
-				bits.vertex |= kShadowBits & 0x48007u;  // DefShadow (VertexDescriptorFromPass)
+				bits.vertex |= kShadowBits & 0x48007u;  // DefShadow
 			}
-			// The engine's current fade node (a layer's is its layer property's).
+			// The engine's current fade node. A layer uses its layer property's.
 			const auto* geometry = a_object < a_tables.objectGeometry.size() ? a_tables.objectGeometry[a_object] : nullptr;
 			const RE::BSShaderProperty* fadeProperty = !geometry ? nullptr : a_tables.IsLayer(a_object) ? LayerPropertyOf(*geometry) :
 			                                                                                            geometry->GetGeometryRuntimeData().shaderProperty.get();
@@ -79,10 +75,7 @@ namespace DCLF
 			return bits;
 		}
 
-		/**
-		 * @brief A member whose feature block variables a feature's pass writes: its record carries a table family's reference
-		 * (Api::TableFamily::recordWord; Features/TreeWind's: a member listed under its tree, whose wind TreeWindCS writes).
-		 */
+		/** @brief A member whose feature block variables a feature's GPU pass writes, such as tree wind. */
 		bool GpuWrittenBlock(const SceneTables& a_tables, std::uint32_t a_object)
 		{
 			if (!Scene::FrameView::Get().IsMember(static_cast<std::int32_t>(a_object)))
@@ -102,7 +95,7 @@ namespace DCLF
 			return fmt::format("'{}' ref {:08X}", name ? name : "", ref ? ref->GetFormID() : 0u);
 		}
 
-		// For values the engine updates while the frame renders (EmitColor: time-of-day emittance).
+		// For values the engine updates while the frame renders, such as time-of-day emittance.
 		bool WithinTolerance(const auto& a_native, std::uint32_t a_float, float a_expected)
 		{
 			float native = 0.0f;
@@ -110,7 +103,7 @@ namespace DCLF
 			return std::abs(native - a_expected) <= 1e-3f * std::max(std::abs(native), std::abs(a_expected));
 		}
 
-		// Which engine structure a node is (TES roots, a loaded cell's 3D or multibound node).
+		// Names which engine structure a node is.
 		std::string DescribeRole(const RE::NiAVObject* a_node)
 		{
 			auto* tes = RE::TES::GetSingleton();
@@ -221,8 +214,8 @@ namespace DCLF
 		const void* a_nativeTable, std::size_t a_nativeTableSize, const ConstantSnapshot& a_native, ID3D11Resource* a_boundBuffer,
 		std::uint32_t a_firstVariable, std::uint64_t a_variables, std::uint64_t a_tolerant)
 	{
-		// Compared only when the bound buffer is the one the Map/Unmap detours snapshotted; otherwise it counts as OK. Coverage is
-		// reported, since a block never compared is not a passing check.
+		// Compared only when the bound buffer is the one the Map/Unmap detours captured, else counted OK. Coverage is reported
+		// because a block never compared is not a passing check.
 		const std::string what = labelPrefix + a_what;
 		auto& coverage = blockCoverage[what];
 		if (!a_native.valid || a_boundBuffer != a_native.buffer) {
@@ -235,7 +228,7 @@ namespace DCLF
 		for (std::uint32_t i = 0; i < a_layout.count && i < a_nativeTableSize; ++i) {
 			if (!((a_variables >> i) & 1))
 				continue;
-			// Reflection leaves offset 0 for variables a permutation lacks: only valid for the group's first variable.
+			// Reflection leaves offset 0 for variables a permutation lacks, so it is only valid for the group's first variable.
 			const std::uint32_t nativeOffset = static_cast<const std::uint8_t*>(a_nativeTable)[i];
 			if (nativeOffset == 0 && i != a_firstVariable)
 				continue;
@@ -250,7 +243,7 @@ namespace DCLF
 			bool differs = false;
 			std::uint32_t firstComponent = 0;
 			for (std::uint32_t c = 0; c < a_layout.size[i]; ++c) {
-				// Only components the engine writes; the rest of a discard-mapped buffer is undefined.
+				// Only components the engine writes. The rest of a discard-mapped buffer is undefined.
 				if (!a_expected.Written(ourOffset + c) || (nativeOffset + c + 1) * 4 > a_native.size)
 					continue;
 				if (std::memcmp(&a_native.bytes[(nativeOffset + c) * 4], &a_expected.floats[ourOffset + c], 4) != 0 &&
@@ -262,7 +255,7 @@ namespace DCLF
 			}
 			if (differs) {
 				ok = false;
-				// A histogram plus at most two samples per variable, so one standing difference cannot fill the capped sample list.
+				// At most two samples per variable, so one standing difference cannot fill the sample list.
 				if (++mismatchByVariable[fmt::format("{} {}", what, i)] <= 2) {
 					float native = 0;
 					std::memcpy(&native, &a_native.bytes[(nativeOffset + firstComponent) * 4], 4);
@@ -282,8 +275,7 @@ namespace DCLF
 		auto* vs = *globals::game::currentVertexShader;
 		auto* ps = *globals::game::currentPixelShader;
 		bool ok = true;
-		// Not compared: TexcoordOffset, which the GPU patches into the rows (frame values' texture transforms; the record keeps its
-		// capture's), and IBLParams, which no Lighting stage reads (the record keeps its first: KeepUnreadFloats).
+		// Not compared. TexcoordOffset is patched into the rows on the GPU, and no Lighting stage reads IBLParams.
 		if (vs)
 			ok &= CompareBlock(a_geometry, "VS PerMaterial", record.vs, LightingVSLayout(), vs->constantTable.data(), vs->constantTable.size(), Slot(0, kPerMaterial),
 				reinterpret_cast<ID3D11Resource*>(vs->constantBuffers[kPerMaterial].buffer), kVSLeftEyeCenter, kVSGroups[kPerMaterial] & ~(1ull << kVSTexcoordOffset), 0);
@@ -297,7 +289,7 @@ namespace DCLF
 				continue;
 			const auto* native = reinterpret_cast<const ID3D11ShaderResourceView*>(state.PSTexture[slot]);
 			const auto nativeMode = static_cast<std::uint32_t>(state.PSTextureAddressMode[slot].underlying());
-			// A character-light pass's t11 is the frame's view (kCharacterLightRegister).
+			// A character-light pass's t11 is the frame's view.
 			const auto* view = frameCharacterLight && slot == 11 ? Scene::FrameView::Get().GetFrameCapture().characterLightView : record.textures[slot];
 			if (native != view || nativeMode != record.addressModes[slot]) {
 				ok = false;
@@ -315,15 +307,15 @@ namespace DCLF
 		if ((object.flags & kObjectNoBindings) || !Scene::FrameView::Get().GetFrameTables().geometryConstantsValid[object.pipelineIndex])
 			return true;
 
-		// Expected: the per-frame block for this pass descriptor plus per-object values.
+		// Expected values are the per-frame block for this pass descriptor plus per-object values.
 		auto& shadowState = globals::game::shadowState->GetRuntimeData();
-		// The engine's current placement (render flag 0x10: the previous transform is the current one).
+		// The engine's current placement. With render flag 0x10 the previous transform is the current one.
 		BindlessPlacement placement{};
 		if (!FrameValues::SampleSlot(tables, a_objectIndex, placement))
 			return true;
 		if (a_renderFlags & 0x10)
 			std::memcpy(placement.previousWorld, placement.world, sizeof(placement.world));
-		// The frame's shading (sampled at frame start); if the property changed since, the engine's current one (counted).
+		// The shading sampled at frame start. If the property changed since, use the engine's current one and count it.
 		const auto* shadingRows = FrameValues::Get().ShadingIfDone(true);
 		const auto* property = Scene::Coordinator::Get().SlotPropertyOf(a_objectIndex);
 		if (!shadingRows || a_objectIndex >= shadingRows->size() || !property)
@@ -339,15 +331,13 @@ namespace DCLF
 			shadowState.previousPosAdjust.getEye());
 		const auto& vsLayout = LightingVSLayout();
 		const auto& psLayout = LightingPSLayout();
-		// A block variable's floats past its compared ones are not compared (Api::ShadingVariable::compared): Features/TreeWind's
-		// WindTimers.y (previous timer), which SetupGeometry (AE 1414dd040, case 0xc) copies from the tree node's current timer
-		// (+0x168 = +0x164) after every native draw, so it depends on native draw order, and DCLF does not write engine nodes.
-		// Lighting.hlsl reads it only into the unused previousInputPosition.
+		// Floats past a variable's compared ones are skipped. TreeWind's WindTimers.y is copied by SetupGeometry (AE 1414dd040, case 0xc)
+		// from the tree node's timer after every native draw, so it depends on draw order. Lighting.hlsl never really reads it.
 		const auto& block = Extensions::ShadingBlockRule();
 		for (const auto& variable : block.variables)
 			for (std::uint32_t c = variable.compared; c < variable.floats && c < vsLayout.size[variable.variable]; ++c)
 				expected.vs.floats[vsLayout.offset[variable.variable] + c] = std::bit_cast<float>(kUnwrittenBits);
-		// A multi-index shape's ProjectedUVParams2.zw: FUN_1414e00c0 writes only xy (normalDampener, materialScale); zw is leftover.
+		// For a multi-index shape, FUN_1414e00c0 writes only ProjectedUVParams2.xy. zw is leftover.
 		if ((object.flags & kObjectProjectedUV) && const_cast<RE::BSGeometry*>(a_geometry)->GetType().get() == RE::BSGeometry::Type::kMultiIndexTriShape &&
 			psLayout.size[kPSProjectedUVParams + 1] > 3) {
 			expected.ps.floats[psLayout.offset[kPSProjectedUVParams + 1] + 2] = std::bit_cast<float>(kUnwrittenBits);
@@ -359,9 +349,8 @@ namespace DCLF
 		bool ok = true;
 		compareContext = fmt::format(" (pipeline descriptor {:08X}, skinned object {})", tables.pipelines[object.pipelineIndex].passDescriptor,
 			(object.flags & kObjectPaletteBlock) != 0);
-		// The block's variables (TreeParams and WindTimers): SetupGeometry writes them for its objects only (technique 12; otherwise
-		// leftover, unread), and a member tree's come from a feature's pass (TreeWindCS: its own parity checks those). World and
-		// PreviousWorld: SetupGeometry skips them for skinned objects (engine notes); the SKINNED vertex shader positions from the palette.
+		// SetupGeometry writes TreeParams and WindTimers only for technique 12, and a member tree's come from TreeWindCS.
+		// SetupGeometry skips World and PreviousWorld for skinned objects, which position from the palette.
 		const std::uint64_t vsMask = kVSGroups[kPerGeometry] &
 		                             ((object.flags & block.objectFlags) && !GpuWrittenBlock(tables, a_objectIndex) ? ~0ull : ~block.vsMask) &
 		                             ((object.flags & kObjectPaletteBlock) ? ~((1ull << kVSWorld) | (1ull << kVSPreviousWorld)) : ~0ull);
@@ -382,8 +371,8 @@ namespace DCLF
 		if (!tables.TechniqueConstantsValid(object.pipelineIndex))
 			return true;
 		const auto& technique = tables.TechniqueOf(object.pipelineIndex).value;
-		// SetupTechnique writes VPOSOffset after unmapping (engine notes); under DXVK the memory stays mapped and the draw sees the
-		// late write, so compare the current contents.
+		// SetupTechnique writes VPOSOffset after unmapping. Under DXVK the memory stays mapped and the draw sees the late write,
+		// so compare the current contents.
 		for (auto& stage : snapshots) {
 			auto& snapshot = stage[kPerTechnique];
 			if (snapshot.valid && snapshot.lastMapped)
@@ -392,7 +381,7 @@ namespace DCLF
 		auto* vs = *globals::game::currentVertexShader;
 		auto* ps = *globals::game::currentPixelShader;
 		bool ok = true;
-		// Terrain LOD's HighDetailRange: DCLF's centre is absolute; the engine's is relative to posAdjust.
+		// Terrain LOD's HighDetailRange centre is absolute in DCLF and relative to posAdjust in the engine.
 		ConstantBlock techniqueVS = technique.vs;
 		if (const std::uint32_t t = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f; t == 9 || t == 18) {
 			const auto eye = globals::game::shadowState->GetRuntimeData().posAdjust.getEye();
@@ -400,8 +389,7 @@ namespace DCLF
 			range[0] -= eye.x;
 			range[1] -= eye.y;
 		}
-		// Not compared: the fog, which a technique row keeps from its making (KeepTechniqueFog); the vertex stage reads the frame's
-		// (DCLFFrameFog) and no Lighting stage reads FogColor.
+		// Fog is not compared. A technique row keeps the fog from when it was made, the vertex stage reads the frame's, and no Lighting stage reads FogColor.
 		std::uint64_t vsFog = 0;
 		for (const std::uint32_t variable : kVSFrameFog)
 			vsFog |= 1ull << variable;
@@ -412,7 +400,7 @@ namespace DCLF
 			ok &= CompareBlock(a_geometry, "PS PerTechnique", technique.ps, LightingPSLayout(), ps->constantTable.data(), ps->constantTable.size(),
 				Slot(1, kPerTechnique), reinterpret_cast<ID3D11Resource*>(ps->constantBuffers[kPerTechnique].buffer), kPSFogColor, kPSGroups[kPerTechnique] & ~(1ull << kPSFogColor), 0);
 
-		// Filter modes: SetupMaterial's, else the technique's.
+		// Filter modes come from SetupMaterial, else from the technique.
 		const auto& material = tables.materials[object.materialIndex];
 		const auto& state = globals::game::shadowState->GetRuntimeData();
 		if (technique.shadowMask) {
@@ -451,9 +439,8 @@ namespace DCLF
 		const auto& expected = tables.permutations[object.pipelineIndex];
 		const auto& native = globals::state->permutationData;
 		using Extra = State::ExtraShaderDescriptors;
-		// Extra bits the Lighting shader or DCLF's model covers; the rest (IsSun, GrassSphereNormal) are other shaders' leftovers.
-		// IsBeastRace only for faces: Subsurface Scattering writes it at a face's SetupGeometry and Lighting.hlsl reads it under
-		// SKIN alone, so other draws carry the last face's.
+		// Extra bits the Lighting shader or DCLF's model covers. The rest are other shaders' leftovers. IsBeastRace counts only for
+		// faces, since Subsurface Scattering writes it per face and other draws carry the last face's.
 		const std::uint32_t technique = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f;
 		const bool face = technique == 4 || technique == 5;
 		const std::uint32_t lightingExtraBits = static_cast<std::uint32_t>(Extra::InWorld) | static_cast<std::uint32_t>(Extra::IsReflections) |
@@ -462,7 +449,7 @@ namespace DCLF
 		const std::uint32_t extra = (expected.extraShaderDescriptor & lightingExtraBits) |
 		                            ((object.flags & kObjectSuppressExternalEmittance) ? static_cast<std::uint32_t>(Extra::SuppressExternalEmittance) : 0u) |
 		                            (face && (object.flags & Integrations::SubsurfaceScattering::kObjectBeastRace) ? static_cast<std::uint32_t>(Extra::IsBeastRace) : 0u);
-		// Excluded: hair's ProjectedUV bit (DCLF drops it: HairProjection) and PerDrawBits.
+		// Excluded are hair's ProjectedUV bit, which DCLF drops, and PerDrawBits.
 		const std::uint32_t hairProjection = HairProjection(native.VertexShaderDescriptor) ? kPassProjectedUV : 0u;
 		const PerDrawBits perDraw = PerDrawBitsOf(tables, a_objectIndex, tables.pipelines[object.pipelineIndex].passDescriptor);
 		const std::array<std::pair<std::uint32_t, std::uint32_t>, 4> fields{ {
@@ -498,10 +485,10 @@ namespace DCLF
 			static_cast<CaptureParity*>(a_owner)->NoteMismatch(fmt::format("{} {}", Describe(a_note), a_message));
 		};
 
-		// t71 and t74, bound by State::Draw from the SetupMaterial hook's pending binding: Integrations/AdvancedSkin's.
+		// t71 and t74, AdvancedSkin's.
 		skinTextures.Compare(a_context, a_geometry, a_objectIndex, tables, note, this);
 
-		// b7 and the actor ownership: Integrations/AdvancedSkin's.
+		// b7 and actor ownership, AdvancedSkin's.
 		skinWetness.Compare(a_geometry, a_objectIndex, tables, FrameValues::Get().ShadingIfDone(true), note, this);
 	}
 
@@ -513,9 +500,8 @@ namespace DCLF
 		a_context->VSGetShaderResources(0, kResourceSlots, current.vsResources.data());
 		a_context->PSGetShaderResources(0, kResourceSlots, current.psResources.data());
 
-		// Skipped: per-material feature textures (the material contributors' registers, Extensions::FeatureTextureRegister; the
-		// integrations' texture parities check them) and Skin's per-geometry t75 (SKIN only). By register: t0-t63, t64-t127. Resolved at
-		// install, so built once at the first check.
+		// Skipped are per-material feature textures, which the integrations' parities check, and Skin's t75.
+		// Resolved at install, so built once at the first check.
 		static const std::array<std::uint64_t, 2> kSkinResources = [] {
 			std::array<std::uint64_t, 2> bits{ 0, 1ull << (75 - 64) };
 			for (std::uint32_t f = 0; f < Extensions::FeatureTextureCount(); ++f) {
@@ -542,7 +528,7 @@ namespace DCLF
 			baseline = current;
 			baselineValid = true;
 		} else {
-			// PS t0-t15 are the engine's (covered by the material and technique checks; unsampled slots keep leftovers).
+			// PS t0-t15 are the engine's and covered by the material and technique checks. Unsampled slots keep leftovers.
 			compare(current.vsBuffers, baseline.vsBuffers, kFirstFeatureConstantBuffer, PerDrawVSBuffers(), "VS b");
 			compare(current.psBuffers, baseline.psBuffers, kFirstFeatureConstantBuffer, PerDrawPSBuffers(), "PS b");
 			compare(current.vsResources, baseline.vsResources, 0, 0, "VS t");
@@ -625,8 +611,7 @@ namespace DCLF
 		if (partition == 0)
 			ComparePermutation(geometry, static_cast<std::uint32_t>(index));
 
-		// Skinned: the bone setter's b10 (current) and b9 (previous) against the frame's palettes (sampled after the same update);
-		// skipped while the producer runs.
+		// Bone b10 and b9 against the frame's palettes. Skipped while the producer runs.
 		const auto* framePalettes = FrameValues::Get().PalettesIfDone();
 		if ((object.flags & kObjectPaletteBlock) && static_cast<std::size_t>(index) < tables.boneOffset.size() && tables.boneRows[index] && framePalettes) {
 			ID3D11Buffer* boneBuffers[2] = {};
@@ -657,14 +642,14 @@ namespace DCLF
 			}
 		}
 
-		// PS b3: Integrations/LightLimitFix's.
+		// PS b3, LightLimitFix's.
 		Diagnostics::DrawnLocalShadows drawn;
 		const bool drawnKnown = Diagnostics::DrawnLocalShadowsOf(static_cast<std::uint32_t>(index), drawn);
 		const std::uint32_t drawnWords[2]{ drawn.mask, drawn.gated };
-		// Moved since the readback was armed (three main epochs before): its lights then and the native pass's now may differ.
+		// Moved since the readback was armed three epochs ago, so its lights may differ from the native pass's.
 		const auto& bound = geometry->worldBound;
 		const bool moved = drawnKnown && (bound.center.x != drawn.bound[0] || bound.center.y != drawn.bound[1] || bound.center.z != drawn.bound[2] || bound.radius != drawn.bound[3]);
-		// Its channels reassigned since (the lights in view changed): the readback's bits name other lights than the native pass's.
+		// Channels reassigned since, so the readback's bits name other lights than the native pass's.
 		const bool reassigned = drawnKnown && drawn.channels != Diagnostics::ChannelLights();
 		lightData.Compare(geometry, static_cast<std::uint32_t>(index), tables, drawnKnown ? &drawnWords : nullptr, moved, reassigned,
 			[](void* a_owner, const RE::BSGeometry* a_note, std::string a_message) {
@@ -673,7 +658,7 @@ namespace DCLF
 			this);
 
 		CompareSkin(a_context, geometry, static_cast<std::uint32_t>(index));
-		// t80-t91: Integrations/TruePBR's.
+		// t80-t91, TruePBR's.
 		truePBRTextures.Compare(a_context, geometry, static_cast<std::uint32_t>(index), tables,
 			[](void* a_owner, const RE::BSGeometry* a_note, std::string a_message) {
 				static_cast<CaptureParity*>(a_owner)->NoteMismatch(fmt::format("{} {}", Describe(a_note), a_message));
@@ -714,7 +699,7 @@ namespace DCLF
 			return;
 		}
 		const auto& tables = Scene::FrameView::Get().GetTables();
-		// The lookup and the tables are not one snapshot: skip an index past the tables.
+		// The lookup and the tables are not one snapshot, so skip an index past the tables.
 		if (static_cast<std::size_t>(index) >= tables.objects.size())
 			return;
 		const auto& object = tables.objects[index];
@@ -745,7 +730,7 @@ namespace DCLF
 
 		auto& store = Scene::Coordinator::Get();
 		auto* geometry = a_pass->geometry;
-		// A multi-index shape's layer pass (accumulation hint 12, the second index list) is its layer object's.
+		// A multi-index shape's layer pass, hint 12 on the second index list, is its layer object's.
 		const bool layerPass = a_pass->accumulationHint == kLayerHint;
 		const std::int32_t index = layerPass ? store.FindLayerObject(geometry) : store.FindObject(geometry);
 		if (const_cast<RE::BSGeometry*>(geometry)->GetType().get() == RE::BSGeometry::Type::kMultiIndexTriShape) {
@@ -758,8 +743,7 @@ namespace DCLF
 
 		if (index < 0) {
 			if (store.IsTracked(geometry)) {
-				// Tracked but left native this frame. Hidden would mean the visibility check disagrees with the game (fading
-				// objects are native by design).
+				// Tracked but left native this frame. Fading objects are native by design.
 				const Ineligible reason = store.Classify(geometry);
 				if (reason == Ineligible::Hidden) {
 					++mismatchedDraws;
@@ -770,7 +754,7 @@ namespace DCLF
 					notInTablesFirst[static_cast<std::uint8_t>(reason)] = Describe(geometry);
 			} else if (Eligibility::Static(SceneCapture::LiveLeaf(*geometry).view, nullptr) == Ineligible::None) {
 				if (auto* category = store.CategoryNodeOf(geometry)) {
-					++untrackedEligible;  // followed below and reported with its parents and what tracked it (ResolveUntracked)
+					++untrackedEligible;  // followed below and reported with its parents
 					const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 					auto [it, inserted] = untracked.try_emplace(geometry);
 					if (inserted) {
@@ -796,7 +780,7 @@ namespace DCLF
 						++it->second.frames;
 					it->second.lastFrame = frame;
 				} else {
-					// Statically eligible content outside the tracked category nodes: where does it live?
+					// Statically eligible content outside the tracked category nodes.
 					++outsideCategories;
 					std::string chain;
 					for (const RE::NiAVObject* node = geometry->parent; node; node = node->parent) {
@@ -809,7 +793,7 @@ namespace DCLF
 							chain += fmt::format("#{:08X}/{}", ref->GetFormID(), base ? static_cast<int>(base->GetFormType()) : -1);
 						chain += DescribeRole(node);
 					}
-					// Which portal graph list holds the root (BSPortalGraph +0x58 alwaysRenderChildren, +0x78, +0x90, +0xA8).
+					// Which portal graph list holds the root. BSPortalGraph lists sit at +0x58, +0x78, +0x90 and +0xA8.
 					const RE::NiAVObject* root = geometry;
 					while (root->parent)
 						root = root->parent;
@@ -840,7 +824,7 @@ namespace DCLF
 						outsideChains.insert(chain);
 				}
 			} else {
-				// Untracked and ineligible: counted by verdict, first of each named.
+				// Untracked and ineligible, counted by verdict with the first of each named.
 				const auto reason = static_cast<std::uint8_t>(Eligibility::Static(SceneCapture::LiveLeaf(*geometry).view, nullptr));
 				if (!untrackedBy[reason]++)
 					untrackedFirst[reason] = fmt::format("{} hint {}", Describe(geometry), a_pass->accumulationHint);
@@ -850,23 +834,22 @@ namespace DCLF
 
 		const auto& tables = Scene::FrameView::Get().GetTables();
 		if (static_cast<std::size_t>(index) >= tables.objects.size())
-			return;  // the lookup is past the tables (not one snapshot with them)
+			return;  // the lookup is not one snapshot with the tables
 		++checkedDraws;
 		const auto& object = tables.objects[index];
 		if (object.flags & kObjectNoBindings)
-			return;  // a culling candidate only: no material or pipeline entry to compare against
+			return;  // a culling candidate only, with no material or pipeline entry
 		const auto& key = tables.pipelines[object.pipelineIndex];
 		const auto* state = globals::state;
 
 		bool mismatch = false;
 		const auto* accumulated = layerPass ? store.FindAccumulatedLayerPass(geometry) : store.FindAccumulatedPass(geometry);
-		// DCLF draws an alpha-test list's pass with DoAlphaTest regardless (DrawnPassDescriptor): normalise the native side.
+		// DCLF draws an alpha-test list's pass with DoAlphaTest regardless, so normalise the native side.
 		const std::uint32_t list = accumulated ? accumulated->subPass : 0u;
 		const std::uint32_t nativeDescriptor = DrawnPassDescriptor(PassDescriptorOf(a_pass->passEnum), list);
 		const PerDrawBits drawBits = PerDrawBitsOf(tables, static_cast<std::uint32_t>(index), key.passDescriptor);
 		const std::uint32_t passDiffers = key.passDescriptor ^ drawBits.Native(nativeDescriptor, key.passDescriptor);
-		// A native pass differing only in PerDrawBits is another technique's (no shadow mask, LOD-faded features dropped): only
-		// descriptors are compared; the object is compared whole on frames where the bits match.
+		// A native pass differing only in PerDrawBits is another technique's. Only descriptors are compared then.
 		const bool otherTechnique = passDiffers && !(passDiffers & ~drawBits.pass);
 		if (otherTechnique)
 			++perDrawNormalised;
@@ -876,7 +859,7 @@ namespace DCLF
 				Describe(geometry), key.passDescriptor, PassDescriptorOf(a_pass->passEnum), a_pass->shaderProperty ? a_pass->shaderProperty->flags.underlying() : 0ull,
 				accumulated ? accumulated->technique : 0u, accumulated ? accumulated->subPass : 0u, accumulated ? PassDescriptorOf(accumulated->passEnum) : 0u));
 		}
-		// Shader descriptors likewise, ignoring the alpha-test bit and hair's ProjectedUV bit (HairProjection).
+		// Shader descriptors too, ignoring the alpha-test bit and hair's ProjectedUV bit.
 		const std::uint32_t ignored = DrawnPassDescriptor(0, list) | (HairProjection(PassDescriptorOf(a_pass->passEnum)) ? kPassProjectedUV : 0u);
 		const PerDrawBits& perDraw = drawBits;
 		if (((key.vertexDescriptor ^ perDraw.Native(state->modifiedVertexDescriptor, key.vertexDescriptor)) & ~(ignored | perDraw.vertex)) != 0 ||
@@ -922,7 +905,7 @@ namespace DCLF
 			firstByTechnique[(key.passDescriptor >> 24) & 0x3f] = lastNote.empty() ? fmt::format("{} (no note)", Describe(geometry)) : lastNote;
 		lastNote.clear();
 		pendingObject = index;
-		// What its DrawIndexed calls should bind: the geometry, or each partition the pass's LODMode draws.
+		// What its DrawIndexed calls should bind, the geometry or each partition the pass's LODMode draws.
 		pendingSlotCount = pendingSlotCursor = 0;
 		const auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get();
 		const std::uint32_t partitions = skin && skin->skinPartition && skin->skinPartition->numPartitions > 1 ?
@@ -933,7 +916,7 @@ namespace DCLF
 			return;
 		}
 		std::uint32_t slot = tables.objects[index].geometryIndex;
-		// Object LOD's chain (kPartitionChain): every link.
+		// Object LOD's chain, every link.
 		if (partitions & kPartitionChain) {
 			for (std::uint32_t i = 0; i < (partitions & kPartitionChainCount) && i < pendingSlots.size() && slot < tables.geometries.size(); ++i) {
 				pendingSlots[pendingSlotCount++] = slot;
@@ -980,12 +963,12 @@ namespace DCLF
 
 	void CaptureParity::Report(std::uint32_t a_frame, std::uint32_t a_interval)
 	{
-		// Called at the start of every main pass: a new baseline.
+		// Every main pass starts a new baseline.
 		baselineValid = false;
 		pendingRewrites = 0;
 		ResolveUntracked(Scene::Coordinator::Get().GetFrame());
 		{
-			// Resolve mismatched materials a frame on (this frame's drain ran in the accumulate phase).
+			// Resolve mismatched materials a frame later, since this frame's drain ran in the accumulate phase.
 			const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
 			std::erase_if(materialMismatchFollow, [&](const auto& a_entry) {
 				const auto& [material, follow] = a_entry;

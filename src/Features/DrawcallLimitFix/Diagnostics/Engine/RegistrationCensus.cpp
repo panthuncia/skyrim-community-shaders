@@ -1,4 +1,4 @@
-// The registration census (RegistrationCensus.h): Note on the registering threads, Collect and the report on the render thread.
+// Registration census. Note runs on the registering threads. Collect and the report run on the render thread.
 
 #include "RegistrationCensus.h"
 #include "Events.h"
@@ -35,26 +35,24 @@ namespace DCLF::RegistrationCensus
 	{
 		struct Noted
 		{
-			// Held from the registration to Collect, and let go of there (the render thread, at Present): what Collect reads of the
-			// geometry is alive whatever the engine releases meanwhile.
+			// Held until Collect on the render thread, so the geometry stays alive whatever the engine releases meanwhile.
 			RE::NiPointer<RE::BSGeometry> geometry;
-			const RE::BSBatchRenderer* batch = nullptr;  // an identity: never dereferenced
-			std::uint8_t shaderType = 0;                 // the pass's shader (BSShader::Type)
+			const RE::BSBatchRenderer* batch = nullptr;  // identity only, never dereferenced
+			std::uint8_t shaderType = 0;                 // BSShader::Type
 			std::uint8_t hint = 0;                       // accumulationHint
 			std::uint8_t flags = 0;                      // NoteFlags
 			std::uint8_t occlusionPhase = 0;
 			Site site = Site::RegisterPass;
 		};
 
-		// Made on the first use, which only a census run reaches (its ring is large); spills past it, never drops (EventQueue).
+		// Made on first use, which only a census run reaches. The ring spills past its size and never drops.
 		EventQueue<Noted, 1u << 16>& Queue()
 		{
 			static EventQueue<Noted, 1u << 16> queue;
 			return queue;
 		}
 
-		// The views: the accumulators the census knows by address, the shadow views by kind (ShadowViews), the reflection faces and
-		// the occlusion maps (PassCapture's), then any other batch renderer by the order it was first seen in.
+		// Known accumulators, shadow views by kind, reflection faces and occlusion maps, then other batch renderers in first-seen order.
 		enum View : std::uint16_t
 		{
 			kMainDepth,
@@ -74,25 +72,24 @@ namespace DCLF::RegistrationCensus
 		constexpr std::array<const char*, kFirstOther> kViewNames{ "main depth", "main", "first person", "sun cascades", "spot shadows", "point shadows",
 			"focus shadows", "other shadows", "reflection faces", "Skylighting occlusion", "precipitation occlusion", "occlusion" };
 
-		// A Lighting geometry's class: [0, kReasons) tracked with that verdict (None is never one: kEligible*), [kUntracked,
-		// kUntracked + kReasons) untracked with its live leaf's static verdict, then the rest.
+		// A Lighting geometry's class. [0, kReasons) is tracked with that verdict, [kUntracked, kUntracked + kReasons) is untracked
+		// with its live leaf's static verdict, then the rest.
 		constexpr std::uint8_t kReasons = static_cast<std::uint8_t>(Ineligible::Count);
 		enum LightingClass : std::uint8_t
 		{
 			kUntracked = kReasons,
 			kEligibleRecord = 2 * kReasons,  // eligible, with a record, not a member of the view's phase
 			kEligibleNoRecord,               // eligible, no record
-			kMemberDefect,                   // a member of the view's phase the view withholds, drawn by the engine: a defect
-			kMemberParityBoth,               // CS_DCLF_PARITY_BOTH: nothing is withheld
-		kEligibleUnbound,                // eligible, a record, not bound (the coordinator's verdict alone)
-		kEligibleBound,                  // eligible, bound, not a member of the view's phase in the frame's set (the coordinator's alone)
+			kMemberDefect,                   // a member the view withholds, drawn by the engine anyway, a defect
+			kMemberParityBoth,               // nothing is withheld
+		kEligibleUnbound,                // eligible with a record but not bound, coordinator verdict only
+		kEligibleBound,                  // eligible and bound but not in the view's phase, coordinator verdict only
 		};
-		// The class key: Lighting's with the top bit, and the next when the class is the live approximation (no coordinator's reply
-		// for the geometry yet); any other shader's its type and the geometry's RTTI (static data).
+		// Lighting keys set the top bit, and the next bit when the class is the live approximation.
+		// Other shaders key on their type and the geometry's RTTI.
 		constexpr std::uint64_t kLightingKey = 1ull << 63;
 		constexpr std::uint64_t kApproximateKey = 1ull << 62;
-		// A material port's geometry classified as a Lighting one (its class on: the Effect port's with Api::ObjectClass::Effect): its kind
-		// in the key's bits 56-61, its classes named by the port ("effect: ..."), its variants splitting its variant class.
+		// A material port's geometry is classified like a Lighting one. Its port kind goes in key bits 56-61.
 		constexpr unsigned kPortKeyShift = 56;
 		constexpr std::uint64_t kPortKeyMask = 0x3F;
 		static_assert(Extensions::kMaterialKinds <= kPortKeyMask + 1, "a port's kind in the class key's port bits");
@@ -144,7 +141,7 @@ namespace DCLF::RegistrationCensus
 		struct Tally
 		{
 			std::uint64_t passes = 0;
-			GeometrySet geometries;  // by address: a geometry released and another made at its address within a window counts once
+			GeometrySet geometries;  // by address, so a geometry freed and another made at its address within a window counts once
 		};
 		struct GeometryCount
 		{
@@ -154,21 +151,19 @@ namespace DCLF::RegistrationCensus
 		struct ClassWindow
 		{
 			std::uint64_t passes = 0;
-			const RE::NiRTTI* rtti = nullptr;  // any other shader's: the geometry's
+			const RE::NiRTTI* rtti = nullptr;  // other shaders only
 			bool attributed = true;
 			ankerl::unordered_dense::map<const RE::BSGeometry*, GeometryCount> geometries;
 			ankerl::unordered_dense::map<std::uint16_t, std::uint64_t> views;  // passes
 		};
 
-		/** @brief Render thread only (Collect, TakeReport). */
+		/** @brief Render thread only. */
 		struct Census
 		{
-			// The window's.
 			std::uint32_t frames = 0;
 			std::uint64_t passes = 0, attributed = 0, defects = 0;
-			// Kept passes of a geometry under an entry DCLF draws whole, in the main camera's, the sun's and the local lights' views,
-			// whose culls skip such an entry (no engine cull should reach it: underWhole, the tag), and in the other views (first person,
-			// focus and other shadows, the reflection faces, the occlusion maps), counted apart.
+			// Kept passes under an entry DCLF draws whole. underWhole counts the main, sun and local light views, whose culls should
+			// skip such an entry. underWholeElsewhere counts the other views.
 			std::uint64_t underWhole = 0, underWholeElsewhere = 0;
 			std::string firstUnderWhole, firstUnderWholeElsewhere;
 			GeometrySet geometries;
@@ -177,12 +172,10 @@ namespace DCLF::RegistrationCensus
 			ankerl::unordered_dense::map<std::uint16_t, Tally> views;
 			std::string firstDefect;
 			bool coordinatorVerdicts = false;  // the last Collect's
-			// The window's non-member Lighting passes, those classified by the live approximation (no young reply), and the
-			// coordinator's replies taken with the geometries they answered.
+			// Non-member Lighting passes, those classified by the live approximation, and coordinator replies taken.
 			std::uint64_t nonMemberPasses = 0, approximatePasses = 0, repliesTaken = 0, answered = 0;
-			// The scene work asynchronous: the coordinator's verdicts (Diagnostics::CensusVerdictOf) by geometry, each with its pin (so
-			// the address stays the geometry's while its verdict is kept; let go of here, on the render thread) and the Collect that took
-			// it; the geometries seen since the last request, pinned; and whether a request is in flight (one at a time).
+			// Async coordinator verdicts by geometry. Each holds a pin so the address stays that geometry's, released on the render thread.
+			// Only one request is in flight at a time.
 			struct Reply
 			{
 				RE::NiPointer<RE::BSGeometry> pin;
@@ -193,9 +186,9 @@ namespace DCLF::RegistrationCensus
 			ankerl::unordered_dense::map<const RE::BSGeometry*, RE::NiPointer<RE::BSGeometry>> unasked;
 			bool inFlight = false;
 			std::uint64_t collects = 0;  // the session's Collects
-			// The session's: any other batch renderer's view, by first sight (grows).
+			// Other batch renderers by first sight, for the session.
 			ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint16_t> others;
-			// The known accumulators' renderers, made again when one of them changes.
+			// Rebuilt when one of the known accumulators changes.
 			std::array<const void*, 3> accumulators{};
 			ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint16_t> accumulatorViews;
 		};
@@ -203,7 +196,7 @@ namespace DCLF::RegistrationCensus
 
 		void AddRenderers(ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint16_t>& a_map, const RE::BSBatchRenderer* a_batch, std::uint16_t a_view)
 		{
-			// A geometry group sorts its passes in a batch renderer of its own (ShadowViews::Rebuild, PassCapture::RefreshMainRenderers).
+			// A geometry group sorts its passes in a batch renderer of its own.
 			if (!a_batch)
 				return;
 			a_map.try_emplace(a_batch, a_view);
@@ -214,12 +207,11 @@ namespace DCLF::RegistrationCensus
 
 		void RefreshAccumulatorViews()
 		{
-			// The Z-prepass's accumulator (render mode 0xC) and the main camera's.
+			// The Z-prepass accumulator (render mode 0xC) and the main camera's.
 			static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> depthAccumulator{ REL::Offset(Engine::Address::kDepthAccumulator) };
 			static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-			// The first-person accumulator (*0x14338c840: Main::unk_FPCulling culls the first-person root alone into it). 0x14338c820 is
-			// its camera, not a BSShaderAccumulator* (read as one, it crashed at the main menu). RenderDepth's first-person block registers
-			// into the Z-prepass's (main depth).
+			// First-person accumulator at *0x14338c840. 0x14338c820 is its camera, not an accumulator, and reading it as one crashed at the
+			// main menu. RenderDepth's first-person block registers into the Z-prepass accumulator.
 			static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> firstPersonAccumulator{ REL::Offset(Engine::Address::kFirstPersonAccumulator) };
 			const std::array<RE::BSGraphics::BSShaderAccumulator*, 3> accumulators{ *depthAccumulator, *mainAccumulator, *firstPersonAccumulator };
 			const std::array<const void*, 3> sources{ accumulators[0], accumulators[1], accumulators[2] };
@@ -239,10 +231,10 @@ namespace DCLF::RegistrationCensus
 			std::shared_ptr<const SetSnapshot> set;
 			bool parityBoth = false;
 			bool coordinatorVerdicts = false;
-			ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint16_t> shadowViews;  // the frame's shadow views (ShadowViews)
-			// A non-member's class, by geometry, with kApproximateKey when it is the live approximation.
+			ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint16_t> shadowViews;  // the frame's shadow views
+			// A non-member's class by geometry, with kApproximateKey for the live approximation.
 			ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint64_t> verdicts;
-			GeometrySet records;  // the installed tables' geometries (made on first use)
+			GeometrySet records;  // the installed tables' geometries, made on first use
 			bool recordsMade = false;
 		};
 
@@ -250,7 +242,7 @@ namespace DCLF::RegistrationCensus
 		{
 			if (a_view < kFirstOther)
 				return std::string(kViewNames[a_view]);
-			// Any other batch renderer by its address too, to match against the views' renderer logs.
+			// Other batch renderers by address too, to match the views' renderer logs.
 			for (const auto& [batch, view] : census.others)
 				if (view == a_view)
 					return fmt::format("other #{} ({})", a_view - kFirstOther, static_cast<const void*>(batch));
@@ -260,7 +252,7 @@ namespace DCLF::RegistrationCensus
 		std::uint16_t ViewOf(const Noted& a_noted, const Frame& a_frame)
 		{
 			if (a_noted.site == Site::Occlusion) {
-				// The occlusion maps' phases (their entries'), in slot order.
+				// Occlusion map phases in slot order.
 				const std::uint8_t phase = a_noted.occlusionPhase;
 				if (phase && phase == Extensions::OcclusionMapOf(DCLF::kOcclusionSky).phase)
 					return kOcclusionSky;
@@ -275,7 +267,7 @@ namespace DCLF::RegistrationCensus
 			return census.others.try_emplace(a_noted.batch, static_cast<std::uint16_t>(kFirstOther + census.others.size())).first->second;
 		}
 
-		/** @brief The view's phase of the set, when the view withholds that phase's members from the engine (PassCapture's tests); else 0. */
+		/** @brief The set phase this view withholds from the engine, or 0. */
 		std::uint8_t WithheldPhase(const Noted& a_noted, std::uint16_t a_view, const Frame& a_frame)
 		{
 			const auto& set = a_frame.set;
@@ -284,14 +276,14 @@ namespace DCLF::RegistrationCensus
 			switch (a_view) {
 			case kMainDepth:
 			case kMain:
-				return kSetMain;  // WithholdMain: any main member (and a first-person member in RenderDepth's block: WithheldPhase's caller's)
+				return kSetMain;  // WithholdMain, which also covers a first-person member in RenderDepth's block
 			case kFirstPerson: {
-				// The first-person view's phase (its feature's: Extensions::Views), withheld while its epochs draw (PassCapture::SetViewCovered).
+				// Withheld while the first-person epochs draw.
 				const std::uint8_t phase = Extensions::ViewEntryOf(Api::EngineView::FirstPerson).phase;
 				return PassCapture::Get().ViewCovered(Api::EngineView::FirstPerson) && (set->drawn & phase) ? phase : 0;
 			}
 			case kReflection: {
-				// The reflection's phase (its feature's: Extensions::Views), withheld inside a plain face render (PassCapture::SetViewWithholdActive).
+				// Withheld inside a plain face render.
 				const std::uint8_t phase = Extensions::ViewEntryOf(Api::EngineView::Reflection).phase;
 				return (a_noted.flags & kReflectionFace) && (set->drawn & phase) ? phase : 0;
 			}
@@ -310,13 +302,13 @@ namespace DCLF::RegistrationCensus
 			return Eligibility::Static(SceneCapture::LiveLeaf(a_geometry).view, nullptr);
 		}
 
-		// A reply is used while it is this young (Collects since it was taken): a geometry the census keeps seeing is asked again
-		// with every request, so a used reply is a frame or two old; an older one (the geometry not seen meanwhile) is let go of.
+		// Replies used while this young, in Collects. A geometry still being seen is asked again every request, so a used reply is
+		// a frame or two old.
 		constexpr std::uint64_t kReplyCollects = 8;
 
 		std::uint8_t CoordinatorClass(const Diagnostics::CensusVerdict& a_verdict, const RE::BSGeometry& a_geometry)
 		{
-			// Untracked: the coordinator has no verdict; the live leaf's static one says why (the render thread's read).
+			// Untracked, so the live leaf's static verdict gives the reason.
 			if (!a_verdict.tracked)
 				return static_cast<std::uint8_t>(kUntracked + static_cast<std::uint8_t>(StaticVerdict(a_geometry)));
 			if (a_verdict.reason != Ineligible::None)
@@ -326,21 +318,16 @@ namespace DCLF::RegistrationCensus
 
 		std::uint8_t ApproximateClass(const RE::BSGeometry& a_geometry, Frame& a_frame)
 		{
-			// The frame's own copies. Tracked content lies under a category node (the newest publication's set); what lies between the
-			// leaf and it, and the live leaf's static verdict, give the reason the coordinator's walk gives (Coordinator::Classify:
-			// static, then the parents); the installed tables, whether it has a record. The per-frame verdicts (hidden, switch, actor,
-			// fading) are not told apart here: they count as eligible.
+			// Mirrors the coordinator's Classify walk on the frame's copies, static verdict first, then the parents.
+			// Per-frame verdicts such as hidden, switch, actor and fading are not told apart here and count as eligible.
 			const auto leaf = SceneCapture::LiveLeaf(a_geometry);
 			const auto* lighting = SceneCapture::LeafView::Lighting(leaf.view.property);
-			// An ordered node rejects only a blended leaf (Coordinator's OrderedLeaf), and with the forward epoch none (ClassifyFrame); a
-			// billboard any.
+			// An ordered node rejects only a blended leaf, and none with the forward epoch on. A billboard rejects any.
 			const bool blended = !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward) &&
 			                     (leaf.view.AlphaBlending() || (lighting && lighting->materialAlpha < 1.0f));
 			Ineligible parentReason = Ineligible::None;
 			bool tracked = false;
-			// The billboard parent's contributions (Features/Billboards): an effect BSTriShape without a skin under one billboard node is
-			// DCLF's (Coordinator::BillboardModeOf); a particle system under any billboard nodes too (ClassifyFrame: its world and particles
-			// are its last update's).
+			// Billboard parents. An unskinned effect BSTriShape under one billboard node is DCLF's, and so is a particle system under any.
 			const auto toggles = ActiveToggles();
 			const bool particlesTaken = Extensions::ParentAdmits(toggles, Api::EngineParent::Billboard, Api::ParentLeaves::ParticleSystems) &&
 			                            ParticleGeometryType(leaf.view.Type());
@@ -381,21 +368,17 @@ namespace DCLF::RegistrationCensus
 		std::uint64_t NonMemberClass(const Noted& a_noted, Frame& a_frame)
 		{
 			const auto& geometry = *a_noted.geometry;
-			// The scene work inline (the parities): no pass runs beside the frame, so the coordinator's own verdicts are read.
+			// With the scene pass inline nothing runs beside the frame, so the coordinator's own verdicts are read.
 			if (a_frame.coordinatorVerdicts)
 				return CoordinatorClass(Diagnostics::CensusVerdictOf(Scene::Coordinator::Get(), &geometry), geometry);
-			// Asynchronous: asked of the coordinator with the next request (pinned until its reply is let go of), and its last
-			// reply used while young; the live approximation only until one arrives.
+			// Async. Ask the coordinator with the next request and use its reply while young. The live approximation fills in until then.
 			census.unasked.try_emplace(&geometry, a_noted.geometry);
 			if (const auto it = census.replies.find(&geometry); it != census.replies.end() && census.collects - it->second.collect <= kReplyCollects)
 				return CoordinatorClass(it->second.verdict, geometry);
 			return kApproximateKey | ApproximateClass(geometry, a_frame);
 		}
 
-		/**
-		 * @brief A port geometry's variant class split by its port's variants (Extensions::PortVariants on the live leaf: the render thread's
-		 * read, at Collect; the Effect port's EffectVariantsOf), in the class key's bits 8-23; any other class as it is.
-		 */
+		/** @brief Splits a port geometry's variant class by its port's variants, in key bits 8-23. Other classes pass through. */
 		std::uint64_t WithPortVariants(std::uint64_t a_class, bool a_ported, const RE::BSGeometry& a_geometry)
 		{
 			constexpr auto kVariant = static_cast<std::uint8_t>(Ineligible::EffectVariant);
@@ -425,10 +408,9 @@ namespace DCLF::RegistrationCensus
 			const RE::NiRTTI* rtti = nullptr;
 			bool attributed = true;
 			const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
-			// A Lighting geometry is DCLF's to classify whichever shader its pass has (the shadow views' passes are Utility's).
+			// A Lighting geometry is DCLF's to classify whatever its pass's shader. Shadow view passes are Utility's.
 			const bool lighting = property && netimmerse_cast<RE::BSLightingShaderProperty*>(const_cast<RE::BSShaderProperty*>(property));
-			// With a port's class on (the effects: Api::ObjectClass::Effect) its geometry is DCLF's to classify too (its verdict: a member,
-			// effect-opaque, ...): a port's property (its RTTI) while the port is on.
+			// With a port's object class on, its geometry is DCLF's to classify too.
 			std::uint8_t port = 0;
 			if (!lighting && property)
 				if (const std::uint8_t kind = Extensions::PortOfRtti(property->GetRTTI()); Extensions::PortOn(ActiveToggles(), kind))
@@ -437,7 +419,7 @@ namespace DCLF::RegistrationCensus
 			if (lighting || ported) {
 				std::uint64_t cls;
 				if (const auto phase = WithheldPhase(a_noted, view, a_frame); phase && (a_frame.set->PhasesOf(geometry) & phase)) {
-					// Kept by the hooks although its view withholds the phase: a defect.
+					// Kept by the hooks although its view withholds the phase, a defect.
 					cls = a_frame.parityBoth ? kMemberParityBoth : kMemberDefect;
 				} else {
 					if (const auto it = a_frame.verdicts.find(geometry); it != a_frame.verdicts.end())
@@ -456,9 +438,9 @@ namespace DCLF::RegistrationCensus
 				attributed = a_noted.shaderType > RE::BSShader::Type::None && a_noted.shaderType < RE::BSShader::Type::Total && rtti;
 				key = (static_cast<std::uint64_t>(a_noted.shaderType) << 48) | (reinterpret_cast<std::uintptr_t>(rtti) & kRttiMask);
 			}
-			// A pass the engine kept under an entry the cut has as whole (any view): a cull reached what DCLF draws whole.
+			// The engine kept a pass under an entry the cut draws whole, so a cull reached it.
 			if (PrimaryCull::Get().DrawsWhole(geometry)) {
-				// The occlusion maps' culls reach roots outside the scene lists (object LOD) that the cut's verdict says nothing of: counted apart.
+				// Occlusion map culls reach roots outside the scene lists, such as object LOD, so they count apart.
 				const bool covered = view == kMainDepth || view == kMain || view == kSun || view == kSpot || view == kPoint;
 				if ((covered ? census.underWhole : census.underWholeElsewhere)++ == 0)
 					(covered ? census.firstUnderWhole : census.firstUnderWholeElsewhere) = fmt::format("{} in {}", Describe(*geometry, true),
@@ -481,7 +463,7 @@ namespace DCLF::RegistrationCensus
 			const auto [it, added] = cls.geometries.try_emplace(geometry);
 			if (added) {
 				it->second.name = Describe(*geometry, lighting || ported);
-				// An untracked geometry's chain top (no category node above it): the three highest nodes, root first, and the depth.
+				// For an untracked chain top, log the three highest nodes, root first, and the depth.
 				if (const std::uint64_t c = key & 0xFF; (lighting || ported) && c >= kUntracked && c < kUntracked + kReasons) {
 					std::vector<const RE::NiAVObject*> chain;
 					for (const RE::NiAVObject* at = geometry->parent; at; at = at->parent)
@@ -505,7 +487,6 @@ namespace DCLF::RegistrationCensus
 				const auto& port = Extensions::MaterialPorts()[kind];
 				if (kind && name.starts_with("lighting:"))
 					name = fmt::format("{}:{}", port.name, name.substr(9));
-				// The port's variant class's variants (WithPortVariants), joined.
 				if (const auto variants = static_cast<std::uint32_t>((a_key >> 8) & 0xFFFF)) {
 					std::string joined;
 					const auto names = port.variantNames;
@@ -545,11 +526,11 @@ namespace DCLF::RegistrationCensus
 		Frame frame;
 		frame.set = Scene::FrameView::Get().FrameClaims();
 		frame.parityBoth = !Policy::WithholdFromEngine();
-		// The scene pass at the frame's start, on the render thread (Policy::ScenePassInline): the coordinator's verdicts are this frame's.
+		// With the scene pass inline the coordinator's verdicts are this frame's.
 		frame.coordinatorVerdicts = Policy::ScenePassInline();
 		census.coordinatorVerdicts = frame.coordinatorVerdicts;
 		++census.collects;
-		// The coordinator's reply to the last request, kept by geometry (a reply replaced lets go of its pin here).
+		// A replaced reply releases its pin here.
 		if (auto reply = frame.coordinatorVerdicts ? nullptr : Diagnostics::TakeCensusReply()) {
 			++census.repliesTaken;
 			census.answered += reply->geometries.size();
@@ -559,8 +540,7 @@ namespace DCLF::RegistrationCensus
 			}
 			census.inFlight = false;
 		}
-		// The frame's shadow views (ShadowViews::Rebuild, when CalculateAndDrawShadowCasterLights returns; their lights live until the next
-		// update).
+		// Shadow views are rebuilt when CalculateAndDrawShadowCasterLights returns. Their lights live until the next update.
 		if (const auto& views = ShadowViews::Get(); views.Valid())
 			for (const auto& view : views.All()) {
 				const std::uint16_t id = view.focus                                          ? kFocus :
@@ -570,10 +550,9 @@ namespace DCLF::RegistrationCensus
 				                                                                                kShadowOther;
 				AddRenderers(frame.shadowViews, view.batch, id);
 			}
-		// Each noted pass's geometry reference is let go of here, on the render thread (EventQueue resets the cell).
+		// Each pass's geometry reference is released here on the render thread.
 		Queue().Drain([&](Noted&& a_noted) { Count(a_noted, frame); });
-		// The distinct geometries seen since the last request, asked of the coordinator's next scene pass (no wake: the frame's
-		// own pass takes it), once the last request's reply was taken.
+		// Ask about new geometries in the next scene pass, once the last reply was taken. No wake is needed since the frame's pass takes it.
 		if (!frame.coordinatorVerdicts && !census.inFlight && !census.unasked.empty()) {
 			auto request = std::make_shared<Diagnostics::CensusRequest>();
 			request->geometries.reserve(census.unasked.size());
@@ -593,7 +572,6 @@ namespace DCLF::RegistrationCensus
 		}
 		const double frames = std::max(1u, census.frames);
 		const double share = 100.0 * static_cast<double>(census.attributed) / static_cast<double>(census.passes);
-		// Asynchronous: the coordinator's replies where the census had one, the live approximation (marked) where it had none yet.
 		const std::string verdicts = census.coordinatorVerdicts ?
 		                                 std::string("the coordinator's (scene work inline)") :
 		                                 fmt::format("the coordinator's replies for {} of {} non-member passes ({} replies, {} geometries answered), the live "
@@ -607,7 +585,7 @@ namespace DCLF::RegistrationCensus
 			census.defects, census.defects ? " <- DEFECT; first: " + census.firstDefect : std::string(" <- OK"), census.underWhole,
 			census.underWhole ? " <- WHOLE ENTRY; first: " + census.firstUnderWhole : std::string(" <- OK"), census.underWholeElsewhere,
 			census.underWholeElsewhere ? " (first: " + census.firstUnderWholeElsewhere + ")" : std::string(), verdicts);
-		// By view, each with its classes; most passes first.
+		// By view, most passes first.
 		std::vector<std::pair<std::uint16_t, const Tally*>> views;
 		for (const auto& [view, tally] : census.views)
 			views.emplace_back(view, &tally);
@@ -623,7 +601,7 @@ namespace DCLF::RegistrationCensus
 					classes += fmt::format("{}{} {}/{}", classes.empty() ? "" : ", ", ClassName(cls, census.classes[cls]), classTally->passes, classTally->geometries.size());
 			out += fmt::format("[DCLF] census view {}: {} passes ({:.1f} a frame), {} geometries; by class (passes/geometries): {}\n", ViewName(view), tally->passes,
 				tally->passes / frames, tally->geometries.size(), classes);
-			// The first-person view's geometries by name and class (a handful: the class lines' tops are every view's).
+			// First-person geometries by name and class. There are only a handful.
 			if (view == kFirstPerson) {
 				std::string names;
 				for (const auto& [cls, classView, classTally] : viewClasses)
@@ -635,7 +613,6 @@ namespace DCLF::RegistrationCensus
 				out += fmt::format("[DCLF] census view first person's geometries: {}\n", names);
 			}
 		}
-		// By class across the views, with the geometries that registered the most passes.
 		constexpr std::size_t kTop = 5;
 		std::vector<std::pair<std::uint64_t, const ClassWindow*>> classes;
 		for (const auto& [key, cls] : census.classes)
@@ -659,7 +636,7 @@ namespace DCLF::RegistrationCensus
 			out += fmt::format("[DCLF] census class {}{}: {} passes ({:.1f} a frame), {} geometries; in {}; top: {}\n", ClassName(key, *cls),
 				cls->attributed ? "" : " (unattributed)", cls->passes, cls->passes / frames, cls->geometries.size(), inViews, names);
 		}
-		// The window restarts; the other renderers' numbering and the accumulators' views are the session's.
+		// The window restarts. Renderer numbering and accumulator views last the session.
 		census.frames = 0;
 		census.passes = census.attributed = census.defects = 0;
 		census.geometries.clear();
@@ -671,8 +648,7 @@ namespace DCLF::RegistrationCensus
 		census.firstUnderWhole.clear();
 		census.firstUnderWholeElsewhere.clear();
 		census.nonMemberPasses = census.approximatePasses = census.repliesTaken = census.answered = 0;
-		// The replies too old to be used let go of (their pins, here on the render thread); a request in flight a whole window (no
-		// scene pass answered it: DCLF off) lets go of what waited for the next, which the next frame asks again.
+		// Release replies too old to use. A request in flight a whole window means no scene pass answered, so drop it and ask again.
 		for (auto it = census.replies.begin(); it != census.replies.end();)
 			it = census.collects - it->second.collect > kReplyCollects ? census.replies.erase(it) : std::next(it);
 		if (census.inFlight)
@@ -760,7 +736,6 @@ namespace DCLF::RegistrationCensus
 			auto* root = actor ? actor->Get3D(false) : nullptr;
 			if (!root || actor->GetPosition().GetDistance(eye) > 4096.0f)
 				continue;
-			// The counts in the order the line prints them.
 			std::array<std::uint32_t, 6> counts{};
 			std::string missing;
 			Engine::ForEachLive(root, [&](RE::NiAVObject& a_object, std::uint32_t) {

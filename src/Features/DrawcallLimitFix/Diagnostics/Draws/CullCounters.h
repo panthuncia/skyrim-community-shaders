@@ -1,10 +1,10 @@
 #pragma once
 
-// The culling's counters' graph pass (CullCounters.cpp): the colour epoch's count words to the host each execution.
+// The culling counters' graph pass, which copies the colour epoch's count words to the host every execution.
 
 namespace DCLF::Diagnostics
 {
 	struct MainGraphPasses;
-	/** @brief MainGraphPasses (kAfterColour): adds the colour epoch's counter readback (CounterReadback), always on. */
+	/** @brief Adds the colour epoch's counter readback after colour. Always on. */
 	void AppendCullCounterPass(const MainGraphPasses& a_passes);
 }
