@@ -2,11 +2,15 @@
 
 #include "Buffer.h"
 #include "Feature.h"
+#include "Utils/Setting.h"
 #include "Utils/TexturePreview.h"
 
 class ViewAtmosphere : public Feature
 {
 public:
+	/** @brief Binds the grid settings to their frame variables. The global is the only instance. */
+	ViewAtmosphere();
+
 	std::string GetName() override { return "Atmosphere and Fog"; }
 	std::string GetShortName() override { return "ViewAtmosphere"; }
 	std::string GetDisplayName() override { return T("feature.view_atmosphere.name", "Atmosphere and Fog"); }
@@ -32,7 +36,8 @@ public:
 	void SetupResources() override;
 	/** @brief Reserves the render graph path's anchors. */
 	void PostPostLoad() override;
-	struct alignas(16) Settings
+	/** @brief The settings block the shaders read (the FeatureData copy). Its layout is fixed. */
+	struct alignas(16) GpuSettings
 	{
 		uint enabled = 1;
 		uint nearPixelSize = 16;
@@ -50,9 +55,32 @@ public:
 		float depthDistribution = 8.0f;
 		float lookupJitter = 1.0f;
 		float padding = 0.0f;
+	};
+	STATIC_ASSERT_ALIGNAS_16(GpuSettings);
+	static_assert(sizeof(GpuSettings) == 64);
+
+	/** @brief The CPU settings. The grid sizes change the frame's shape, so they are CS::Setting. */
+	struct Settings
+	{
+		uint enabled = 1;
+		CS::Setting<std::uint32_t> nearPixelSize = 16;
+		CS::Setting<std::uint32_t> nearSlices = 64;
+		CS::Setting<std::uint32_t> middlePixelSize = 64;
+		CS::Setting<std::uint32_t> middleSlices = 32;
+		uint distantPixelSize = 32;
+		uint distantSlices = 64;
+		uint historyMissSamples = 4;
+		float nearRange = 8000.0f;
+		float localRange = 60000.0f;
+		float historyWeight = 0.96f;
+		float sampleJitter = 0.0f;
+		float shadowBias = 0.002f;
+		float depthDistribution = 8.0f;
+		float lookupJitter = 1.0f;
 	} settings;
-	STATIC_ASSERT_ALIGNAS_16(Settings);
-	static_assert(sizeof(Settings) == 64);
+
+	/** @brief The GPU block built from the settings. */
+	GpuSettings GetCommonBufferData() const;
 
 	/** @brief Prepares the shared volume before standalone fog selects its path. */
 	bool Prepare();

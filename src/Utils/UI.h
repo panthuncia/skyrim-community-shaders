@@ -951,6 +951,9 @@ namespace Util
 	/** @brief ImGui::Checkbox over a bool setting. @return True when the control edited the value. */
 	bool Checkbox(const char* label, CS::Setting<bool>& setting);
 
+	/** @brief ImGui::Checkbox over an unsigned setting used as a flag. An edit stores 0 or 1. */
+	bool Checkbox(const char* label, CS::Setting<std::uint32_t>& setting);
+
 	/** @brief ImGui::SliderInt over an int setting. @return True when the control edited the value. */
 	bool SliderInt(const char* label, CS::Setting<int>& setting, int min, int max, const char* format = "%d", ImGuiSliderFlags flags = 0);
 

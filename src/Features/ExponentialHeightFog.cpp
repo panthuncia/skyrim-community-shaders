@@ -73,6 +73,17 @@ namespace
 	}
 }
 
+ExponentialHeightFog::ExponentialHeightFog()
+{
+	settings.enabled.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.enabled"));
+	settings.volumetricFogEnabled.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.volumetricFogEnabled"));
+	settings.useSkyIBL.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.useSkyIBL"));
+	settings.useDynamicCubemaps.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.useDynamicCubemaps"));
+	settings.fogDensity.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.fogDensity"));
+	settings.fogDensity2.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.fogDensity2"));
+	settings.volumetricFogExtinctionScale.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.volumetricFogExtinctionScale"));
+}
+
 void ExponentialHeightFog::RestoreDefaultSettings()
 {
 	settings = {};
@@ -88,9 +99,42 @@ void ExponentialHeightFog::SaveSettings(json& o_json)
 	o_json = settings;
 }
 
-ExponentialHeightFog::Settings ExponentialHeightFog::GetCommonBufferData() const
+ExponentialHeightFog::GpuSettings ExponentialHeightFog::GetCommonBufferData() const
 {
-	Settings data = settings;
+	GpuSettings data;
+	data.enabled = settings.enabled;
+	data.useDynamicCubemaps = settings.useDynamicCubemaps;
+	data.startDistance = settings.startDistance;
+	data.fogHeight = settings.fogHeight;
+	data.fogHeightFalloff = settings.fogHeightFalloff;
+	data.fogDensity = settings.fogDensity;
+	data.fogHeight2 = settings.fogHeight2;
+	data.fogHeightFalloff2 = settings.fogHeightFalloff2;
+	data.fogDensity2 = settings.fogDensity2;
+	data.directionalInscatteringMultiplier = settings.directionalInscatteringMultiplier;
+	data.directionalInscatteringAnisotropy = settings.directionalInscatteringAnisotropy;
+	data.useSkyIBL = settings.useSkyIBL;
+	data.inscatteringTint = settings.inscatteringTint;
+	data.cubemapMipLevel = settings.cubemapMipLevel;
+	data.sunlightAttenuationAmount = settings.sunlightAttenuationAmount;
+	data.respectVanillaFogFade = settings.respectVanillaFogFade;
+	data.disableVanillaFog = settings.disableVanillaFog;
+	data.fogInscatteringColor = settings.fogInscatteringColor;
+	data.originalFogColorAmount = settings.originalFogColorAmount;
+	data.volumetricFogEnabled = settings.volumetricFogEnabled;
+	data.volumetricFogStartDistance = settings.volumetricFogStartDistance;
+	data.volumetricFogNearFadeInDistance = settings.volumetricFogNearFadeInDistance;
+	data.volumetricFogAlbedo = settings.volumetricFogAlbedo;
+	data.volumetricFogEmissive = settings.volumetricFogEmissive;
+	data.volumetricDirectionalScatteringIntensity = settings.volumetricDirectionalScatteringIntensity;
+	data.volumetricSkyLightingIntensity = settings.volumetricSkyLightingIntensity;
+	data.volumetricFogScatteringDistribution = settings.volumetricFogScatteringDistribution;
+	data.volumetricFogExtinctionScale = settings.volumetricFogExtinctionScale;
+	data.volumetricLocalLightScatteringIntensity = settings.volumetricLocalLightScatteringIntensity;
+	data.volumetricFogNoiseScale = settings.volumetricFogNoiseScale;
+	data.volumetricFogNoiseThreshold = settings.volumetricFogNoiseThreshold;
+	data.volumetricFogNoiseVelocity = settings.volumetricFogNoiseVelocity;
+	data.originalFogColorOverride = settings.originalFogColorOverride;
 	auto& linearLighting = globals::features::linearLighting;
 	linearLighting.SRGBToWorking(&data.inscatteringTint.x);
 	linearLighting.SRGBToWorking(&data.fogInscatteringColor.x);
@@ -116,7 +160,7 @@ void ExponentialHeightFog::DrawSettings()
 		T("common.settings_managed_by_enb", "This setting is managed by Effects 11."));
 	const Util::DefaultsWhileActive<Settings> shownDefaults(settings, managedByEffects11);
 
-	ImGui::Checkbox(T(TKEY("enable_exp_height_fog"), "Enable Exponential Height Fog"), (bool*)&settings.enabled);
+	Util::Checkbox(T(TKEY("enable_exp_height_fog"), "Enable Exponential Height Fog"), settings.enabled);
 	ImGui::SliderFloat(T(TKEY("start_distance"), "Start Distance"), &settings.startDistance, 0.0f, 100000.0f, "%.1f");
 	ImGui::SliderFloat(T(TKEY("fog_height"), "Fog Height"), &settings.fogHeight, -22000.0f, 22000.0f, "%.1f");
 	ImGui::SliderFloat(T(TKEY("fog_height_falloff"), "Fog Height Falloff"), &settings.fogHeightFalloff, 0.001f, 2.0f, "%.3f");
@@ -128,11 +172,11 @@ void ExponentialHeightFog::DrawSettings()
 							  "Replaces the weather's fog colour used by Original Fog Color Amount.\n"
 							  "Alpha blends from the weather colour (0) to this colour (1)."));
 	}
-	ImGui::SliderFloat(T(TKEY("fog_density"), "Fog Density"), &settings.fogDensity, 0.0f, 1.0f, "%.3f");
+	Util::SliderFloat(T(TKEY("fog_density"), "Fog Density"), settings.fogDensity, 0.0f, 1.0f, "%.3f");
 	if (ImGui::TreeNode(T(TKEY("second_fog_layer"), "Second Fog Layer"))) {
 		ImGui::SliderFloat(T(TKEY("fog_height_2"), "Fog Height 2"), &settings.fogHeight2, -22000.0f, 22000.0f, "%.1f");
 		ImGui::SliderFloat(T(TKEY("fog_height_falloff_2"), "Fog Height Falloff 2"), &settings.fogHeightFalloff2, 0.001f, 2.0f, "%.3f");
-		ImGui::SliderFloat(T(TKEY("fog_density_2"), "Fog Density 2"), &settings.fogDensity2, 0.0f, 1.0f, "%.3f");
+		Util::SliderFloat(T(TKEY("fog_density_2"), "Fog Density 2"), settings.fogDensity2, 0.0f, 1.0f, "%.3f");
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("second_fog_layer_tooltip"),
 								  "Adds a second stacked exponential height fog layer with its own base height, density and height falloff.\n"
@@ -158,11 +202,11 @@ void ExponentialHeightFog::DrawSettings()
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("apply_vanilla_fade_tooltip"), "Applies vanilla fade brightness to exponential height fog."));
 	}
-	ImGui::Checkbox(T(TKEY("use_sky_ibl"), "Use Sky IBL for Exterior Inscattering"), (bool*)&settings.useSkyIBL);
+	Util::Checkbox(T(TKEY("use_sky_ibl"), "Use Sky IBL for Exterior Inscattering"), settings.useSkyIBL);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("use_sky_ibl_tooltip"), "Adds the sky IBL color to the fog inscattering in exteriors. Requires the Image Based Lighting feature."));
 	}
-	ImGui::Checkbox(T(TKEY("use_dynamic_cubemaps"), "Use Dynamic Cubemaps for Interior Inscattering"), (bool*)&settings.useDynamicCubemaps);
+	Util::Checkbox(T(TKEY("use_dynamic_cubemaps"), "Use Dynamic Cubemaps for Interior Inscattering"), settings.useDynamicCubemaps);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("use_dynamic_cubemaps_tooltip"), "Adds the dynamic environment cubemap color to the fog inscattering in interiors."));
 	}
@@ -171,7 +215,7 @@ void ExponentialHeightFog::DrawSettings()
 
 	ImGui::TextWrapped("%s", T("feature.view_atmosphere.quality_location", "Grid quality and temporal sampling are configured in Atmosphere and Fog."));
 	ImGui::SeparatorText(T(TKEY("volumetric_fog"), "Volumetric Fog"));
-	ImGui::Checkbox(T(TKEY("enable_volumetric_fog"), "Enable Volumetric Fog"), (bool*)&settings.volumetricFogEnabled);
+	Util::Checkbox(T(TKEY("enable_volumetric_fog"), "Enable Volumetric Fog"), settings.volumetricFogEnabled);
 	if (settings.volumetricFogEnabled) {
 		ImGui::SliderFloat(T(TKEY("volumetric_start_distance"), "Volumetric Start Distance"), &settings.volumetricFogStartDistance, 0.0f, 20000.0f, "%.0f");
 		ImGui::SliderFloat(T(TKEY("near_fade_in_distance"), "Near Fade In Distance"), &settings.volumetricFogNearFadeInDistance, 0.0f, 20000.0f, "%.0f");
@@ -188,7 +232,7 @@ void ExponentialHeightFog::DrawSettings()
 			}
 			ImGui::TreePop();
 		}
-		ImGui::SliderFloat(T(TKEY("volumetric_extinction_scale"), "Volumetric Extinction Scale"), &settings.volumetricFogExtinctionScale, 0.0f, 10.0f, "%.2f");
+		Util::SliderFloat(T(TKEY("volumetric_extinction_scale"), "Volumetric Extinction Scale"), settings.volumetricFogExtinctionScale, 0.0f, 10.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("volumetric_scattering_distribution"), "Volumetric Scattering Distribution"), &settings.volumetricFogScatteringDistribution, -0.9f, 0.9f, "%.2f");
 		ImGui::ColorEdit4(T(TKEY("volumetric_albedo"), "Volumetric Albedo"), (float*)&settings.volumetricFogAlbedo);
 		ImGui::ColorEdit4(T(TKEY("volumetric_emissive"), "Volumetric Emissive"), (float*)&settings.volumetricFogEmissive);
@@ -280,10 +324,10 @@ void ExponentialHeightFog::ClearShaderCache()
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;
-	uint32_t pixelSize = std::clamp(quality.nearPixelSize, 4u, 64u);
-	const uint32_t gridZ = std::clamp(quality.nearSlices, 16u, 160u);
-	uint32_t farPixelSize = std::clamp(quality.middlePixelSize, 4u, 64u);
-	const uint32_t farGridZ = std::clamp(quality.middleSlices, 16u, 160u);
+	uint32_t pixelSize = std::clamp(quality.nearPixelSize.Get(), 4u, 64u);
+	const uint32_t gridZ = std::clamp(quality.nearSlices.Get(), 16u, 160u);
+	uint32_t farPixelSize = std::clamp(quality.middlePixelSize.Get(), 4u, 64u);
+	const uint32_t farGridZ = std::clamp(quality.middleSlices.Get(), 16u, 160u);
 	float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 	auto renderSize = Util::ConvertToDynamic(screenSz);
 
@@ -317,8 +361,8 @@ ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 	sizes.nearSize = gridSize;
 	sizes.farSize = farGridSize;
 	// From 8-pixel cells up, one thread group per cell reduces the cell's depth footprint in parallel.
-	sizes.nearGroupReduce = std::clamp(quality.nearPixelSize, 4u, 64u) >= 8;
-	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(quality.middlePixelSize, 4u, 64u) >= 8;
+	sizes.nearGroupReduce = std::clamp(quality.nearPixelSize.Get(), 4u, 64u) >= 8;
+	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(quality.middlePixelSize.Get(), 4u, 64u) >= 8;
 	return sizes;
 }
 
@@ -1081,17 +1125,3 @@ void ExponentialHeightFog::Prepass()
 	BindIntegratedLightScattering();
 }
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection ExponentialHeightFog::ProjectSizeSettings() const
-{
-	// The densities and the extinction scale count only as zero or not, so a slider drag raises no event.
-	SizeProjection projection;
-	projection.Add("enabled", settings.enabled)
-		.Add("volumetricFogEnabled", settings.volumetricFogEnabled)
-		.Add("volumetricFogExtinctionScale>0", settings.volumetricFogExtinctionScale > 0.0f)
-		.Add("fogDensity>0", settings.fogDensity > 0.0f)
-		.Add("fogDensity2>0", settings.fogDensity2 > 0.0f)
-		.Add("useSkyIBL", settings.useSkyIBL)
-		.Add("useDynamicCubemaps", settings.useDynamicCubemaps);
-	return projection;
-}

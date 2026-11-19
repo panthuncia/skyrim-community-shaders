@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Features/LightLimitFix.h"
+#include "Utils/Setting.h"
 
 struct ExponentialHeightFog : Feature
 {
@@ -9,6 +10,9 @@ private:
 	static constexpr std::string_view MOD_ID = "180146";
 
 public:
+	/** @brief Binds the shape settings to their frame variables. The global is the only instance. */
+	ExponentialHeightFog();
+
 	virtual inline std::string GetName() override { return "Exponential Height Fog"; }
 	virtual std::string GetDisplayName() override { return T("feature.exponential_height_fog.name", "Exponential Height Fog"); }
 	virtual inline std::string GetShortName() override { return "ExponentialHeightFog"; }
@@ -42,11 +46,10 @@ public:
 
 	virtual void RestoreDefaultSettings() override;
 	virtual void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 
-	struct alignas(16) Settings
+	/** @brief The settings block the shaders read (the FeatureData copy). Its layout is fixed. */
+	struct alignas(16) GpuSettings
 	{
 		uint enabled = 0;
 		uint useDynamicCubemaps = 1;
@@ -83,11 +86,50 @@ public:
 		float3 volumetricFogNoiseVelocity = { 0.0f, 0.0f, 0.0f };
 		float pad0 = 0.0f;
 		float4 originalFogColorOverride = { 1.0f, 1.0f, 1.0f, 0.0f };  // rgb = replaces the weather fog colour, a = blend amount
-	} settings;
-	STATIC_ASSERT_ALIGNAS_16(Settings);
-	static_assert(sizeof(Settings) == 208);
+	};
+	STATIC_ASSERT_ALIGNAS_16(GpuSettings);
+	static_assert(sizeof(GpuSettings) == 208);
 
-	Settings GetCommonBufferData() const;
+	/** @brief The CPU settings. The ones that change the frame's shape are CS::Setting. */
+	struct Settings
+	{
+		CS::Setting<std::uint32_t> enabled = 0;
+		CS::Setting<std::uint32_t> useDynamicCubemaps = 1;
+		float startDistance = 0.0f;
+		float fogHeight = 0.0f;
+		float fogHeightFalloff = 0.2f;
+		CS::Setting<float> fogDensity = 0.005f;
+		float fogHeight2 = 0.0f;
+		float fogHeightFalloff2 = 0.2f;
+		CS::Setting<float> fogDensity2 = 0.0f;
+		float directionalInscatteringMultiplier = 1.0f;
+		float directionalInscatteringAnisotropy = 0.2f;
+		CS::Setting<std::uint32_t> useSkyIBL = 1;
+		float4 inscatteringTint = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float cubemapMipLevel = 8.0f;
+		float sunlightAttenuationAmount = 1.0f;
+		uint respectVanillaFogFade = 0;
+		uint disableVanillaFog = 1;
+		float4 fogInscatteringColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+		float originalFogColorAmount = 0.0f;
+		CS::Setting<std::uint32_t> volumetricFogEnabled = 0;
+		float volumetricFogStartDistance = 0.0f;
+		float volumetricFogNearFadeInDistance = 1000.0f;
+		float4 volumetricFogAlbedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float4 volumetricFogEmissive = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float volumetricDirectionalScatteringIntensity = 1.0f;
+		float volumetricSkyLightingIntensity = 1.0f;
+		float volumetricFogScatteringDistribution = 0.2f;
+		CS::Setting<float> volumetricFogExtinctionScale = 1.0f;
+		float volumetricLocalLightScatteringIntensity = 1.0f;
+		float volumetricFogNoiseScale = 0.0f;  // noise frequency per unit; 0 = disabled
+		float volumetricFogNoiseThreshold = 0.5f;
+		float3 volumetricFogNoiseVelocity = { 0.0f, 0.0f, 0.0f };
+		float4 originalFogColorOverride = { 1.0f, 1.0f, 1.0f, 0.0f };  // rgb = replaces the weather fog colour, a = blend amount
+	} settings;
+
+	/** @brief The GPU block built from the settings, with the colours in the working space. */
+	GpuSettings GetCommonBufferData() const;
 	/** @brief Reports whether height fog contributes in the current scene. */
 	bool IsActive() const { return loaded && settings.enabled && !IsSuppressed(); }
 

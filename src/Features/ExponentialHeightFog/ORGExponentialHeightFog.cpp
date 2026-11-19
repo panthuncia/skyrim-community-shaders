@@ -1250,7 +1250,7 @@ bool ORGExponentialHeightFog::Prepass()
 			"[ORG] Exponential Height Fog: the first graph frame: density {:.4f}/{:.4f}, extinction scale {:.3f}, albedo a {:.3f}; "
 			"near {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}); far {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}) range {:.0f}-{:.0f}{}; "
 			"camera data ({:.1f}, {:.2f}, {:.1f}, {:.1f}); depth from {}",
-			s.fogDensity, s.fogDensity2, s.volumetricFogExtinctionScale, s.volumetricFogAlbedo.w, f.gridSizeAndFlags.x, f.gridSizeAndFlags.y,
+			s.fogDensity.Get(), s.fogDensity2.Get(), s.volumetricFogExtinctionScale.Get(), s.volumetricFogAlbedo.w, f.gridSizeAndFlags.x, f.gridSizeAndFlags.y,
 			f.gridSizeAndFlags.z, f.gridSizeAndFlags.w, f.gridZParams.x, f.gridZParams.y, f.gridZParams.z, f.farGridSizeAndFlags.x,
 			f.farGridSizeAndFlags.y, f.farGridSizeAndFlags.z, f.farGridSizeAndFlags.w, f.farGridZParams.x, f.farGridZParams.y, f.farGridZParams.z,
 			f.farRange.x, f.farRange.y, farEnabled ? "" : " (off)", camera.x, camera.y, camera.z, camera.w,
