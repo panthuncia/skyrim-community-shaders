@@ -2152,6 +2152,7 @@ namespace DCLF
 		constexpr std::array<ShadingFieldRange, Extensions::kShadingRowFields> kShadingFieldRanges{ {
 			{ offsetof(BindlessShading, skinPerGeometry), sizeof(BindlessShading::skinPerGeometry) },
 			{ offsetof(BindlessShading, landscapeSeams), sizeof(BindlessShading::landscapeSeams) },
+			{ offsetof(BindlessShading, skinMaterial), sizeof(BindlessShading::skinMaterial) },
 		} };
 		static_assert(sizeof(BindlessShading::skinPerGeometry) <= sizeof(ShadingFieldValue::value));
 	}

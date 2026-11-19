@@ -485,7 +485,7 @@ namespace DCLF
 			static_cast<CaptureParity*>(a_owner)->NoteMismatch(fmt::format("{} {}", Describe(a_note), a_message));
 		};
 
-		// t71 and t74, AdvancedSkin's.
+		// t71, t74, t72 and b7's material, AdvancedSkin's.
 		skinTextures.Compare(a_context, a_geometry, a_objectIndex, tables, note, this);
 
 		// b7 and actor ownership, AdvancedSkin's.
@@ -1062,7 +1062,7 @@ namespace DCLF
 		logger::info("[DCLF] draw parity {}: {} draws checked, {} with different arguments or bound buffers", drawMismatches == 0 ? "OK" : "MISMATCH",
 			drawsChecked, drawMismatches);
 		lightData.Report();
-		logger::info("[DCLF] skin parity {}: {} draws' t71/t74 checked, {} differ; {} draws' wetness checked ({} wet), {} differ, {} with a different actor ownership",
+		logger::info("[DCLF] skin parity {}: {} t71/t74/t72 and material checks, {} differ; {} draws' wetness checked ({} wet), {} differ, {} with a different actor ownership",
 			skinTextures.Ok() && skinWetness.Ok() ? "OK" : "MISMATCH", skinTextures.checks, skinTextures.mismatches, skinWetness.checks,
 			skinWetness.wetDraws, skinWetness.mismatches, skinWetness.ownerMismatches);
 		truePBRTextures.Report();

@@ -1,4 +1,4 @@
-// Advanced Skin's wetness field: its membership hook and its capture at the frame's start. Render thread. Its material textures are in SkinTextures.cpp.
+// Advanced Skin's wetness field: its membership hook and its capture at the frame's start. Render thread. Its material table is in SkinMaterials.cpp.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/AdvancedSkin.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -61,7 +61,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			// Features/Actors' class, registered published whatever its toggle.
 			a_context.RegisterShadingField({ .name = "wetness", .field = Api::ShadingRowField::SkinPerGeometry, .members = Api::EntryClass::ActorOwned,
 				.membership = &Membership, .capture = &Capture });
-			InstallMaterialTextures(a_context);
+			InstallMaterials(a_context);
 		}
 	}
 
@@ -73,8 +73,12 @@ namespace DCLF::Integrations::AdvancedSkin
 	std::vector<std::string> GrowthLines()
 	{
 		const auto& owners = Owners();
-		return { fmt::format("advanced skin wetness groups {}", owners.GroupCount()), fmt::format("advanced skin wetness slots {}", owners.SlotCount()),
+		std::vector<std::string> lines{ fmt::format("advanced skin wetness groups {}", owners.GroupCount()),
+			fmt::format("advanced skin wetness slots {}", owners.SlotCount()),
 			fmt::format("advanced skin wetness last capture actors {}, changed {}, visited {}, members {}", lastStats.actors, lastStats.changed, lastStats.visited,
 				lastStats.members) };
+		for (auto& line : MaterialGrowthLines())
+			lines.push_back(std::move(line));
+		return lines;
 	}
 }

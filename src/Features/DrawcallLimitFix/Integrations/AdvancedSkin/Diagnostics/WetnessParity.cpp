@@ -31,7 +31,7 @@ namespace DCLF::Integrations::AdvancedSkin
 		auto& skin = globals::features::skin;
 		if (skin.settings.EnableSkin && a_rows && a_objectIndex < a_rows->size()) {
 			const auto& expected = (*a_rows)[a_objectIndex].skinPerGeometry;
-			const auto& native = skin.currentWetness;
+			const auto& native = skin.lastGeometryData.skinPerGeometry;
 			++checks;
 			if (native.x != 0.0f || native.y != 0.0f)
 				++wetDraws;

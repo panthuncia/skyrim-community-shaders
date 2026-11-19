@@ -55,9 +55,6 @@ struct Skin : Feature
 	 */
 	float4 GetWetness(RE::BSGeometry* a_geometry);
 
-	/// The per-geometry wetness the last SetupGeometry uploaded to b7, for Drawcall Limit Fix's parity check. Render thread.
-	float4 currentWetness{ 0, 0, 0, 0 };
-
 	struct Settings
 	{
 		bool EnableSkin = true;
@@ -91,6 +88,24 @@ struct Skin : Feature
 	static_assert(sizeof(SkinData) == 112);
 	static_assert(sizeof(PerGeometryData) == 144);
 	SkinData GetCommonBufferData();
+
+	/// A geometry's material as SetupGeometry binds it, less the wetness.
+	struct GeometryMaterial
+	{
+		float4 materialFlags{ 0, 0, 0, 0 };  ///< t71 bound, t74 bound, t72 is a BC5 normal-only map, thickness.
+		SkinData profile{};
+		std::array<winrt::com_ptr<ID3D11ShaderResourceView>, SkinMaterials::TextureCount> views;  ///< t71, t74 and t72; null when absent.
+		std::optional<float> previewWetness;                             ///< The editor's preview sweat, replacing the actor's wetness.
+	};
+	/**
+	 * @brief Resolves a geometry's material exactly as SetupGeometry does, without binding anything. Public for Drawcall Limit Fix,
+	 * whose draws never reach SetupGeometry. Observes the geometry, so a new one is prepared at the next Prepass. Render thread.
+	 */
+	GeometryMaterial ResolveGeometryMaterial(RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property);
+	/// The detail normal sampler (s15) that SetupResources creates.
+	static D3D11_SAMPLER_DESC DetailSamplerDesc();
+	/// What the last SetupGeometry uploaded to b7, for Drawcall Limit Fix's parity checks. Render thread.
+	PerGeometryData lastGeometryData{};
 
 	enum class Layer
 	{

@@ -58,6 +58,7 @@ namespace DCLF::Features
 			kFadeRootsRegister,
 			kFadeSeedsRegister,
 			kPixelObjectsRegister,
+			Integrations::AdvancedSkin::kMaterialTableRegister,
 		};
 
 		constexpr bool FrameBindingRegistersValid()
@@ -157,7 +158,6 @@ namespace DCLF::Features
 		// Every material contributor's feature texture registers, each list ascending. They must not overlap other ranges and must fit
 		// MaterialRecord's feature slots.
 		constexpr std::span<const std::uint32_t> kFeatureTextureRegisters[] = {
-			Integrations::AdvancedSkin::kMaterialTextureRegisters,
 			Integrations::TruePBR::kTextureRegisters,
 		};
 
@@ -198,10 +198,10 @@ namespace DCLF::Features
 			return count <= Extensions::kFeatureTextureSlots;
 		}
 
-		// DCLFMaterialTextureIndex (DCLFObjects.hlsli): t71 is slot 0, t74 slot 1, t80 and up slot 2.
+		// DCLFMaterialTextureIndex (DCLFObjects.hlsli): t80 and up are slots 0 on.
 		constexpr std::uint32_t DecodedFeatureSlot(std::uint32_t a_register)
 		{
-			return a_register == 71 ? 0u : a_register == 74 ? 1u : a_register >= 80 ? 2u + (a_register - 80) : ~0u;
+			return a_register >= 80 ? a_register - 80 : ~0u;
 		}
 
 		// Core assigns contributors' registers to feature slots in ascending order. Each slot must be the one the shaders decode.
@@ -380,7 +380,7 @@ namespace DCLF::Features
 	static_assert(FeatureTextureRegistersValid(),
 		"a material contributor's feature texture registers are not ascending, below t16, past t127, Core's, a frame binding's, a frame "
 		"texture's, a graph buffer's or another contributor's, or more than MaterialRecord's feature slots");
-	static_assert(FeatureTextureSlotsDecoded(), "the feature texture registers, ascending, are not DCLFMaterialTextureIndex's slots (t71, t74, t80 on)");
+	static_assert(FeatureTextureSlotsDecoded(), "the feature texture registers, ascending, are not DCLFMaterialTextureIndex's slots (t80 on)");
 	static_assert(FrameConstantRowsValid(),"a frame constant row is outside Core's feature rows of PS b13 or another row's");
 	static_assert(ObjectFlagsValid(), "a feature's object flags are Core's (outside kFeatureObjectFlags) or another feature's");
 	// Every bit left to the features must be declared by one, so Core cannot take one back unnoticed.

@@ -211,7 +211,9 @@ namespace DCLF
 		float skinPerGeometry[4];
 		// A bit per float SetupGeometry writes, for CPU comparisons. The shader reads none.
 		std::uint32_t written;
-		std::uint32_t padding[3];
+		// Advanced Skin's row in its material table (Integrations/AdvancedSkin/SkinMaterials.cpp), zero for the disabled profile.
+		std::uint32_t skinMaterial;
+		std::uint32_t padding[2];
 		// The feature block. The shading contribution that claims it derives the first blockWords, such as TreeWind's TreeParams and WindTimers.xy,
 		// which a member draws with until TreeWindCS has an entry for its tree. The rest is zero.
 		float featureBlock[8];
