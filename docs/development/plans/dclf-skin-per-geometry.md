@@ -62,8 +62,9 @@ The field is registered for `EntryClass::ActorOwned`, like wetness, with its own
 
 The put carries the row's sealed descriptor owners, so FrameValues keeps the views alive until the frame's GPU work is done.
 
-Not covered: a skin surface not owned by an actor (Skin's D3D11 path would still give it a material by its texture). It gets row 0,
-skin off.
+Not covered, by decision: a skin surface not owned by an actor (Skin's D3D11 path would still give it a material by its texture).
+It gets row 0, skin off. Such surfaces are rare (skin-textured statics, mannequin-like props); covering them would need a scan of
+every published shading change, as Landscape seams do. This is a known difference from the D3D11 path.
 
 ### 2.4 Publication at frame boundaries
 
@@ -107,9 +108,10 @@ that frame's Prepass. `currentWetness` became `lastGeometryData.skinPerGeometry`
 
 ## 3. Open decisions
 
-1. **Rejected imports are fatal.** The alternative is drawing the surface without that texture and logging once.
-2. **Non-actor skin surfaces** get skin off. Tracking every slot (as Landscape seams do) would cover them at the cost of a scan of
-   every published shading change.
+1. **Rejected imports: decided.** A texture whose import fails logs an error once, and the surface draws without it (its flag or
+   the detail switch off). The view is not asked again until the device changes.
+2. **Non-actor skin surfaces: decided.** They get skin off (section 2.3). Tracking every slot (as Landscape seams do) would cover
+   them at the cost of a scan of every published shading change.
 3. **The capture resolves every compatible member every frame**, as SetupGeometry does per draw. Skin's revisions could gate it
    later if the cost shows (zone `CS.DCLF.Capture.SkinMaterials`).
 4. **t38** is a new frame binding register. Any free register works.

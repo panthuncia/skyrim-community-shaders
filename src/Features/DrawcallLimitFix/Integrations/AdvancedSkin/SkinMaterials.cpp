@@ -55,6 +55,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			GpuTextures::Binding binding;  // kInvalid until the first reply
 			bool asked = false;
+			bool failed = false;     // the import failed: the material draws without this texture and it is not asked again
 			std::uint32_t used = 0;  // the capture that last used it
 		};
 
@@ -186,10 +187,13 @@ namespace DCLF::Integrations::AdvancedSkin
 				if (it == a_state.views.end())
 					return;
 				it->second.asked = false;
-				// Skin validated the DDS when it loaded it, so an import that fails is a bug.
-				if (!a_reply.binding.owner)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: Advanced Skin's texture {} could not be imported for DCLF's draws",
-						fmt::ptr(a_reply.view)));
+				// Skin validated the DDS when it loaded it, so a failed import is a bug. The skin still draws, without this texture.
+				if (!a_reply.binding.owner) {
+					it->second.failed = true;
+					logger::error("[DCLF] Advanced Skin's texture {} could not be imported for DCLF's draws; its skin draws without it",
+						fmt::ptr(a_reply.view));
+					return;
+				}
 				// Moved meanwhile: the next capture asks again, and the old binding stays in use until then.
 				if (GpuTextures::Superseded(a_reply.binding.owner.get()))
 					return;
@@ -206,7 +210,7 @@ namespace DCLF::Integrations::AdvancedSkin
 				entry.view = a_view;
 			entry.used = a_state.captures;
 			const bool bound = entry.binding.index != GpuTextures::kInvalid;
-			if (!entry.asked && (!bound || GpuTextures::Superseded(entry.binding.owner.get()))) {
+			if (!entry.asked && !entry.failed && (!bound || GpuTextures::Superseded(entry.binding.owner.get()))) {
 				GpuTextures::Get().Request(a_view.get(), GpuTextures::Tag(GpuTextures::Source::Feature), a_state.replies, a_state.cookie);
 				entry.asked = true;
 			}
@@ -278,7 +282,9 @@ namespace DCLF::Integrations::AdvancedSkin
 					row.descriptors[i] = binding->index + 1;
 					owners.push_back(binding->owner);
 				} else {
-					a_slot.complete = false;
+					// A failed import is settled: the slot keeps drawing without it and is not resolved again for it.
+					if (const auto it = a_state.views.find(material.views[i].get()); it == a_state.views.end() || !it->second.failed)
+						a_slot.complete = false;
 					if (i < 2)
 						row.materialFlags[i] = 0.0f;
 				}
@@ -397,6 +403,8 @@ namespace DCLF::Integrations::AdvancedSkin
 		materialPool = a_context.RegisterFrameValuePool(
 			{ .name = "skin-materials", .stride = sizeof(MaterialRow), .kick = &KickMaterials, .sample = &SampleMaterials, .send = &SendMaterials });
 		a_context.RegisterFrameBinding({ .name = "skin materials SRV", .textureRegister = kMaterialTableRegister, .select = &SelectMaterialTable });
+		// Actor-owned surfaces only, by decision. A skin surface no actor owns keeps row 0 (skin off), unlike Skin's D3D11 path, which
+		// gives it a material by its texture (docs/development/plans/dclf-skin-per-geometry.md, 2.3).
 		a_context.RegisterShadingField({ .name = "skin material", .field = Api::ShadingRowField::SkinMaterial, .members = Api::EntryClass::ActorOwned,
 			.membership = &MaterialMembership, .capture = &CaptureMaterials });
 		// SkinPerGeometry (b7), bound per draw. DCLF's draws take it from the shading row and the material table instead.
