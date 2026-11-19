@@ -606,7 +606,11 @@ refuses each, so they join instead of being registered by the engine every frame
 -   **Physical Sky washes the scene out.** With Physical Sky on, a Whiterun exterior at noon is covered in a bright cream haze:
     distant terrain nearly gone, a flat pale sky, glowing silhouette edges. It happens in plain D3D11 mode, in the graph modes,
     and in upstream's own build (`a03587448`, 2.0.0-rc.1, checked by hand on 2026-11-19), so it is not from the sync or the ORG
-    ports. **Next:** find the source (defaults, units, exposure, a missing asset, or this modlist's weathers); being investigated.
+    ports. **Cause (confirmed 2026-11-19):** Physical Sky's output is calibrated for a linear scene; with Linear Lighting off
+    (Post Processing in Vanilla mode) its sky radiance, aerial perspective and 10 lux sun land in the gamma buffer unscaled. With
+    Linear Lighting on, plain D3D11 looks normal. A candidate fix that turns Physical Sky off without Linear Lighting is on
+    `fix/physsky-washout` (`2e0fdec49`), not merged. **Next:** waiting on the feature author on whether the combination is meant
+    to work; left alone until then.
 -   **BasicRHI's `frontCCW` under Vulkan.** `frontCCW` has D3D's meaning on both backends. SARP and BasicRenderer set it true for
     glTF content. Their D3D12 behaviour is unchanged, but they have not been run under Vulkan since the mapping changed.
 
