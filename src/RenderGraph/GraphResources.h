@@ -15,6 +15,7 @@
 namespace org
 {
 	class ExternalTextureResource;
+	class GloballyIndexedResource;
 	class RenderGraph;
 	class RenderPass;
 	class Resource;
@@ -29,7 +30,8 @@ namespace org
 * A transient's first use each frame must be a write, and nothing may read it in a later frame.
 * Teardown and Resize release the D3D11 side first, then free the graph resource after D3D11's last use.
 * A same-shape Resize of a versioned texture is a new version. Any other Resize triggers a graph rebuild by itself.
-* New versions are published only at a frame boundary, so during a frame use RequestSize. Everything runs on the render thread.
+* New versions are published only at a frame boundary, so during a frame use RequestSize. Everything runs on the render thread,
+* except Prepare and Preparable (any thread).
 */
 namespace GraphResources
 {
@@ -106,7 +108,8 @@ namespace GraphResources
 	{
 		std::shared_ptr<org::ExternalTextureResource> graph;
 		winrt::com_ptr<ID3D11Resource> d3d11;
-		std::uint64_t image = 0;  // the VkImage, for readers that hold DXVK's description of it
+		std::uint64_t image = 0;   // the VkImage, for readers that hold DXVK's description of it
+		std::uint32_t layout = 0;  // the VkImageLayout D3D11 rests it in, which every image of its shape class rests in too
 	};
 
 	/** @brief Exports a graph texture for an owner that makes its own D3D11 views, such as engine targets. Render thread. Empty on failure.
@@ -126,6 +129,35 @@ namespace GraphResources
 
 	/** @brief A copy pass for staged uploads. It copies on every run it is in, so give it as a one-shot pass. Null entries are skipped. */
 	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads);
+
+	/** @brief A texture's width, height and depth (1 for a 2D texture). */
+	using Extent = std::array<UINT, 3>;
+
+	/** @brief What a new version holds before its first write. */
+	enum class Contents : std::uint8_t
+	{
+		Undefined,  // whatever the memory held: written before any read, or zeroed by its D3D11 export
+		Zero,       // zero-filled before the version is ready (a history is born cleared)
+	};
+
+	/** @brief What adoption needs of an exported twin's prepared version. Opaque outside GraphResources.cpp. */
+	struct PreparedExport;
+
+	/**
+	* @brief A versioned twin's next version, made by Resource::Prepare and not yet adopted.
+	* Make the slot's pending version from resource (VersionedTexture::MakeImage), fill it as contents says, adopt it at a
+	* frame boundary, then call Resource::AdoptPrepared with this.
+	*/
+	struct PreparedVersion
+	{
+		std::shared_ptr<org::VersionedTexture> slot;             // the slot it becomes a version of
+		std::shared_ptr<org::GloballyIndexedResource> resource;  // the version's graph resource, its memory made
+		Contents contents = Contents::Undefined;
+		Extent extent{};
+		const void* twin = nullptr;                      // the Resource it was prepared for
+		std::shared_ptr<const PreparedExport> exported;  // null for a graph-only twin
+		explicit operator bool() const { return resource != nullptr; }
+	};
 
 	/** @brief What every twin shares: the graph resource, its name and its exported views. */
 	class Resource
@@ -173,6 +205,42 @@ namespace GraphResources
 		/** @brief What bumped the resize generation past a_since, for the log. Only the last few are kept. */
 		static std::string ResizeCauses(std::uint64_t a_since);
 
+		/** @brief The texture's current extent; zeros for a buffer. Render thread. */
+		virtual Extent CurrentExtent() const { return {}; }
+
+		/** @brief Texture2D::Resize or Texture3D::Resize at a_extent, for a holder of the base, such as a taker of size wishes
+		*  serving one that is not Preparable. Only at a frame boundary. False for a buffer or an unchanged size. */
+		virtual bool ResizeTo(const Extent&) { return false; }
+
+		/** @brief Whether Prepare makes a version at a_next: a versioned texture, live, whose shape class holds there
+		*  (format, mip count, slice count). False means today's path: Resize at a frame boundary, a new slot and a build. Any thread. */
+		bool Preparable(const Extent& a_next) const;
+
+		/**
+		* @brief Makes the next version at a_next without changing the twin: its graph resource with memory, and what adoption needs.
+		* Any thread. Never touches D3D11. Empty when not Preparable. Throws, naming the twin, when memory or a resource cannot be made.
+		* An exported twin's version is Contents::Undefined: its D3D11 export, made at adoption, zeroes it before any graph use.
+		*/
+		PreparedVersion Prepare(const Extent& a_next) const;
+
+		/**
+		* @brief Render thread, at a frame boundary, after the slot adopted a_prepared's version. Makes the D3D11 export and views
+		* (exported twins), updates Desc(), Graph() and the made-image registry, and releases the old D3D11 side after D3D11's last use.
+		* Bumps no resize generation and adopts no version. A version prepared for another twin or another slot is fatal.
+		*/
+		void AdoptPrepared(const PreparedVersion& a_prepared);
+
+		/** @brief The size RequestSize asked for and no boundary applied yet. Render thread. */
+		const std::optional<Extent>& RequestedExtent() const { return requestedSize; }
+
+		/**
+		* @brief Takes every change of a twin's size wish instead of the next frame boundary's Resize. Render thread.
+		* Called with the twin and its new wish (empty when it asks for its own size again). Null restores Resize at the boundary.
+		* The hook holds the twin by its Alive() token, since a twin may go before its wish is served.
+		*/
+		using SizeWishHook = std::function<void(Resource&, const std::optional<Extent>&)>;
+		static void SetSizeWishHook(SizeWishHook a_hook);
+
 	protected:
 		Resource(std::string a_name, Options a_options) :
 			name(std::move(a_name)), options(a_options)
@@ -180,12 +248,19 @@ namespace GraphResources
 			if (Aliasable())
 				NoteTransientName(name, true);
 		}
-		~Resource()
+		virtual ~Resource()
 		{
 			Reset();
 			if (Aliasable())
 				NoteTransientName(name, false);
 		}
+
+		/** @brief The texture's D3D11 shape at a_extent, view formats left unknown. False for a buffer, or when a_extent changes
+		*  the mip count. Called with the register lock held. */
+		virtual bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const;
+
+		/** @brief Sets the description's size to an adopted version's. */
+		virtual void SetExtent(const Extent&) {}
 
 		/** @brief The views' names, as Buffer.h's detail::SetD3DName gives them. */
 		void NameViews() const;
@@ -208,7 +283,8 @@ namespace GraphResources
 		std::shared_ptr<const void> alive = std::make_shared<const int>(0);
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
-		std::optional<std::array<UINT, 3>> requestedSize;  // RequestSize's, until the next frame boundary
+		std::optional<Extent> requestedSize;          // RequestSize's, until the next frame boundary
+		std::uint32_t exportLayout = 0;               // an exported texture's resting VkImageLayout, the same for every version
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
@@ -246,6 +322,13 @@ namespace GraphResources
 		/** @brief The size the texture takes at the next frame boundary. Render thread, at any point of a frame. */
 		void RequestSize(UINT a_width, UINT a_height);
 
+		Extent CurrentExtent() const override;
+		bool ResizeTo(const Extent& a_extent) override;
+
+	protected:
+		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
+		void SetExtent(const Extent& a_extent) override;
+
 	private:
 		void Create();
 
@@ -268,6 +351,13 @@ namespace GraphResources
 
 		/** @brief Texture2D::RequestSize with a depth. */
 		void RequestSize(UINT a_width, UINT a_height, UINT a_depth);
+
+		Extent CurrentExtent() const override;
+		bool ResizeTo(const Extent& a_extent) override;
+
+	protected:
+		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
+		void SetExtent(const Extent& a_extent) override;
 
 	private:
 		void Create();
