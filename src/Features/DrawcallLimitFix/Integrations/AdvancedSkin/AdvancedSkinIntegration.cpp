@@ -73,8 +73,12 @@ namespace DCLF::Integrations::AdvancedSkin
 	std::vector<std::string> GrowthLines()
 	{
 		const auto& owners = Owners();
-		return { fmt::format("advanced skin wetness groups {}", owners.GroupCount()), fmt::format("advanced skin wetness slots {}", owners.SlotCount()),
+		std::vector<std::string> lines{ fmt::format("advanced skin wetness groups {}", owners.GroupCount()),
+			fmt::format("advanced skin wetness slots {}", owners.SlotCount()),
 			fmt::format("advanced skin wetness last capture actors {}, changed {}, visited {}, members {}", lastStats.actors, lastStats.changed, lastStats.visited,
 				lastStats.members) };
+		for (auto& line : MaterialGrowthLines())
+			lines.push_back(std::move(line));
+		return lines;
 	}
 }

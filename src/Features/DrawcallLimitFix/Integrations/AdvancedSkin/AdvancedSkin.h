@@ -44,6 +44,8 @@ namespace DCLF::Integrations::AdvancedSkin
 
 	/** @brief Render thread. a_slot's material as the last capture made it. False when the slot is not an actor's. */
 	bool SlotMaterialOf(std::uint32_t a_slot, SlotMaterial& a_out);
+	/** @brief Render thread. The material table's sizes, as "<name> <value>" lines. */
+	std::vector<std::string> MaterialGrowthLines();
 
 	Api::Feature Integration();
 

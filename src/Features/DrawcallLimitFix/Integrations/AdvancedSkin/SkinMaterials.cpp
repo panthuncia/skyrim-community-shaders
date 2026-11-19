@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -410,5 +411,13 @@ namespace DCLF::Integrations::AdvancedSkin
 		const auto& slot = state.slots[a_slot];
 		a_out = { slot.views, &state.table[slot.row].row, slot.complete };
 		return true;
+	}
+
+	std::vector<std::string> MaterialGrowthLines()
+	{
+		const auto& state = SkinMaterialState();
+		return { fmt::format("advanced skin material members {}", state.members.size()),
+			fmt::format("advanced skin material rows {} ({} free)", state.table.size(), state.freeRows.size()),
+			fmt::format("advanced skin material views {}", state.views.size()) };
 	}
 }
