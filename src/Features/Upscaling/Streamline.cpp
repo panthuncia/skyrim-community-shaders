@@ -3,6 +3,7 @@
 #include "Features/Upscaling.h"
 
 #include "DXVKInterop.h"
+#include "DxvkPresenter.h"
 
 #include "../../DxvkLoader.h"
 #include "Utils/SwitchFile.h"
@@ -127,58 +128,6 @@ namespace
 
 	} g_sl;
 
-	// All DXVK exports used by Streamline, resolved once at device setup.
-	struct DxvkExports
-	{
-		using RequestSwapchainRecreateFn = void (*)();
-		using SetSyncPresentFn = void (*)(uint32_t);
-		using SetPresentQueueDepthFn = void (*)(uint32_t);
-		using SetTearingPreferenceFn = void (*)(uint32_t);
-		using SetSwapchainTornDownCallbackFn = void (*)(bool (*)());
-
-		HMODULE module = nullptr;
-		RequestSwapchainRecreateFn requestSwapchainRecreate = nullptr;
-		SetSyncPresentFn setSyncPresent = nullptr;
-		SetPresentQueueDepthFn setPresentQueueDepth = nullptr;
-		SetTearingPreferenceFn setTearingPreference = nullptr;
-		bool presenterSurfaceStateAvailable = false;
-		SetSwapchainTornDownCallbackFn setSwapchainTornDownCallback = nullptr;
-
-		/// Resolve on first use. Upscaling::Load pushes sync present and the tearing preference
-		/// before DXVK creates its swapchain -- which is the whole point of those calls -- but that
-		/// runs before Streamline feature init calls Resolve. Without this both pushes were dropped
-		/// and latched a "not found" warning that could never be retracted.
-		void EnsureResolved()
-		{
-			if (!module)
-				Resolve();
-		}
-
-		void Resolve()
-		{
-			module = GetModuleHandleW(L"dxvk_d3d11.dll");
-			if (!module)
-				return;
-			requestSwapchainRecreate = reinterpret_cast<RequestSwapchainRecreateFn>(
-				GetProcAddress(module, "dxvkRequestSwapchainRecreate"));
-			setSyncPresent = reinterpret_cast<SetSyncPresentFn>(
-				GetProcAddress(module, "dxvkSetSyncPresent"));
-			setPresentQueueDepth = reinterpret_cast<SetPresentQueueDepthFn>(
-				GetProcAddress(module, "dxvkSetPresentQueueDepth"));
-			setTearingPreference = reinterpret_cast<SetTearingPreferenceFn>(
-				GetProcAddress(module, "dxvkSetTearingPreference"));
-			presenterSurfaceStateAvailable =
-				GetProcAddress(module, "dxvkGetPresenterSurfaceState") != nullptr;
-			setSwapchainTornDownCallback = reinterpret_cast<SetSwapchainTornDownCallbackFn>(
-				GetProcAddress(module, "dxvkSetSwapchainTornDownCallback"));
-		}
-
-		[[nodiscard]] bool HasFrameGenerationInterop() const
-		{
-			return module && requestSwapchainRecreate && setSyncPresent &&
-			       presenterSurfaceStateAvailable && setSwapchainTornDownCallback;
-		}
-	} g_dxvk;
 
 	// Feature load changes are applied only while the swapchain is torn down.
 	std::atomic<bool> g_dlssgDesiredLoaded{ false };
@@ -216,8 +165,8 @@ namespace
 		return true;
 	}
 
-	// Runs between DXVK swapchain destruction and creation.
-	bool DxvkSwapchainTornDownCallback()
+	// Runs between the swap chain's destruction and creation.
+	bool SwapchainTornDown()
 	{
 		// Per-swapchain options are invalid after teardown.
 		g_sl.dlssgModeCached = false;
@@ -683,8 +632,7 @@ void Streamline::SetVulkanDevice()
 		featureXeSS = g_sl.slXeSSSetOptions != nullptr;
 	}
 
-	g_dxvk.Resolve();
-	const bool frameGenerationInteropReady = g_dxvk.HasFrameGenerationInterop();
+	const bool frameGenerationInteropReady = FrameGen::DxvkPresenter::Get().HasFrameGenerationInterop();
 	featureDLSSG = featureDLSSG && dlssgHardware && frameGenerationInteropReady;
 	featureFSRFG = featureFSRFG && frameGenerationInteropReady &&
 	               dxvk->FrameGenerationQueueInteropReady();
@@ -2628,20 +2576,9 @@ bool Streamline::EnsureDLSSGPresentTag()
 	return g_sl.dlssgTaggedThisFrame;
 }
 
-void Streamline::RegisterDxvkSwapchainCallbacks()
+bool Streamline::CompleteSwapchainTeardown()
 {
-	if (!g_dxvk.module) {
-		logger::warn("[Streamline] DXVK module not loaded — cannot register swapchain callbacks");
-		return;
-	}
-
-	// Streamline features may only be loaded or unloaded while no swapchain exists.
-	if (g_dxvk.setSwapchainTornDownCallback) {
-		g_dxvk.setSwapchainTornDownCallback(&DxvkSwapchainTornDownCallback);
-		logger::info("[Streamline] registered DXVK swapchain-torn-down callback");
-	} else {
-		logger::warn("[Streamline] dxvkSetSwapchainTornDownCallback not found — frame-generation switching disabled");
-	}
+	return SwapchainTornDown();
 }
 
 void Streamline::SetDLSSGDesiredLoaded(bool a_loaded)
@@ -2681,60 +2618,3 @@ bool Streamline::IsFSRFGPresentOwner() const
 	return g_fsrfgOwnsPresent.load(std::memory_order_acquire);
 }
 
-void Streamline::RequestDxvkSwapchainRecreate(const char* a_reason)
-{
-	g_dxvk.EnsureResolved();
-	if (g_dxvk.requestSwapchainRecreate) {
-		g_dxvk.requestSwapchainRecreate();
-		logger::info("[Streamline] requested DXVK swapchain recreate ({})", a_reason);
-	} else {
-		logger::warn("[Streamline] dxvkRequestSwapchainRecreate not found — {} cannot take effect", a_reason);
-	}
-}
-
-void Streamline::PushDxvkSyncPresent(bool a_sync)
-{
-	g_dxvk.EnsureResolved();
-	// Frame-generation proxies require present to complete before the D3D11 hook returns.
-	if (g_dxvk.setSyncPresent) {
-		g_dxvk.setSyncPresent(a_sync ? 1u : 0u);
-	} else {
-		static bool s_warned = false;
-		if (!s_warned) {
-			s_warned = true;
-			logger::warn("[Streamline] dxvkSetSyncPresent not found - synchronous present control inactive");
-		}
-	}
-}
-
-void Streamline::PushDxvkPresentQueueDepth(uint32_t a_depth)
-{
-	g_dxvk.EnsureResolved();
-	// Bounded overlap for a steady frame-generation proxy. Neither extreme of
-	// dxvkSetSyncPresent substitutes for this: fully synchronous wedges the swapchain
-	// recreate that installs the FFX wrap, and unrestricted wedges shortly after it.
-	if (g_dxvk.setPresentQueueDepth) {
-		g_dxvk.setPresentQueueDepth(a_depth);
-	} else {
-		static bool s_warned = false;
-		if (!s_warned) {
-			s_warned = true;
-			logger::warn("[Streamline] dxvkSetPresentQueueDepth not found - bounded present overlap inactive");
-		}
-	}
-}
-
-void Streamline::PushDxvkTearingPreference(uint32_t a_preference)
-{
-	g_dxvk.EnsureResolved();
-	// Presenter::pickPresentMode reads this at swapchain creation, so it must be set before the
-	// recreate that installs a frame-generation proxy. 0 = tear-free, 1 = tearing, anything else
-	// defers to DXVK configuration.
-	if (g_dxvk.setTearingPreference) {
-		g_dxvk.setTearingPreference(a_preference);
-	} else {
-		static bool s_warned = false;
-		if (!std::exchange(s_warned, true))
-			logger::warn("[Streamline] dxvkSetTearingPreference not found - present-mode control inactive");
-	}
-}

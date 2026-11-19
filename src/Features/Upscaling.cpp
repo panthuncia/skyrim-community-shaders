@@ -10,6 +10,7 @@
 #include "ScreenshotFeature.h"
 #include "State.h"
 #include "Upscaling/DXVKInterop.h"
+#include "Upscaling/DxvkPresenter.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -395,7 +396,7 @@ void Upscaling::Load()
 {
 	// Frame-generation proxies require synchronous present from the first frame.
 	if (DxvkLoader::IsLoaded())
-		Streamline::PushDxvkSyncPresent(settings.frameGeneration);
+		FrameGen::DxvkPresenter::Get().PresetSyncPresent(settings.frameGeneration);
 
 	if (DxvkLoader::IsLoaded()) {
 		// Tear-free (MAILBOX) for the whole session, set before DXVK creates the swapchain.
@@ -440,7 +441,7 @@ void Upscaling::Load()
 		// follows the frame-rate setting: tear-free while a cap paces the output anyway, tearing
 		// when the cap is off. Switching costs a swapchain recreate (MAILBOX is outside IMMEDIATE's
 		// compatible-mode group on NVIDIA), so it is done only when the setting actually changes.
-		Streamline::PushDxvkTearingPreference(GetPresentModePreference());
+		FrameGen::DxvkPresenter::Get().PresetTearing(GetPresentModePreference() != 0);
 	}
 
 	if (DxvkLoader::IsLoaded()) {
@@ -618,11 +619,8 @@ bool Upscaling::IsFrameGenerationActive() const
 {
 	if (!loaded || !settings.frameGeneration || IsDisplayUnsettled())
 		return false;
-	if (DXVKInterop::GetSingleton()->HasCommandRingFault())
-		return false;
-	const auto& hdr = globals::features::hdrDisplay;
-	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive))
+	const auto& presenter = FrameGen::ActivePresenter();
+	if (!presenter.Available() || !presenter.Surface().ready)
 		return false;
 	auto fgMethod = GetFrameGenMethod();
 	if (fgMethod == FrameGenMethod::kDLSSG)
@@ -700,7 +698,7 @@ void Upscaling::BeginRenderFrame()
 	if (hdr.loaded)
 		hdr.BeginRenderFrame();
 	else
-		DXVKInterop::GetSingleton()->CommitPresenterSurfaceStateForRenderFrame();
+		FrameGen::DxvkPresenter::Get().BeginFrame();
 }
 
 bool Upscaling::GetEffectiveReflex() const
@@ -868,16 +866,20 @@ void Upscaling::UpdatePresentModePreference()
 		return;
 	const bool first = s_applied == UINT32_MAX;
 	s_applied = desired;
-	Streamline::PushDxvkTearingPreference(desired);
 	// Presenter::pickPresentMode reads the preference at swapchain creation, so an already-created
 	// swapchain keeps the old mode until it is rebuilt. Skip the recreate on the first call, which
 	// only records what Load() already pushed.
-	if (!first) {
+	if (first)
+		FrameGen::DxvkPresenter::Get().PresetTearing(desired != 0);
+	else {
 		logger::info("[Upscaling] present mode preference -> {} (vsync {}, frame rate {})",
 			desired ? "tearing" : "tear-free",
 			settings.vsync ? "on" : "off",
 			settings.frameRateLimitDivisor <= 0 ? "unlocked" : "capped");
-		Streamline::RequestDxvkSwapchainRecreate("frame-rate setting changed present mode");
+		const auto method = !IsFrameGenerationActive()                      ? FrameGen::Method::kNone :
+		                    GetFrameGenMethod() == FrameGenMethod::kDLSSG ? FrameGen::Method::kDLSSG :
+		                                                                    FrameGen::Method::kFSR;
+		FrameGen::ActivePresenter().RequestConfig(FrameGen::Controller::Presentation(method), "frame-rate setting changed present mode");
 	}
 }
 
@@ -995,7 +997,7 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 			!streamline->SetDLSSGMode(false, displayWidth, displayHeight)) {
 			logger::error("[Upscaling] DLSS-G mode-off failed; continuing with device-idle teardown");
 		}
-		const bool completionProven = dxvk->WaitDeviceIdle();
+		const bool completionProven = FrameGen::ActivePresenter().Quiesce(FrameGen::Method::kDLSSG);
 		if (!completionProven) {
 			// Deferring suppresses this present. That is correct for a transient fault, but only
 			// while the wait can still succeed -- see the device-lost check at the top, which is
@@ -1011,11 +1013,9 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 			return E_FAIL;
 		}
 		// Ambiguous submissions keep their Vulkan views quarantined until FFX swapchain teardown.
-		const auto& hdr = globals::features::hdrDisplay;
-		dxvk->BeginPresenterColorSpaceTransition(hdr.loaded && hdr.IsHDREnabledForFrame(), true);
 		streamline->SetDLSSGDesiredLoaded(false);
 		streamline->SetFSRFGDesiredLoaded(false);
-		Streamline::RequestDxvkSwapchainRecreate(a_reason);
+		FrameGen::ActivePresenter().RequestConfig(FrameGen::Controller::Presentation(FrameGen::Method::kNone), a_reason);
 		FrameGen::Controller::GetSingleton()->NotifyFaultTeardownRequested();
 		return a_present(a_swapChain, 0, a_flags);
 	};
@@ -1029,15 +1029,8 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	if (!IsFrameGenerationActive())
 		return a_present(a_swapChain, a_syncInterval, a_flags);
 
-	// Relax the fully-synchronous present once a proxy actually owns the swapchain. The switch
-	// itself needs depth zero, and the proxy install re-asserts it, so this has to be (re)applied
-	// from the steady-state present rather than once at settle.
-	// FSR-FG only. DLSS-G paces by blocking inside its own present (eBlockPresentingClientQueue);
-	// adding a second waiting gate on top deadlocks the pipeline.
-	if (streamline->IsFSRFGPresentOwner())
-		Streamline::PushDxvkPresentQueueDepth(2u);
-
 	auto fgMethod = GetFrameGenMethod();
+	FrameGen::ActivePresenter().BeforePresent(fgMethod == FrameGenMethod::kDLSSG ? FrameGen::Method::kDLSSG : FrameGen::Method::kFSR);
 	if (fgMethod != FrameGenMethod::kDLSSG) {
 		// FSR-FG needs the same every-present guarantee DLSS-G gets below: on frames where the
 		// render pass prepared no interpolation frame -- the main menu, load screens, anywhere
@@ -1109,10 +1102,8 @@ void Upscaling::CreateHudlessTexture()
 	D3D11_TEXTURE2D_DESC texDesc{};
 	auto& hdr = globals::features::hdrDisplay;
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	auto* dxvk = DXVKInterop::GetSingleton();
-	const auto encoding = dxvk->GetPresenterEncodingForFrame();
-	const VkFormat presenterFormat = dxvk->GetPresenterFormatForFrame();
-	const bool nativeHDR = hdrActive && encoding == DXVKInterop::PresenterEncoding::kHDR10;
+	const auto surface = FrameGen::ActivePresenter().Surface();
+	const bool nativeHDR = hdrActive && surface.hdr10;
 	if (hdrActive) {
 		// Size from the composed HDR output; the blit in CaptureHudlessColor converts the
 		// format, so this no longer requires the presenter to be exactly HDR10.
@@ -1142,13 +1133,12 @@ void Upscaling::CreateHudlessTexture()
 	// uses, and the blit converts into it regardless of the composed source format.
 	if (hdrActive) {
 		format = DXGI_FORMAT_R10G10B10A2_UNORM;
-	} else if (!hdrActive && encoding == DXVKInterop::PresenterEncoding::kSDR) {
-		if (presenterFormat == VK_FORMAT_R8G8B8A8_UNORM)
+	} else if (!hdrActive && !surface.hdr10) {
+		if (surface.format == rhi::Format::R8G8B8A8_UNorm)
 			format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		else if (presenterFormat == VK_FORMAT_B8G8R8A8_UNORM)
+		else if (surface.format == rhi::Format::B8G8R8A8_UNorm)
 			format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		else if (presenterFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
-				 presenterFormat == VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+		else if (surface.format == rhi::Format::R10G10B10A2_UNorm)
 			format = DXGI_FORMAT_R10G10B10A2_UNORM;
 	}
 	if (format == DXGI_FORMAT_UNKNOWN) {
@@ -1158,10 +1148,9 @@ void Upscaling::CreateHudlessTexture()
 		// calls this every frame and copes with a null texture, so a later frame picks it up.
 		// Reporting it as an error put a spurious "Unsupported HUD-less presenter format 0 for
 		// encoding 0" in every session's log.
-		if (encoding != DXVKInterop::PresenterEncoding::kUnknown &&
-			presenterFormat != VK_FORMAT_UNDEFINED) {
-			logger::error("[Upscaling] Unsupported HUD-less presenter format {} for encoding {}",
-				static_cast<int>(presenterFormat), static_cast<int>(encoding));
+		if (surface.format != rhi::Format::Unknown) {
+			logger::error("[Upscaling] Unsupported HUD-less presenter format {} (HDR10 {})",
+				static_cast<int>(surface.format), surface.hdr10);
 		}
 		return;
 	}
@@ -1586,7 +1575,7 @@ void Upscaling::SetupResources()
 		auto* streamline = Streamline::GetSingleton();
 		if (streamline->Initialize()) {
 			streamline->SetVulkanDevice();
-			Streamline::RegisterDxvkSwapchainCallbacks();
+			FrameGen::ActivePresenter().SetTornDown(&Streamline::CompleteSwapchainTeardown);
 		}
 
 		ApplyHardwareDefaults();
@@ -2067,9 +2056,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 	auto* ui = globals::game::ui;
 	const bool gameplay = ui && !ui->GameIsPaused() && !globals::state->IsMainOrLoadingMenuOpen(ui);
 	const auto fgMethod = GetFrameGenMethod();
-	auto& hdr = globals::features::hdrDisplay;
-	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
-	if (!DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive) ||
+	if (!FrameGen::ActivePresenter().Surface().ready ||
 		(fgMethod == FrameGenMethod::kFSR &&
 		 !FrameGen::Controller::GetSingleton()->IsFSRPresenterReady()))
 		return;
@@ -2197,10 +2184,8 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	globals::features::screenshotFeature.SnapshotCleanSceneOnGraph();
 
 	if (windowUsable && upscaling.IsFrameGenerationActive()) {
-		const auto& hdr = globals::features::hdrDisplay;
-		const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
 		const auto fgMethod = upscaling.GetFrameGenMethod();
-		const bool presenterReady = DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdrActive);
+		const bool presenterReady = FrameGen::ActivePresenter().Surface().ready;
 		const bool fsrReady = fgMethod != FrameGenMethod::kFSR ||
 		                      FrameGen::Controller::GetSingleton()->IsFSRPresenterReady();
 		if (presenterReady && fsrReady)

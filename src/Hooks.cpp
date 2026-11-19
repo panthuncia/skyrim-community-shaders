@@ -57,6 +57,7 @@
 #include "Features/Upscaling.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/Upscaling/DXVKInterop.h"
+#include "Features/Upscaling/DxvkPresenter.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricLighting/ORGVolumetricLighting.h"
@@ -682,7 +683,6 @@ struct IDXGISwapChain_Present
 		queueFrameEnd();
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
 
-		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);
 		// A removed device (DXVK's or native D3D11's Present): the test run ends with device-lost.
 		if (retval == DXGI_ERROR_DEVICE_REMOVED || retval == DXGI_ERROR_DEVICE_RESET || retval == DXGI_ERROR_DEVICE_HUNG) {
@@ -691,8 +691,7 @@ struct IDXGISwapChain_Present
 		}
 		{
 			ZoneScopedN("CS.Present.SurfaceState");
-			if (presentSucceeded)
-				dxvk->RefreshPresenterSurfaceState();
+			FrameGen::DxvkPresenter::Get().AfterPresent(presentSucceeded);
 			streamline->CaptureDLSSGPresentState();
 		}
 

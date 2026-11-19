@@ -31,8 +31,9 @@ namespace FrameGen
 		return surface;
 	}
 
-	void NativePresenter::RequestConfig(const PresentationConfig& a_config)
+	void NativePresenter::RequestConfig(const PresentationConfig& a_config, const char* a_reason)
 	{
+		logger::info("[FrameGen] native presentation requested ({})", a_reason ? a_reason : "no reason given");
 		std::function<bool()> step;
 		{
 			std::lock_guard guard(lock);
@@ -42,6 +43,8 @@ namespace FrameGen
 	}
 
 	uint64_t NativePresenter::AdoptedSerial() const { return RenderGraph::Engine::Native::Presentation().serial; }
+
+	uint64_t NativePresenter::RequestedSerial() const { return RenderGraph::Engine::Native::Presentation().requested; }
 
 	void NativePresenter::SetTornDown(std::function<bool()> a_tornDown)
 	{

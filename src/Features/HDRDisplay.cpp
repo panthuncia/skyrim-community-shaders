@@ -18,6 +18,7 @@
 #include "State.h"
 #include "Upscaling.h"
 #include "Upscaling/DXVKInterop.h"
+#include "Upscaling/DxvkPresenter.h"
 #include "Util.h"
 #include <algorithm>
 #include <dxgi1_4.h>
@@ -801,7 +802,7 @@ void HDRDisplay::SetupResources()
 
 void HDRDisplay::BeginRenderFrame()
 {
-	DXVKInterop::GetSingleton()->CommitPresenterSurfaceStateForRenderFrame();
+	FrameGen::DxvkPresenter::Get().BeginFrame();
 
 	bool requestedHDR;
 	{
@@ -1707,31 +1708,7 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	if (!swapChain4)
 		return;
 
-	auto* dxvk = DXVKInterop::GetSingleton();
-	if (dxvk->IsAvailable() || dxvk->Initialize())
-		dxvk->BeginPresenterColorSpaceTransition(IsHDREnabledForFrame());
-
-	if (IsHDREnabledForFrame()) {
-		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
-		if (SUCCEEDED(hr)) {
-			logger::info("[HDR] Set swap chain color space to HDR10 (PQ/BT.2020)");
-			// Do NOT set HDR10 static metadata - it can cause issues on some monitors
-			// The HGiG approach is to handle highlights compression in the shader instead.
-			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-		} else {
-			logger::warn("[HDR] Failed to set HDR10 color space");
-			dxvk->CancelPresenterColorSpaceTransition(true);
-		}
-	} else {
-		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-		if (SUCCEEDED(hr)) {
-			logger::info("[HDR] Set swap chain color space to SDR (sRGB)");
-			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-		} else {
-			logger::warn("[HDR] Failed to set SDR color space");
-			dxvk->CancelPresenterColorSpaceTransition(false);
-		}
-	}
+	FrameGen::DxvkPresenter::Get().SetColorSpace(swapChain4, IsHDREnabledForFrame());
 
 	swapChain4->Release();
 }

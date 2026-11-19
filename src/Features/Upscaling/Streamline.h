@@ -162,18 +162,11 @@ public:
 	/** @brief FSR-FG counterpart: passes frames through when the render pass prepared none. */
 	bool EnsureFSRFGPresentState();
 
-	/** @brief Registers the swapchain-torn-down callback frame-generation switching needs. */
-	static void RegisterDxvkSwapchainCallbacks();
-
-	/** @brief Requests a Vulkan swapchain recreation. */
-	static void RequestDxvkSwapchainRecreate(const char* a_reason = "FG method switch");
-
-	/** @brief Enables synchronous present while a frame-generation proxy is active. */
-	static void PushDxvkSyncPresent(bool a_sync);
-	/** @brief Sets a bounded present overlap for a settled frame-generation proxy. */
-	static void PushDxvkPresentQueueDepth(uint32_t a_depth);
-	/** @brief 0 = tear-free (MAILBOX), 1 = tearing (IMMEDIATE); set before a swapchain recreate. */
-	static void PushDxvkTearingPreference(uint32_t a_preference);
+	/**
+	 * @brief The presenter's torn-down step, between the swap chain's destruction and creation: FFX's swap chain teardown and
+	 * the frame generation features' load changes, which Streamline allows only while no swap chain exists.
+	 */
+	static bool CompleteSwapchainTeardown();
 
 private:
 	Streamline() = default;
