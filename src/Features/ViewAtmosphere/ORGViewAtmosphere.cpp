@@ -46,7 +46,9 @@ ORGViewAtmosphere& ORGViewAtmosphere::Get()
 #	include <Resources/Buffers/Buffer.h>
 
 #	include <array>
+#	include <cmath>
 #	include <cstdint>
+#	include <cstring>
 #	include <optional>
 #	include <string>
 #	include <vector>
@@ -218,6 +220,36 @@ struct ORGViewAtmosphere::Impl
 			fog.fogDensity, fog.fogDensity2, fog.startDistance, fog.volumetricFogStartDistance, atmosphere.localRange, atmosphere.nearRange,
 			orgFog.NearSRV() ? "ran this frame" : "did not run this frame", slices ? slices->first : 0u, slices ? slices->second : 0u,
 			shared.PostWaterComposite, shared.CameraData.y, camera.x, camera.y, camera.z, DebugView());
+		ReportAnalyticInputs();
+	}
+
+	/**
+	* @brief The analytic fog's inputs in the bytes the shared constants latch from, and the opacity the shader should get from them.
+	* Finds the fog's settings block in the FeatureData bytes by content, so a block at the wrong place or stale shows as missing.
+	*/
+	static void ReportAnalyticInputs()
+	{
+		const auto expected = globals::features::exponentialHeightFog.GetCommonBufferData();
+		const auto& bytes = globals::state->lastFeatureData;
+		std::optional<std::size_t> offset;
+		for (std::size_t at = 0; at + sizeof(expected) <= bytes.size(); at += 16)
+			if (std::memcmp(bytes.data() + at, &expected, sizeof(expected)) == 0) {
+				offset = at;
+				break;
+			}
+		const auto& camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+		// The shader's HeightDensityIntegral for a level ray at the camera's height, at 20000 and 100000 units.
+		const auto opacity = [&](float a_length) {
+			const double height = static_cast<double>(camera.z) - expected.fogHeight;
+			const double falloff = expected.fogHeightFalloff * 0.001;
+			const double perUnit = height <= 0.0 ? 0.69314718056 : std::exp2(-falloff * height) * 0.69314718056;
+			return 1.0 - std::exp2(-expected.fogDensity * 0.001 * perUnit * a_length);
+		};
+		logger::info(
+			"[ORG] Atmosphere and Fog: the analytic fog's inputs: settings block {} in FeatureData ({} B); fog height {:.1f}, falloff {:.3f}, "
+			"density {:.4f}, start {:.0f}, camera z {:.1f}; a level ray should get opacity {:.3f} at 20000 units and {:.3f} at 100000",
+			offset ? fmt::format("at offset {}", *offset) : std::string("NOT FOUND"), bytes.size(), expected.fogHeight, expected.fogHeightFalloff,
+			expected.fogDensity, expected.startDistance, camera.z, opacity(20000.0f), opacity(100000.0f));
 	}
 
 	void MakeMedium()
