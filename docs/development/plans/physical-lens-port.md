@@ -1,8 +1,8 @@
 # Physical Lens on the ORG post chain
 
-Status, 2026-11-18: phase 1 (focus, image mapping, Composite inputs) implemented on `org-native/port-lens`, not built or run
-yet. Phases 2 and 3 (diffraction, ghosts) are designed here and not written. Until they are, the chain holds while Ghost Intensity is above zero
-or Diffraction Starburst is on, with the reason in the log.
+Status, 2026-11-19: phase 1 (focus, image mapping, Composite inputs) is merged. Phases 2 and 3 (diffraction, ghosts) are
+written on `org-native/port-lens-p23`, not built or run yet. The chain no longer holds for Physical Lens. Every lens shader
+the D3D11 path compiles builds for ORG (SPIR-V and DXIL, checked with dxc and spirv-val), and its FXC bytecode is unchanged.
 
 Upstream: #3171 (`00e99c218`), `src/Features/PostProcessing/PhysicalLens*.{h,cpp}`, shaders under
 `features/Post Processing/Shaders/PostProcessing/PhysicalLensFlare/` and `.../PhysicalLensImaging/`.
@@ -44,8 +44,9 @@ The lens's three large blocks do not fit the chain latch (16 KiB for every effec
 - one device-local buffer with a CBV per block,
 - an upload pass that copies the run's region into those buffers, as `SharedConstants`' upload pass does.
 
-Shaders read the blocks as `CBUFFER` entries (`ConstantBuffer<T>` from the heap). A LATCH entry would copy the whole
-struct into a static, and `Surfaces[i]` is indexed dynamically, so that is never used for them. The upload is gated with
+Shaders read the blocks as `CBUFFER` entries through `ORG_CB(name)`. A LATCH entry would copy the whole struct into a
+static, and `Surfaces[i]` is indexed dynamically, so that is never used for them. `optics.hlsli` copies each value field
+of `LensParameters` into a static and reads `Surfaces` in place. The upload is gated with
 the passes that read the block, so a frame that rebuilds no cache copies only what its per-frame passes read.
 
 Small per-frame blocks (focus 32 B, diffraction 112 B, the ghost-wave stage 48 B) are chain latch regions.
@@ -68,12 +69,23 @@ effect's latch block and an upload copies them in, ordered before the writer by 
 
 Indirect dispatches use `ComputeProgram::DispatchIndirect` with the declared buffer (`IndirectArguments` use).
 
-The ghost draws are indexed (`DrawIndexedInstancedIndirect`, 16-bit `BeamIndices`). `RasterProgram` draws non-indexed,
-and indirect only from a latch block. The ORG build of `beam.hlsl` pulls its index from a structured buffer by
-`SV_VertexID`, and the effect's raster pass records `ExecuteIndirect` with the program's draw signature on the declared
-arguments buffer. The arguments the compute shaders write are D3D11's five-word indexed form; the non-indexed signature
-reads the first four at the same offset (count, instances, first index read as first vertex, base vertex read as first
-instance). Both trailing words are zero in every argument set `BuildJobs` writes, which phase 3 must check.
+The ghost draws are indexed on D3D11 (`DrawIndexedInstancedIndirect`, 16-bit `BeamIndices`). The ORG build of `beam.hlsl`
+pulls its index from a 32-bit structured buffer by `SV_VertexID`, and draws non-indexed through the program's draw
+signature on the declared arguments buffer (`RasterProgram::DrawDesc::indirectBuffer`). The compute shaders write D3D11's
+five-word indexed form. The non-indexed signature reads the first four at the same offset: count, instances, first index
+read as first vertex, base vertex read as first instance. Checked: `BuildJobs` only adds to the instance word
+(`InterlockedAdd` at 16, `InterlockedMax` at 68, 88, 108), and the seed's other trailing words are zero.
+
+Kept recordings replay on runs whose commit did not open them. Direct dispatches then read zero counts from the run gate.
+Indirect work reads GPU buffers, so one copy pass seeds all three argument buffers from the effect's latch block on every
+run, with zeros on runs without that work. The planning status clear is an ORG-only gated dispatch
+(`ClearPlanStatus`), not a UAV clear, for the same reason.
+
+The ghost paths (768 paths, about 1.5 MB) are a staged buffer (`StagedBuffer` in the effect): each new lens model is a new
+`org::VersionedBuffer` version, uploaded on the uploader's worker path (`PendingVersion`), adopted at the next frame
+boundary after its copies complete (`Frame::Driver::AtNextBegin`, then `NoteNewVersions`). Until then the ghosts use the
+current version, and the flare constants keep the model fields that version was built for (surfaces, path count, sensor
+plane, focal length, pupil, coating). Nothing waits. The beam's index list goes the same way, once.
 
 ### Targets
 
@@ -82,8 +94,9 @@ area layers as whole textures, additively (`RasterProgram::Target` blend One/One
 through a full-array UAV (`UAVViewType::Texture2DArrayFull`). The anchor helpers have no array UAV, so the effect has
 its own dispatch pass (`LensDispatch`) that declares SRV and UAV variants, CBVs, indirect arguments and buffers.
 
-The ghost-wave atlas has mips made by `GenerateMips` on D3D11. On the graph, `RenderGraph/GenerateMips` or a
-reduction dispatch per mip; phase 3 picks whichever takes RGBA32F.
+The ghost-wave atlas has mips made by `GenerateMips` on D3D11. On the graph it is `GraphPasses::MakeGenerateMips`, gated by
+group counts in the chain's latch, written only when the cache is remade. Its stage words are push constants per
+dispatch, and its aperture and surface a latch region.
 
 ## 3. The DoF focus on the graph
 
@@ -115,16 +128,16 @@ The per-frame flags come from the lens's Commit (`PhysicalLens::OrgComposite`), 
 
 ## 5. Order of work
 
-1. Focus, lens model on the CPU, image mapping, Composite inputs. The chain holds while ghosts or diffraction are on.
-   (Done.)
+1. Focus, lens model on the CPU, image mapping, Composite inputs. (Merged.)
 2. Extraction front end (`flare.cs` Extract to SelectSources, with exposure inputs from the published auto exposure
    and local exposure), the diffraction cache, the per-frame diffraction passes, Composite's wave inputs. Dual-target
    `flare.cs.hlsl`, `exposure.hlsli`, `optics.hlsli`, `diffraction*.hlsl(i)`. `optics.hlsli`'s `LensParameters` becomes a
-   `CBUFFER` with the same `#define` scheme as `trace.cs.hlsl`'s `ImagingParameters`. Lift the hold for Diffraction.
-3. Ghosts: jobs, planning (its table and status are persistent; the status clear is a gated UAV clear), tracing, the
-   ghost-wave cache, the raster pass, resolve. Lift the hold for Intensity.
+   `CBUFFER`. (Written, not run.)
+3. Ghosts: jobs, planning (its table and status are persistent; the status clear is a gated dispatch), tracing, the
+   ghost-wave cache, the raster pass, resolve. (Written, not run.)
 
-Each phase keeps the chain holding for what it has not ported, so no frame mixes paths.
+The diffraction and ghost passes are in a build only while their setting is on, so toggling Diffraction Starburst or
+Ghost Intensity between zero and above rebuilds the chain. Other settings never do.
 
 ## 6. Open questions
 
@@ -132,12 +145,16 @@ Each phase keeps the chain holding for what it has not ported, so no frame mixes
   resources, several at the same register under different types (u1 is `Selected` and `OutRays`). Counted: 15 views,
   `LensParameters`, the exposure latch (2 words), and 5 more in `planning.cs` make 23 words, under the 32-word limit,
   so one list per file works without splitting by entry point.
-- **CBUFFER entries with indexed arrays.** `Common/OrgResources.hlsli`'s `CBUFFER` kind declares
-  `static ConstantBuffer<T>`. DXC's SPIR-V rejects that once an array in `T` is indexed dynamically (`Surfaces[i]`),
-  and DXIL rejects the cast form. `trace.cs.hlsl` uses the cast on Vulkan and the static on D3D12. Fixing it in
-  `OrgResources.hlsli` would rebuild every Lighting variant, so it stays local until another shader needs it.
-- **The 16-bit index pull.** `BeamIndices` is 16-bit. The ORG VS reads it as `ByteAddressBuffer` halves or the effect
-  uploads a 32-bit copy; the second is simpler and costs 2x a small buffer.
+- **CBUFFER entries with indexed arrays.** Fixed in `Common/OrgResources.hlsli`. DXC's SPIR-V copied a ConstantBuffer held
+  in a variable (static or heap-read value) into function memory once an array in it was indexed dynamically, which fails
+  validation; even the cast form fails with arrays of structs. On Vulkan a `CBUFFER` is now an element of an array
+  declared at the resource heap's binding, indexed in place; reads go through `ORG_CB(name)`. The binding numbers are
+  copied from `rhi_shader_abi.h` and must stay in step with it.
+- **The 16-bit index pull.** Settled: the effect uploads a 32-bit copy.
+- **Ghost model lag.** A new lens model's ghosts show one or more frames after its constants, once the paths' upload
+  completes. Not measured.
+- **Push words.** The flare list is 23 words, beam.hlsl 16, ghost_wave.cs.hlsl 12, the diffraction tree 16,
+  diffraction_sources.cs.hlsl 18.
 - **The focus readback service.** Histogram Auto Exposure drops a readback when the service has no buffer. The lens
   then keeps its last focus; no fallback is needed, but a long run of drops would freeze the lens focus. Not seen yet.
 - **Exposure inputs.** The flare reads Auto Exposure's adaptation (t5) and constants (b1). On the graph both are
