@@ -1081,3 +1081,17 @@ void ExponentialHeightFog::Prepass()
 	BindIntegratedLightScattering();
 }
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection ExponentialHeightFog::ProjectSizeSettings() const
+{
+	// The densities and the extinction scale count only as zero or not, so a slider drag raises no event.
+	SizeProjection projection;
+	projection.Add("enabled", settings.enabled)
+		.Add("volumetricFogEnabled", settings.volumetricFogEnabled)
+		.Add("volumetricFogExtinctionScale>0", settings.volumetricFogExtinctionScale > 0.0f)
+		.Add("fogDensity>0", settings.fogDensity > 0.0f)
+		.Add("fogDensity2>0", settings.fogDensity2 > 0.0f)
+		.Add("useSkyIBL", settings.useSkyIBL)
+		.Add("useDynamicCubemaps", settings.useDynamicCubemaps);
+	return projection;
+}

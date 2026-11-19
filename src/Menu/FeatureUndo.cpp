@@ -21,7 +21,7 @@ namespace FeatureUndo
 		target.restore = [feature](const UndoHistory::Snapshot& snapshot) {
 			SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
 			nlohmann::json values = UndoHistory::Get<nlohmann::json>(snapshot);
-			feature->LoadSettings(values);
+			feature->ApplySettings(values, "undo");
 			globals::state->MarkSettingsChanged();
 			globals::state->InvalidateEditsUnderBaselines(feature);
 		};

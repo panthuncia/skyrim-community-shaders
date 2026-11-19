@@ -1874,6 +1874,48 @@ void SyntheticFeature::SaveSettings(json& output) { output = settings; }
                     self.assertEqual(entry["displayPath"], expected)
                     self.assertEqual(entry["aggregateCount"], 3)
 
+    def test_setting_wrapper_catalogs_as_its_value_type(self):
+        self.assertEqual(GENERATOR.clean_type("CS::Setting<std::uint32_t>"), "std::uint32_t")
+        self.assertEqual(GENERATOR.clean_type("const CS::Setting<std::array<float, 3>>&"), "std::array<float, 3>")
+        header = r"""
+struct SyntheticFeature : Feature {
+    struct Settings {
+        CS::Setting<std::uint32_t> Slices{ 64 };
+        CS::Setting<float> Density = 0.5f;
+        CS::Setting<bool> Enabled = true;
+    } settings;
+    std::string GetShortName() { return "Synthetic"; }
+    std::string GetName() { return "Synthetic Feature"; }
+    void DrawSettings();
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(SyntheticFeature::Settings, Slices, Density, Enabled)
+"""
+        source = r"""
+void SyntheticFeature::SaveSettings(json& output) { output = settings; }
+void SyntheticFeature::DrawSettings()
+{
+    Util::SliderInt("Slices", settings.Slices, 16, 128);
+    Util::SliderFloat("Density", settings.Density, 0.0f, 1.0f);
+    Util::Checkbox("Enabled", settings.Enabled);
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src/SyntheticFeature.h").write_text(header, encoding="utf-8")
+            (root / "src/SyntheticFeature.cpp").write_text(source, encoding="utf-8")
+            entries = GENERATOR.build_entries(root)
+        by_key = {entry["key"]: entry for entry in entries}
+        self.assertEqual(set(by_key), {"Slices", "Density", "Enabled"})
+        self.assertEqual(by_key["Slices"]["type"], "Integer")
+        self.assertEqual(by_key["Density"]["type"], "Float")
+        self.assertEqual(by_key["Enabled"]["type"], "Boolean")
+        self.assertEqual(by_key["Slices"]["sourceWidget"], "SliderInt")
+        self.assertEqual((by_key["Slices"]["minimum"], by_key["Slices"]["maximum"]), (16, 128))
+        for entry in entries:
+            with self.subTest(key=entry["key"]):
+                self.assertIn("SceneControllable", entry["flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

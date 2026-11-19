@@ -250,6 +250,83 @@ public:
 	virtual void LoadSettings(json&) {}
 	virtual void RestoreDefaultSettings() {}
 
+	// Settings events from frame revision plan step 5c. The projection and every SettingsWritten call are intermediate.
+	// Step 7 deletes them once the fields are CS::Setting.
+
+	/**
+	 * @brief The settings that size or shape a feature's resources and passes, by field name.
+	 *
+	 * Each field holds an integer, a real or a text value. A derived field holds the derived value, such as whether a
+	 * density is above zero. Then a slider drag changes it only when the result changes.
+	 */
+	struct SizeProjection
+	{
+		struct Field
+		{
+			std::string_view name;  // a string literal
+			std::int64_t integer = 0;
+			double real = 0.0;
+			std::string text;
+			friend bool operator==(const Field&, const Field&) = default;
+		};
+		std::vector<Field> fields;
+
+		/** @brief Adds a field. Integers, enums and bools are integers. Floats are reals. Strings are text. */
+		template <class T>
+		SizeProjection& Add(std::string_view a_name, const T& a_value)
+		{
+			auto& field = fields.emplace_back(Field{ a_name });
+			if constexpr (std::is_floating_point_v<T>)
+				field.real = static_cast<double>(a_value);
+			else if constexpr (std::is_integral_v<T> || std::is_enum_v<T>)
+				field.integer = static_cast<std::int64_t>(a_value);
+			else
+				field.text = std::string(a_value);
+			return *this;
+		}
+
+		friend bool operator==(const SizeProjection&, const SizeProjection&) = default;
+	};
+
+	/** @brief The feature's size- and shape-relevant settings now. Empty by default. Any thread. */
+	virtual SizeProjection ProjectSizeSettings() const { return {}; }
+
+	/**
+	 * @brief Raises the feature's settings event when its projection differs from the one raised last. Call it after every
+	 * write to the feature's settings. a_writer names who wrote. The first projection seen is the baseline and raises nothing.
+	 */
+	void SettingsWritten(std::string_view a_writer);
+
+	/** @brief LoadSettings, then SettingsWritten. Writers outside the feature call this, not LoadSettings. */
+	void ApplySettings(json& a_json, std::string_view a_writer);
+
+	/** @brief RestoreDefaultSettings, then SettingsWritten. Writers outside the feature call this, not RestoreDefaultSettings. */
+	void ApplyDefaults(std::string_view a_writer);
+
+	/**
+	 * @brief Holds back this thread's settings events until the outermost batch ends, then raises each written feature once.
+	 * A write and its undo inside one batch raise nothing, as in a scene layer's suspension.
+	 */
+	class SettingsWriteBatch
+	{
+	public:
+		/** @brief a_writer must outlive the batch. A literal does. */
+		explicit SettingsWriteBatch(std::string_view a_writer);
+		~SettingsWriteBatch();
+		SettingsWriteBatch(const SettingsWriteBatch&) = delete;
+		SettingsWriteBatch& operator=(const SettingsWriteBatch&) = delete;
+
+	private:
+		std::string_view writer;
+	};
+
+	/**
+	 * @brief The missed-writer check. Returns each field that changed with no event as "<feature>.<field>", once per field
+	 * for the session. A difference counts only when two checks in a row see it. A writer on another thread caught between
+	 * its write and its SettingsWritten is no miss. Render thread.
+	 */
+	static std::vector<std::string> FindMissedSettingsWriters();
+
 	/** @brief Rewrites defaults that depend on the current settings, so a middle-click reset restores the right value.
 	 *  @param a_defaults The feature's default settings, in the shape SaveSettings writes. */
 	virtual void ApplyContextualDefaults(json& a_defaults) const { (void)a_defaults; }

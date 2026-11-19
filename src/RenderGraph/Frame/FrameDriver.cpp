@@ -1,5 +1,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 
+#include "Feature.h"
+
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -11,7 +13,9 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
+#include "Utils/Setting.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -255,6 +259,42 @@ namespace RenderGraph::Frame::Driver
 		state.atNextBegin.push_back(std::move(a_work));
 	}
 
+	namespace
+	{
+		/**
+		* @brief The missed-writer check of frame revision plan 6.3, in development builds only. A feature's size settings
+		* that changed with no settings event, or a bound CS::Setting whose value changed with no raise, is logged once and is a
+		* tap error. It only reports and never feeds a revision. CS_ORG_MISSED_WRITER_CHECK=0 turns it off.
+		*/
+		void CheckSettingsWriters()
+		{
+#if !defined(CS_RELEASE_PROFILE)
+			static const bool enabled = [] {
+				const bool on = !Switches::Off("CS_ORG_MISSED_WRITER_CHECK");
+				logger::info("[ORG] missed settings writer check {} (CS_ORG_MISSED_WRITER_CHECK=0/1)", on ? "on" : "off");
+				return on;
+			}();
+			if (!enabled)
+				return;
+			for (const auto& field : Feature::FindMissedSettingsWriters()) {
+				logger::error("[ORG] missed settings writer: {} changed with no event", field);
+				NoteTapError(TapError::MissedSettingsWriter, SegmentId::Count, fmt::format("{} changed with no settings event", field));
+			}
+			// A bound setting counts once two checks in a row see it unraised, as a feature's projection does.
+			static std::vector<CS::SettingVariableId> unraisedBefore;
+			static std::set<CS::SettingVariableId> reported;
+			auto unraised = CS::SettingRegistry::Unraised();
+			for (const auto id : unraised)
+				if (std::ranges::contains(unraisedBefore, id) && reported.insert(id).second) {
+					logger::error("[ORG] missed settings writer: {} changed with no event", CS::SettingRegistry::Name(id));
+					NoteTapError(TapError::MissedSettingsWriter, SegmentId::Count,
+						fmt::format("the setting {} changed with no settings event", CS::SettingRegistry::Name(id)));
+				}
+			unraisedBefore = std::move(unraised);
+#endif
+		}
+	}
+
 	void OnBegin()
 	{
 		auto& state = Get();
@@ -267,6 +307,8 @@ namespace RenderGraph::Frame::Driver
 		// Work that waited for a frame boundary runs before the frame's kind and schedules are decided.
 		for (auto& work : std::exchange(state.atNextBegin, {}))
 			work();
+		// After that work, so the writes it made have raised their events.
+		CheckSettingsWriters();
 		// A declared segment of the last frame whose tap never fired is a tap error.
 		if (state.began)
 			for (std::uint32_t s = 0; s < kSegments; ++s) {
@@ -314,8 +356,6 @@ namespace RenderGraph::Frame::Driver
 				Recipes::Check(*host);
 		FrameAnchors::BeginFrame(state.current);
 		Engine::ImageSpace::OnFrameBegin();
-		// The swap chain's presentation this frame presents into (a replacement lands between frames).
-		Engine::Native::OnFrameBegin();
 		{
 			const std::lock_guard lock(state.mutex);
 			for (std::uint32_t s = 0; s < kSegments; ++s)
@@ -367,6 +407,8 @@ namespace RenderGraph::Frame::Driver
 			return "run not executed";
 		case TapError::OwnEpoch:
 			return "own epoch";
+		case TapError::MissedSettingsWriter:
+			return "missed settings writer";
 		default:
 			return "?";
 		}

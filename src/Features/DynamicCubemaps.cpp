@@ -975,3 +975,10 @@ void DynamicCubemaps::Reset()
 	}
 }
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection DynamicCubemaps::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("EnabledSSR", settings.EnabledSSR);
+	return projection;
+}

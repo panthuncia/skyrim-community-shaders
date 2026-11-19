@@ -1523,3 +1523,11 @@ void Effects11::DrawSunRays()
 	stateBackup.Restore(context);
 	stateBackup.Release();
 }
+
+Feature::SizeProjection Effects11::ProjectSizeSettings() const
+{
+	// Not weather-blended, so it changes only through the setting manager's writes.
+	SizeProjection projection;
+	projection.Add("EnableSunRays", SettingManager::GetSingleton().GetValue<bool>("EnableSunRays", "EFFECT"));
+	return projection;
+}

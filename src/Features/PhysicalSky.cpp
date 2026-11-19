@@ -2637,3 +2637,10 @@ void PhysicalSky::Hooks::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* This
 	func(This, Pass, RenderFlags);
 	globals::features::physicalSky.RestoreWaterSampler();
 }
+
+Feature::SizeProjection PhysicalSky::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("enabled", settings.enabled).Add("enableVolumetricClouds", settings.enableVolumetricClouds);
+	return projection;
+}

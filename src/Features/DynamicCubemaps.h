@@ -212,6 +212,8 @@ public:
 
 	virtual void SaveSettings(json&) override;
 	virtual void LoadSettings(json&) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void RestoreDefaultSettings() override;
 	virtual void DrawSettings() override;
 	virtual void DataLoaded() override;

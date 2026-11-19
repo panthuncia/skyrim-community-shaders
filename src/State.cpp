@@ -494,12 +494,12 @@ namespace
 	bool LoadLayeredSettings(Feature* feature, json& layered, json& current)
 	{
 		try {
-			feature->LoadSettings(layered);
+			feature->ApplySettings(layered, "baseline layers");
 			return true;
 		} catch (const std::exception& e) {
 			logger::warn("Could not apply Baseline settings to {}, keeping its settings: {}", feature->GetName(), e.what());
 			try {
-				feature->LoadSettings(current);
+				feature->ApplySettings(current, "baseline layers");
 			} catch (...) {
 			}
 			return false;
@@ -1224,17 +1224,19 @@ void State::RestoreFeatureLayers(Feature* feature)
 	MarkSettingsChanged();
 	InvalidateEditsUnderBaselines(feature);
 	SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
+	// Defaults, then the base over them, raise one settings event.
+	const Feature::SettingsWriteBatch settingsBatch{ "restore defaults" };
 	// Defaults first, so settings a partial base leaves out still reset.
-	feature->RestoreDefaultSettings();
+	feature->ApplyDefaults("restore defaults");
 	const auto base = featureBases.find(feature->GetName());
 	if (base == featureBases.end() || base->second.empty())
 		return;
 	json values = base->second;
 	try {
-		feature->LoadSettings(values);
+		feature->ApplySettings(values, "restore defaults");
 	} catch (const std::exception& e) {
 		logger::warn("Could not restore {} to its Baseline values, using defaults: {}", feature->GetName(), e.what());
-		feature->RestoreDefaultSettings();
+		feature->ApplyDefaults("restore defaults");
 	}
 }
 

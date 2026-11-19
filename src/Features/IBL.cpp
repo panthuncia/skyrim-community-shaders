@@ -444,3 +444,10 @@ ID3D11ComputeShader* IBL::GetDiffuseIBLCS()
 		diffuseIBLCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\IBL\\DiffuseIBLCS.hlsl", defines, "cs_5_0"));
 	return diffuseIBLCS;
 }
+
+Feature::SizeProjection IBL::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("EnableIBL", settings.EnableIBL).Add("UseStaticIBL", settings.UseStaticIBL);
+	return projection;
+}

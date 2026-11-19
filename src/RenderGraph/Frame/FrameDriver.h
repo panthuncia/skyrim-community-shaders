@@ -73,6 +73,7 @@ namespace RenderGraph::Frame::Driver
 		Unbacked,             // GPU work reached an engine target native mode keeps without memory (Frame/EngineTargetUse.h)
 		NotExecuted,          // a skeleton clear or copy run did not execute what it took (nothing draws it another way)
 		OwnEpoch,             // an anchor would run an epoch of its own
+		MissedSettingsWriter,  // a feature's size settings changed with no settings event (the missed-writer check)
 		Count
 	};
 

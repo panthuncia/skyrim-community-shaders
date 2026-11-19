@@ -333,3 +333,10 @@ void ScreenSpaceShadows::EnsureShadowTexture()
 	screenSpaceShadowsTexture->CreateUAV(uavDesc);
 }
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection ScreenSpaceShadows::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("Enable", bendSettings.Enable).Add("SampleCount", bendSettings.SampleCount);
+	return projection;
+}

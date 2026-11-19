@@ -47,6 +47,7 @@ void SceneFeatureReplica::Draw(const std::string& featureShortName, const SceneS
 	// override reads back as the value it applies.
 	const SceneWidgetInterceptor::Scope scope({ feature, contextId });
 	feature->DrawSettings();
+	feature->SettingsWritten("scene menu");
 }
 
 #undef I18N_KEY_PREFIX

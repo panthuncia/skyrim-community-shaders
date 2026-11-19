@@ -135,14 +135,6 @@ namespace RenderGraph::Engine::Native
 	/** @brief The engine's Present. Copies the back buffer into the swap chain image after the frame's graph work. */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
 
-	/**
-	 * @brief Switches the swap chain between HDR10 and SDR. HDR Display calls this because the native handle has no IDXGISwapChain3.
-	 * It asks for a presentation with the colour space (RequestPresentation), so the swap chain changes on the submission thread
-	 * after the queued presents. The render thread does not wait.
-	 * @return False off native mode, or when HDR10 is asked and the output cannot show it (the swap chain stays SDR).
-	 */
-	bool SetSwapChainColorSpace(bool a_hdr);
-
 	/** @brief The swap chain's presentation. */
 	struct PresentationState
 	{
@@ -178,11 +170,14 @@ namespace RenderGraph::Engine::Native
 	/** @brief The presentation the swap chain has now. Any thread. */
 	PresentationState Presentation();
 
-	/** @brief The presentation taken at the frame's begin, stable through the frame. Render owner. */
+	/** @brief The presentation of the adopted frame revision, stable through the frame. Render owner. */
 	PresentationState FramePresentation();
 
-	/** @brief Takes the frame's presentation (Frame::Driver::OnBegin). */
-	void OnFrameBegin();
+	/**
+	 * @brief Takes the swap chain's presentation as the frame's. Inside the adoption point of a frame revision that waited for a
+	 * replacement (FrameGen::PresentationRevision), so frames see a new presentation only with the revision made for it. Render owner.
+	 */
+	void AdoptPresentation();
 
 	/** @brief Queued-present waits and their total time in microseconds since the last call. Any thread. */
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);

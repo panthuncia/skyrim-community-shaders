@@ -13,12 +13,14 @@
 #include "PostProcessing.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Upscaling.h"
 #include "Upscaling/DXVKInterop.h"
 #include "Upscaling/DxvkPresenter.h"
+#include "Upscaling/PresentationRevision.h"
 #include "Util.h"
 #include <algorithm>
 #include <dxgi1_4.h>
@@ -650,6 +652,24 @@ namespace
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
 	};
+
+	/**
+	* @brief The HDR setting and the frame's HDR target as frame variables (plan, step 5b). Written every frame, so only a change
+	* is an event. The setting is also the swap chain's colour space, so a revision that changes it waits for the swap chain.
+	*/
+	void RaiseHdrVariables(const HDRDisplay& a_hdr, bool a_enableHDR, std::string_view a_writer)
+	{
+		namespace Vars = RenderGraph::Frame::Vars;
+		Vars::SetHdrEnabled(a_enableHDR, a_writer);
+		FrameGen::PresentationRevision::SetHdr(a_enableHDR, a_writer);
+		Vars::TargetIdentity target;
+		if (auto* texture = a_hdr.PostChainTarget()) {
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			target = { reinterpret_cast<std::uint64_t>(texture), { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format) };
+		}
+		Vars::SetHdrOutputTarget(target, a_writer);
+	}
 }
 
 void HDRDisplay::PostPostLoad()
@@ -696,10 +716,16 @@ void HDRDisplay::SetupResources()
 		settings.hdrAutoDetected = true;
 		logger::info("[HDR] Auto-configured HDR based on display: {}", isHDRMonitor ? "enabled" : "disabled");
 	}
+	// Outside the lock, since the projection takes it.
+	SettingsWritten("HDRDisplay auto-detect");
+	bool enableHDR;
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
-		hdrEnabledForFrame = settings.enableHDR;
+		enableHDR = settings.enableHDR;
 	}
+	// The frame renders for the HDR state of the revision it adopted. A change of the setting reaches it with a later revision.
+	hdrEnabledForFrame = RenderGraph::Frame::Vars::AdoptedHdrEnabled();
+	RaiseHdrVariables(*this, enableHDR, "HDRDisplay::SetupResources");
 
 	cachedDisplayMaxLuminance = GetDisplayMaxLuminance();
 
@@ -809,13 +835,15 @@ void HDRDisplay::BeginRenderFrame()
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		requestedHDR = settings.enableHDR;
 	}
-	if (requestedHDR == hdrEnabledForFrame)
-		return;
-
-	hdrEnabledForFrame = requestedHDR;
-	logger::info("HDR: applying enableHDR={} for the next rendered frame", hdrEnabledForFrame);
-	UpdateHDRData();
-	UpdateSwapChainColorSpace();
+	// The frame renders for the HDR state of the revision it adopted. Native's revision waited for the swap chain made for it,
+	// and DXVK's swap chain takes the colour space here, in the frame that adopted it.
+	if (const bool adopted = RenderGraph::Frame::Vars::AdoptedHdrEnabled(); adopted != hdrEnabledForFrame) {
+		hdrEnabledForFrame = adopted;
+		logger::info("HDR: enableHDR={} adopted with the frame revision (the setting is {})", hdrEnabledForFrame, requestedHDR);
+		UpdateHDRData();
+		UpdateSwapChainColorSpace();
+	}
+	RaiseHdrVariables(*this, requestedHDR, "HDRDisplay::BeginRenderFrame");
 }
 
 void HDRDisplay::RedirectFramebuffer()
@@ -1687,15 +1715,16 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	// setup and never again.
 	RefreshDisplayLuminance();
 
-	// Native mode: the swap chain handle answers no IDXGISwapChain4. BasicRHI's swap chain takes the colour space directly, and the
-	// output reaches it as in guest mode (ORGHDRDisplay copies it into the native back buffer, which the present copies to the swap
-	// chain image).
+	// In native mode the swap chain handle answers no IDXGISwapChain4. The frame revision that changed the HDR setting replaced the
+	// swap chain with the colour space before it was adopted (FrameGen::PresentationRevision), so there is nothing to set here.
 	if (RenderGraph::Engine::Native::Active()) {
 		const bool hdr = IsHDREnabledForFrame();
-		if (RenderGraph::Engine::Native::SetSwapChainColorSpace(hdr))
-			logger::info("[HDR] Set swap chain color space to {} (native)", hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)");
+		const auto presentation = RenderGraph::Engine::Native::FramePresentation();
+		if (hdr == presentation.hdr10)
+			logger::info("[HDR] swap chain color space is {} (native, request {})", hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)", presentation.serial);
 		else
-			logger::warn("[HDR] Failed to set {} color space (native)", hdr ? "HDR10" : "SDR");
+			logger::warn("[HDR] the frame renders {} but the swap chain is {} (native, request {})", hdr ? "HDR" : "SDR", presentation.hdr10 ? "HDR10" : "SDR",
+				presentation.serial);
 		return;
 	}
 
@@ -1711,4 +1740,17 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	FrameGen::DxvkPresenter::Get().SetColorSpace(swapChain4, IsHDREnabledForFrame());
 
 	swapChain4->Release();
+}
+
+Feature::SizeProjection HDRDisplay::ProjectSizeSettings() const
+{
+	// The menu and the render thread write enableHDR under the settings mutex. Locking leaves the settings unchanged.
+	bool enableHDR = false;
+	{
+		std::lock_guard lock(const_cast<std::mutex&>(settingsMutex));
+		enableHDR = settings.enableHDR;
+	}
+	SizeProjection projection;
+	projection.Add("enableHDR", enableHDR);
+	return projection;
 }

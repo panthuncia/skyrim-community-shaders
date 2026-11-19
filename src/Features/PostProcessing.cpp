@@ -521,6 +521,8 @@ void PostProcessing::UpdatePipeline()
 			pipe->UpdateAutoEnabled();
 	}
 	SyncPipelineResources();
+	// The auto-enabled effects switch themselves on and off.
+	SettingsWritten("PostProcessing pipeline sync");
 }
 
 std::vector<PostProcessing::FeaturePipelineIndex> PostProcessing::ChainOrder() const
@@ -649,6 +651,7 @@ void PostProcessing::SetupResources()
 
 	ProcessSettings(pendingSettings);
 	pendingSettings = {};
+	SettingsWritten("PostProcessing pending settings");
 
 	ORGPostProcessing::Get().Setup();
 }
@@ -969,6 +972,7 @@ void PostProcessing::Prepass()
 		logger::info("Processing pending post processing settings...");
 		ProcessSettings(pendingSettings);
 		pendingSettings = {};
+		SettingsWritten("PostProcessing pending settings");
 		UpdateVanillaEffects(globals::state->GetTonemapOwner() == State::TonemapOwner::kPostProcessing);
 	}
 
@@ -1003,4 +1007,46 @@ void PostProcessing::PostPostLoad()
 	stl::write_vfunc<0x2, BSImagespaceShaderRefraction_SetupTechnique>(RE::VTABLE_BSImagespaceShaderRefraction[0]);
 
 	ORGPostProcessing::Reserve();
+}
+
+Feature::SizeProjection PostProcessing::ProjectSizeSettings() const
+{
+	// Field names are literals, one per pipeline slot in FeaturePipelineIndex order.
+	static constexpr std::array<std::string_view, static_cast<size_t>(FeaturePipelineIndex::COUNT)> kEnabledFields = {
+		"DoF.enabled", "Vignette.enabled", "LocalExposure.enabled", "AutoExposure.enabled", "MotionBlur.enabled",
+		"PhysicalGlare.enabled", "CODBloom.enabled", "LensFlare.enabled", "PhysicalLens.enabled", "Composite.enabled",
+		"ColorGrading.enabled", "LUT.enabled", "Camera.enabled", "Border.enabled"
+	};
+	SizeProjection projection;
+	// Before SetupResources the pipeline does not exist and the settings wait in pendingSettings.
+	for (size_t index = 0; index < pipeline.size(); ++index)
+		if (pipeline[index])
+			projection.Add(kEnabledFields[index], pipeline[index]->enabled);
+	const auto slot = [&](FeaturePipelineIndex a_index) { return pipeline[static_cast<size_t>(a_index)].get(); };
+	// The bloom's blend factors count only through the mips they use.
+	if (const auto* bloom = static_cast<const ::CODBloom*>(slot(FeaturePipelineIndex::CODBloom)))
+		projection.Add("CODBloom.usedMips", bloom->UsedMips());
+	if (const auto* dof = static_cast<const ::DoF*>(slot(FeaturePipelineIndex::DoF)))
+		projection.Add("DoF.UseAdaptiveGather", dof->settings.UseAdaptiveGather)
+			.Add("DoF.GatherQuality", dof->settings.GatherQuality)
+			.Add("DoF.BokehMode", dof->settings.BokehMode)
+			.Add("DoF.HighlightShape", dof->settings.HighlightShape);
+	if (const auto* glare = static_cast<const ::PhysicalGlare*>(slot(FeaturePipelineIndex::PhysicalGlare)))
+		projection.Add("PhysicalGlare.FFTResolution", glare->settings.FFTResolution).Add("PhysicalGlare.ApertureMode", glare->settings.ApertureMode);
+	if (const auto* flare = static_cast<const ::LensFlare*>(slot(FeaturePipelineIndex::LensFlare)))
+		projection.Add("LensFlare.FFTResolution", flare->settings.FFTResolution).Add("LensFlare.GhostModeInt", flare->settings.GhostModeInt);
+	if (const auto* lut = static_cast<const ::LUT*>(slot(FeaturePipelineIndex::LUT)))
+		projection.Add("LUT.LutPath", lut->settings.LutPath);
+	if (const auto* grading = static_cast<const ::ColorGrading*>(slot(FeaturePipelineIndex::ColorGrading)))
+		projection.Add("ColorGrading.currentTonemapper", grading->settings.currentTonemapper)
+			.Add("ColorGrading.useOpenDrt", grading->settings.useOpenDrt)
+			.Add("ColorGrading.enableTonemap", grading->settings.enableTonemap)
+			.Add("ColorGrading.enableAutoHDR", grading->settings.enableAutoHDR)
+			.Add("ColorGrading.skipLUT", grading->settings.skipLUT);
+	// The lens intensity counts only as zero or not, since only zero drops the ghost passes.
+	if (const auto* lens = static_cast<const ::PhysicalLens*>(slot(FeaturePipelineIndex::PhysicalLens)))
+		projection.Add("PhysicalLens.ImageEffects", lens->settings.ImageEffects)
+			.Add("PhysicalLens.Diffraction", lens->settings.Diffraction)
+			.Add("PhysicalLens.Intensity>0", lens->settings.Intensity > 0.0f);
+	return projection;
 }

@@ -42,6 +42,8 @@ struct PhysicalSky final : public Feature
 	void DataLoaded() override;
 	void RestoreDefaultSettings() override;
 	void LoadSettings(json& o_json) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	SizeProjection ProjectSizeSettings() const override;
 	void SaveSettings(json& o_json) override;
 
 	/** @brief Whether Physical Sky is loaded, enabled, and not owned by Effects 11 (unless handed back through the Scene Manager). */

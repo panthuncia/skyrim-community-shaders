@@ -733,6 +733,19 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 41 | BasicRHI takes Streamline's optical flow queue natively (the first optical flow family, index 0, `useNativeOpticalFlowMode`) when the device has the features and that family is none of its own; otherwise it logs why and DLSS-G uses its interop optical flow, as before. | The manual hooking guide's 5.2.1 requirements; guest's interposed device takes the native queue too |
 | 42 | The DLSS-G hardware probe checks only the native device's adapter (its LUID). | On a machine with two GPUs, the NVIDIA one would add `VK_NV_optical_flow` to the other's device, and BasicRHI then turns all of Streamline off |
 
+**Step 9, decided by the agent, to confirm (2026-11-19).** Landed with frame revision step 5 (`org-native/rev-step5`).
+
+| # | Decision | Why |
+|---|---|---|
+| 43 | The presentation's input producer (`Revision::RegisterInputProducer`) asks for the replacement when the revision starts, not when its other members are ready. In native, the frame or two between the request and the adoption present old-revision content into the new swap chain. | The producer stays generic; `hdr-frames` (frame revision plan, section 11, 4.2) will show whether those frames need dropping or a request at adoption |
+| 44 | Guest: a colour space change alone asks DXVK for no recreate, so its input is ready at once. `SetColorSpace1` runs in HDR's `BeginRenderFrame` of the adopting frame, not inside `AdoptLatest`. | The colour space call still follows the adopted `HdrEnabled`, on the same frame |
+| 45 | `PresentationConfig` carries `request`, the controller's request count, so a request with unchanged settings (the "FSR-FG wrap") is still an event. The controller completes on an adopted request at or past its own. | Without it the wrap would never reach the presenter |
+| 46 | Native `Surface().ready` compares with the live requested serial, so frame generation inputs stay off while a replacement is in flight. | Keeps step 5's protection now that the render thread takes the presentation at adoption |
+| 47 | `Native::SetSwapChainColorSpace` is removed (supersedes 13). Native changes its colour space only through a replacement; `UpdateSwapChainColorSpace` in native only logs, or warns on a mismatch. | One path |
+| 48 | The present-mode setting's request also goes through the variable. Guest's fault-teardown request in `PresentWithFrameGeneration` stays direct. | The fault path must not wait for a revision |
+| 49 | The inputs pass's presence is still decided per frame from the adopted presentation (`IsFSRPresenterReady`), not a revision member. Its client registration's build joins revisions through step 4e. | No new member type for a per-frame gate |
+| 50 | Upscaler options are not read from the adopted revision yet; that waits for 6.14 (frame revision plan, step 5 notes). | Not a direct swap |
+
 1. **Is DLSS-G in native in scope?**
    (a) yes, last, in a session on the RTX 5080; (b) not now: build the interface so it fits, implement later; (c) D3D12 only.
    *Recommended: (a). The architecture is the same; only step 8 needs the card.*

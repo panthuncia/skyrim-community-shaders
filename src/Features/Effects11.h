@@ -233,6 +233,8 @@ public:
 	void UpdateSkyScattering(PerFrame& a_data);
 
 	virtual void DrawSettings() override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void Load() override;
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;

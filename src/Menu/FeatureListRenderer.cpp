@@ -1659,6 +1659,8 @@ void FeatureListRenderer::DrawFeatureBody(Feature* feat)
 		if (feat->HasDebugSection())
 			feat->DrawDebugSection();
 		SettingReveal::EndFeatureBody();
+		// Widgets, buttons and the scene widget interceptor wrote during the draw. The compare makes this cheap each frame.
+		feat->SettingsWritten("menu");
 		if (feat->UsesMainSettings()) {
 			auto* state = globals::state;
 			const bool edited = !editedBefore && context.ActiveIdHasBeenEditedThisFrame;

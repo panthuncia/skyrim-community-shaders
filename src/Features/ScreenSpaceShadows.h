@@ -113,6 +113,8 @@ public:
 	virtual void PostPrepass() override;
 
 	virtual void LoadSettings(json& o_json) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 
 	/** @brief Dispatches the Bend SSS compute shader to generate screen-space contact shadows. */

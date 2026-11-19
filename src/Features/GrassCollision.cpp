@@ -516,3 +516,10 @@ void GrassCollision::UpdateCollisionTexture()
 	context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
 }
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection GrassCollision::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("EnableGrassCollision", settings.EnableGrassCollision);
+	return projection;
+}

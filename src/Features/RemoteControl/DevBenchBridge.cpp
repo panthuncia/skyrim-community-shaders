@@ -331,7 +331,7 @@ namespace
 					return json{ { "error", "feature not found or not loaded" }, { "shortName", shortName } };
 				SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
 				try {
-					feature->LoadSettings(blob);
+					feature->ApplySettings(blob, "DevBench set");
 					logger::info("DevBenchBridge: feature(set, {}) applied", shortName);
 					return json{ { "action", "set" }, { "shortName", shortName }, { "applied", true } };
 				} catch (const std::exception& e) {
@@ -347,7 +347,7 @@ namespace
 					return json{ { "error", "feature not found or not loaded" }, { "shortName", shortName } };
 				SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
 				try {
-					feature->RestoreDefaultSettings();
+					feature->ApplyDefaults("DevBench reset");
 					logger::info("DevBenchBridge: feature(reset, {}) applied", shortName);
 					return json{ { "action", "reset" }, { "shortName", shortName }, { "applied", true } };
 				} catch (const std::exception& e) {
@@ -1063,7 +1063,7 @@ namespace
 				SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
 				for (auto* f : Feature::GetFeatureList()) {
 					try {
-						f->RestoreDefaultSettings();
+						f->ApplyDefaults("DevBench reset");
 					} catch (const std::exception& e) {
 						logger::error("DevBenchBridge: settings(reset) {} threw: {}", f->GetShortName(), e.what());
 					} catch (...) {
