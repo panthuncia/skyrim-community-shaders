@@ -169,6 +169,12 @@ namespace RenderGraph::Engine::Native
 	 */
 	void SetPresentationTornDown(std::function<bool()> a_tornDown);
 
+	/**
+	 * @brief The step a swap chain change runs on the thread that asks for it, before anything changes: every RequestPresentation
+	 * and the engine's ResizeBuffers. DLSS-G turns its mode off there. Any thread.
+	 */
+	void SetPresentationLeaving(std::function<void()> a_leaving);
+
 	/** @brief The presentation the swap chain has now. Any thread. */
 	PresentationState Presentation();
 

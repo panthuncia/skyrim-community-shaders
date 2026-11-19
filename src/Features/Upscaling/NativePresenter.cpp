@@ -54,5 +54,7 @@ namespace FrameGen
 		}
 		// Also for replacements other callers ask for (HDR's colour space), so a pending feature load change goes through them.
 		RenderGraph::Engine::Native::SetPresentationTornDown(std::move(a_tornDown));
+		// DLSS-G's mode goes off before every swap chain change, whoever asks for it.
+		RenderGraph::Engine::Native::SetPresentationLeaving([] { Streamline::GetSingleton()->TurnDLSSGOffBeforeSwapchainChange(); });
 	}
 }

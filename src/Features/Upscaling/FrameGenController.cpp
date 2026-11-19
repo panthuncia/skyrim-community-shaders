@@ -6,6 +6,7 @@
 #include "Streamline.h"
 
 #include "../../Globals.h"
+#include "../../RenderGraph/Engine/Native/Native.h"
 #include "../../Utils/Game.h"
 
 namespace FrameGen
@@ -58,7 +59,10 @@ namespace FrameGen
 	PresentationConfig Controller::Presentation(Method a_method)
 	{
 		const auto& upscaling = globals::features::upscaling;
-		return { .method = a_method, .hdr = IsHDRActive(), .vsync = upscaling.settings.vsync, .tearing = upscaling.GetPresentModePreference() != 0 };
+		// Native bakes the vsync into a presentation layer's swap chain, so DLSS-G's own vsync limit (SL-VSYNC-011) applies here.
+		// Guest forces the sync interval per present instead (Hooks.cpp).
+		const bool dlssgNoVsync = a_method == Method::kDLSSG && RenderGraph::Engine::Native::Active() && !Streamline::GetSingleton()->IsDLSSGVsyncSupported();
+		return { .method = a_method, .hdr = IsHDRActive(), .vsync = upscaling.settings.vsync && !dlssgNoVsync, .tearing = upscaling.GetPresentModePreference() != 0 };
 	}
 
 	void Controller::RequestPresentation(Method a_method, const char* a_reason)
@@ -117,6 +121,20 @@ namespace FrameGen
 			return;
 		StepLoadState(target);
 		StepFSRDelivery(target);
+		StepDLSSGVsync(target);
+	}
+
+	void Controller::StepDLSSGVsync(Method a_target)
+	{
+		// Native only: a presentation layer keeps the vsync its swap chain was made with, so a change is a replacement.
+		if (a_target != Method::kDLSSG || phase != Phase::kIdle || owner != Method::kDLSSG || !RenderGraph::Engine::Native::Active() ||
+			!Streamline::GetSingleton()->IsDLSSGLoaded())
+			return;
+		const auto adopted = RenderGraph::Engine::Native::Presentation();
+		if (adopted.serial != adopted.requested || !adopted.presentationLayer)
+			return;
+		if (Presentation(Method::kDLSSG).vsync != adopted.vsync)
+			RequestPresentation(Method::kDLSSG, "DLSS-G vsync change");
 	}
 
 	void Controller::StepPhaseCompletion()

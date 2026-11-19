@@ -25,9 +25,16 @@ public:
 
 	/**
 	 * @brief Native mode, before the native device exists: loads the interposer and initializes Streamline for the native backend
-	 * (manual hooking). False, logged, when Streamline cannot run; the device is then made without it.
+	 * (manual hooking). a_adapterLuid names the adapter the device is made on: DLSS-G loads only when that adapter has the
+	 * optical flow hardware. False, logged, when Streamline cannot run; the device is then made without it.
 	 */
-	bool InitializeForNative();
+	bool InitializeForNative(uint64_t a_adapterLuid);
+
+	/**
+	 * @brief Native mode, after the device and before the first swap chain: unloads DLSS-G, which would otherwise attach to a swap
+	 * chain made without a presentation layer. The frame generation controller loads it again through a presentation replacement.
+	 */
+	void UnloadDLSSGBeforeFirstSwapchain();
 
 	/** @brief The interposer CS loaded (an HMODULE), after Initialize. Null before or without it. */
 	[[nodiscard]] void* InterposerModule() const;
@@ -38,7 +45,7 @@ public:
 
 	/**
 	 * @brief Native mode, once the native device exists: resolves feature support on its adapter (a_vkPhysicalDevice on Vulkan, else
-	 * the adapter a_luid names). Frame generation stays off in native mode.
+	 * the adapter a_luid names).
 	 */
 	void SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid);
 
@@ -153,12 +160,22 @@ public:
 	[[nodiscard]] bool IsFSRFGLoadSettled() const;
 	[[nodiscard]] bool IsFSRFGPresentOwner() const;
 
+	/**
+	 * @brief Tags DLSS-G's inputs for the frame: the UI stage's inputs pass in graph modes (a_depthCopy names kMAIN_COPY's depth),
+	 * the interop ring in plain D3D11 mode.
+	 */
 	void TagDLSSGResources(ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 		ID3D11Resource* a_hudlessColor, uint32_t a_renderWidth, uint32_t a_renderHeight,
-		uint32_t a_displayWidth, uint32_t a_displayHeight);
+		uint32_t a_displayWidth, uint32_t a_displayHeight, float a_jitterX, float a_jitterY, bool a_depthCopy);
 
 	void ClearDLSSGTags();
 	[[nodiscard]] bool EnsureDLSSGPresentTag();
+
+	/**
+	 * @brief Native mode: turns DLSS-G's mode off before the swap chain is replaced or resized, as Streamline asks. The controller
+	 * turns it on again once the new swap chain is adopted. Render thread.
+	 */
+	void TurnDLSSGOffBeforeSwapchainChange();
 	/** @brief FSR-FG counterpart: passes frames through when the render pass prepared none. */
 	bool EnsureFSRFGPresentState();
 
@@ -191,6 +208,8 @@ private:
 
 	// DLSS-G requires VK_NV_optical_flow before Streamline initialization.
 	bool dlssgHardware = false;
+	// Native mode: the adapter the device is made on (InitializeForNative), which the DLSS-G hardware probe checks.
+	uint64_t nativeAdapterLuid = 0;
 
 	bool isNvidiaGPU = false;
 	bool isIntelGPU = false;
