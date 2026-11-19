@@ -497,9 +497,14 @@ struct ORGPostProcessing::Impl
 
 	// Empty means on the graph. Logged when it changes.
 	std::optional<std::string> reason;
+	// The effects the graph ran last frame. Logged when one joins or leaves.
+	std::vector<Index> members;
 
 	void SetReason(std::string a_reason)
 	{
+		// While the chain is held, no effect runs on the graph.
+		if (!a_reason.empty())
+			SetMembers({});
 		if (reason && *reason == a_reason)
 			return;
 		if (a_reason.empty())
@@ -507,6 +512,34 @@ struct ORGPostProcessing::Impl
 		else
 			logger::info("[ORG] Post Processing: the chain runs on D3D11: {}", a_reason);
 		reason = std::move(a_reason);
+	}
+
+	/** @brief For a frame where neither path runs the chain. Logged when the reason changes. */
+	void SetSkipped(std::string_view a_why)
+	{
+		auto text = std::format("skipped: {}", a_why);
+		if (reason && *reason == text)
+			return;
+		logger::info("[ORG] Post Processing: no chain runs this frame: {}", a_why);
+		reason = std::move(text);
+		SetMembers({});
+	}
+
+	/** @brief The effects the graph runs this frame. Each one that joins or leaves is logged. */
+	void SetMembers(const std::vector<Index>& a_members)
+	{
+		auto& pp = globals::features::postProcessing;
+		const auto name = [&](Index a_index) {
+			const auto& feature = pp.pipeline[static_cast<std::size_t>(a_index)];
+			return feature ? feature->GetType() : std::string(StepName(a_index));
+		};
+		for (const auto index : a_members)
+			if (std::ranges::find(members, index) == members.end())
+				logger::info("[ORG] Post Processing: {} joins the graph chain", name(index));
+		for (const auto index : members)
+			if (std::ranges::find(a_members, index) == a_members.end())
+				logger::info("[ORG] Post Processing: {} leaves the graph chain", name(index));
+		members = a_members;
 	}
 
 	/** @brief False, with the reason in a_failure, when it cannot. */
@@ -670,20 +703,28 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	auto& s = *impl;
 	s.ready = false;
 	s.ran = false;
-	if (!RenderGraphRuntime::Get().IsActive())
+	if (!RenderGraphRuntime::Get().IsActive()) {
+		s.SetSkipped("the render graph is not active");
 		return;
+	}
 
 	auto& pp = globals::features::postProcessing;
 	auto* state = globals::state;
 	const bool linear = globals::features::linearLighting.IsLinearLightingActive();
 	// PreProcess draws nothing here, so neither does the graph.
-	if (linear && (state->permutationData.RenderToUI || state->IsMainOrLoadingMenuOpen()))
+	if (linear && (state->permutationData.RenderToUI || state->IsMainOrLoadingMenuOpen())) {
+		s.SetSkipped("a menu or UI frame under linear lighting");
 		return;
-	if (pp.bypass && !linear)
+	}
+	if (pp.bypass && !linear) {
+		s.SetSkipped("Post Processing is bypassed");
 		return;
+	}
 	// Effects11 owns the tonemap.
-	if (state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing)
+	if (state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing) {
+		s.SetSkipped("Post Processing does not own the tonemap");
 		return;
+	}
 
 	pp.UpdatePipeline();
 	auto order = pp.ChainOrder();
@@ -776,6 +817,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.exposureResolved = exposureResolved;
 	s.ready = true;
 	s.SetReason({});
+	s.SetMembers(s.order);
 
 	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
