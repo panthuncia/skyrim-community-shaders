@@ -114,6 +114,11 @@ namespace ORGPostChain
 		inline constexpr std::string_view kLuminanceGrid = "PostProcessing::LocalExposure::LuminanceGrid";
 		inline constexpr std::string_view kBlurredLuminance = "PostProcessing::LocalExposure::BlurredLuminance";
 		inline constexpr std::string_view kLocalExposureConstants = "PostProcessing::LocalExposure::Constants";
+		// DoF's smoothed focus distance in km, R32F 1x1, written before Physical Lens runs.
+		inline constexpr std::string_view kDoFFocus = "PostProcessing::DoF::Focus";
+		// Physical Lens's image mapping (RGBA32F array of 3) and its PhysicalLensImaging::DiffractionParameters region.
+		inline constexpr std::string_view kPhysicalLensMapping = "PostProcessing::PhysicalLens::ChromaticMapping";
+		inline constexpr std::string_view kPhysicalLensDiffraction = "PostProcessing::PhysicalLens::DiffractionParameters";
 	}
 
 	/** @brief Dispatches through it run only on frames Commit opens it, with the group counts given there. */
@@ -132,6 +137,8 @@ namespace ORGPostChain
 
 		static Bind Srv(const FrameAnchors::Texture& a_texture) { return { Base::Srv(a_texture) }; }
 		static Bind Srv(const Image& a_image) { return { Base::Srv(a_image.graph, a_image.mip) }; }
+		/** @brief The whole-array view, for a shader that declares Texture2DArray. */
+		static Bind SrvArray(const Image& a_image) { return { Base::SrvArray(a_image.graph) }; }
 		static Bind Uav(const FrameAnchors::Texture& a_texture) { return { Base::Uav(a_texture) }; }
 		static Bind Uav(const Image& a_image) { return { Base::Uav(a_image.graph, a_image.mip) }; }
 		static Bind Handle(std::uint32_t a_index) { return { Base::Handle(a_index) }; }
@@ -195,6 +202,8 @@ namespace ORGPostChain
 
 		/** @brief An effect-owned history or persistent resource. Call at every build. */
 		void Register(const GraphResources::Resource& a_resource);
+		/** @brief An effect-owned graph resource that is not a twin, such as a constant buffer, by name. Call at every build. */
+		void Register(std::string_view a_name, std::shared_ptr<org::Resource> a_resource);
 
 		/** @brief Find returns it, or a null image. */
 		void Publish(std::string_view a_name, const Image& a_image);
@@ -214,6 +223,9 @@ namespace ORGPostChain
 		}
 
 		GateEntry Gate();
+
+		/** @brief The chain's gate, for an effect's own passes (Add) that skip closed runs. */
+		std::shared_ptr<const RenderGraph::RunGate> RunGate() const;
 
 		/** @brief 16-byte aligned, at most kLatchBytes for the whole build. */
 		template <class T>
@@ -281,6 +293,9 @@ namespace ORGPostChain
 		/** @brief They stay closed on every other frame. */
 		void Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
 
+		/** @brief The run being committed, for an effect's own latch block. */
+		const org::RunRef& Run() const { return run; }
+
 	private:
 		void WriteBytes(std::uint32_t a_offset, const void* a_data, std::size_t a_size) const;
 
@@ -330,6 +345,7 @@ namespace ORGPostChain
 	std::unique_ptr<Effect> MakeMotionBlur();
 	std::unique_ptr<Effect> MakeLocalExposure();
 	std::unique_ptr<Effect> MakeHistogramAutoExposure();
+	std::unique_ptr<Effect> MakePhysicalLens();
 }
 
 #endif

@@ -74,6 +74,32 @@ struct PhysicalLens : PostProcessFeature
 
 	winrt::com_ptr<ID3D11SamplerState> sampler;
 
+	/// focus.cs.hlsl's FocusConstants.
+	struct alignas(16) FocusInputs
+	{
+		float2 uv;
+		float manualKM, speed;
+		unsigned automatic, reset;
+		float padding[2]{};
+	};
+	static_assert(sizeof(FocusInputs) == 32);
+	/// The focus shader's inputs for this frame: the camera's focus point, its target or the race menu's player.
+	FocusInputs FocusInputsFor(const CinematicCamera::PhysicalCameraState& camera, bool reset);
+	/// Sets the optical state from the settings or the camera, and rebuilds the lens model when it changed. False when
+	/// the lens cannot be configured this frame. Call SanitizeSettings first. Shared by the D3D11 and ORG paths.
+	bool PrepareOptics(float aspect, const CinematicCamera::PhysicalCameraState* camera, float cameraFocusM);
+	/// BuildCameraMaps' two constant blocks for the current lens model.
+	std::pair<PhysicalLensImaging::GPUParameters, PhysicalLensImaging::CameraTableParameters> CameraMapping(float aspect) const;
+	void SanitizeSettings();
+	/// For the settings readout when the ORG path resolves the focus.
+	void SetResolvedFocus(float metres) { resolvedFocusM = metres; }
+	/// What the ORG Composite reads this frame, set by the ORG effect's commit before Composite's.
+	struct OrgComposite
+	{
+		bool cameraMap = false, flare = false;
+		PhysicalLensImaging::DiffractionParameters diffraction{};
+	} orgComposite;
+
 private:
 	bool resourcesReady = false, shadersRequested = false;
 	static constexpr unsigned SourceCount = PhysicalLensOptics::SourceCount, TileCount = 64 * 36, CandidateCount = 2 * TileCount;
@@ -161,5 +187,7 @@ private:
 	PhysicalLensImaging::DiffractionParameters cachedWaveParameters{};
 	bool UpdateDiffraction(unsigned width, unsigned height);
 	void CompileShaders();
-	void SanitizeSettings();
+	// The lens model's ghost paths, uploaded by the D3D11 path when changed.
+	std::vector<PhysicalLensOptics::GhostPath> ghostPaths;
+	bool ghostPathsChanged = false;
 };

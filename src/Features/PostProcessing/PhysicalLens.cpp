@@ -550,6 +550,28 @@ PhysicalLensImaging::GPUParameters PhysicalLens::OpticalParameters() const
 	return data;
 }
 
+PhysicalLens::FocusInputs PhysicalLens::FocusInputsFor(const CinematicCamera::PhysicalCameraState& camera, bool reset)
+{
+	FocusInputs data{ camera.ScreenPointUV, camera.ManualDistanceM * .001f, camera.TransitionSpeed,
+		camera.Mode == CinematicCamera::FocusMode::ScreenPoint, reset };
+	auto* dof = owner->GetPipelineFeature<DoF>(PostProcessing::FeaturePipelineIndex::DoF);
+	auto& resolver = owner->GetCinematicCamera().focusResolver;
+	if (camera.Mode == CinematicCamera::FocusMode::Target) {
+		uint ref = 0;
+		const auto target = resolver.ResolveTarget(!dof || dof->settings.consoleSelection, ref);
+		if (target.hasTarget) {
+			data.automatic = target.projected;
+			data.uv = target.focusCoord;
+			data.manualKM = target.distanceM * .001f;
+		}
+	}
+	if (auto* player = globals::game::player; player && globals::game::ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
+		data.automatic = resolver.GetReferenceFocusCoord(player, data.uv);
+		data.manualKM = Util::Units::GameUnitsToMeters(resolver.GetDistanceToReference(player)) * .001f;
+	}
+	return data;
+}
+
 float PhysicalLens::ResolveCameraFocus(const CinematicCamera::PhysicalCameraState& camera)
 {
 	auto* ctx = globals::d3d::context;
@@ -614,30 +636,7 @@ float PhysicalLens::ResolveCameraFocus(const CinematicCamera::PhysicalCameraStat
 		auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
 		if (!shader || !depth)
 			return resolvedFocusM;
-		struct alignas(16) FocusData
-		{
-			float2 uv;
-			float manualKM, speed;
-			unsigned automatic, reset;
-			float padding[2]{};
-		} data{ camera.ScreenPointUV, camera.ManualDistanceM * .001f, camera.TransitionSpeed,
-			camera.Mode == CinematicCamera::FocusMode::ScreenPoint, reset };
-		static_assert(sizeof(FocusData) == 32);
-		auto& resolver = owner->GetCinematicCamera().focusResolver;
-		if (camera.Mode == CinematicCamera::FocusMode::Target) {
-			uint ref = 0;
-			const auto target = resolver.ResolveTarget(!dof || dof->settings.consoleSelection, ref);
-			if (target.hasTarget) {
-				data.automatic = target.projected;
-				data.uv = target.focusCoord;
-				data.manualKM = target.distanceM * .001f;
-			}
-		}
-		if (auto* player = globals::game::player; player && globals::game::ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
-			data.automatic = resolver.GetReferenceFocusCoord(player, data.uv);
-			data.manualKM = Util::Units::GameUnitsToMeters(resolver.GetDistanceToReference(player)) * .001f;
-		}
-		focusParameters->Update(data);
+		focusParameters->Update(FocusInputsFor(camera, reset));
 		{
 			OpticalBindings bindings(ctx);
 			ID3D11ShaderResourceView* inputs[]{ depth, previousFocus->srv.get() };
@@ -667,6 +666,12 @@ float PhysicalLens::ResolveCameraFocus(const CinematicCamera::PhysicalCameraStat
 	return resolvedFocusM;
 }
 
+std::pair<PhysicalLensImaging::GPUParameters, PhysicalLensImaging::CameraTableParameters> PhysicalLens::CameraMapping(float aspect) const
+{
+	return { OpticalParameters(), PhysicalLensImaging::CameraTable(cachedImagingModel, projectionFocal, aspect,
+									  optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity) };
+}
+
 void PhysicalLens::UpdateCameraMapping(float aspect)
 {
 	if (!settings.ImageEffects)
@@ -678,8 +683,7 @@ void PhysicalLens::UpdateCameraMapping(float aspect)
 	}
 	if (!shader)
 		return;
-	const auto data = OpticalParameters();
-	const auto table = PhysicalLensImaging::CameraTable(cachedImagingModel, projectionFocal, aspect, optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity);
+	const auto [data, table] = CameraMapping(aspect);
 	if (!cameraValid || std::memcmp(&data, &cachedCameraParameters, sizeof(data)) || std::memcmp(&table, &cachedCameraTable, sizeof(table))) {
 		cameraParameters->Update(data);
 		cameraTableParameters->Update(table);
@@ -844,6 +848,72 @@ bool PhysicalLens::UpdateGhostWave()
 	return true;
 }
 
+bool PhysicalLens::PrepareOptics(float aspect, const CinematicCamera::PhysicalCameraState* camera, float cameraFocusM)
+{
+	optical = { settings.FNumber, settings.FocusDistanceM, settings.ApertureRotation, 0, 0, 0, ApertureBladeCount(), false };
+	if (camera) {
+		optical = { camera->FNumber, cameraFocusM, camera->ApertureBladeRotationDeg,
+			camera->ApertureRoundness, camera->FocalLengthMM, camera->EffectiveSensorWidthMM,
+			unsigned(camera->ApertureBladeCount), true };
+	}
+	if (!configurationValid || cachedPreset != settings.LensPreset || cachedFNumber != optical.fNumber || cachedFocusDistance != optical.focusM || cachedZoom != settings.ZoomPosition || cachedCoating != settings.Coating || cachedFocalMM != optical.focalMM || cachedLinked != optical.linked ||
+		(optical.linked && (cachedCameraBladeCount != optical.blades || cachedCameraRoundness != optical.roundness))) {
+		const double focusMM = optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity;
+		PhysicalLensImaging::Model imagingModel;
+		double nextProjectionFocal = 0;
+		float apertureExtent = cameraApertureExtent;
+		bool configured;
+		if (optical.linked) {
+			auto cameraInfinity = cachedCameraInfinity;
+			if (!cachedLinked || cachedPreset != settings.LensPreset || cachedFocalMM != optical.focalMM || cachedFNumber != optical.fNumber) {
+				if (!PhysicalLensImaging::CameraInfinity(settings.LensPreset, optical.focalMM, optical.fNumber, cameraInfinity)) {
+					configurationValid = false;
+					return false;
+				}
+			}
+			if (!cachedLinked || cachedCameraBladeCount != optical.blades || cachedCameraRoundness != optical.roundness)
+				apertureExtent = float(PhysicalLensImaging::CameraApertureExtent(optical.blades, optical.roundness));
+			configured = PhysicalLensImaging::FocusCamera(cameraInfinity, optical.fNumber, focusMM,
+				apertureExtent, imagingModel, nextProjectionFocal);
+			if (configured)
+				cachedCameraInfinity = std::move(cameraInfinity);
+		} else {
+			apertureExtent = 1;
+			configured = PhysicalLensImaging::Configure(settings.LensPreset, optical.fNumber, settings.ZoomPosition, focusMM, imagingModel, nextProjectionFocal);
+		}
+		configurationValid = configured;
+		if (!configured)
+			return false;
+		cachedImagingModel = std::move(imagingModel);
+		projectionFocal = nextProjectionFocal;
+		cameraApertureExtent = apertureExtent;
+		lastGhostFrame = ~0u;
+		cachedLens = PhysicalLensImaging::GhostModel(cachedImagingModel, projectionFocal);
+		ghostPaths.assign(PhysicalLensOptics::MaxPaths, {});
+		cachedPathCount = 0;
+		for (unsigned back = 1; back < cachedLens.count; ++back)
+			for (unsigned front = 0; front < back; ++front)
+				if (!cachedLens.interfaces[back].stop && !cachedLens.interfaces[front].stop)
+					ghostPaths[cachedPathCount++] = PhysicalLensOptics::BuildPath(cachedLens, back, front, settings.Coating);
+		ghostPathsChanged = true;
+		cachedPreset = settings.LensPreset;
+		cachedFNumber = optical.fNumber;
+		cachedFocusDistance = optical.focusM;
+		cachedZoom = settings.ZoomPosition;
+		cachedCoating = settings.Coating;
+		cachedFocalMM = optical.focalMM;
+		cachedLinked = optical.linked;
+		cachedCameraBladeCount = optical.blades;
+		cachedCameraRoundness = optical.roundness;
+		planningValid = false;
+	}
+	if (optical.linked) {
+		cachedImagingModel.gateWidth = optical.gateWidthMM;
+		cachedImagingModel.gateHeight = optical.gateWidthMM / aspect;
+	}
+	return true;
+}
+
 void PhysicalLens::Draw(TextureInfo& input)
 {
 	outputReady = false;
@@ -886,68 +956,14 @@ void PhysicalLens::Draw(TextureInfo& input)
 	input.tex->GetDesc(&inputDesc);
 	const float aspect = float(inputDesc.Width) / inputDesc.Height;
 	const auto* camera = owner ? owner->GetActivePhysicalCameraState() : nullptr;
-	optical = { settings.FNumber, settings.FocusDistanceM, settings.ApertureRotation, 0, 0, 0, ApertureBladeCount(), false };
-	if (camera) {
-		optical = { camera->FNumber, ResolveCameraFocus(*camera), camera->ApertureBladeRotationDeg,
-			camera->ApertureRoundness, camera->FocalLengthMM, camera->EffectiveSensorWidthMM,
-			unsigned(camera->ApertureBladeCount), true };
-	} else {
+	const float cameraFocusM = camera ? ResolveCameraFocus(*camera) : 0.f;
+	if (!camera)
 		lastFocusFrame = ~0u;
-	}
-	if (!configurationValid || cachedPreset != settings.LensPreset || cachedFNumber != optical.fNumber || cachedFocusDistance != optical.focusM || cachedZoom != settings.ZoomPosition || cachedCoating != settings.Coating || cachedFocalMM != optical.focalMM || cachedLinked != optical.linked ||
-		(optical.linked && (cachedCameraBladeCount != optical.blades || cachedCameraRoundness != optical.roundness))) {
-		const double focusMM = optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity;
-		PhysicalLensImaging::Model imagingModel;
-		double nextProjectionFocal = 0;
-		float apertureExtent = cameraApertureExtent;
-		bool configured;
-		if (optical.linked) {
-			auto cameraInfinity = cachedCameraInfinity;
-			if (!cachedLinked || cachedPreset != settings.LensPreset || cachedFocalMM != optical.focalMM || cachedFNumber != optical.fNumber) {
-				if (!PhysicalLensImaging::CameraInfinity(settings.LensPreset, optical.focalMM, optical.fNumber, cameraInfinity)) {
-					configurationValid = false;
-					return;
-				}
-			}
-			if (!cachedLinked || cachedCameraBladeCount != optical.blades || cachedCameraRoundness != optical.roundness)
-				apertureExtent = float(PhysicalLensImaging::CameraApertureExtent(optical.blades, optical.roundness));
-			configured = PhysicalLensImaging::FocusCamera(cameraInfinity, optical.fNumber, focusMM,
-				apertureExtent, imagingModel, nextProjectionFocal);
-			if (configured)
-				cachedCameraInfinity = std::move(cameraInfinity);
-		} else {
-			apertureExtent = 1;
-			configured = PhysicalLensImaging::Configure(settings.LensPreset, optical.fNumber, settings.ZoomPosition, focusMM, imagingModel, nextProjectionFocal);
-		}
-		configurationValid = configured;
-		if (!configured)
-			return;
-		cachedImagingModel = std::move(imagingModel);
-		projectionFocal = nextProjectionFocal;
-		cameraApertureExtent = apertureExtent;
-		lastGhostFrame = ~0u;
-		cachedLens = PhysicalLensImaging::GhostModel(cachedImagingModel, projectionFocal);
-		std::vector<PhysicalLensOptics::GhostPath> allPaths(PhysicalLensOptics::MaxPaths);
-		cachedPathCount = 0;
-		for (unsigned back = 1; back < cachedLens.count; ++back)
-			for (unsigned front = 0; front < back; ++front)
-				if (!cachedLens.interfaces[back].stop && !cachedLens.interfaces[front].stop)
-					allPaths[cachedPathCount++] = PhysicalLensOptics::BuildPath(cachedLens, back, front, settings.Coating);
-		paths->Update(allPaths.data(), allPaths.size() * sizeof(allPaths[0]));
-		cachedPreset = settings.LensPreset;
-		cachedFNumber = optical.fNumber;
-		cachedFocusDistance = optical.focusM;
-		cachedZoom = settings.ZoomPosition;
-		cachedCoating = settings.Coating;
-		cachedFocalMM = optical.focalMM;
-		cachedLinked = optical.linked;
-		cachedCameraBladeCount = optical.blades;
-		cachedCameraRoundness = optical.roundness;
-		planningValid = false;
-	}
-	if (optical.linked) {
-		cachedImagingModel.gateWidth = optical.gateWidthMM;
-		cachedImagingModel.gateHeight = optical.gateWidthMM / aspect;
+	if (!PrepareOptics(aspect, camera, cameraFocusM))
+		return;
+	if (ghostPathsChanged) {
+		paths->Update(ghostPaths.data(), ghostPaths.size() * sizeof(ghostPaths[0]));
+		ghostPathsChanged = false;
 	}
 	const auto& lens = cachedLens;
 	Parameters data{};
