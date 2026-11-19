@@ -22,9 +22,7 @@
 #	include <OpenRenderGraph/Runtime.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/PassBuilders.h>
-#	include <Render/Runtime/IReadbackService.h>
 #	include <Render/Runtime/IUploadService.h>
-#	include <Render/Runtime/ReadbackCapturePlan.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/Buffers/VersionedBuffer.h>
@@ -603,86 +601,6 @@ namespace ORGPostChain
 			std::optional<Waiting> waiting;
 		};
 
-		/** @brief The focus readback, shared by the render thread, the readback pass and the readback service's callback. */
-		struct FocusReadback
-		{
-			std::shared_ptr<org::runtime::IReadbackService> service;
-			std::atomic<bool> want = false;
-			// A reset bumps it, so a readback issued before the reset is dropped.
-			std::atomic<std::uint64_t> generation = 0;
-			std::atomic<std::uint64_t> issued = 0;
-
-			std::mutex mutex;
-			std::optional<float> km;          // guarded, the newest result not taken yet
-			std::uint64_t newest = 0;         // guarded, the sequence of the newest result taken or stored
-			std::uint64_t newestGeneration = 0;  // guarded
-		};
-
-		struct FocusReadbackFrame
-		{
-			org::PreparedResourceReference source;
-			org::runtime::ReadbackCapturePlan plan;
-		};
-
-		/** @brief On frames the camera is active, as the D3D11 staging copies. No revision, so it is prepared every frame and never replayed. */
-		class FocusReadbackPass final : public org::TypedRenderGraphPass<FocusReadbackPass, FocusReadbackFrame>
-		{
-		public:
-			FocusReadbackPass(std::shared_ptr<FocusReadback> a_shared, std::shared_ptr<org::Resource> a_source) :
-				shared(std::move(a_shared)), source(std::move(a_source)) {}
-
-			void Declare(org::PassBuilder& a_builder)
-			{
-				a_builder.CopySource(source);
-				a_builder.PreferQueue(org::QueueKind::Graphics);
-			}
-
-			FocusReadbackFrame Prepare(const org::PassPrepareContext& a_preparation)
-			{
-				if (!shared->service || !shared->want.load(std::memory_order_acquire))
-					return {};
-				FocusReadbackFrame data{};
-				data.source = a_preparation.CaptureResource(source->GetGlobalResourceID());
-				const std::uint64_t generation = shared->generation.load(std::memory_order_acquire);
-				const std::uint64_t sequence = shared->issued.fetch_add(1, std::memory_order_acq_rel) + 1;
-				// The readback service's thread. The result waits for the next Commit.
-				org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<FocusReadback>(shared), generation, sequence](org::ReadbackCaptureResult&& a_result) {
-					const auto owner = weak.lock();
-					if (!owner || a_result.data.size() < sizeof(float))
-						return;
-					float value = 0.0f;
-					std::memcpy(&value, a_result.data.data(), sizeof(value));
-					std::scoped_lock lock(owner->mutex);
-					if (generation < owner->newestGeneration || (generation == owner->newestGeneration && sequence <= owner->newest))
-						return;
-					owner->km = value;
-					owner->newest = sequence;
-					owner->newestGeneration = generation;
-				};
-				data.plan = org::runtime::PlanReadbackCapture(a_preparation.device, shared->service, *source, a_preparation.ResolveCapturedResource(data.source),
-					{}, std::move(onDone), org::QueueKind::Graphics, "cs.pp.physical-lens.focus");
-				if (!data.plan)
-					return {};
-				if (data.plan.destinationLease)
-					a_preparation.Retain(data.plan.destinationLease);
-				a_preparation.Reserve(data.plan.reservation);
-				data.plan.destinationLease.reset();
-				data.plan.reservation.reset();
-				return data;
-			}
-
-			static void Record(const FocusReadbackFrame& a_frame, org::PassRecordContext& a_recording)
-			{
-				if (!a_frame.plan)
-					return;
-				org::runtime::RecordReadbackCapture(a_frame.plan, a_recording.Commands(), a_recording.Resolve(a_frame.source).GetHandle());
-			}
-
-		private:
-			std::shared_ptr<FocusReadback> shared;
-			std::shared_ptr<org::Resource> source;
-		};
-
 		/** @brief A device-local buffer with a CBV over a_bytes rounded to 256, as SharedConstants makes its blocks. */
 		std::shared_ptr<org::Buffer> MakeConstantBuffer(uint32_t a_bytes, const char* a_name)
 		{
@@ -812,8 +730,13 @@ namespace ORGPostChain
 				a_builder.Register(kImagingName, imagingBuffer);
 				a_builder.Register(kTableName, tableBuffer);
 				a_builder.Register(kLensName, lensBuffer);
-				if (!readback->service)
-					readback->service = RenderGraphRuntime::Get().Host()->GetRuntime().Readbacks();
+				if (!readback)
+					readback = RunReadback::Create("PostProcessing::PhysicalLens::FocusReadback", { 256 });
+				if (!readback) {
+					a_builder.Fail("its focus readback buffer could not be made");
+					return;
+				}
+				readback->Build(a_builder);
 
 				// The camera focus: DoF's when it runs in this chain, else this effect's own pass.
 				const auto dofFocus = a_builder.Find(Published::kDoFFocus);
@@ -826,10 +749,8 @@ namespace ORGPostChain
 						.bindings = { Bind::Shared(), Bind::Latch(focusConstants), Bind::Srv(depth), Bind::Unused(), Bind::Handle(sampler.Index()), Bind::Uav(focus->Graph()) },
 						.gate = focusGate });
 				}
-				a_builder.Add("focus-readback", FrameAnchors::PassKind::Copy,
-					[shared = readback, source = ownFocus ? focus->Graph() : dofFocus.graph.Plain()]() -> std::shared_ptr<org::RenderPass> {
-						return std::make_shared<FocusReadbackPass>(shared, source);
-					});
+				// Every run copies it, so a kept recording can replay it. Commit takes it only while the camera is active.
+				readback->AddTexture(a_builder, "focus-readback", 0, ownFocus ? focus->Graph() : dofFocus.graph.Plain(), 1, 1);
 				focusReset = kFocusResetCommits;
 
 				diffraction = a_builder.Latch<PhysicalLensImaging::DiffractionParameters>();
@@ -862,11 +783,13 @@ namespace ORGPostChain
 				const auto* camera = lens.owner ? lens.owner->GetActivePhysicalCameraState() : nullptr;
 				const unsigned frame = globals::state->frameCount;
 				float focusM = 0.f;
+				const auto stamp = readback->Commit(a_commit);
 				if (camera) {
 					// As ResolveCameraFocus: a frame gap or a history reset starts the focus over at the manual distance.
 					const bool reset = lastFocusFrame == ~0u || frame != lastFocusFrame + 1 || globals::state->ShouldResetHistory();
 					if (reset) {
-						readback->generation.fetch_add(1, std::memory_order_acq_rel);
+						// A readback of a run before the reset is dropped.
+						firstFocusStamp = stamp;
 						resolvedFocusM = camera->ManualDistanceM;
 					}
 					TakeFocus();
@@ -880,7 +803,6 @@ namespace ORGPostChain
 				} else {
 					lastFocusFrame = ~0u;
 				}
-				readback->want.store(camera != nullptr, std::memory_order_release);
 				if (focusReset > 0)
 					--focusReset;
 
@@ -994,6 +916,7 @@ namespace ORGPostChain
 
 			void Executed(PostProcessFeature&) override
 			{
+				readback->Executed();
 				if (pendingMapping)
 					madeMapping = std::exchange(pendingMapping, std::nullopt);
 				if (pendingWave)
@@ -1494,17 +1417,18 @@ namespace ORGPostChain
 				       made(blueViolet) && made(areaLayers[0]) && made(areaLayers[1]) && made(areaLayers[2]);
 			}
 
-			/** @brief The newest focus readback of this generation, in metres, as ResolveCameraFocus maps its staging copy. */
+			/** @brief The newest focus readback since the last reset, in metres, as ResolveCameraFocus maps its staging copy. */
 			void TakeFocus()
 			{
-				std::scoped_lock lock(readback->mutex);
-				if (!readback->km)
+				std::uint32_t stamp = 0;
+				const auto bytes = readback->Take(0, &stamp);
+				if (bytes.size() < sizeof(float) || stamp < firstFocusStamp)
 					return;
-				const float metres = *readback->km * 1000.f;
-				const bool current = readback->newestGeneration == readback->generation.load(std::memory_order_acquire);
-				if (current && std::isfinite(metres) && metres > 0.f)
+				float km = 0.f;
+				std::memcpy(&km, bytes.data(), sizeof(km));
+				const float metres = km * 1000.f;
+				if (std::isfinite(metres) && metres > 0.f)
 					resolvedFocusM = metres;
-				readback->km.reset();
 			}
 
 			FrameAnchors::Texture depth;
@@ -1532,7 +1456,8 @@ namespace ORGPostChain
 			std::shared_ptr<const RenderGraph::RunGate> gate;
 			std::shared_ptr<const org::LatchBlock> chainLatch;
 
-			std::shared_ptr<FocusReadback> readback = std::make_shared<FocusReadback>();
+			std::shared_ptr<RunReadback> readback;  // kept across builds
+			std::uint32_t firstFocusStamp = 0;      // the stamp of the last reset's run
 			bool ownFocus = true;
 			unsigned lastFocusFrame = ~0u, lastGhostFrame = ~0u;
 			const void* beamModel = nullptr;  // the paths snapshot the beams last traced
