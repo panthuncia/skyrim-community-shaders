@@ -1,11 +1,16 @@
-ByteAddressBuffer AreaArguments : register(t0);
-Texture2D<float2> BlueViolet : register(t1);
-Texture2D<float4> Area0 : register(t2);
-Texture2D<float4> Area1 : register(t3);
-Texture2D<float4> Area2 : register(t4);
-RWTexture2DArray<float> Fine : register(u0);
-RWStructuredBuffer<uint> GhostTiles : register(u1);
-SamplerState LinearSampler : register(s0);
+// Dual-target (Common/OrgResources.hlsli).
+#include "Common/OrgResources.hlsli"
+#define PHYSICAL_LENS_RESOLVE_RESOURCES(X)             \
+	X(SRV, ByteAddressBuffer, AreaArguments, 0)        \
+	X(SRV, Texture2D<float2>, BlueViolet, 1)           \
+	X(SRV, Texture2D<float4>, Area0, 2)                \
+	X(SRV, Texture2D<float4>, Area1, 3)                \
+	X(SRV, Texture2D<float4>, Area2, 4)                \
+	X(UAV, RWTexture2DArray<float>, Fine, 0)           \
+	X(UAV, RWStructuredBuffer<uint>, GhostTiles, 1)    \
+	X(SAMPLER, SamplerState, LinearSampler, 0)
+ORG_PUSH_BLOCK(PHYSICAL_LENS_RESOLVE_RESOURCES(ORG_HANDLE))
+PHYSICAL_LENS_RESOLVE_RESOURCES(ORG_RESOURCE)
 groupshared uint Occupied;
 // Five-tap cubic reconstruction of the broad layers. Center alignment matches
 // AreaRasterPosition, including odd dimensions and the four-texel guard band.

@@ -1,5 +1,5 @@
-#ifndef PHYSICAL_LENS_FLARE_RESOURCES
-#define PHYSICAL_LENS_FLARE_RESOURCES
+#ifndef PHYSICAL_LENS_FLARE_RESOURCE_LISTS
+#define PHYSICAL_LENS_FLARE_RESOURCE_LISTS
 #include "Common/OrgResources.hlsli"
 // The flare shaders' resource lists (Common/OrgResources.hlsli). Each file expands its own list where it declared its
 // resources, so the D3D11 declarations stay as they were. An entry file puts every list it includes into its push block
