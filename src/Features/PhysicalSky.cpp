@@ -15,6 +15,7 @@
 #include "Effects11.h"
 #include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Features/ViewAtmosphere.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
@@ -2152,6 +2153,12 @@ void PhysicalSky::ReflectionsPrepass()
 
 void PhysicalSky::ClearVolumetricToNeutral()
 {
+	// On the render graph the cloud client's next run clears the targets (ORGVolumetricClouds).
+	if (ORGVolumetricClouds::Requested()) {
+		ORGVolumetricClouds::Get().RequestNeutral();
+		volumetricNeutralCleared = true;
+		return;
+	}
 	auto context = globals::d3d::context;
 	for (auto* texture : { texVolTr.get(), texVolLowTr.get(), texVolHistoryTr.get(), texVolFilteredTr.get(), texVolCubeTr.get() }) {
 		if (texture)

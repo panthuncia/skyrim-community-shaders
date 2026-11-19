@@ -153,14 +153,16 @@ namespace RenderGraph::AnchorPasses
 		std::vector<Bind> table;
 	};
 
-	/** @brief A copy of a whole texture's first mip into another of the same size and format.
-	*  With a gate entry it copies only on runs whose commit opened it, and is recorded at execution. */
+	/** @brief A copy of a texture's first mip into another of the same size and format: depth slices of a 3D texture and
+	*  array slices as the copy names them. With a gate entry it copies only on runs whose commit opened it, and is recorded at execution. */
 	struct Copy
 	{
 		std::string name;
 		FrameAnchors::Texture source, target;
 		std::uint32_t width = 0, height = 0;
 		std::optional<std::uint32_t> gate;  // the builder's run gate entry
+		std::uint32_t depth = 1;            // a 3D texture's depth slices
+		std::uint32_t slices = 1;           // an array's or cube's slices (six for a cube), each copied in turn
 	};
 
 	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value. */
