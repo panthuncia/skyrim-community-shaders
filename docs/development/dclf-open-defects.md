@@ -368,6 +368,20 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     **Next:** count publication holes apart for flips that were deferred, and judge by the release check.
 -   **A hold's known effects.** During a hold, both terrain levels' LOD water registers, and a held block's segments are not
     updated. The map's hide-all is handled by flushing. These effects have not been measured visually.
+-   **DynDOLOD LOD shapes without the LOD flags may be drawn by nobody (unconfirmed).** `Eligibility::Static`
+    (`Core/Scene/Model/Eligibility.cpp`) admits a `BSSubIndexTriShape` only when its shader property carries Features/Lod's
+    `kLODObjects | kHDLODObjects`. Ordinary object LOD (`.bto`) has them and DCLF draws it. DynDOLOD's 3D tree LOD and other
+    passthru LOD shapes inside its `.bto` files keep the full model's shader flags, so they come out `Ineligible::NotTriShape`; in
+    guest the flush latch then skips the engine's draw, and native has no engine draw. Found by reading the code
+    (`docs/development/plans/dclf-tree-wind-object-lod.md`); the test profile has no DynDOLOD output, so it is unconfirmed.
+    **Decision (2026-11-18):** admit every LOD shape under the LOD roots, flags or not, kept non-casting (`IsLodObject`), with a
+    matching rule for the water reflection. **Next:** confirm on a DynDOLOD install with `CS_DCLF_CENSUS=1` (look for
+    `NotTriShape` sub-index shapes under `lodLandRoot`), then admit them.
+-   **Tree Wind does not sway object-LOD trees in DCLF.** Blocked by the entry above. Decided design: a buffer owned by Tree
+    Wind, read by device reference from record words 4-5, with the bend data built by background jobs under engine-read-window
+    leases (plan: `dclf-tree-wind-object-lod.md`). **Improvement target:** that design copies vertices and computes bend data on
+    the CPU. A better one would avoid the copies and the CPU work altogether (for example, derive the bend weights on the GPU from
+    data DCLF already uploads), and the whole area should be revisited before or instead of building the copy path.
 
 ## Grass drawn by the engine on the first takeover after a load
 
@@ -591,6 +605,26 @@ refuses each, so they join instead of being registered by the engine every frame
     `CS_ORG_RESTING_LAYOUTS=0`.
 -   **BasicRHI's `frontCCW` under Vulkan.** `frontCCW` has D3D's meaning on both backends. SARP and BasicRenderer set it true for
     glTF content. Their D3D12 behaviour is unchanged, but they have not been run under Vulkan since the mapping changed.
+
+## Graph-mode port gaps
+
+Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 hard ports.
+
+-   **A cold loading screen can lose its frame schedule.** With a cold shader store and a load that outlasts the intro movie, the
+    UI stage's build after the targets are registered again is staged together with the post build, which compiles about 75
+    ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
+    and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
+    **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
+-   **Physical Sky's aerial perspective will be its own full-screen pass.** The ORG deferred composite's push block holds 32
+    words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. Decided: run the aerial perspective as
+    `cs.physical-sky.composite` right after `cs.deferred`. Minor cost: one more full-screen read and write of kMAIN and a second
+    fp16 rounding. **Next:** fold it back into the composite when the composite takes a handle table.
+-   **ViewAtmosphere's post-water composite corrupts guest and shows no fog in native.** With Exponential Height Fog and its
+    volumetric fog on, guest's image goes black with bright green-haloed foliage and stays so; native shows no haze where plain
+    D3D11 does. Fog off is clean. Being diagnosed with `CS_ORG_VIEW_ATMOSPHERE_DEBUG` (`render-graph.md`).
+-   **Physical Sky's `PHYSICAL_SKY` define is still stripped from graph builds.** Removing the strip broke DCLF Lighting and
+    Effect pipelines (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and
+    the ORG `ISSAOComposite` build in guest. Reverted on the integration branch; phase 3 of `physical-sky-port.md` maps them.
 
 ## Accepted differences
 

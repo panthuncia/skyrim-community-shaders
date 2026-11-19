@@ -144,7 +144,8 @@ t125-t127 for the faces (with `flags.w = 1`). On the graph:
 1. The composite's step is after the water ImageSpace blend. If the hook fires before `ISWaterBlend` in some frame kinds, the
    graph order would differ from D3D11's. Check one run's schedule against the D3D11 order.
 2. Faces vs main view: DCLF's frame textures give one view per register for both. The reflection medium needs either per-epoch
-   views or separate registers for the faces.
+   views or separate registers for the faces. **Decided (2026-11-18): per-epoch views.** The reflection faces are already their
+   own epochs, so a frame texture selects its view per epoch: no new registers, and one shader path for faces and main view.
 3. Sky (`Sky.hlsl`) and Water (`Water.hlsl`) DCLF families: whether their graph builds define `DCLF_BINDLESS` and bind frame
    textures. If not, they read t125-t127 unbound.
 4. `CompositeActive()` turns on when the registration exists. Until the stage's next build holds it, the hook's run is Idle and

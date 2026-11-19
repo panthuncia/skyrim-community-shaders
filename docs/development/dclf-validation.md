@@ -1189,6 +1189,14 @@ the composite never reads. DCLF's rule: derive write mode 11 for those decals; t
 but a trap: DCLF captures the engine's state objects inside the deferred pass (`CaptureEngineStates`), and opaque pipelines take
 their write masks from the engine's state for their write mode (`kOpaqueWriteMode`), never a default blend state.
 
+**Physical Sky: the deferred composite's aerial perspective has no depth without Dynamic Cubemaps.** Possible bug, found by
+the ORG Physical Sky port, not by a parity check.
+-   Where: `Deferred.cpp` binds the composite's t4 `DepthTexture` only when Dynamic Cubemaps is loaded (upstream does the same,
+    `a03587448`, `Deferred.cpp:386`). `DeferredCompositeCS.hlsl` applies the aerial perspective only for `depth < 1`, so with t4
+    unbound it reads 0 and adds nothing.
+-   It may be intended: only the cubemap path may need that view, with the aerial perspective covered elsewhere. Not confirmed.
+-   The ORG port keeps upstream's behaviour: its aerial perspective reads depth only when Dynamic Cubemaps is loaded.
+
 ### In the engine
 
 | Bug | DCLF's rule |

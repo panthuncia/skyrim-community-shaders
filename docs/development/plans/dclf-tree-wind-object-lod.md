@@ -146,7 +146,17 @@ skinned or eye:
 
 **Utility.** Not needed: object LOD never casts in DCLF.
 
-## Open decisions
+## Decisions (2026-11-18)
+
+- **D1:** admit every LOD shape under the LOD roots, LOD flags or not, kept non-casting, with a matching rule for the water
+  reflection. Deferred: first confirm on a DynDOLOD install that these shapes are undrawn today (`dclf-open-defects.md`, "LOD
+  gates").
+- **D2:** the feature buffer owned by Tree Wind, read by device reference.
+- **D3:** bend data built by background jobs on the preparation pool.
+- **Improvement target:** this whole design copies vertices and computes bend data on the CPU. A better design would avoid the
+  copies and the CPU work in the first place; revisit it before building the copy path.
+
+## Open decisions (as first written)
 
 - **D1. Admitting sub-index LOD shapes without the LOD object flags.** Needed for these shapes to be drawn at all in the graph
   modes, with or without Tree Wind. It covers every DynDOLOD passthru LOD shape, not only trees. Questions: is "under
