@@ -14,6 +14,7 @@
 
 #	include "Aftermath.h"
 #	include "Features/Upscaling.h"
+#	include "Features/Upscaling/FramePresenter.h"
 #	include "Features/Upscaling/Streamline.h"
 #	include "Globals.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
@@ -1130,6 +1131,14 @@ namespace RenderGraph::Engine::Native
 			} graph;
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
+			// The presentation (RequestPresentation). Requests come from any thread. The submission thread replaces the swap chain
+			// under presentLock and publishes what it made under presentationLock, which never waits on anything.
+			std::atomic<uint64_t> presentationRequested = 0;
+			std::mutex presentationLock;
+			FrameGen::PresentationConfig requestedPresentation{};
+			PresentationState adoptedPresentation{};
+			std::atomic<bool> hdr10Supported = false;
+			PresentationState framePresentation{};  // render owner
 			// The render thread queues a present only once the one before has finished.
 			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
 			std::atomic<uint64_t> presentPaceWaits = 0, presentPaceUs = 0;
@@ -2028,6 +2037,62 @@ namespace RenderGraph::Engine::Native
 					logger::info("[ORG native] swap chain made again at {}x{} (the back buffer is kept)", width, height);
 			}
 
+			/** @brief Publishes what the swap chain is now. Under presentLock. */
+			void PublishPresentation(uint64_t a_serial)
+			{
+				hdr10Supported.store(swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), std::memory_order_relaxed);
+				const bool hdr10 = swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084;
+				const bool layer = swapchain->Caps().presentationLayer;
+				std::lock_guard guard(presentationLock);
+				adoptedPresentation.serial = a_serial;
+				adoptedPresentation.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : swapchainFormat);
+				adoptedPresentation.hdr10 = hdr10;
+				adoptedPresentation.presentationLayer = layer;
+			}
+
+			/**
+			 * @brief The submission thread's replacement: waits for the presents, destroys the swap chain, runs a_tornDown, creates the
+			 * new one. Under presentLock, so a loading screen's present on its own thread cannot use the swap chain in between.
+			 */
+			void ReplacePresentation(const FrameGen::PresentationConfig& a_config, const std::function<bool()>& a_tornDown, uint64_t a_serial)
+			{
+				ZoneScopedN("CS.Native.ReplacePresentation");
+				const auto describe = [&] {
+					return fmt::format("frame generation {}, {}, vsync {}, tearing {}", static_cast<int>(a_config.method), a_config.hdr ? "HDR10" : "SDR",
+						a_config.vsync, a_config.tearing);
+				};
+				if (lost.load(std::memory_order_relaxed))
+					return;
+				const auto start = std::chrono::steady_clock::now();
+				WaitPresents();
+				// HDR10 the output cannot show presents SDR, as before.
+				const bool hdr = a_config.hdr && swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084);
+				if (a_config.hdr && !hdr)
+					logger::warn("[ORG native] HDR is on, but the display path does not take HDR10 (ST.2084, Rec. 2020). Presenting SDR.");
+				swapchain.Reset();
+				if (a_tornDown && !a_tornDown())
+					stl::report_and_fail(fmt::format("[ORG native] the presentation's torn-down step failed for {}", describe()));
+				rhi::SwapchainDesc desc{};
+				desc.hwnd = window;
+				desc.width = width;
+				desc.height = height;
+				desc.format = swapchainFormat;
+				desc.bufferCount = bufferCount;
+				desc.allowTearing = a_config.tearing;
+				desc.colorSpace = hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
+				desc.presentationLayer = a_config.method != FrameGen::Method::kNone;
+				if (const auto created = Rhi().CreateSwapchain(desc, swapchain); created != rhi::Result::Ok || !swapchain)
+					stl::report_and_fail(fmt::format("[ORG native] the swap chain could not be made for {} (BasicRHI result {})", describe(), static_cast<int>(created)));
+				if (swapchain->SetMaximumFrameLatency(frameLatency) != rhi::Result::Ok)
+					stl::report_and_fail(fmt::format("[ORG native] the new swap chain refused a frame latency of {}", frameLatency));
+				// A fresh swap chain has no mode change pending.
+				resizeRequested = false;
+				PublishPresentation(a_serial);
+				logger::info("[ORG native] presentation replaced (request {}): {}; {} images {}x{}, presentation layer {}, {:.1f} ms", a_serial, describe(),
+					swapchain->ImageCount(), width, height, desc.presentationLayer,
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+			}
+
 			HRESULT Present(UINT a_syncInterval, UINT a_flags)
 			{
 				static const bool probeOn = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
@@ -2514,6 +2579,8 @@ namespace RenderGraph::Engine::Native
 			{
 				if (!g_device)
 					return E_FAIL;
+				// A presentation replacement on the submission thread swaps the swap chain under presentLock.
+				std::lock_guard guard(g_device->presentLock);
 				g_device->frameLatency = a_frames ? a_frames : 3;
 				(void)g_device->swapchain->SetMaximumFrameLatency(g_device->frameLatency);
 				logger::info("[ORG native] the engine set the frame latency to {}", g_device->frameLatency);
@@ -4530,12 +4597,19 @@ namespace RenderGraph::Engine::Native
 			state->width = (std::max)(static_cast<uint32_t>(client.right - client.left), 1u);
 			state->height = (std::max)(static_cast<uint32_t>(client.bottom - client.top), 1u);
 		}
-		if (state->Rhi().CreateSwapchain(state->window, state->width, state->height, state->swapchainFormat, state->bufferCount, true, state->swapchain) !=
-				rhi::Result::Ok ||
-			!state->swapchain)
+		rhi::SwapchainDesc swapchainDesc{};
+		swapchainDesc.hwnd = state->window;
+		swapchainDesc.width = state->width;
+		swapchainDesc.height = state->height;
+		swapchainDesc.format = state->swapchainFormat;
+		swapchainDesc.bufferCount = state->bufferCount;
+		swapchainDesc.allowTearing = true;
+		if (state->Rhi().CreateSwapchain(swapchainDesc, state->swapchain) != rhi::Result::Ok || !state->swapchain)
 			Fail("the native swap chain", "BasicRHI could not create a swap chain on the game's window");
 		// HDR Display switches the colour space later.
 		(void)ConfigureSwapchain(state->swapchain.Get(), { .hdr = false, .maximumFrameLatency = state->frameLatency });
+		state->PublishPresentation(0);
+		state->framePresentation = state->adoptedPresentation;
 		if (!state->MakePresentObjects())
 			Fail("the native swap chain", "the present's command lists or timeline could not be made");
 		g_device = state;
@@ -4993,22 +5067,58 @@ namespace RenderGraph::Engine::Native
 
 	bool SetSwapChainColorSpace(bool a_hdr)
 	{
-		if (!g_device || !g_device->swapchain)
+		if (!g_device)
 			return false;
-		// A queued present uses the swap chain, so let it finish before taking the lock.
-		RenderGraphRuntime::Get().DrainSubmissions("a swap chain colour space change", true);
-		std::lock_guard guard(g_device->presentLock);
-		const auto wanted = a_hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
-		if (g_device->swapchain->ColorSpace() == wanted)
-			return true;
-		// The swap chain images are remade, so queued copies into them must finish first.
-		g_device->WaitPresents();
-		const bool configured = ConfigureSwapchain(g_device->swapchain.Get(), { .hdr = a_hdr, .maximumFrameLatency = g_device->frameLatency });
-		const bool applied = g_device->swapchain->ColorSpace() == wanted;
-		logger::info("[ORG native] swap chain colour space: {} asked, {} now ({} images, DXGI format {} back buffer){}", a_hdr ? "HDR10 (PQ, Rec. 2020)" : "SDR",
-			g_device->swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084 ? "HDR10" : "SDR", g_device->swapchain->ImageCount(),
-			static_cast<int>(g_device->format), configured ? "" : "; the swap chain refused it (see the [ORG] line above)");
-		return applied;
+		FrameGen::PresentationConfig config;
+		{
+			std::lock_guard guard(g_device->presentationLock);
+			config = g_device->requestedPresentation;
+		}
+		const bool supported = !a_hdr || g_device->hdr10Supported.load(std::memory_order_relaxed);
+		if (config.hdr != a_hdr) {
+			config.hdr = a_hdr;
+			(void)RequestPresentation(config, {});
+		}
+		return supported;
+	}
+
+	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig& a_config, std::function<bool()> a_tornDown)
+	{
+		if (!g_device)
+			return 0;
+		std::uint64_t serial;
+		{
+			std::lock_guard guard(g_device->presentationLock);
+			g_device->requestedPresentation = a_config;
+			serial = g_device->presentationRequested.fetch_add(1, std::memory_order_acq_rel) + 1;
+			g_device->adoptedPresentation.requested = serial;
+		}
+		logger::info("[ORG native] presentation request {}: frame generation {}, {}, vsync {}, tearing {}; the submission thread replaces the swap chain",
+			serial, static_cast<int>(a_config.method), a_config.hdr ? "HDR10" : "SDR", a_config.vsync, a_config.tearing);
+		// After the presents queued so far. The latest request wins, so a superseded one does nothing.
+		RenderGraphRuntime::Get().QueueOnSubmitThread([a_config, tornDown = std::move(a_tornDown), serial] {
+			if (!g_device || g_device->presentationRequested.load(std::memory_order_acquire) != serial)
+				return;
+			std::lock_guard guard(g_device->presentLock);
+			g_device->ReplacePresentation(a_config, tornDown, serial);
+		});
+		return serial;
+	}
+
+	PresentationState Presentation()
+	{
+		if (!g_device)
+			return {};
+		std::lock_guard guard(g_device->presentationLock);
+		return g_device->adoptedPresentation;
+	}
+
+	PresentationState FramePresentation() { return g_device ? g_device->framePresentation : PresentationState{}; }
+
+	void OnFrameBegin()
+	{
+		if (g_device && ::FrameAnchors::IsRenderOwner())
+			g_device->framePresentation = Presentation();
 	}
 
 	namespace
@@ -5191,6 +5301,10 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
 	bool SetSwapChainColorSpace(bool) { return false; }
+	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig&, std::function<bool()>) { return 0; }
+	PresentationState Presentation() { return {}; }
+	PresentationState FramePresentation() { return {}; }
+	void OnFrameBegin() {}
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}
 	rhi::QueueProgress GraphicsProgress() { return {}; }

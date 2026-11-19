@@ -28,6 +28,11 @@ namespace rhi
 	struct QueueProgress;
 }
 
+namespace FrameGen
+{
+	struct PresentationConfig;
+}
+
 namespace org
 {
 	class ExternalTextureResource;
@@ -132,9 +137,39 @@ namespace RenderGraph::Engine::Native
 
 	/**
 	 * @brief Switches the swap chain between HDR10 and SDR. HDR Display calls this because the native handle has no IDXGISwapChain3.
-	 * @return Whether the swap chain now presents in the asked colour space.
+	 * It asks for a presentation with the colour space (RequestPresentation), so the swap chain changes on the submission thread
+	 * after the queued presents. The render thread does not wait.
+	 * @return False off native mode, or when HDR10 is asked and the output cannot show it (the swap chain stays SDR).
 	 */
 	bool SetSwapChainColorSpace(bool a_hdr);
+
+	/** @brief The swap chain's presentation. */
+	struct PresentationState
+	{
+		std::uint64_t serial = 0;     // the request the swap chain was last made for. 0 is the swap chain made at startup
+		std::uint64_t requested = 0;  // the latest request
+		std::uint32_t format = 0;     // the swap chain images' rhi::Format
+		bool hdr10 = false;
+		bool presentationLayer = false;
+	};
+
+	/**
+	 * @brief Replaces the swap chain with one for a_config, on the submission thread after the presents queued so far. The entry waits
+	 * for the presents, destroys the swap chain, runs a_tornDown, then creates the new one (a presentation layer may wrap it when
+	 * a_config names a frame generation method). The latest request wins: one superseded before it runs does nothing. A failure is
+	 * fatal. Any thread.
+	 * @return The request's serial. Presentation().serial reaches it once the swap chain is replaced.
+	 */
+	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig& a_config, std::function<bool()> a_tornDown);
+
+	/** @brief The presentation the swap chain has now. Any thread. */
+	PresentationState Presentation();
+
+	/** @brief The presentation taken at the frame's begin, stable through the frame. Render owner. */
+	PresentationState FramePresentation();
+
+	/** @brief Takes the frame's presentation (Frame::Driver::OnBegin). */
+	void OnFrameBegin();
 
 	/** @brief Queued-present waits and their total time in microseconds since the last call. Any thread. */
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);

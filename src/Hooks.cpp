@@ -605,7 +605,9 @@ struct IDXGISwapChain_Present
 		// features' Reset, EndFrame, runs after the present); then the render thread's pacing point (RenderGraphRuntime::SignalFramePace),
 		// unless frame generation paces the present itself. After the commit, they follow the UI stage's block in stream order, and their
 		// D3D11 work (a flush, release queries) is outside the stage's window.
-		const bool pacedByCS = !globals::features::upscaling.IsFrameGenerationActive();
+		// Native: the presenter knows whether a presentation layer paces the presents.
+		const bool pacedByCS = RenderGraph::Engine::Native::Active() ? !RenderGraph::Engine::Native::FramePresentation().presentationLayer :
+		                                                              !globals::features::upscaling.IsFrameGenerationActive();
 		bool frameEndQueued = false;
 		const auto queueFrameEnd = [&] {
 			if (std::exchange(frameEndQueued, true))
@@ -641,8 +643,8 @@ struct IDXGISwapChain_Present
 						// after the frame's epochs, so it does not drain (Native's QueuePresent).
 						const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
 						                          !globals::features::upscaling.IsFrameGenerationActive();
-						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && !globals::features::upscaling.IsFrameGenerationActive() &&
-						                           RenderGraphRuntime::Get().QueuesPresent();
+						// Native keeps the queued present with frame generation on: the swap chain's layer presents on the submission thread.
+						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && RenderGraphRuntime::Get().QueuesPresent();
 						if (!queuedPresent)
 							RenderGraphRuntime::Get().DrainSubmissions("the present", true);
 						RenderGraph::FrameSequence::NoteBoundary("the present");
