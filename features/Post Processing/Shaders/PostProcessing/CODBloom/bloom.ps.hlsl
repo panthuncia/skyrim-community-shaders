@@ -12,13 +12,12 @@
 /// upsample returns CurrentMipMult in alpha and blends with DestBlend =
 /// SRC_ALPHA instead, with alpha not written.
 
-#include "Common/OrgResources.hlsli"
-#include "PostProcessing/fullscreen.hlsli"
-
-#include "PostProcessing/common.hlsli"
-
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (CODBloom::BloomCB at b1). The ORG chain
-// (ORG/ORGCODBloom.cpp) gives heap handles in the push block and each pass's constants from its latch.
+// (ORG/ORGCODBloom.cpp) gives heap handles in the push block and each pass's constants from its latch. The thresholds
+// read the scene pre-exposure from SharedData, so the push block comes before the headers that declare it.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
 struct BloomConstants
 {
 	// threshold
@@ -29,8 +28,17 @@ struct BloomConstants
 	float CurrentMipMult;
 };
 
-#define BLOOM_RESOURCES(X)                   	X(SRV, Texture2D<float4>, TexColor, 0)   	X(SRV, Texture2D<float4>, TexBloomIn, 1) 	X(SAMPLER, SamplerState, SampColor, 0)   	X(LATCH, BloomConstants, Bloom, 1)
+#define BLOOM_RESOURCES(X)                   \
+	X(SHARED, ConstantBuffer, Shared, 0)     \
+	X(SRV, Texture2D<float4>, TexColor, 0)   \
+	X(SRV, Texture2D<float4>, TexBloomIn, 1) \
+	X(SAMPLER, SamplerState, SampColor, 0)   \
+	X(LATCH, BloomConstants, Bloom, 1)
 ORG_PUSH_BLOCK(BLOOM_RESOURCES(ORG_HANDLE))
+
+#include "PostProcessing/common.hlsli"
+#include "PostProcessing/fullscreen.hlsli"
+
 BLOOM_RESOURCES(ORG_RESOURCE)
 
 // A per-component or of bool vectors: HLSL 2021 (DXC) takes one only through or, FXC's || is per component.

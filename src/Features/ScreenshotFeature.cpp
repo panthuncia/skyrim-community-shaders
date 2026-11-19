@@ -49,6 +49,8 @@ namespace
 		// The render graph's copy (ORGScreenshot): the engine target it is (-1: none), else its import name.
 		std::int32_t engineTarget = -1;
 		const char* importName = nullptr;
+		// The render graph's clean scene (ORGScreenshot::SnapshotCleanScene); texture is null.
+		bool graphCleanScene = false;
 	};
 
 	struct CaptureStateGuard
@@ -320,6 +322,11 @@ namespace
 		}
 
 		if (!IsFlatHdrScreenshotCapture()) {
+			if (forCapture && ORGScreenshot::Get().HasFreshCleanScene()) {
+				src.graphCleanScene = true;
+				src.description = "Pre-UI scene snapshot on the render graph (no HUD, no menu blur)";
+				return src;
+			}
 			if (auto* clean = globals::features::screenshotFeature.GetFreshCleanScene()) {
 				src.texture = clean;
 				src.description = "Pre-UI scene snapshot (no HUD, no menu blur)";
@@ -849,7 +856,9 @@ void ScreenshotFeature::Reset()
 void ScreenshotFeature::SnapshotCleanScene()
 {
 	const bool previewWanted = std::exchange(previewVisible, false);
-	if (!loaded || !(captureRequested || previewWanted) || IsFlatHdrScreenshotCapture() || !globals::game::renderer)
+	// The render graph took this frame's capture snapshot already.
+	const bool captureWanted = captureRequested && !ORGScreenshot::Get().HasFreshCleanScene();
+	if (!loaded || !(captureWanted || previewWanted) || IsFlatHdrScreenshotCapture() || !globals::game::renderer)
 		return;
 
 	winrt::com_ptr<ID3D11Texture2D> sceneKeepAlive;
@@ -879,6 +888,19 @@ ID3D11Texture2D* ScreenshotFeature::GetFreshCleanScene() const
 	return cleanSceneTexture && cleanSceneFrame == globals::state->frameCount ? cleanSceneTexture->resource.get() : nullptr;
 }
 
+void ScreenshotFeature::SnapshotCleanSceneOnGraph()
+{
+	if (!loaded || !captureRequested || IsFlatHdrScreenshotCapture() || !ORGScreenshot::Get().IsActive())
+		return;
+	// A frame it does not copy, such as before the copy's first build switches in, falls back to the D3D11 snapshot.
+	(void)ORGScreenshot::Get().SnapshotCleanScene();
+}
+
+bool ScreenshotFeature::HasFreshCleanScene() const
+{
+	return GetFreshCleanScene() || ORGScreenshot::Get().HasFreshCleanScene();
+}
+
 void ScreenshotFeature::ProcessCaptureRequest()
 {
 	ProcessPendingReadbacks();
@@ -895,7 +917,7 @@ void ScreenshotFeature::ProcessCaptureRequest()
 	if (captureRequested.exchange(false)) {
 		// Hotkeys and the button are handled after the UI draws, so the pre-UI snapshot needs a one-frame wait.
 		// Scripted captures (RequestCapture) keep the frame they were asked for.
-		if (!IsFlatHdrScreenshotCapture() && captureOutputPath.empty() && !GetFreshCleanScene() && !captureDeferred) {
+		if (!IsFlatHdrScreenshotCapture() && captureOutputPath.empty() && !HasFreshCleanScene() && !captureDeferred) {
 			captureDeferred = true;
 			captureRequested = true;
 		} else {
@@ -1069,14 +1091,18 @@ void ScreenshotFeature::Capture()
 	const auto src = SelectCaptureSource(sourceTextureKeepAlive, /*forCapture=*/true);
 	logger::debug("Capturing from {}", src.description);
 
-	if (!src.texture) {
+	const auto* cleanDesc = src.graphCleanScene ? ORGScreenshot::Get().CleanSceneDesc() : nullptr;
+	if (!src.texture && !cleanDesc) {
 		logger::error("Failed to acquire screenshot source texture ({}).", src.description);
 		return;
 	}
 	ID3D11Texture2D* sourceTexture = src.texture;
 
 	D3D11_TEXTURE2D_DESC srcDesc{};
-	sourceTexture->GetDesc(&srcDesc);
+	if (cleanDesc)
+		srcDesc = *cleanDesc;
+	else
+		sourceTexture->GetDesc(&srcDesc);
 
 	uint32_t copyX = 0;
 	uint32_t copyY = 0;
@@ -1122,7 +1148,11 @@ void ScreenshotFeature::Capture()
 		screenshot.cropX = copyX;
 		screenshot.cropY = copyY;
 		auto shared = std::make_shared<PendingScreenshot>(std::move(screenshot));
-		const ORGScreenshot::Source source{ .texture = sourceTexture, .srv = src.srv, .engineTarget = src.engineTarget, .importName = src.importName };
+		const ORGScreenshot::Source source{ .texture = sourceTexture,
+			.srv = src.srv,
+			.engineTarget = src.engineTarget,
+			.importName = src.importName,
+			.cleanScene = src.graphCleanScene };
 		const bool onGraph = ORGScreenshot::Get().Capture(source, [this, shared](ORGScreenshot::Pixels&& a_pixels) {
 			shared->readback = std::move(a_pixels);
 			try {
@@ -1137,6 +1167,11 @@ void ScreenshotFeature::Capture()
 			return;
 		}
 		screenshot = std::move(*shared);
+	}
+	// The graph's clean scene has no D3D11 texture to copy instead.
+	if (!sourceTexture) {
+		logger::error("Screenshot failed: the render graph could not take the capture of {}.", src.description);
+		return;
 	}
 
 	D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;

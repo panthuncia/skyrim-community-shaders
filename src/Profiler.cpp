@@ -245,7 +245,8 @@ void Profiler::PushSkipSamples(const SkipMarks& a_marks, const std::function<boo
 {
 	for (const auto& name : std::span(a_marks.names).first(a_marks.count)) {
 		auto it = knownTimerIndex.find(name);
-		if (it == knownTimerIndex.end() || a_ran(name))
+		// A render graph pass's samples arrive late and in bursts, so one still waiting means it ran.
+		if (it == knownTimerIndex.end() || a_ran(name) || pendingExternal.contains(name))
 			continue;
 		// lastSampleFrame stays, so a pass that is always skipped still retires.
 		auto& known = knownTimers[it->second];

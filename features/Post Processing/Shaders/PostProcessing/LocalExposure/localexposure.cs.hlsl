@@ -1,11 +1,9 @@
-#include "Common/PreExposure.hlsli"
 /// Local Exposure luminance analysis
 /// Builds the luminance pyramid and edge-aware grid. Composite resolves the
 /// base layer and evaluates tonal remapping using the final global exposure.
 
+#define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
-
-#include "Common/Color.hlsli"
 
 #define GRID_DEPTH 32
 #define GRID_TILE_SIZE 64
@@ -16,7 +14,8 @@
 
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (LocalExposure::LocalExposureCB at b1). The
 // ORG chain (ORG/ORGLocalExposure.cpp) gives heap handles in the push block and the constants from its latch. Each entry
-// point reads only some of the resources: the others' handles are never dereferenced.
+// point reads only some of the resources: the others' handles are never dereferenced. The scene pre-exposure is read
+// from SharedData, so the push block, which holds its handles, comes before the headers that declare it.
 struct LocalExposureConstants
 {
 	float ManualExposure;
@@ -45,6 +44,7 @@ struct LocalExposureConstants
 };
 
 #define LOCAL_EXPOSURE_RESOURCES(X)                    \
+	X(SHARED, ConstantBuffer, Shared, 0)               \
 	X(SRV, Texture2D<float4>, TexColor, 0)             \
 	X(SRV, Texture2D<float>, TexLogLuminance, 1)       \
 	X(SRV, Texture3D<float2>, TexLuminanceGrid, 2)     \
@@ -55,6 +55,10 @@ struct LocalExposureConstants
 	X(UAV, RWTexture3D<float2>, RWTexLuminanceGrid, 1) \
 	X(LATCH, LocalExposureConstants, LocalExposure, 1)
 ORG_PUSH_BLOCK(LOCAL_EXPOSURE_RESOURCES(ORG_HANDLE))
+
+#include "Common/Color.hlsli"
+#include "Common/PreExposure.hlsli"
+
 LOCAL_EXPOSURE_RESOURCES(ORG_RESOURCE)
 
 float SceneLogLuminance(float3 color)

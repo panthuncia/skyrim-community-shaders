@@ -10,6 +10,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 
 #	include <format>
 
@@ -24,6 +25,7 @@ namespace ORGPostChain
 		// Each shader's resource list in order.
 		struct ThresholdBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle texColor, fftR, fftG, fftB;
 			ShaderBindings::Latch glare;
 		};
@@ -57,6 +59,7 @@ namespace ORGPostChain
 		};
 		struct CompositeBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle scene, ifft, output;
 			ShaderBindings::Latch glare;
 		};
@@ -184,7 +187,7 @@ namespace ORGPostChain
 				pending.reset();
 				a_builder.Dispatch({ .name = "threshold",
 					.program = threshold,
-					.bindings = { Bind::Srv(a_builder.Current()), Bind::Uav(work[0][0]), Bind::Uav(work[1][0]), Bind::Uav(work[2][0]), glareLatch },
+					.bindings = { Bind::Shared(), Bind::Srv(a_builder.Current()), Bind::Uav(work[0][0]), Bind::Uav(work[1][0]), Bind::Uav(work[2][0]), glareLatch },
 					.groups = { groups, groups, 1 } });
 				for (int channel = 0; channel < 3; ++channel) {
 					dispatchFft(std::format("row-{}", kChannels[channel]), rowForward, work[channel][0], work[channel][1], false);
@@ -205,7 +208,7 @@ namespace ORGPostChain
 					.groups = { groups, groups, 1 } });
 				a_builder.Dispatch({ .name = "composite",
 					.program = composite,
-					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(packed), Bind::Uav(output), glareLatch },
+					.bindings = { Bind::Shared(), Bind::Srv(a_builder.Current()), Bind::Srv(packed), Bind::Uav(output), glareLatch },
 					.groups = { (shape.width + 7) >> 3, (shape.height + 7) >> 3, 1 } });
 				a_builder.Publish(Published::kGlare, output);
 				width = static_cast<float>(shape.width);
