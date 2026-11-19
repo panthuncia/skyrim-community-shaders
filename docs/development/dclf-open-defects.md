@@ -628,6 +628,9 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
     read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
     handle table.
+-   **Native Vulkan: Physical Lens's ghosts and starburst lose the device on the RX 6600.** Seen in `cs.pp.physical-lens.request-plans`
+    with frame generation off (step 6's lead, `native-vulkan+fg-fx`, 2026-11-19). The lens image mapping and Camera FX are fine.
+    **Next:** reproduce with `DXVK_DEBUG=hang` and the RGD crash flow on Vulkan only.
 -   **Physical Sky's graph clouds are about 6% darker than D3D11.** Same frame, clear weather, Whiterun: guest's overcast sky
     reads 223 against D3D11's 239. Under the washout (Linear Lighting off) the clear skies already differ, so the gap is not
     pinned. First suspects: the ambient inputs (ground-reflection SH, ambient transport). **Next:** compare with Linear

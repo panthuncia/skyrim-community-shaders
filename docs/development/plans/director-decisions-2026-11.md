@@ -44,3 +44,13 @@ final until the user confirms it.
    - The merge moves `extern/OpenRenderGraph` to `7c5d080` (`org-port/exempt-exit-commit`, "never commit an exempt backing's
      exit step"). It is a descendant of the previous pointer, is only local, and needs pushing to the ORG remote with the
      rest.
+10. **Native FSR-FG, steps 6 and 7, merged** (native Vulkan 46 rendered / 92 presented per second, native D3D12 37 / 74,
+    HDR10 too, no device loss, D3D12 InfoQueue clean). The leads' calls are questions 23-36 in the plan. Ones with visible
+    effects:
+    - Native loads `sl.fsr_g` at boot, which costs one extra swap chain replacement (about 90 ms) with frame generation off.
+    - The controller's wanted method no longer waits for the surface (27). This also changes guest: a surface stuck in the
+      scRGB fallback stays wrapped and passes frames through.
+    - A failed wrap is fatal instead of falling back (30, 32).
+
+    The foreground eye check (HUD ghosting, pacing, menu and loading passthrough) needs the user, on both backends.
+    `fg+hdr` cannot test frame generation under HDR (step lists replace whole); `fg-hdr.toml` does.
