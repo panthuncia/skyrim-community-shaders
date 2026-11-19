@@ -490,9 +490,11 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView
 
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
-	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
+	// CS_ORG_FOG_DEBUG=5: only the draws that still run on D3D11 get no volume. DCLF reads the views through its own callbacks.
+	const bool engineNone = ORGExponentialHeightFog::Debug() == 5;
+	ID3D11ShaderResourceView* srv = engineNone ? nullptr : IntegratedLightScatteringView();
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
-	ID3D11ShaderResourceView* farSrv = IntegratedLightScatteringFarView();
+	ID3D11ShaderResourceView* farSrv = engineNone ? nullptr : IntegratedLightScatteringFarView();
 	globals::d3d::context->PSSetShaderResources(22, 1, &farSrv);
 }
 

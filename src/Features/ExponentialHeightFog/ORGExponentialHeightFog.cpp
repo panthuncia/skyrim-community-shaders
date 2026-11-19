@@ -13,8 +13,8 @@ std::uint32_t ORGExponentialHeightFog::Debug()
 {
 	static const std::uint32_t s_mode = [] {
 		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
-		if (mode > 4) {
-			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 4); it is off", mode);
+		if (mode > 8) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 8); it is off", mode);
 			return 0u;
 		}
 		if (mode)
@@ -1003,7 +1003,8 @@ bool ORGExponentialHeightFog::Prepass()
 	// A frame whose inputs the graph cannot read runs on D3D11.
 	Shape shape;
 	shape.sizes = fog.ComputeGridSizes();
-	shape.temporal = Util::GetTemporal();
+	// Mode 8 runs without history, so no froxel reads a history texture.
+	shape.temporal = Util::GetTemporal() && Debug() != 8;
 	const auto fallback = [&](const char* a_reason) {
 		if (impl->fallbackReason != a_reason) {
 			logger::info("[ORG] Exponential Height Fog: this frame runs on D3D11 ({})", a_reason);
@@ -1103,7 +1104,8 @@ bool ORGExponentialHeightFog::Prepass()
 	// The far extent depends only on the settings and near plane.
 	bool farEnabled = false;
 	fog.BuildConstants(inputs, farEnabled);
-	shape.farEnabled = farEnabled;
+	// Mode 7 keeps the far volume cleared to no fog, so every reader sees only the near volume.
+	shape.farEnabled = farEnabled && Debug() != 7;
 
 	// A new extent alone becomes a new version at the next frame boundary, with no build. Other changes register new passes.
 	if (impl->textures)
