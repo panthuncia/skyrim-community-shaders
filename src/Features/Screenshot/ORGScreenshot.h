@@ -20,6 +20,8 @@ namespace DirectX
 * One copy pass at the Capture anchor copies the source into a readback buffer. It is recorded at execution from the capture its
 * run stored, so a kept recording needs nothing new. The bytes come back at a later capture point and the frame never waits.
 * D3D11's staging copy is used only when the graph cannot take a capture at all.
+* The pre-UI clean scene is a graph copy too: at the FrameGeneration anchor, after the ImageSpace chain and before the UI, kFRAMEBUFFER
+* is copied into a graph texture that a capture of that frame then reads. It needs no D3D11 content, so it also works in native mode.
 * Render thread throughout, except Crop. Free of ORG/Vulkan includes.
 */
 class ORGScreenshot
@@ -32,6 +34,7 @@ public:
 		ID3D11ShaderResourceView* srv = nullptr;
 		std::int32_t engineTarget = -1;
 		const char* importName = nullptr;  // FrameAnchors::D3D11Texture's name when it is no engine target
+		bool cleanScene = false;           // this frame's SnapshotCleanScene copy; texture and srv are not used
 	};
 
 	/** @brief The first subresource at offset in data, rows rowPitch bytes apart. */
@@ -68,6 +71,18 @@ public:
 
 	/** @brief Every capture point. Takes a waiting capture and hands finished readbacks to their callbacks. */
 	void Poll();
+
+	/**
+	* @brief After the ImageSpace chain, before the UI: copies kFRAMEBUFFER into the clean scene on the graph.
+	* @return False when it did not copy this frame, such as while the copy's first build has not switched in.
+	*/
+	bool SnapshotCleanScene();
+
+	/** @brief Whether SnapshotCleanScene copied this frame. */
+	bool HasFreshCleanScene() const;
+
+	/** @brief The clean scene's description. Null before the first SnapshotCleanScene. */
+	const D3D11_TEXTURE2D_DESC* CleanSceneDesc() const;
 
 	/** @brief Any thread, since the encoding worker calls it. @return False when the readback does not hold the crop. */
 	static bool Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_width, std::uint32_t a_height, DXGI_FORMAT a_format,

@@ -63,6 +63,7 @@
 #include <bit>
 #include <filesystem>
 #include <semaphore>
+#include <unordered_map>
 
 #include <tbb/concurrent_queue.h>
 
@@ -1134,6 +1135,12 @@ struct RenderGraphRuntime::Impl
 	std::array<std::uint64_t, 10> aheadCounts{};
 	std::uint64_t aheadPeak = 0, aheadPeakSession = 0, aheadFrames = 0;
 	std::array<SegmentTime, kSegments> segmentTimes{};
+	// Per segment, each profiler name its timed epochs reported and how many of them since left it out. A segment can run
+	// several epochs a frame with different passes (Interface, ImageSpace, EngineDraws), so a pass counts as stopped only
+	// after kStoppedEpochs of them. It is then marked skipped, so its row reads 0 rather than its last time until it retires.
+	static constexpr std::uint32_t kStoppedEpochs = 16;
+	static constexpr std::uint32_t kForgottenEpochs = 256;
+	std::array<std::unordered_map<std::string, std::uint32_t>, kSegments> profiledPasses{};
 	std::uint32_t timedEpochs = 0;
 	std::uint32_t completedFrames = 0;  // callbacks, timed or not: tells "no readback" from "no timestamps"
 
@@ -1165,26 +1172,41 @@ struct RenderGraphRuntime::Impl
 		++completedFrames;
 		if (a_epoch.timestampFrame)
 			GpuCounters::Timestamps::Completed(a_epoch.timestampFrame, std::move(a_epoch.ranges));
-		if (globals::profiler && a_epoch.segment < kSegments)
-			for (const auto& completed : a_epoch.otherQueuePasses)
-				if (completed.inclusiveMs >= kProfilerMinPassMs)
-					globals::profiler->AddExternalSample(ProfilerName(static_cast<Segment>(a_epoch.segment), completed.name + " [compute]"),
-						static_cast<float>(completed.inclusiveMs));
-		if (!a_epoch.timed || a_epoch.segment >= kSegments)
+		if (a_epoch.segment >= kSegments)
+			return;
+		const auto epochSegment = static_cast<Segment>(a_epoch.segment);
+		std::vector<std::string> reported;
+		// Leave out passes with nothing to do, which cost a few microseconds of empty timestamps.
+		const auto report = [&](const std::string& a_pass, double a_ms) {
+			if (!globals::profiler || a_ms < kProfilerMinPassMs)
+				return;
+			auto name = ProfilerName(epochSegment, a_pass);
+			globals::profiler->AddExternalSample(name, static_cast<float>(a_ms));
+			reported.push_back(std::move(name));
+		};
+		for (const auto& completed : a_epoch.otherQueuePasses)
+			report(completed.name + " [compute]", completed.inclusiveMs);
+		if (!a_epoch.timed)
 			return;
 		auto& segmentTime = segmentTimes[a_epoch.segment];
-		const auto epochSegment = static_cast<Segment>(a_epoch.segment);
 		for (const auto& completed : a_epoch.passes) {
 			auto& pass = segmentTime.passes[completed.name];
 			pass.inclusiveMs += completed.inclusiveMs;
 			pass.exclusiveMs += completed.exclusiveMs;
-			// Leave out passes with nothing to do, which cost a few microseconds of empty timestamps.
-			if (globals::profiler && completed.exclusiveMs >= kProfilerMinPassMs)
-				globals::profiler->AddExternalSample(ProfilerName(epochSegment, completed.name), static_cast<float>(completed.exclusiveMs));
+			report(completed.name, completed.exclusiveMs);
 		}
 		segmentTime.spanMs += a_epoch.spanMs;
 		++segmentTime.epochs;
 		++timedEpochs;
+		if (globals::profiler) {
+			auto& absent = profiledPasses[a_epoch.segment];
+			for (auto& [name, epochs] : absent)
+				if (++epochs > kStoppedEpochs)
+					globals::profiler->MarkPassSkipped(name);
+			std::erase_if(absent, [](const auto& a_entry) { return a_entry.second > kForgottenEpochs; });
+			for (auto& name : reported)
+				absent.insert_or_assign(std::move(name), 0u);
+		}
 	}
 
 	// Render thread: the timings the host's thread has read back since the last call.
@@ -1302,8 +1324,49 @@ struct RenderGraphRuntime::Impl
 
 	static constexpr double kProfilerMinPassMs = 0.003;
 
-	// "<Feature>::<segment> / <pass>" so the profiler groups passes by feature. These are an epoch's only timings,
-	// since a D3D11 timer around ExecuteEpoch would also count queue idle time.
+	/** @brief The feature whose client made a pass, from the client id the pass name starts with. Null for the engine's and CS's own. */
+	static const char* PassFeature(std::string_view a_pass)
+	{
+		static constexpr std::pair<std::string_view, const char*> kClients[] = {
+			{ "cs.pp", "PostProcessing" },
+			{ "cs.upscaling", "Upscaling" },
+			{ "cs.screenshot", "Screenshot" },
+			{ "cs.hdr", "HDRDisplay" },
+			{ "cs.effects11", "Effects11" },
+			{ "cs.e11-rays", "Effects11" },
+			{ "cs.volumetric-lighting", "VolumetricLighting" },
+			{ "cs.volumetric-shadows", "VolumetricShadows" },
+			{ "cs.llf", "LightLimitFix" },
+			{ "cs.dyncubemaps", "DynamicCubemaps" },
+			{ "cs.subsurface", "SubsurfaceScattering" },
+			{ "cs.skylighting", "Skylighting" },
+			{ "cs.exp-height-fog", "ExponentialHeightFog" },
+			{ "cs.ssgi", "ScreenSpaceGI" },
+			{ "cs.screen-space-shadows", "ScreenSpaceShadows" },
+			{ "cs.cloud-shadows", "CloudShadows" },
+			{ "cs.terrain-blending", "TerrainBlending" },
+			{ "cs.terrain-shadows", "TerrainShadows" },
+			{ "cs.ibl", "ImageBasedLighting" },
+			{ "cs.grass-collision", "GrassCollision" },
+			{ "cs.texstream", "TextureStreaming" },
+			{ "cs.dclf", "DrawcallLimitFix" },
+			{ "cs.water", "DrawcallLimitFix" },
+			{ "cs.precipitation", "DrawcallLimitFix" },
+			{ "cs.decals", "DrawcallLimitFix" },
+			{ "cs.blood-splatter", "DrawcallLimitFix" },
+			{ "cs.shadow-mask", "DrawcallLimitFix" },
+			{ "cs.sky", "DrawcallLimitFix" },
+			{ "cs.menu-scenes", "DrawcallLimitFix" },
+		};
+		for (const auto& [client, feature] : kClients)
+			if (a_pass.starts_with(client) && (a_pass.size() == client.size() || a_pass[client.size()] == '.'))
+				return feature;
+		return nullptr;
+	}
+
+	// "<Feature>::<segment> / <pass>" so the profiler groups passes by feature, and the menu's feature cost chip finds them. An
+	// anchor's or stage's pass goes under the feature its client belongs to. These are an epoch's only timings, since a D3D11
+	// timer around ExecuteEpoch would also count queue idle time.
 	static std::string ProfilerName(Segment a_segment, const std::string& a_pass)
 	{
 		switch (a_segment) {
@@ -1326,8 +1389,14 @@ struct RenderGraphRuntime::Impl
 		case Segment::FirstPerson:
 			return "DrawcallLimitFix::First person / " + a_pass;
 		default:
-			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment))) {
+				// "FrameAnchors::Tonemap / " becomes "PostProcessing::Tonemap / " for a Post Processing pass.
+				const std::string_view profiler = anchor->profiler;
+				const auto separator = profiler.find("::");
+				if (const char* feature = PassFeature(a_pass); feature && separator != std::string_view::npos)
+					return std::format("{}::{}{}", feature, profiler.substr(separator + 2), a_pass);
 				return anchor->profiler + a_pass;
+			}
 			break;
 		}
 		return "RenderGraph::" + a_pass;

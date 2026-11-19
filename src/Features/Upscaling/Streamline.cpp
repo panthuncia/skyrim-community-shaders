@@ -2112,6 +2112,7 @@ Streamline::EvaluationResult Streamline::EvaluateFSR(ID3D11Resource* a_colorIn, 
 	fsrOpts.outputHeight = a_outputHeight;
 	fsrOpts.sharpness = a_sharpness;
 	fsrOpts.colorBuffersHDR = sl::Boolean::eTrue;
+	fsrOpts.preExposure = globals::state->preExposure;
 	const sl::Result optionsResult = g_sl.slFSRSetOptions(g_sl.viewport, fsrOpts);
 	if (optionsResult != sl::Result::eOk) {
 		logger::error("[Streamline] FSR options failed (result {})", static_cast<int>(optionsResult));

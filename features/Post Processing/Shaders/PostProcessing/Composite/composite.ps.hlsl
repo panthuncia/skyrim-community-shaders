@@ -1,4 +1,3 @@
-#include "Common/PreExposure.hlsli"
 /// Bloom/Flare/Glare/Exposure Composite pass
 /// Combines bloom, lens flare, physical glare, and auto exposure results with the main color texture.
 /// Formula: SceneColor * GlobalExposure * LocalExposure + Bloom * GlobalExposure
@@ -6,16 +5,16 @@
 /// Purkinje effect is applied after compositing on the final perceived image.
 /// Uses #ifdef HAS_BLOOM / HAS_LENS_FLARE / HAS_GLARE / HAS_EXPOSURE / HAS_LOCAL_EXPOSURE to control behavior.
 
+#define ORG_SHARED_CONSTANTS
 #include "Common/OrgResources.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
-
-#include "Common/Color.hlsli"
 
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below: Composite::Draw binds Histogram Auto
 // Exposure's and Local Exposure's constant buffers at b1 and b2 and Composite::CompositeCB at b3. The ORG chain
 // (ORG/ORGComposite.cpp) gives heap handles in the push block; the exposure constants are the regions those effects
 // publish in the chain's latch, and the composite constants Composite's own region. Each permutation reads only the
-// entries its HAS_* defines name; the others are never read.
+// entries its HAS_* defines name; the others are never read. The scene pre-exposure is read from SharedData, so the
+// push block, which holds its handles, comes before the headers that declare it.
 
 // HistogramAutoExposure::AutoExposureCB (its padding is never read).
 struct AutoExposureConstants
@@ -75,6 +74,7 @@ struct CompositeConstants
 // TexBlurredLuminance: the broad base. LinearSampler: linear clamp (local exposure and flare). BloomSampler: linear
 // border (bloom).
 #define COMPOSITE_RESOURCES(X)                             \
+	X(SHARED, ConstantBuffer, Shared, 0)                   \
 	X(SRV, Texture2D<float4>, TexColor, 0)                 \
 	X(SRV, Texture2D<float4>, TexBloom, 1)                 \
 	X(SRV, Texture2D<float4>, TexFlare, 2)                 \
@@ -89,6 +89,10 @@ struct CompositeConstants
 	X(LATCH, LocalExposureConstants, LocalExposure, 2)     \
 	X(LATCH, CompositeConstants, Composite, 3)
 ORG_PUSH_BLOCK(COMPOSITE_RESOURCES(ORG_HANDLE))
+
+#include "Common/Color.hlsli"
+#include "Common/PreExposure.hlsli"
+
 COMPOSITE_RESOURCES(ORG_RESOURCE)
 
 // The physical lens inputs are D3D11 only: the ORG chain does not run the physical lens.

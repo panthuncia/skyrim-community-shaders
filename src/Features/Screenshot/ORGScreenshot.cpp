@@ -56,7 +56,10 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
+#	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
+#	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <OpenRenderGraph/Runtime.h>
@@ -67,11 +70,14 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 
 #	include <atomic>
 #	include <mutex>
+#	include <string>
 #	include <utility>
 
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
+	// The clean scene's copy, at the FrameGeneration anchor (RecipeTable.h names it on that anchor's ticket).
+	constexpr const char* kCleanClientId = "cs.screenshot.clean";
 	// How many capture points a capture may wait for its copy and readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
 	// Extra captures in flight wait for a free buffer.
@@ -103,6 +109,15 @@ namespace
 		std::shared_ptr<Request> armed;
 		// Render thread, read by the commit.
 		std::uint64_t points = 0;
+		// Render thread. The source's name and resource when the graph owns it (the clean scene), for the client's graph.
+		std::pair<std::string, std::shared_ptr<org::Resource>> own;
+	};
+
+	/** @brief The clean scene's copy, shared with its client's callbacks. Render thread. */
+	struct CleanCopy
+	{
+		bool armed = false;            // SnapshotCleanScene is running the anchor for it
+		std::uint32_t copied = ~0u;    // the frame whose run's commit opened the copy
 	};
 
 	struct CaptureBindings
@@ -188,6 +203,14 @@ struct ORGScreenshot::Impl
 	std::uint64_t points = 0;
 	std::vector<std::shared_ptr<Request>> outstanding;  // taken, not read back yet
 	std::uint64_t built = 0;                            // the registration the client's passes were made for
+
+	// The pre-UI clean scene: kFRAMEBUFFER's copy at the FrameGeneration anchor.
+	std::unique_ptr<GraphResources::Texture2D> clean;
+	FrameAnchors::Texture cleanSource;
+	std::shared_ptr<RenderGraph::RunGate> cleanGate;
+	std::shared_ptr<CleanCopy> cleanCopy = std::make_shared<CleanCopy>();
+	bool cleanRegistered = false;
+	bool cleanWarned = false;
 };
 
 ORGScreenshot::~ORGScreenshot() = default;
@@ -225,6 +248,11 @@ namespace
 		client.active = [weak = std::weak_ptr<Shared>(a_shared)] {
 			const auto owner = weak.lock();
 			return owner && owner->armed != nullptr;
+		};
+		// A graph-owned source is registered with the graph by name.
+		client.registerResources = [own = a_shared->own](org::RenderGraph& a_graph) {
+			if (own.second)
+				a_graph.RegisterResource(org::ResourceIdentifier(own.first), own.second);
 		};
 		client.commit = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
 			const auto owner = weak.lock();
@@ -271,11 +299,17 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 {
 	auto& state = *impl;
 	auto& shared = *state.shared;
-	auto source = Import(a_source);
+	const bool clean = a_source.cleanScene && state.clean;
+	if (a_source.cleanScene && !clean)
+		return false;
+	FrameAnchors::Texture source = clean ? FrameAnchors::Texture(state.clean->Graph()) : Import(a_source);
 	if (!source)
 		return false;
 	D3D11_TEXTURE2D_DESC desc{};
-	a_source.texture->GetDesc(&desc);
+	if (clean)
+		desc = state.clean->Desc();
+	else
+		a_source.texture->GetDesc(&desc);
 	const auto bytes = rhi::FormatByteSize(source.Format());
 	if (!bytes)
 		return false;
@@ -283,6 +317,7 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 	if (source == shared.source && shared.width == desc.Width && shared.height == desc.Height && shared.texelBytes == bytes)
 		return true;
 	shared.source = std::move(source);
+	shared.own = clean ? std::pair{ state.clean->Name(), state.clean->Graph() } : std::pair<std::string, std::shared_ptr<org::Resource>>{};
 	shared.width = desc.Width;
 	shared.height = desc.Height;
 	shared.texelBytes = bytes;
@@ -297,7 +332,7 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 	if (!RegisterClient(state.shared))
 		return false;
 	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its build switches in before the next capture copies",
-		a_source.importName ? a_source.importName : "the source", desc.Width, desc.Height, bytes);
+		clean ? "the clean scene" : (a_source.importName ? a_source.importName : "the source"), desc.Width, desc.Height, bytes);
 	return true;
 }
 
@@ -328,7 +363,7 @@ namespace
 
 bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 {
-	if (!a_source.texture || !a_onPixels || !IsActive())
+	if (!(a_source.cleanScene ? HasFreshCleanScene() : a_source.texture != nullptr) || !a_onPixels || !IsActive())
 		return false;
 	auto& state = *impl;
 	auto& shared = *state.shared;
@@ -421,6 +456,98 @@ void ORGScreenshot::Poll()
 	});
 }
 
+namespace
+{
+	/** @brief The clean scene's client: one gated copy, opened only by a commit SnapshotCleanScene armed. */
+	bool RegisterCleanClient(const std::shared_ptr<RenderGraph::RunGate>& a_gate, const GraphResources::Texture2D& a_clean, const FrameAnchors::Texture& a_source,
+		const std::shared_ptr<CleanCopy>& a_copy)
+	{
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kCleanClientId, 100, nullptr, a_gate);
+		builder.Add(RenderGraph::AnchorPasses::Copy{
+			.name = "copy", .source = a_source, .target = a_clean.Graph(), .width = a_clean.Desc().Width, .height = a_clean.Desc().Height, .gate = 0u });
+		if (builder.Failed()) {
+			logger::error("[ORG] Screenshot: the clean scene's copy could not be built: {}", builder.Failure());
+			return false;
+		}
+		FrameAnchors::ClientDesc client{};
+		client.id = kCleanClientId;
+		client.passes = builder.Take();
+		client.gates = { a_gate };
+		client.registerResources = [name = a_clean.Name(), resource = a_clean.Graph()](org::RenderGraph& a_graph) {
+			a_graph.RegisterResource(org::ResourceIdentifier(name), resource);
+		};
+		client.active = [weak = std::weak_ptr<CleanCopy>(a_copy)] {
+			const auto copy = weak.lock();
+			return copy && copy->armed;
+		};
+		client.commit = [weak = std::weak_ptr<CleanCopy>(a_copy), gate = a_gate](const FrameAnchors::Point&) {
+			const auto copy = weak.lock();
+			if (!copy || !copy->armed)
+				return;
+			gate->OpenDraw(0);
+			copy->copied = globals::state->frameCount;
+		};
+		return FrameAnchors::Register(std::move(client));
+	}
+}
+
+bool ORGScreenshot::SnapshotCleanScene()
+{
+	if (!IsActive() || !globals::game::renderer)
+		return false;
+	auto& state = *impl;
+	auto* framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER].texture;
+	auto source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
+	if (!framebuffer || !source)
+		return false;
+	D3D11_TEXTURE2D_DESC desc{};
+	framebuffer->GetDesc(&desc);
+	const bool same = state.clean && state.clean->Desc().Width == desc.Width && state.clean->Desc().Height == desc.Height &&
+	                  state.clean->Desc().Format == desc.Format && state.cleanSource == source;
+	if (!same) {
+		// A new size or format makes a new texture and client. Its build switches in at a later frame, so this frame does not copy.
+		D3D11_TEXTURE2D_DESC cleanDesc{};
+		cleanDesc.Width = desc.Width;
+		cleanDesc.Height = desc.Height;
+		cleanDesc.MipLevels = 1;
+		cleanDesc.ArraySize = 1;
+		cleanDesc.Format = desc.Format;
+		cleanDesc.SampleDesc = { 1, 0 };
+		cleanDesc.Usage = D3D11_USAGE_DEFAULT;
+		cleanDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		auto clean = std::make_unique<GraphResources::Texture2D>(cleanDesc, "Screenshot::CleanScene", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+		if (!state.cleanGate)
+			state.cleanGate = RenderGraph::RunGate::Create("cs.screenshot.clean.gate");
+		state.clean.reset();
+		state.cleanRegistered = false;
+		if (*clean && state.cleanGate) {
+			state.clean = std::move(clean);
+			state.cleanSource = std::move(source);
+			state.cleanRegistered = RegisterCleanClient(state.cleanGate, *state.clean, state.cleanSource, state.cleanCopy);
+		}
+		if (!state.cleanRegistered && !std::exchange(state.cleanWarned, true))
+			logger::error("[ORG] Screenshot: the clean scene's copy could not be set up ({}x{}, format {}); captures read kFRAMEBUFFER at the capture point",
+				desc.Width, desc.Height, static_cast<int>(desc.Format));
+		return false;
+	}
+	if (!state.cleanRegistered)
+		return false;
+	state.cleanCopy->armed = true;
+	const bool ran = FrameAnchors::Scheduled(kCleanClientId, FrameAnchors::Anchor::FrameGeneration) && FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration);
+	state.cleanCopy->armed = false;
+	return ran && HasFreshCleanScene();
+}
+
+bool ORGScreenshot::HasFreshCleanScene() const
+{
+	return impl && impl->clean && impl->cleanCopy->copied == globals::state->frameCount;
+}
+
+const D3D11_TEXTURE2D_DESC* ORGScreenshot::CleanSceneDesc() const
+{
+	return impl && impl->clean ? &impl->clean->Desc() : nullptr;
+}
+
 #else  // !CS_HAS_RENDER_GRAPH
 
 // Without OpenRenderGraph screenshots always copy with D3D11.
@@ -435,5 +562,8 @@ bool ORGScreenshot::IsActive() const { return false; }
 bool ORGScreenshot::SetSource(const Source&) { return false; }
 bool ORGScreenshot::Capture(const Source&, OnPixels) { return false; }
 void ORGScreenshot::Poll() {}
+bool ORGScreenshot::SnapshotCleanScene() { return false; }
+bool ORGScreenshot::HasFreshCleanScene() const { return false; }
+const D3D11_TEXTURE2D_DESC* ORGScreenshot::CleanSceneDesc() const { return nullptr; }
 
 #endif

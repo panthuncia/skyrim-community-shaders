@@ -7,6 +7,7 @@
 
 #	include "Features/PostProcessing/CODBloom.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 
 #	include <Render/OwnedDescriptorBinding.h>
 #	include <rhi_helpers.h>
@@ -23,6 +24,7 @@ namespace ORGPostChain
 		// BLOOM_RESOURCES order.
 		struct BloomBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle texColor, texBloomIn, sampColor;
 			ShaderBindings::Latch bloom;
 		};
@@ -79,7 +81,7 @@ namespace ORGPostChain
 				constants[0] = a_builder.Latch<CODBloom::BloomCB>();
 				a_builder.Draw({ .name = "threshold",
 					.program = threshold,
-					.bindings = { Bind::Srv(a_builder.Current()), Bind::Unused(), linear, Bind::Latch(constants[0]) },
+					.bindings = { Bind::Shared(), Bind::Srv(a_builder.Current()), Bind::Unused(), linear, Bind::Latch(constants[0]) },
 					.target = image.Mip(0) });
 
 				// The downsamples read no constants and take the threshold's region.
@@ -87,7 +89,7 @@ namespace ORGPostChain
 					const auto mip = static_cast<std::uint32_t>(i);
 					a_builder.Draw({ .name = std::format("downsample-{}", mip + 1),
 						.program = i == 0 ? downsampleFirst : downsample,
-						.bindings = { Bind::Unused(), Bind::Srv(image.Mip(mip)), linear, Bind::Latch(constants[0]) },
+						.bindings = { Bind::Shared(), Bind::Unused(), Bind::Srv(image.Mip(mip)), linear, Bind::Latch(constants[0]) },
 						.target = image.Mip(mip + 1) });
 				}
 
@@ -96,7 +98,7 @@ namespace ORGPostChain
 					constants[mip] = a_builder.Latch<CODBloom::BloomCB>();
 					a_builder.Draw({ .name = std::format("upsample-{}", mip),
 						.program = upsample,
-						.bindings = { Bind::Unused(), Bind::Srv(image.Mip(mip + 1)), linear, Bind::Latch(constants[mip]) },
+						.bindings = { Bind::Shared(), Bind::Unused(), Bind::Srv(image.Mip(mip + 1)), linear, Bind::Latch(constants[mip]) },
 						.target = image.Mip(mip) });
 				}
 

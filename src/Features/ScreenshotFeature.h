@@ -46,8 +46,15 @@ struct ScreenshotFeature : public Feature
 	void ProcessCaptureRequest();
 	/** @brief Copies the scene before the HUD draws when an SDR capture is pending, so screenshots exclude the HUD and menu blur. */
 	void SnapshotCleanScene();
-	/** @brief Returns this frame's pre-UI snapshot, or nullptr if none was taken. */
+	/**
+	 * @brief In graph modes, at the end of the ImageSpace chain: a pending SDR capture's clean scene is copied on the render graph
+	 * (ORGScreenshot), which needs no D3D11 content. SnapshotCleanScene then copies only for the crop preview.
+	 */
+	void SnapshotCleanSceneOnGraph();
+	/** @brief Returns this frame's pre-UI D3D11 snapshot, or nullptr if none was taken. */
 	ID3D11Texture2D* GetFreshCleanScene() const;
+	/** @brief Whether this frame has a pre-UI snapshot, the D3D11 one or the render graph's. */
+	bool HasFreshCleanScene() const;
 	/**
 	 * @brief Drops a queued vanilla Multi-Screenshot (Ctrl+PrintScreen) while vanilla screenshots are disabled.
 	 * Its TestCameraPath mode locks game time to 33 ms per frame, speeding the game up. Call after input dispatch.

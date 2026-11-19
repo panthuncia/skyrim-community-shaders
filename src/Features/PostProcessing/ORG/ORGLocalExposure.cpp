@@ -8,6 +8,7 @@
 #	include "Features/PostProcessing/LocalExposure.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 
 #	include <format>
 
@@ -22,6 +23,7 @@ namespace ORGPostChain
 		// LOCAL_EXPOSURE_RESOURCES order, every entry.
 		struct LocalExposureBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle texColor, texLogLuminance, texLuminanceGrid, texBlurredLuminance;
 			ShaderBindings::Handle linearSampler, mirrorSampler;
 			ShaderBindings::Handle rwTexOutput, rwTexLuminanceGrid;
@@ -70,7 +72,7 @@ namespace ORGPostChain
 				const auto mirror = Bind::Handle(mirrorSampler.Index());
 				// Every entry takes the whole list, and each reads only its own.
 				auto bindings = [&](Bind a_color, Bind a_logLuminance, Bind a_output, Bind a_grid) {
-					return std::vector<Bind>{ std::move(a_color), std::move(a_logLuminance), Bind::Unused(), Bind::Unused(), linear, mirror,
+					return std::vector<Bind>{ Bind::Shared(), std::move(a_color), std::move(a_logLuminance), Bind::Unused(), Bind::Unused(), linear, mirror,
 						std::move(a_output), std::move(a_grid), Bind::Latch(constants) };
 				};
 				const auto image = [](const auto& a_texture, DXGI_FORMAT a_format) { return Image{ a_texture->Graph(), a_format }; };

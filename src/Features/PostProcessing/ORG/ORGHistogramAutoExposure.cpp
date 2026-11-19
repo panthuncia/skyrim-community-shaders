@@ -5,11 +5,13 @@
 
 #	include "Features/PostProcessing/ORGPostEffect.h"
 
+#	include "Features/LinearLighting.h"
 #	include "Features/PostProcessing/HistogramAutoExposure.h"
 #	include "Globals.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -19,6 +21,7 @@
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 
 #	include <atomic>
+#	include <cmath>
 #	include <cstring>
 #	include <mutex>
 #	include <optional>
@@ -33,6 +36,7 @@ namespace ORGPostChain
 		// HISTOGRAM_RESOURCES order, every entry.
 		struct HistogramBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle texColor, rwHistogram, rwAdaptation;
 			ShaderBindings::Latch autoExposure;
 		};
@@ -61,7 +65,10 @@ namespace ORGPostChain
 			org::runtime::ReadbackCapturePlan plan;
 		};
 
-		/** @brief Only on frames the settings UI or the log wants it, as the D3D11 staging copies. No revision, so it is prepared every frame and never replayed. */
+		/**
+		* @brief Only on frames something wants it, as the D3D11 staging copies: the settings UI, or the pre-exposure metering under linear
+		* lighting. No revision, so it is prepared every frame and never replayed.
+		*/
 		class ReadbackPass final : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrame>
 		{
 		public:
@@ -182,11 +189,11 @@ namespace ORGPostChain
 				if (clearPending)
 					a_builder.Dispatch({ .name = "reset",
 						.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
-						.bindings = { Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
+						.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
 						.once = true });
 				a_builder.Dispatch({ .name = "histogram",
 					.program = a_builder.Compute(kShader, words, {}, L"CS_Histogram"),
-					.bindings = { Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
+					.bindings = { Bind::Shared(), Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
 					.groups = { groups[0], groups[1], 1 } });
 				// Before CS_Average clears the histogram, as the D3D11 staging copy.
 				a_builder.Add("histogram-readback", FrameAnchors::PassKind::Copy,
@@ -195,7 +202,7 @@ namespace ORGPostChain
 					});
 				a_builder.Dispatch({ .name = "average",
 					.program = a_builder.Compute(kShader, words, {}, L"CS_Average"),
-					.bindings = { Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) } });
+					.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) } });
 				a_builder.Add("adaptation-readback", FrameAnchors::PassKind::Copy,
 					[shared = readback, source = adaptation->Graph()]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<ReadbackPass>(shared, source, Capture::Adaptation);
@@ -216,7 +223,7 @@ namespace ORGPostChain
 			void Executed(PostProcessFeature&) override { clearPending = false; }
 
 		private:
-			/** @brief Moves arrived readbacks into the UI values and posts this frame's requests. */
+			/** @brief Moves arrived readbacks into the UI values and the pre-exposure metering, and posts this frame's requests. */
 			void TakeReadbacks(HistogramAutoExposure& a_exposure) const
 			{
 				{
@@ -226,6 +233,9 @@ namespace ORGPostChain
 						readback->histogram.reset();
 					}
 					if (readback->adaptation) {
+						// As GetPreExposure takes the D3D11 staging copy: the graph's adaptation meters the next frames' pre-exposure.
+						if (const float value = *readback->adaptation; std::isfinite(value) && value > 0.0f)
+							a_exposure.preExposureLuminance = value;
 						a_exposure.adaptationValue = *readback->adaptation;
 						a_exposure.adaptationReadbackFrame = static_cast<int64_t>(globals::state->frameCount);
 						readback->adaptation.reset();
@@ -233,7 +243,8 @@ namespace ORGPostChain
 				}
 				const auto wanted = a_exposure.WantedReadbacks();
 				readback->wantHistogram.store(wanted.histogram, std::memory_order_release);
-				readback->wantAdaptation.store(wanted.adaptation, std::memory_order_release);
+				const bool metering = globals::features::linearLighting.IsLinearLightingActive();
+				readback->wantAdaptation.store(wanted.adaptation || metering, std::memory_order_release);
 			}
 
 			std::unique_ptr<GraphResources::StructuredBuffer> histogram;

@@ -1,4 +1,3 @@
-#include "Common/PreExposure.hlsli"
 // Physical Glare — Scene composite with energy conservation
 // Community Shaders / Post Processing — Author: Jiaye, 2026
 //
@@ -17,16 +16,22 @@
 //   [1] Delavennat (2021), Physically-based Real-time Glare, LiU.
 //   [4] Jimenez (2012), Filmic SMAA, SIGGRAPH — bicubic via HW bilinear.
 
+#define ORG_SHARED_CONSTANTS
 #include "PostProcessing/PhysicalGlare/glare.hlsli"
 
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (PhysicalGlare::GlareCB at b1). The ORG chain
-// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch.
+// (ORG/ORGPhysicalGlare.cpp) gives heap handles in the push block and the constants from its latch. The scene
+// pre-exposure is read from SharedData, so the push block comes before the header that declares it.
 #define COMPOSITE_RESOURCES(X)                  \
+	X(SHARED, ConstantBuffer, Shared, 0)        \
 	X(SRV, Texture2D<float4>, TexScene, 0)      \
 	X(SRV, Texture2D<float4>, TexIFFT_RGB, 1)   \
 	X(UAV, RWTexture2D<float4>, RWTexOutput, 0) \
 	X(LATCH, GlareConstants, Glare, 1)
 ORG_PUSH_BLOCK(COMPOSITE_RESOURCES(ORG_HANDLE))
+
+#include "Common/PreExposure.hlsli"
+
 COMPOSITE_RESOURCES(ORG_RESOURCE)
 
 groupshared float3 GlareTile[256];
