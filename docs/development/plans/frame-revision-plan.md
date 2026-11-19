@@ -995,3 +995,73 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   HDR black frames).
 - **Tap errors are fatal** in development builds (`CS_ORG_MISMATCH_FATAL`). A run that stops on one is a failed run; read the line,
   it names the segment and the reason.
+
+---
+
+## 11. Additions from later findings (2026-11-18)
+
+These come from the investigation of a device loss and of wrong colours on the HDR switch, recorded in
+[xess-tdr-hdr-colours.md](xess-tdr-hdr-colours.md). The wrong colours are in this plan's class: the parts of one change switch on
+different frames. The user asked for such findings to be added here and not fixed one by one. Fold each item into the step it names
+when that step is implemented.
+
+The plan already covers: HDR as variables `HdrEnabled`/`HdrOutputTarget` (5b, line ~446), 6.15 (HDR Display), 9a ("HDR swap chain
+colour space and format: an `HdrEnabled`/`SwapChainFormat` revision. The old chain draws until the new one is adopted"), 7.7 Native,
+and the `hdr` test "no black frame in a shot taken 2 frames after the switch" (step 9). It does **not** mention upscaler SDK contexts
+anywhere, and its HDR text is about black frames, not about the colour space being applied ahead of the content.
+
+Text to add:
+
+**4.1 Step 9a, after the "HDR swap chain colour space and format" bullet (new sub-bullet):**
+
+> - The colour space call itself moves into adoption. Today `HDRDisplay.cpp:BeginRenderFrame` latches `hdrEnabledForFrame` from the
+>   live setting and calls `UpdateSwapChainColorSpace` (native: `NativeDevice.cpp:SetSwapChainColorSpace`) on the same frame, while the
+>   HDR output anchor attaches about 2 frames later and the post stage's build 9-10 frames later (log of 2026-11-18, frames 1836-1846).
+>   Frames in between present PQ space with SDR content, or the reverse: "strange colours" on the switch, black frames on the way back.
+>   End state: `SetSwapChainColorSpace` runs inside `AdoptLatest`, for the revision whose post chain, HDR output client, LdrScratch
+>   format and ImGui target format were prepared for that `HdrEnabled` value. `hdrEnabledForFrame` is `Adopted().Get(HdrEnabled)`,
+>   never the live setting. The drain it does today stays (a present queued on the old space finishes first); it is the only wait in
+>   adoption and is allowed because the swap chain is reconfigured. If that wait breaks "the render thread never waits" (2.2), the
+>   alternative is to switch the colour space at the first present of the adopted revision on the presenter thread.
+> - Guest: `OwnedFrame.cpp:ApplyColorSpace` (at present) gets the same rule: it applies the colour space of the revision whose content
+>   it presents.
+
+**4.2 Step 9, Test (extend the `hdr` acceptance):** a black-frame check is not enough; wrong colours are not black.
+
+> New cs-test config `hdr-frames`: with the menu closed, `hdr 1`, then shots at frames 1, 2, 3, 5, 10 and 60 after the step; then
+> `hdr 0` and the same shots. Acceptance: every shot after `hdr 1` decodes (PQ) to within the noise of the frame-60 shot (mean and
+> 99th percentile luminance, and mean chroma), and every shot after `hdr 0` matches its frame-60 SDR shot. Needs shots that copy the
+> frame as presented, without waiting for a build to switch in (today's `shot` may wait, which would hide the bad frames: check
+> `Testing` before relying on it).
+
+**4.3 New sub-section 7.11 "SDK contexts and frames in flight" (and a row in step 5b's table):**
+
+> Upscaler SDKs keep their own GPU objects (XeSS context, FFX context, NGX feature) whose shape depends on variables: `UpscaleMethod`,
+> the quality mode, `DisplaySize`, and for FSR `RenderSize` growth and the HDR flag. They are bound state like a texture version, but
+> they live inside Streamline plugins, so ORG cannot version them.
+> - Rule: an SDK object replaced by an options change is retired on the retirement clock, after the last submitted frame that recorded
+>   an evaluate with it. It is never destroyed at the next evaluate. Today both CS plugins break this
+>   (`sl.xess/xessEntry.cpp:ensureContext`, `sl.fsr/fsrEntry.cpp:ensureUpscaleContext`); that is a plain bug to fix first (see
+>   `_notes/xess-tdr-hdr-colours.md` section 5), not something the revision lane fixes by itself.
+> - The SDK options for a frame (`slXeSSSetOptions`/`slFSRSetOptions`/`slDLSSSetOptions`: mode, output size) come from the adopted
+>   revision, not the live settings (`Streamline.cpp:EvaluateXeSS` reads `settings.qualityMode` per call today). The new context is
+>   then created on the first frame of the revision whose render size and post chain match it.
+> - Better (removes the trigger): prepare the new context on the revision lane, as a fragment, so creation and
+>   `xessD3D12BuildPipelines` (tens of ms) do not run on the recording thread. That needs a plugin entry point to prepare a context
+>   for given options without evaluating. Decide in step 6.14.
+> - Decision 6a interacts: with render-size textures at display size, a quality change is constants-only for CS, but XeSS still needs
+>   a new context per quality mode (its input range is per preset **(inferred; check `xessGetInputResolution` min/max per preset)**).
+>   If one preset's input range covers every ratio CS offers, one context per output size would remove the trigger.
+
+Step 5b table, new row:
+
+> | `UpscalerOptions` | method, quality mode, output size, HDR flag | `Upscaling` settings; read by `Streamline.cpp:Evaluate*` from `Adopted()` |
+
+**4.4 Step 6.14 (Upscaling) and step 8 tests:**
+
+> New cs-test config `xess-quality` (native D3D12, native Vulkan, guest): `upscale xess`, 120 frames, then `setting
+> Upscaling.qualityMode=` 3, 1, 3, 2, 1, 4, 1, a few frames apart (also two on consecutive frames), shots after each. Same for `fsr`
+> (the growth direction is the one that recreates FSR's context). Run with DRED (`DXVK_DEBUG=hang` does this in cs-test) and once
+> with `org.validation=true`: the D3D12 debug layer reports objects deleted while still in use. Acceptance: no device loss, no debug
+> layer "deleted while still in use" message, shots match. Step 8's `dynres` config should include XeSS and FSR, not only the
+> default method.
