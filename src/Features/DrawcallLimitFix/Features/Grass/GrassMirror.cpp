@@ -357,7 +357,11 @@ namespace DCLF::Features::Grass
 				const auto* lod = ::GrassMeshLibrary::GetLODMesh(record, tier == 1 ? Tier::kMiddle : Tier::kFar);
 				if (!lod)
 					continue;
-				MeshSource source{ .key = lod, .vertexDesc = lod->vertexDesc, .indexCount = lod->indexCount, .canopyHeight = lod->canopyHeight };
+				MeshSource source{ .key = lod,
+					.vertexDesc = lod->vertexDesc,
+					.indexCount = lod->indexCount,
+					.canopyHeight = lod->canopyHeight,
+					.occlusionRadius = lod->occlusionRadius };
 				source.vertexBuffer.copy_from(lod->vertexBuffer);
 				source.indexBuffer.copy_from(lod->indexBuffer);
 				bucket.meshes[tier] = AddMeshUser(std::move(source));
@@ -414,6 +418,9 @@ namespace DCLF::Features::Grass
 				continue;
 			auto& row = bucket.row.Plain();
 			row.flags &= ~(GrassInstances::kBucketTierOne | GrassInstances::kBucketTierTwo);
+			// As Grass Optimizations: the bound about the canopy's middle, grown to cover every LOD mesh drawn.
+			const auto& center = row.boundCenter;
+			row.occlusionRadius = row.modelRadius + std::hypot(center[0], center[1], center[2] - 0.5f * row.canopyHeight[0]);
 			bool lodRange = false;
 			for (std::uint32_t tier = 0; tier < kTiers; ++tier) {
 				const auto it = bucket.meshes[tier] ? meshes.find(bucket.meshes[tier]) : meshes.end();
@@ -437,6 +444,8 @@ namespace DCLF::Features::Grass
 				if (tier > 0) {
 					row.lodMeshCost[tier - 1] = drawn ? std::sqrt(std::max(1.0f, static_cast<float>(it->second.source.indexCount) / 24.0f)) : row.minPixelScale;
 					row.canopyHeight[tier] = drawn ? it->second.source.canopyHeight : row.canopyHeight[0];
+					if (drawn)
+						row.occlusionRadius = std::max(row.occlusionRadius, it->second.source.occlusionRadius);
 				}
 			}
 			row.instanceCount = row.mesh[0] != kNoMesh ? bucket.total : 0;

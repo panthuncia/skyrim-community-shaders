@@ -70,11 +70,13 @@ namespace
 		Handle skylightingProbes;
 		Handle ssgiAo, ssgiY, ssgiCoCg, ssgiSpecular;
 		Handle envIBL, skyIBL;
+		Handle skylightingCoverage, skylightingZenith;
 	};
-	static_assert(sizeof(CompositeBlock) == 96, "matches the shader's push block (check-dual-target-shaders reports 96 bytes)");
+	static_assert(sizeof(CompositeBlock) == 104, "matches the shader's push block (check-dual-target-shaders reports 104 bytes)");
 
 	// The D3D11 composite's slots for other features' outputs.
-	constexpr std::array<std::uint32_t, 9> kViewSlots{ 6, 7, 8, 10, 11, 12, 13, 14, 15 };
+	constexpr std::array<std::uint32_t, 11> kViewSlots{ 6, 7, 8, 10, 11, 12, 13, 14, 15, 21, 22 };
+	constexpr std::uint32_t kSkylightingCoverageSlot = 21;
 
 	/** @brief In kViewSlots order. */
 	struct SlotSource
@@ -92,6 +94,8 @@ namespace
 		{ { ORGScreenSpaceGI::kSpecularId, {} }, false },
 		{ { ORGIBL::kEnvId, {} }, false },
 		{ { ORGIBL::kSkyId, {} }, false },
+		{ { ORGSkylighting::kCoverageId, {} }, false },
+		{ { ORGSkylighting::kZenithId, {} }, false },
 	} };
 
 	/** @brief The producer's published resource, ordered after its writes. Without one, the null descriptor, as D3D11 binds nothing there. */
@@ -250,6 +254,8 @@ namespace
 			block.ssgiSpecular = inputs[6];
 			block.envIBL = inputs[7];
 			block.skyIBL = inputs[8];
+			block.skylightingCoverage = inputs[9];
+			block.skylightingZenith = inputs[10];
 			execution->program->Dispatch(a_recording, ShaderBindings::Data(block), execution->groupsX, execution->groupsY, 1);
 		}
 
@@ -325,8 +331,10 @@ struct ORGDeferredComposite::Impl
 		}
 		if (!t.specular || !t.albedo || !t.normalRoughness || !t.masks || !t.masks2 || !t.main || !t.normals[0] || !t.normals[1] || !t.motionVectors)
 			return std::nullopt;
-		for (std::size_t i = 0; i < kViewSlots.size(); ++i)
-			t.inputs[i] = InputOf(i, a_frame.views[kViewSlots[i]]);
+		for (std::size_t i = 0; i < kViewSlots.size(); ++i) {
+			const auto slot = kViewSlots[i];
+			t.inputs[i] = InputOf(i, slot < kSkylightingCoverageSlot ? a_frame.views[slot] : a_frame.skylightingCoverage[slot - kSkylightingCoverageSlot]);
+		}
 		return t;
 	}
 

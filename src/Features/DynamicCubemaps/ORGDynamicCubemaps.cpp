@@ -24,6 +24,7 @@ bool ORGDynamicCubemaps::Requested()
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
+#	include "Deferred.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
@@ -425,11 +426,12 @@ namespace
 		explicit operator bool() const { return depth && main && reflections && defaultCubemap; }
 	};
 
-	Imports Import()
+	/** @brief a_main is the capture's colour source: the forward pass's main target, as upstream's D3D11 capture reads. */
+	Imports Import(std::uint32_t a_main)
 	{
 		Imports imports;
 		imports.depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
-		imports.main = FrameAnchors::EngineTarget(RE::RENDER_TARGETS::kMAIN);
+		imports.main = FrameAnchors::EngineTarget(a_main);
 		imports.reflections = FrameAnchors::EngineCubemap(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
 		if (auto* view = globals::features::dynamicCubemaps.defaultCubemap) {
 			winrt::com_ptr<ID3D11Resource> resource;
@@ -778,7 +780,8 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			return false;
 		}
 		// The engine made its targets just before CS's setup, and the feature loaded its default cubemap.
-		state->imports = Import();
+		// Deferred has not chosen the forward targets yet; the first update moves the import to its main target.
+		state->imports = Import(RE::RENDER_TARGETS::kMAIN);
 		if (!state->imports) {
 			logger::warn("[ORG] Dynamic Cubemaps: its inputs cannot be imported (depth {}, main {}, reflections {}, default cubemap {}); the cubemaps stay on D3D11",
 				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
@@ -950,7 +953,7 @@ bool ORGDynamicCubemaps::AfterUpdate()
 		refresh = true;
 	}
 	// Old imports stay alive with the builds that hold them.
-	if (auto imports = Import(); imports && imports != state.imports) {
+	if (auto imports = Import(static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0])); imports && imports != state.imports) {
 		state.imports = std::move(imports);
 		refresh = true;
 	}
