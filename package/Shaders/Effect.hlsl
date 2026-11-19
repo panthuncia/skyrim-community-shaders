@@ -18,6 +18,7 @@
 #	undef VOLUMETRIC_SHADOWS
 #	undef SCREEN_SPACE_SHADOWS
 #	undef EXP_HEIGHT_FOG
+#	undef PHYSICAL_SKY
 #	undef WETNESS_EFFECTS
 #	undef CS_HAIR
 #	undef CS_SKIN

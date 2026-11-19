@@ -11,7 +11,7 @@
 // (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants, written at the anchor's run right after the
 // engine's batch, so they hold the camera the engine's draw would have read.
 // The world's CS features are off in this build: a menu scene has none of their frame inputs (light clusters, skylighting, the
-// cubemaps, the world's shadows, fog, wetness), so it shades as the vanilla shader with CS's material path.
+// cubemaps, the world's shadows, fog, wetness, Physical Sky's LUTs), so it shades as the vanilla shader with CS's material path.
 #	define LIGHTING_ORG
 #	undef LIGHT_LIMIT_FIX
 #	undef SKYLIGHTING
@@ -30,6 +30,7 @@
 #	undef EXTENDED_MATERIALS
 #	undef EXTENDED_TRANSLUCENCY
 #	undef EXP_HEIGHT_FOG
+#	undef PHYSICAL_SKY
 #	undef SSS
 #	undef CS_SKIN
 #	undef CS_SKIN_SHADING
