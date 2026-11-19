@@ -766,8 +766,15 @@ ORG_HEADER_SRV(Texture2D<float4>, TexSkyTail, 66)
 	float3 GetCloudDiffuseTransmittance(float3 worldPosAbs)
 	{
 		const SharedData::PhysSkyData data = SharedData::physSkyData;
+#if defined(CS_ORG_BINDLESS)
+		// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+		const float lowThickness = data.enableVolumetricClouds ? data.volCloudLowThickness : 0.0;
+		if (lowThickness <= 0.0)
+			return 1.0;
+#else
 		if (!data.enableVolumetricClouds || data.volCloudLowThickness <= 0.0)
 			return 1.0;
+#endif
 		const float4 transport = TexCloudDiffuseTransport.Load(int3(0, 1, 0));
 		if (transport.w == 0.0)
 			return 1.0;
@@ -796,8 +803,15 @@ ORG_HEADER_SRV(Texture2D<float4>, TexSkyTail, 66)
 		SharedData::PhysSkyData data = SharedData::physSkyData;
 		float3 transmittance = 1.0;
 
+#if defined(CS_ORG_BINDLESS)
+		// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+		const float lowThickness = data.enableVolumetricClouds ? data.volCloudLowThickness : 0.0;
+		if (lowThickness <= 0.0)
+			return transmittance;
+#else
 		if (!data.enableVolumetricClouds || data.volCloudLowThickness <= 0)
 			return transmittance;
+#endif
 
 		float3 posRelative = worldPosAbs;
 		posRelative.z -= data.zBottom;

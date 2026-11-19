@@ -567,8 +567,15 @@ groupshared float4 gCloudAmbientPartial[8][32];
 
 float3 CloudAmbientAtmosphereSource(uint lightIndex, float3 position, float3 direction, float3 lightDirection, float3 color, float3 rayleigh, float3 mie)
 {
+#if defined(CS_ORG_BINDLESS)
+	// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+	const float source = dot(lightDirection, lightDirection) >= 0.5 ? max(color.r, max(color.g, color.b)) : 0.0;
+	if (source <= 0.0)
+		return 0.0;
+#else
 	if (!any(color > 0.0) || dot(lightDirection, lightDirection) < 0.5)
 		return 0.0;
+#endif
 	const float cosine = dot(direction, lightDirection);
 	const float3 direct = SampleAtmosphereLightTr(TexTransmittance, TransmittanceSampler, position, lightDirection, SharedData::physSkyData.diskAngularRadius[lightIndex]) *
 	                      (rayleigh * DiskRayleigh(cosine, lightIndex) + mie * SampleDiskPhase(cosine, lightIndex).z);
@@ -938,8 +945,15 @@ float sampleCloudDensityFromContext(
 {
 	density_context.light_density = 0.0;
 	const NDFInfo ndf = density_context.ndf;
+#if defined(CS_ORG_BINDLESS)
+	// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+	const float layerProfile = ndf.in_layer ? ndf.dimension_profile : 0.0;
+	if (layerProfile <= 1e-10)
+		return 0.0;
+#else
 	if (!ndf.in_layer || ndf.dimension_profile <= 1e-10)
 		return 0.0;
+#endif
 
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
 #ifdef NO_CLOUD_STORMS
@@ -1029,8 +1043,15 @@ float sampleWeatherCloudDensity(
 	const float2 fieldMeters = CloudFieldPosition((pos.xy - info.noiseWindOffset) * GAME_UNIT_TO_M, info.cloudEvolution.xy);
 	density_context.ndf = sampleNDF(fieldMeters * GAME_UNITS_PER_METER, pos.xy, profileAltitude);
 	density_context.weather_height_fraction = density_context.ndf.height_fraction;
+#if defined(CS_ORG_BINDLESS)
+	// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+	const float layerProfile = density_context.ndf.in_layer ? density_context.ndf.dimension_profile : 0.0;
+	if (layerProfile <= 0.0)
+		return 0;
+#else
 	if (!density_context.ndf.in_layer || density_context.ndf.dimension_profile <= 0.0)
 		return 0;
+#endif
 
 	const float bottomFade = saturate((density_context.ndf.height_fraction - 0.02) * 33.333332);
 	const float2 xy = fieldMeters;
@@ -1412,8 +1433,15 @@ VolumetricCloudResult RenderVolumetricCloudRay(float3 direction, float3 eye, flo
 #endif
 			cirrusPending = false;
 		}
+#if defined(CS_ORG_BINDLESS)
+		// One relational test: a continue behind an || with a negation miscompiles on AMD RDNA2.
+		const float pieceLength = CloudIntervalContains(low, 0.5 * (begin + end)) ? end - begin : 0.0;
+		if (pieceLength <= 0.0)
+			continue;
+#else
 		if (end <= begin || !CloudIntervalContains(low, 0.5 * (begin + end)))
 			continue;
+#endif
 		float distance = begin;
 		float reflectionEnd = begin;
 		float2 stormPiece = 0.0;

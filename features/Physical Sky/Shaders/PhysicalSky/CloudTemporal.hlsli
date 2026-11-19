@@ -327,8 +327,14 @@ static uint4 StormScreenRect = CloudDispatch.StormScreenRect;
 	}
 #	else
 	tid += StormScreenRect.xy;
+#		if defined(CS_ORG_BINDLESS)
+	// One test: an early return behind an || of equality tests miscompiles on AMD RDNA2. Tiles hold 0 or 1.
+	if (min(uint(all(tid < StormScreenRect.zw)), TexStormTiles[tid / 8u]) == 0u)
+		return;
+#		else
 	if (any(tid >= StormScreenRect.zw) || TexStormTiles[tid / 8u] == 0u)
 		return;
+#		endif
 #	endif
 #endif
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];

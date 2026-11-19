@@ -105,8 +105,15 @@ float LightningChannelTransmission(float3 direction, float distance)
 
 float4 LightningChannel(float3 direction, float sceneDistance, float footprint, float intensity)
 {
+#if defined(CS_ORG_BINDLESS)
+	// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+	const float sourceIntensity = Lightning::HasSource() ? intensity : 0.0;
+	if (sourceIntensity <= 0.0)
+		return 0.0;
+#else
 	if (!Lightning::HasSource() || intensity <= 0.0)
 		return 0.0;
+#endif
 	float energy = 0.0, depth = 0.0, strongest = 0.0;
 	const float3 eye = FrameBuffer::CameraPosAdjust.xyz;
 	// Reject rays outside the entire branched discharge before reading segments.
