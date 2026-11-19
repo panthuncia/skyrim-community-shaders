@@ -50,7 +50,8 @@ namespace RenderGraph::AnchorPasses
 	inline constexpr std::uint32_t kAllMips = UINT32_MAX;
 
 	/** @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h).
-	*  Srv and Uav declare a texture or one mip. Published reads by id. Handle, Latch and Shared pass descriptor indices or offsets. */
+	*  Srv and Uav declare a texture or one mip. Published reads by id. Handle, Latch and Shared pass descriptor indices or offsets.
+	*  Table passes the pass's handle table (Dispatch::table, Draw::table) as a LATCH entry: its buffer's index, then offset 0. */
 	struct Bind
 	{
 		enum class Kind : std::uint8_t
@@ -61,6 +62,7 @@ namespace RenderGraph::AnchorPasses
 			Handle,
 			Latch,
 			Shared,
+			Table,
 		};
 
 		Kind kind = Kind::Handle;
@@ -68,7 +70,8 @@ namespace RenderGraph::AnchorPasses
 		std::uint32_t value = 0;             // Handle: the descriptor index; Latch: the region's offset
 		std::uint32_t mip = kAllMips;        // Srv and Uav: the one mip the view covers, or the default view
 		std::string id;                      // Published: the id (PublishedResources::IsDeclarable at the build)
-		std::uint32_t variant = UINT32_MAX;  // Srv and Published: the view variant (org::SRVViewType), UINT32_MAX for the default view
+		// Srv and Published: the view variant (org::SRVViewType); Uav: org::UAVViewType. UINT32_MAX for the default view.
+		std::uint32_t variant = UINT32_MAX;
 		// A versioned twin's slot, declared in place of resource, so a resize is a new version.
 		std::shared_ptr<org::VersionedTexture> slot;
 
@@ -76,6 +79,10 @@ namespace RenderGraph::AnchorPasses
 		/** @brief An Srv of a texture array's whole-array view (Texture2DArrayFull), for a shader that declares Texture2DArray. */
 		static Bind SrvArray(const FrameAnchors::Texture& a_texture);
 		static Bind Uav(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip = kAllMips) { return Of(Kind::Uav, a_texture, a_mip); }
+		/** @brief A Uav of a texture array's or cube's whole-array view (Texture2DArrayFull), for a shader that declares RWTexture2DArray. */
+		static Bind UavArray(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip = kAllMips);
+		/** @brief An Srv of a cube texture's cube view (TextureCube), for a shader that declares TextureCube. */
+		static Bind SrvCube(const FrameAnchors::Texture& a_texture);
 		/** @brief An Srv of another client's published resource, declared by its id: the graph orders the read after its producer. */
 		static Bind Published(std::string_view a_id, std::uint32_t a_variant = UINT32_MAX)
 		{
@@ -88,6 +95,8 @@ namespace RenderGraph::AnchorPasses
 		static Bind Unused() { return Handle(0); }
 		static Bind Latch(std::uint32_t a_offset) { return { Kind::Latch, nullptr, a_offset }; }
 		static Bind Shared() { return { Kind::Shared, nullptr, 0 }; }
+		/** @brief The pass's handle table, as a LATCH entry (two words). */
+		static Bind Table() { return { Kind::Table, nullptr, 0 }; }
 
 	private:
 		/** @brief An Srv or Uav of a handle: its slot, or its plain resource. */
@@ -121,6 +130,11 @@ namespace RenderGraph::AnchorPasses
 		// The draw's own viewport and scissor inside the render area. The viewport may reach past the target, as the engine's would.
 		std::optional<rhi::Viewport> dynamicViewport;
 		std::optional<rhi::ScissorRect> scissor;
+		// Ungated draws: the vertex and instance counts (a gated draw takes them from RunGate::OpenDraw).
+		std::uint32_t vertexCount = 3;
+		std::uint32_t instanceCount = 1;
+		// The handle table, read through the Bind::Table entry of bindings (see Dispatch::table).
+		std::vector<Bind> table;
 	};
 
 	/** @brief A compute pass: fixed group counts, a run gate entry, or group counts at a latch offset the commit writes. */
@@ -132,6 +146,11 @@ namespace RenderGraph::AnchorPasses
 		std::array<std::uint32_t, 3> groups{ 1, 1, 1 };
 		std::optional<std::uint32_t> gate;       // the builder's run gate entry (its counts replace groups)
 		std::optional<std::uint32_t> latchArgs;  // three uints at this offset of the builder's latch (replace groups)
+		// The handle table, for a shader that reads more resources than the push block holds: one uint per entry, in the order
+		// of the shader's table struct. Srv, Uav and Published entries are declared as bindings are and hold their views'
+		// indices; Handle entries hold their value. The pass writes the indices into a buffer of its own when it is recorded,
+		// so the table is fixed for the recording and any replay of it. The bindings pass that buffer as their Bind::Table entry.
+		std::vector<Bind> table;
 	};
 
 	/** @brief A copy of a whole texture's first mip into another of the same size and format.
@@ -209,7 +228,8 @@ namespace RenderGraph::AnchorPasses
 		std::vector<FrameAnchors::PassDesc> Take() { return std::move(passes); }
 
 	private:
-		bool Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate);
+		bool Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate,
+			const std::vector<Bind>& a_table = {});
 		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
 			bool a_atExecution = false);
 

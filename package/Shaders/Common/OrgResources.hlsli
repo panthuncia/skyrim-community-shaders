@@ -99,6 +99,12 @@
 // field list and ORG_GLOBAL_LATCH_END, under #if defined(CS_ORG_BINDLESS). The shader invokes the
 // field list itself, as it does its resource list.
 //
+// Handle tables: a shader that reads more resources than the push block holds keeps their handles in a table, one uint per
+// resource, which the pass writes into a buffer of its own (AnchorPasses' Dispatch::table and Bind::Table). The shader
+// declares the table as a struct of `uint OrgHandle_<name>;` fields read through one LATCH entry, then a static
+// `OrgHandle_<name>` per field copied from it, before the headers that declare the resources with ORG_HEADER_SRV,
+// ORG_HEADER_UAV and ORG_HEADER_SAMPLER. The C++ table lists the same names in the same order.
+//
 // Not covered: arrays of resources and append/consume counters. A list cannot hold another list
 // (FXC rejects a macro passed on as an argument), so the shared handles are one SHARED entry.
 
@@ -197,9 +203,11 @@
 
 #if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
 #	define ORG_HEADER_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
+#	define ORG_HEADER_UAV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
 #	define ORG_HEADER_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
 #else
 #	define ORG_HEADER_SRV(T, N, R) T N : register(t##R);
+#	define ORG_HEADER_UAV(T, N, R) T N : register(u##R);
 #	define ORG_HEADER_SAMPLER(T, N, R) T N : register(s##R);
 #endif
 
