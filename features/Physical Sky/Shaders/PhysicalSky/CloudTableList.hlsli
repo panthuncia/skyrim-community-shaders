@@ -1,39 +1,19 @@
 // The handle table of every Volumetrics.cs.hlsl program on the render graph (physical-sky-port.md, 6a): one uint per
 // resource its include closure declares, in this order. HLSL and C++ (ORGVolumetricClouds) both include this file, so
-// keep it to this one macro. Names are the shader's declared names.
+// keep it to this one macro. Names are the shader's declared names; TexVoxelModeling0-7 and TexVoxelDistance0-7 are the
+// elements of D3D11's arrays (t60-t67, t68-t75). The latches (the constant buffers, the structured buffers, the AP shadow's
+// light) are not here: they are in the push block (Volumetrics.cs.hlsl).
 #define PHYSSKY_CLOUD_TABLE(X) \
 	X(TexShadowVolume) \
 	X(DepthTexture) \
-	X(Luminance) \
-	X(Transmittance) \
-	X(Data) \
 	X(MeanProfile) \
 	X(CloudShadowsTexture) \
-	X(CloudSelfShadowTexture) \
-	X(EnvIBLTexture) \
-	X(SkyIBLTexture) \
-	X(StaticDiffuseIBLTexture) \
-	X(StaticSpecularIBLTexture) \
 	X(SampTr) \
 	X(SampSv) \
-	X(SampNoise) \
-	X(TexTrLut) \
-	X(TexMsLut) \
-	X(TexSvLut) \
-	X(TexApLut) \
-	X(TexApShadow) \
-	X(TexSkyTail) \
 	X(TexDiskPhaseLut) \
-	X(TexLightningChannels) \
-	X(TexLightningReflection) \
-	X(TexVolTr) \
-	X(TexVolLum) \
-	X(TexVolCubeTr) \
-	X(TexVolCubeLum) \
-	X(TexVolCubeDepth) \
 	X(TexCloudDiffuseTransport) \
 	X(ShadowHeightTexture) \
-	X(DirectionalShadowLights) \
+	X(TexDirectShadows) \
 	X(TileableSampler) \
 	X(TexTransmittance) \
 	X(TexAerialPerspective) \
@@ -78,10 +58,8 @@
 	X(TexLocalNdfHeight) \
 	X(TexLocalNdfModeling) \
 	X(TexLocalNdfMaximum) \
-	X(LocalNdfWeights) \
 	X(TexStormHeight) \
 	X(TexStormModeling) \
-	X(CloudStorms) \
 	X(RWTexTr) \
 	X(RWTexLum) \
 	X(RWTexAux) \
@@ -92,9 +70,22 @@
 	X(RWCloudAmbientSH) \
 	X(RWCloudAmbientPartial) \
 	X(TexCloudAmbientPartial) \
-	X(TexVoxelModeling) \
-	X(TexVoxelDistance) \
-	X(VoxelClouds) \
+	X(TexVoxelModeling0) \
+	X(TexVoxelModeling1) \
+	X(TexVoxelModeling2) \
+	X(TexVoxelModeling3) \
+	X(TexVoxelModeling4) \
+	X(TexVoxelModeling5) \
+	X(TexVoxelModeling6) \
+	X(TexVoxelModeling7) \
+	X(TexVoxelDistance0) \
+	X(TexVoxelDistance1) \
+	X(TexVoxelDistance2) \
+	X(TexVoxelDistance3) \
+	X(TexVoxelDistance4) \
+	X(TexVoxelDistance5) \
+	X(TexVoxelDistance6) \
+	X(TexVoxelDistance7) \
 	X(TexVoxelLighting) \
 	X(RWVoxelLighting) \
 	X(TexMiddleWeather) \
@@ -140,7 +131,6 @@
 	X(RWStormTiles) \
 	X(TexUpperTiles) \
 	X(RWUpperTiles) \
-	X(LightningSegments) \
 	X(LightningCandidates) \
 	X(LightningResolvedMask) \
 	X(LightningResolvedCubeMask) \

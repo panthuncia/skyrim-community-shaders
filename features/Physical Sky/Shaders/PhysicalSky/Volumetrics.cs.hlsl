@@ -18,7 +18,79 @@
 #	define TERRAIN_SHADOW_REGISTER t36
 #	define CLOUD_SHADOW_REGISTER t37
 #endif
-Texture3D<float> TexShadowVolume : register(t14);
+
+// Dual-target (Common/OrgResources.hlsli). On the render graph every program of this file has the same push block, and
+// reads every resource handle from one table (PhysicalSky/CloudTableList.hlsli, physical-sky-port.md 6a). The constant
+// buffers and the per-frame structured buffers are latch regions. The C++ side fills the table and the regions.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#define PS_CLOUD_TRANSPORT_EXTERN
+#include "Common/OrgResources.hlsli"
+#include "PhysicalSky/CloudTableList.hlsli"
+
+// The push block (26 words). Each latch is a handle and a byte offset.
+// - CloudTable: the handle table, one uint per PHYSSKY_CLOUD_TABLE entry, at offset 0 of the pass's own buffer.
+// - VolumetricCloudConstants: the D3D11 b1 bytes (VolumetricCloudCB, 1328 bytes).
+// - CloudDispatch: the D3D11 b3 bytes (one uint4: StormScreenRect, or VoxelScreenRect in the voxel view).
+// - CloudAmbientVolumeConstants: the D3D11 b2 bytes (CloudAmbientVolumeCB, 32 bytes).
+// - StormInstanceConstants: the D3D11 b0 bytes of SINGLE_CLOUD_STORM (one CloudStormData, 1824 bytes).
+// - VoxelLightingUpdate: the D3D11 b4 bytes of the voxel lighting update (one uint4).
+// - ApShadowLight: the AP shadow's light (PhysicalSky/ApShadow.hlsli).
+// - CloudStorms, LocalNdfWeights, VoxelClouds, LightningSegments: the D3D11 structured buffers' elements, packed at
+//   their D3D11 strides (1824, 16, 96 and 32 bytes).
+// Every program lists all of them, read or not.
+#define PHYSSKY_CLOUD_PUSH(X)                                                  \
+	X(SHARED, ConstantBuffer, Shared, 0)                                       \
+	X(LATCH, PhysSkyCloudTable, CloudTable, 0)                                 \
+	X(EXTERN_LATCH, VolumetricCloudConstantsData, VolumetricCloudConstants, 1) \
+	X(EXTERN_LATCH, CloudDispatchData, CloudDispatch, 3)                       \
+	X(EXTERN_LATCH, CloudAmbientVolumeData, CloudAmbientVolumeConstants, 2)    \
+	X(EXTERN_LATCH, CloudStormData, StormInstanceConstants, 0)                 \
+	X(EXTERN_LATCH, VoxelLightingData, VoxelLightingUpdate, 4)                 \
+	X(EXTERN_LATCH, DirectionalShadowLightData, ApShadowLight, 98)             \
+	X(EXTERN_LATCH, CloudStormData, CloudStorms, 57)                           \
+	X(EXTERN_LATCH, float4, LocalNdfWeights, 35)                               \
+	X(EXTERN_LATCH, VoxelCloudData, VoxelClouds, 77)                           \
+	X(EXTERN_LATCH, LightningSegment, LightningSegments, 94)
+
+#if defined(CS_ORG_BINDLESS)
+#	define PHYSSKY_CLOUD_TABLE_FIELD(N) uint OrgHandle_##N;
+struct PhysSkyCloudTable
+{
+	PHYSSKY_CLOUD_TABLE(PHYSSKY_CLOUD_TABLE_FIELD)
+};
+#	undef PHYSSKY_CLOUD_TABLE_FIELD
+#endif
+ORG_PUSH_BLOCK(PHYSSKY_CLOUD_PUSH(ORG_HANDLE))
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, PhysSkyCloudTable, CloudTable, 0)
+#	define PHYSSKY_CLOUD_TABLE_STATIC(N) static uint OrgHandle_##N = CloudTable.OrgHandle_##N;
+PHYSSKY_CLOUD_TABLE(PHYSSKY_CLOUD_TABLE_STATIC)
+#	undef PHYSSKY_CLOUD_TABLE_STATIC
+
+// The latches this file reads by hand: each one's buffer.
+#	define PHYSSKY_CLOUD_LATCH(N) static ByteAddressBuffer OrgLatch_##N = ResourceDescriptorHeap[OrgHandle_##N];
+PHYSSKY_CLOUD_LATCH(VolumetricCloudConstants)
+PHYSSKY_CLOUD_LATCH(StormInstanceConstants)
+PHYSSKY_CLOUD_LATCH(CloudStorms)
+PHYSSKY_CLOUD_LATCH(LocalNdfWeights)
+PHYSSKY_CLOUD_LATCH(VoxelClouds)
+PHYSSKY_CLOUD_LATCH(LightningSegments)
+#	undef PHYSSKY_CLOUD_LATCH
+#endif
+
+// HLSL 2021 (DXC) takes no vector condition in ?: and no vector && or ||. FXC has no select, and, or.
+#if defined(CS_ORG_BINDLESS)
+#	define CLOUD_SELECT(c, a, b) select(c, a, b)
+#	define CLOUD_OR(a, b) or(a, b)
+#	define CLOUD_AND(a, b) and(a, b)
+#else
+#	define CLOUD_SELECT(c, a, b) ((c) ? (a) : (b))
+#	define CLOUD_OR(a, b) ((a) || (b))
+#	define CLOUD_AND(a, b) ((a) && (b))
+#endif
+
+ORG_HEADER_SRV(Texture3D<float>, TexShadowVolume, 14)
 #include "Common/FlareOcclusion.hlsli"
 #include "Common/Spherical Harmonics/SphericalHarmonics.hlsli"
 #include "PhysicalSky/CloudGeometry.hlsli"
@@ -42,7 +114,7 @@ float DecodeCloudDepth(float encodedDepth)
 	return encodedDepth * 1000.0 * GAME_UNITS_PER_METER;
 }
 
-SamplerState TileableSampler : register(s2);
+ORG_HEADER_SAMPLER(SamplerState, TileableSampler, 2)
 #define TransmittanceSampler SampTr
 #define SkyViewSampler SampSv
 
@@ -140,6 +212,38 @@ struct VolumetricCloudData
 	float4 middleShape;   // edge softness, reserved, detail UV/game unit, 3D detail
 };
 
+#if defined(CS_ORG_BINDLESS)
+// The b1 latch (VolumetricCloudCB): VolumetricCloudData at 0, CloudMsCalibration at 496, then the three middle-cloud rows
+// at 1280. Reads keep D3D11's names. Each read loads only what it uses, and a dynamic index reads one row.
+static const uint kCloudMsCalibrationOffset = 496u;
+static const uint kCloudPreviousViewProjOffset = 288u;
+struct OrgVolumetricCloudBuffer
+{
+	// D3D11's array has one element.
+	VolumetricCloudData operator[](uint a_index)
+	{
+		const uint base = OrgOffset_VolumetricCloudConstants;
+		VolumetricCloudData data = OrgLatch_VolumetricCloudConstants.Load<VolumetricCloudData>(base);
+		// DXC's SPIR-V ignores row_major in a templated load, so the matrix is read by rows.
+		const uint rows = base + kCloudPreviousViewProjOffset;
+		data.previousViewProj = float4x4(asfloat(OrgLatch_VolumetricCloudConstants.Load4(rows)), asfloat(OrgLatch_VolumetricCloudConstants.Load4(rows + 16u)),
+			asfloat(OrgLatch_VolumetricCloudConstants.Load4(rows + 32u)), asfloat(OrgLatch_VolumetricCloudConstants.Load4(rows + 48u)));
+		return data;
+	}
+};
+struct OrgCloudMsCalibration
+{
+	float4 operator[](uint a_index)
+	{
+		return asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + kCloudMsCalibrationOffset + a_index * 16u));
+	}
+};
+static OrgVolumetricCloudBuffer VolumetricCloudBuffer;
+static OrgCloudMsCalibration CloudMsCalibration;
+static float4 MiddleCloudCells = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1280u));
+static float4 MiddleCloudBands = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1296u));
+static float4 MiddleCloudBandShape = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1312u));
+#else
 cbuffer VolumetricCloudConstants : register(b1)
 {
 	VolumetricCloudData VolumetricCloudBuffer[1];
@@ -148,33 +252,34 @@ cbuffer VolumetricCloudConstants : register(b1)
 	float4 MiddleCloudBands;      // world wave vector (cycles/game unit), bend (wavelengths), organization
 	float4 MiddleCloudBandShape;  // thickness contrast, displacement (game units), wavelength (game units), enabled
 };
-Texture2D<float4> TexTransmittance : register(t1);
-Texture3D<float4> TexAerialPerspective : register(t2);
+#endif
+ORG_HEADER_SRV(Texture2D<float4>, TexTransmittance, 1)
+ORG_HEADER_SRV(Texture3D<float4>, TexAerialPerspective, 2)
 
-Texture2D<float> TexDepth : register(t3);
+ORG_HEADER_SRV(Texture2D<float>, TexDepth, 3)
 
-Texture3D<unorm float4> TexCloudShapeNoise : register(t4);
-Texture3D<float4> NoiseVoxel : register(t76);
-Texture2D<float4> TexCloudHeight : register(t5);
-Texture2D<float3> TexCloudModeling : register(t6);
-Texture2D<float4> TexCloudAtmosphereMs : register(t8);
-Texture2D<float2> TexCirrusWeather : register(t9);
-Texture2D<float3> TexCirrusPatterns : register(t10);
-Texture2D<unorm float2> TexCloudProfileLUT : register(t11);
-Texture2D<unorm float3> TexCloudAdjustmentLUT : register(t12);
-Texture2D<sh2> TexCloudAmbientSH : register(t13);
-TextureCube<float4> TexCloudGroundReflection : register(t39);
+ORG_HEADER_SRV(Texture3D<unorm float4>, TexCloudShapeNoise, 4)
+ORG_HEADER_SRV(Texture3D<float4>, NoiseVoxel, 76)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudHeight, 5)
+ORG_HEADER_SRV(Texture2D<float3>, TexCloudModeling, 6)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAtmosphereMs, 8)
+ORG_HEADER_SRV(Texture2D<float2>, TexCirrusWeather, 9)
+ORG_HEADER_SRV(Texture2D<float3>, TexCirrusPatterns, 10)
+ORG_HEADER_SRV(Texture2D<unorm float2>, TexCloudProfileLUT, 11)
+ORG_HEADER_SRV(Texture2D<unorm float3>, TexCloudAdjustmentLUT, 12)
+ORG_HEADER_SRV(Texture2D<sh2>, TexCloudAmbientSH, 13)
+ORG_HEADER_SRV(TextureCube<float4>, TexCloudGroundReflection, 39)
 
-Texture2D<float4> TexCloudBoundary : register(t15);
-Texture2D<float2> TexCloudHeightBounds : register(t16);
-Texture2D<float4> TexCloudHeightBoundsTiles : register(t54);
-Texture2D<float2> TexCloudWeatherBounds : register(t89);
-Texture2D<float2> TexLightningTrace : register(t90);
-Texture2D<float2> TexLightningHistory : register(t91);
-TextureCube<float2> TexLightningCubeTrace : register(t92);
-TextureCube<float2> TexLightningCubeHistory : register(t93);
-RWTexture2D<float2> RWLightningMask : register(u3);
-RWTexture2DArray<float2> RWLightningCubeMask : register(u3);
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudBoundary, 15)
+ORG_HEADER_SRV(Texture2D<float2>, TexCloudHeightBounds, 16)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudHeightBoundsTiles, 54)
+ORG_HEADER_SRV(Texture2D<float2>, TexCloudWeatherBounds, 89)
+ORG_HEADER_SRV(Texture2D<float2>, TexLightningTrace, 90)
+ORG_HEADER_SRV(Texture2D<float2>, TexLightningHistory, 91)
+ORG_HEADER_SRV(TextureCube<float2>, TexLightningCubeTrace, 92)
+ORG_HEADER_SRV(TextureCube<float2>, TexLightningCubeHistory, 93)
+ORG_HEADER_UAV(RWTexture2D<float2>, RWLightningMask, 3)
+ORG_HEADER_UAV(RWTexture2DArray<float2>, RWLightningCubeMask, 3)
 
 CloudLayer GetCloudLayer(VolumetricCloudData info)
 {
@@ -197,26 +302,35 @@ CloudLayer GetCloudLayer(VolumetricCloudData info)
 	return cloud;
 }
 
-Texture2D<float> TexVolHistoryTr : register(t17);
-Texture2D<float4> TexVolHistoryLum : register(t18);
-Texture2D<float4> TexVolHistoryAux : register(t19);
-Texture2D<float> TexVolLowTr : register(t20);
-Texture2D<float4> TexVolLowLum : register(t21);
-Texture2D<float4> TexVolLowAux : register(t22);
-Texture2D<float4> TexVolLowStormMotion : register(t58);
-TextureCube<float4> TexCubeStormMotion : register(t59);
-RWTexture2D<float4> RWStormMotion : register(u6);
-RWTexture2DArray<float4> RWCubeStormMotion : register(u7);
-TextureCube<float> TexCubeHistoryTr : register(t23);
-TextureCube<float4> TexCubeHistoryLum : register(t24);
-TextureCube<float4> TexCubeHistoryAux : register(t25);
-TextureCube<float> TexCubeTraceTr : register(t26);
-TextureCube<float4> TexCubeTraceLum : register(t27);
-TextureCube<float4> TexCubeTraceAux : register(t28);
-Texture2DArray<float4> TexLocalNdfHeight : register(t32);
-Texture2DArray<float4> TexLocalNdfModeling : register(t33);
-Texture2DArray<float4> TexLocalNdfMaximum : register(t34);
+ORG_HEADER_SRV(Texture2D<float>, TexVolHistoryTr, 17)
+ORG_HEADER_SRV(Texture2D<float4>, TexVolHistoryLum, 18)
+ORG_HEADER_SRV(Texture2D<float4>, TexVolHistoryAux, 19)
+ORG_HEADER_SRV(Texture2D<float>, TexVolLowTr, 20)
+ORG_HEADER_SRV(Texture2D<float4>, TexVolLowLum, 21)
+ORG_HEADER_SRV(Texture2D<float4>, TexVolLowAux, 22)
+ORG_HEADER_SRV(Texture2D<float4>, TexVolLowStormMotion, 58)
+ORG_HEADER_SRV(TextureCube<float4>, TexCubeStormMotion, 59)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWStormMotion, 6)
+ORG_HEADER_UAV(RWTexture2DArray<float4>, RWCubeStormMotion, 7)
+ORG_HEADER_SRV(TextureCube<float>, TexCubeHistoryTr, 23)
+ORG_HEADER_SRV(TextureCube<float4>, TexCubeHistoryLum, 24)
+ORG_HEADER_SRV(TextureCube<float4>, TexCubeHistoryAux, 25)
+ORG_HEADER_SRV(TextureCube<float>, TexCubeTraceTr, 26)
+ORG_HEADER_SRV(TextureCube<float4>, TexCubeTraceLum, 27)
+ORG_HEADER_SRV(TextureCube<float4>, TexCubeTraceAux, 28)
+ORG_HEADER_SRV(Texture2DArray<float4>, TexLocalNdfHeight, 32)
+ORG_HEADER_SRV(Texture2DArray<float4>, TexLocalNdfModeling, 33)
+ORG_HEADER_SRV(Texture2DArray<float4>, TexLocalNdfMaximum, 34)
+#if defined(CS_ORG_BINDLESS)
+// The weights latch: one float4 per local NDF layer, localNdfAltitude.w of them.
+struct OrgLocalNdfWeights
+{
+	float4 operator[](uint a_index) { return asfloat(OrgLatch_LocalNdfWeights.Load4(OrgOffset_LocalNdfWeights + a_index * 16u)); }
+};
+static OrgLocalNdfWeights LocalNdfWeights;
+#else
 StructuredBuffer<float4> LocalNdfWeights : register(t35);
+#endif
 uint CloudStormCount()
 {
 #ifdef NO_CLOUD_STORMS
@@ -228,12 +342,48 @@ uint CloudStormCount()
 #endif
 }
 
-Texture2DArray<float4> TexStormHeight : register(t55);
-Texture2DArray<float4> TexStormModeling : register(t56);
-#ifdef SINGLE_CLOUD_STORM
-cbuffer StormInstanceConstants : register(b0) { CloudStormData CloudStorms[1]; };
+ORG_HEADER_SRV(Texture2DArray<float4>, TexStormHeight, 55)
+ORG_HEADER_SRV(Texture2DArray<float4>, TexStormModeling, 56)
+#if defined(CS_ORG_BINDLESS)
+// The storms: the storm list latch, or the single storm's latch with SINGLE_CLOUD_STORM. CloudStormData's parcels and
+// calibration rows are read by a dynamic index through CloudStormParcelAt and CloudStormMsCalibration, which load one
+// element; indexing the struct a whole-struct read returns would copy all 1824 bytes into function memory.
+static const uint kCloudStormStride = 1824u;
+static const uint kCloudStormMsCalibrationOffset = 112u;
+static const uint kCloudStormParcelsOffset = 896u;
+static const uint kCloudStormParcelStride = 112u;
+#	ifdef SINGLE_CLOUD_STORM
+static ByteAddressBuffer OrgCloudStormBytes = OrgLatch_StormInstanceConstants;
+static uint OrgCloudStormBase = OrgOffset_StormInstanceConstants;
+#	else
+static ByteAddressBuffer OrgCloudStormBytes = OrgLatch_CloudStorms;
+static uint OrgCloudStormBase = OrgOffset_CloudStorms;
+#	endif
+uint CloudStormOffset(uint a_index) { return OrgCloudStormBase + a_index * kCloudStormStride; }
+struct OrgCloudStorms
+{
+	CloudStormData operator[](uint a_index) { return OrgCloudStormBytes.Load<CloudStormData>(CloudStormOffset(a_index)); }
+};
+static OrgCloudStorms CloudStorms;
+CloudStormParcel CloudStormParcelAt(uint a_index, uint a_parcel)
+{
+	return OrgCloudStormBytes.Load<CloudStormParcel>(CloudStormOffset(a_index) + kCloudStormParcelsOffset + a_parcel * kCloudStormParcelStride);
+}
+float4 CloudStormMsCalibration(uint a_index, uint a_row)
+{
+	return asfloat(OrgCloudStormBytes.Load4(CloudStormOffset(a_index) + kCloudStormMsCalibrationOffset + a_row * 16u));
+}
+#	define CLOUD_STORM_PARCEL(storm, index, parcel) CloudStormParcelAt(index, parcel)
+#	define CLOUD_STORM_MS_CALIBRATION(storm, index, row) CloudStormMsCalibration(index, row)
 #else
+#	ifdef SINGLE_CLOUD_STORM
+cbuffer StormInstanceConstants : register(b0) { CloudStormData CloudStorms[1]; };
+#	else
 StructuredBuffer<CloudStormData> CloudStorms : register(t57);
+#	endif
+// D3D11 indexes the storm in place.
+#	define CLOUD_STORM_PARCEL(storm, index, parcel) storm.parcels[parcel]
+#	define CLOUD_STORM_MS_CALIBRATION(storm, index, row) storm.msCalibration[row]
 #endif
 
 float2 LocalNdfUV(float2 worldXY, VolumetricCloudData info)
@@ -371,16 +521,16 @@ float3 GetCloudDirectionalLightColor()
 	return Color::Light(SharedData::DirLightColor.xyz);
 }
 
-RWTexture2D<float> RWTexTr : register(u0);
-RWTexture2D<float4> RWTexLum : register(u1);
-RWTexture2D<float4> RWTexAux : register(u2);
+ORG_HEADER_UAV(RWTexture2D<float>, RWTexTr, 0)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWTexLum, 1)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWTexAux, 2)
 
-RWTexture3D<float> RWShadowVolume : register(u0);
+ORG_HEADER_UAV(RWTexture3D<float>, RWShadowVolume, 0)
 
-RWTexture2DArray<float> RWTexCubeTr : register(u0);
-RWTexture2DArray<float4> RWTexCubeLum : register(u1);
-RWTexture2DArray<float4> RWTexCubeAux : register(u2);
-RWTexture2D<sh2> RWCloudAmbientSH : register(u0);
+ORG_HEADER_UAV(RWTexture2DArray<float>, RWTexCubeTr, 0)
+ORG_HEADER_UAV(RWTexture2DArray<float4>, RWTexCubeLum, 1)
+ORG_HEADER_UAV(RWTexture2DArray<float4>, RWTexCubeAux, 2)
+ORG_HEADER_UAV(RWTexture2D<sh2>, RWCloudAmbientSH, 0)
 
 float RayIntersectSphereCentered(float3 orig, float3 dir, float r)
 {
@@ -411,8 +561,8 @@ float4 SampleCloudAerialPerspective(float3 viewDir, float distance, float shadow
 	return ap;
 }
 
-RWTexture2D<float4> RWCloudAmbientPartial : register(u1);
-Texture2D<float4> TexCloudAmbientPartial : register(t90);
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudAmbientPartial, 1)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAmbientPartial, 90)
 groupshared float4 gCloudAmbientPartial[8][32];
 
 float3 CloudAmbientAtmosphereSource(uint lightIndex, float3 position, float3 direction, float3 lightDirection, float3 color, float3 rayleigh, float3 mie)
@@ -1182,7 +1332,7 @@ VolumetricCloudResult RenderVolumetricCloudRay(float3 direction, float3 eye, flo
 	const float nearArc = max(arc.y - arc.x, 0.0);
 	const float farArc = max(arc.w - arc.z, 0.0);
 	const float2 coordinate = raySegment * (nearArc + farArc);
-	const float2 mapped = (exp2(coordinate <= nearArc ? arc.xx + coordinate : arc.zz + coordinate - nearArc) - 1.0) * offset;
+	const float2 mapped = (exp2(CLOUD_SELECT(coordinate <= nearArc, arc.xx + coordinate, arc.zz + coordinate - nearArc)) - 1.0) * offset;
 	// Include a cirrus sheet outside the finite low-cloud intervals in the first
 	// or last segment, without integrating an infinite volume step.
 	raySegment = float2(raySegment.x == 0.0 ? 0.0 : mapped.x, raySegment.y == 1.0 ? 1e30 : mapped.y);
@@ -1680,7 +1830,7 @@ groupshared uint g_density_segment[NTHREADS];
 	RWShadowVolume[pixel] = TexShadowVolume.SampleLevel(TransmittanceSampler, (float3(pixel) + 0.5 - offset) / float3(dims), 0);
 }
 
-RWTexture2D<float4> RWCloudShadowMean : register(u0);
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudShadowMean, 0)
 groupshared float ShadowMeanSamples[64];
 
 // One 8x8 spatial quadrature per height. Reuse complete local prefixes; where

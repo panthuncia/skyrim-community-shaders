@@ -271,7 +271,7 @@ void ResolveCloudHistoryVisibility(inout CloudTemporalSample history, CloudTempo
 	const float4 currentValue = float4(current.color.rgb, current.transmittance);
 	const float4 difference = float4(history.color.rgb, history.transmittance) - currentValue;
 	const float4 extent = max(lerp(currentValue - sampleMinimum, sampleMaximum - currentValue, step(0.0, difference)), 0.0);
-	const float4 ratio = abs(difference) > 1e-6 ? extent / max(abs(difference), 1e-6) : 1.0;
+	const float4 ratio = CLOUD_SELECT(abs(difference) > 1e-6, extent / max(abs(difference), 1e-6), 1.0);
 	const float clippedWeight = depthValid ? saturate(min(min(ratio.x, ratio.y), min(ratio.z, ratio.w))) : 0.0;
 	const float historyWeight = lerp(1.0, clippedWeight, confidence);
 	// Clip along the current-to-history segment: premultiplied radiance and
@@ -299,7 +299,13 @@ float4 LoadCloudBoundary(uint2 pixel, float3 ray)
 }
 
 #ifdef CLOUD_MAIN_DISPATCH
-cbuffer CloudDispatch : register(b3) { uint4 StormScreenRect; };
+// ORG: the CloudDispatch latch (Volumetrics.cs.hlsl's push block).
+ORG_GLOBAL_LATCH_BEGIN(CloudDispatchData, CloudDispatch, 3)
+uint4 StormScreenRect;
+ORG_GLOBAL_LATCH_END(CloudDispatchData, CloudDispatch, 3)
+#	if defined(CS_ORG_BINDLESS)
+static uint4 StormScreenRect = CloudDispatch.StormScreenRect;
+#	endif
 #endif
 
 #if defined(CLOUD_MAIN_DISPATCH) && defined(SINGLE_CLOUD_STORM)
