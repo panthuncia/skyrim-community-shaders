@@ -87,3 +87,19 @@ final until the user confirms it.
     - `ExternalResourceTests` exits early.
 18. **Frame revision step 4 has one lead** that gives the sub-steps 4a-4e to its own workers, at most two at a time, as the
     plan's serial order allows. That keeps the user's "one subagent per part" rule: step 4 is one part with five sub-steps.
+19. **Frame revision step 4 is merged** (`f3f292c80`; on nfg the standard set, native Vulkan resize, guest resize-drag, native D3D12 HDR and latch-census-short pass): the prepared set, the revision lane and staged builds joining
+    revisions. The lead's calls are in the plan's section 9 (step 4), marked "to confirm". OpenRenderGraph `bfd13bb` and
+    ORGModuleServices `d2ec1c6` (both on branch `rev-step4`) are local only. Open from step 4:
+    - In native, adoption still waits in `WrapTexture` for each exported twin: 19-75 ms on Vulkan, 41-102 ms on D3D12
+      (Dev-Fast). The proposed fix is to zero-fill exported versions on the lane and skip the wrap's initialize.
+    - A change of shape class (for example the mip count) still goes through `ResizeTo` and a structural rebuild
+      (`Revision.cpp:ApplyResizes`). No run hit it.
+    - The prepared part of the graph-resource self-test is untested in native, because the self-test's older part already
+      fails there on the base.
+    - The 4e files were not built with `-DSC_UNITY_BUILD=OFF`, and the `CS_ORG=0` stubs were not built.
+    - `ORGBufferBuildTests` in OMS doesn't compile (a `ProcessDeferredReleases` signature mismatch). This was already so before
+      step 4.
+    - `981aef49e` is typed `feat(org)`, where the plan prefers `refactor`. It's left as is, because rewording it would mean
+      rewriting merged history.
+20. **Frame revision step 5 has one lead**, which also does native framegen step 9 (`PresentationConfig` as a variable), as
+    both plans say. It reuses the step 4 worktree on `org-native/rev-step5`.
