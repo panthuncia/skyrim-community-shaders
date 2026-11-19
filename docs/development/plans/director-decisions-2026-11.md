@@ -54,3 +54,19 @@ final until the user confirms it.
 
     The foreground eye check (HUD ghosting, pacing, menu and loading passthrough) needs the user, on both backends.
     `fg+hdr` cannot test frame generation under HDR (step lists replace whole); `fg-hdr.toml` does.
+11. **DLSS-G in native (frame generation step 8) is merged untested** (`2fcb06441`). The lead's calls are plan decisions
+    37-42: load at `slInit` and unload before the first swap chain; all tags `eOnlyValidNow`; native sets the DLSS-G constants
+    itself; a native optical-flow queue in BasicRHI, with a fallback to interop; the probe checks the native adapter's LUID.
+    Guest's DLSS-G tags also moved to the UI-stage inputs pass. The RTX 5080 procedure is in the plan's step 8, "user to run",
+    and includes `guest+fg-dlss`.
+12. **Frame revision step 1 is merged** (`[ORG] boundary:` census, counting only). The lead's calls are in the plan's
+    section 9, "Decided by the agent (step 1)". Steps 2 and 3 run in parallel after it.
+13. **Submodule commits that exist only locally** and need pushing with the rest:
+    - OpenRenderGraph `2b22711` (`rev-step1-adoption-observer`), on top of `7c5d080`.
+    - BasicRHI `021308d` (`org-native/fg-dlssg-native`), on top of `5099de3`.
+    - Streamline `156ace6` (`org-native/fg-native-d3d12`), which has the Vulkan branch in it.
+    - The Streamline `sl.fsr_g.dll` in the `CS AB nfg` mod is a local build of `156ace6`; the original is kept as
+      `sl.fsr_g.dll.orig`.
+14. **The shared MO2 profile was broken twice by leads** (staging without the base AIO, and a retry script deleting a live
+    stage folder). cs-test's stage now refuses a mod without TerrainHelper.esp. A guard that stops a stage folder being
+    deleted while it is live is not built.
