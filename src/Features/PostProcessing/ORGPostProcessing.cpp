@@ -44,6 +44,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 
 #	include <algorithm>
 #	include <cmath>
+#	include <cstddef>
 #	include <cstring>
 #	include <format>
 #	include <map>
@@ -442,15 +443,14 @@ namespace
 		ShaderBindings::Latch copy;
 	};
 
-	// PostProcessing::CopyCB with the ORG source selector in its last word.
+	// copy.ps.hlsl's CopyConstants: PostProcessing::CopyCB, then the ORG source selector.
 	struct CopyLatch
 	{
-		std::uint32_t inputGamut = 0;
-		std::uint32_t outputGamut = 0;
-		float gamma = 1.0f;
+		PostProcessing::CopyCB conversion;
 		std::uint32_t source = 0;
+		std::uint32_t pad[3]{};
 	};
-	static_assert(sizeof(CopyLatch) == sizeof(PostProcessing::CopyCB));
+	static_assert(offsetof(CopyLatch, source) == sizeof(PostProcessing::CopyCB));
 
 	std::uint64_t Bits(float a_value)
 	{
@@ -477,6 +477,7 @@ struct ORGPostProcessing::Impl
 	bool readsMainCopy = false;
 	bool linear = false;
 	bool colorGraded = false;
+	bool exposureResolved = true;
 	std::vector<Index> order;
 
 	// Empty means on the graph. Logged when it changes.
@@ -601,13 +602,10 @@ struct ORGPostProcessing::Impl
 		gate.OpenDraw(ORGPostChain::kDrawEntry);
 		for (const auto& [groups, entry] : build->fixed)
 			gate.OpenDispatch(entry, groups[0], groups[1], groups[2]);
-		commit.Write(input, CopyLatch{ .gamma = linear ? 1.0f : Util::ColorSpace::GAME_GAMMA, .source = readsMainCopy ? 1u : 0u });
+		commit.Write(input, CopyLatch{ .conversion = { .gamma = linear ? 1.0f : Util::ColorSpace::GAME_GAMMA }, .source = readsMainCopy ? 1u : 0u });
 		for (const auto index : order)
 			effects[static_cast<std::size_t>(index)]->Commit(commit, *pp.pipeline[static_cast<std::size_t>(index)]);
-		const auto conversion = pp.OutputConversion(colorGraded);
-		commit.Write(output, CopyLatch{ .inputGamut = static_cast<std::uint32_t>(conversion.inputGamut),
-								 .outputGamut = static_cast<std::uint32_t>(conversion.outputGamut),
-								 .gamma = conversion.gamma });
+		commit.Write(output, CopyLatch{ .conversion = pp.OutputConversion(colorGraded, exposureResolved) });
 		ran = true;
 	}
 
@@ -674,6 +672,10 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 
 	pp.UpdatePipeline();
 	auto order = pp.ChainOrder();
+	// As PreProcess: without Composite the scene stays pre-exposed, so grading is skipped and the output copy divides it out.
+	const bool exposureResolved = !linear || state->preExposure == 1.0f || std::ranges::find(order, Index::Composite) != order.end();
+	if (!exposureResolved)
+		std::erase_if(order, [&](Index a_index) { return a_index == Index::ColorGrading || pp.pipeline[static_cast<std::size_t>(a_index)]->DrawAfterColorGrading(); });
 
 	// The graph runs the chain only when it can run every effect in it.
 	std::vector<std::uint64_t> key;
@@ -756,6 +758,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.linear = linear;
 	s.readsMainCopy = !single && (a_refraction || a_targets.input == mainCopyTarget);
 	s.colorGraded = colorGraded;
+	s.exposureResolved = exposureResolved;
 	s.ready = true;
 	s.SetReason({});
 

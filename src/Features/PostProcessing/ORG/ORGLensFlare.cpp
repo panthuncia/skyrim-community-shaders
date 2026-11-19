@@ -8,6 +8,7 @@
 #	include "Features/PostProcessing/LensFlare.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/SharedConstants.h"
 
 #	include <algorithm>
 #	include <format>
@@ -26,6 +27,7 @@ namespace ORGPostChain
 		// LENS_FLARE_RESOURCES, then the LensFlareFrame latch.
 		struct FlareBlock
 		{
+			SharedConstants::Handles shared;
 			ShaderBindings::Handle inputTexture, colorSampler, borderSampler, outputTexture;
 			ShaderBindings::Latch frame;
 		};
@@ -219,7 +221,7 @@ namespace ORGPostChain
 
 			std::vector<Bind> FlareBindings(Bind a_input, Bind a_output, const LatchRegion<CB>& a_constants) const
 			{
-				return { std::move(a_input), Bind::Handle(colorSampler.Index()), Bind::Handle(borderSampler.Index()), std::move(a_output), Bind::Latch(a_constants) };
+				return { Bind::Shared(), std::move(a_input), Bind::Handle(colorSampler.Index()), Bind::Handle(borderSampler.Index()), std::move(a_output), Bind::Latch(a_constants) };
 			}
 
 			/** @brief Entries left out are unused by that entry point. */
