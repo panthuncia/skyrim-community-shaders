@@ -57,6 +57,7 @@ namespace DCLF::Features
 			kFadeRootsRegister,
 			kFadeSeedsRegister,
 			kPixelObjectsRegister,
+			Integrations::AdvancedSkin::kMaterialTableRegister,
 		};
 
 		constexpr bool FrameBindingRegistersValid()

@@ -1,4 +1,4 @@
-// Advanced Skin's wetness field: its membership hook and its capture at the frame's start. Render thread. Its material textures are in SkinTextures.cpp.
+// Advanced Skin's wetness field: its membership hook and its capture at the frame's start. Render thread. Its material table is in SkinMaterials.cpp.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/AdvancedSkin.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -61,7 +61,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			// Features/Actors' class, registered published whatever its toggle.
 			a_context.RegisterShadingField({ .name = "wetness", .field = Api::ShadingRowField::SkinPerGeometry, .members = Api::EntryClass::ActorOwned,
 				.membership = &Membership, .capture = &Capture });
-			InstallMaterialTextures(a_context);
+			InstallMaterials(a_context);
 		}
 	}
 
