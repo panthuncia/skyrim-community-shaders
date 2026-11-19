@@ -132,10 +132,12 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Frame generation in guest** (2026-11-18, RX 6600, FSR-FG): engages, about 2x driver presents, and stays on through the CS menu,
   the pause menu and a loading screen, in the background and the foreground (`fg` config). Its hudless input has no HUD. FSR-FG drops
   to one presented frame for a moment about twice a second (guest 28 to 36 times a run, plain D3D11 3379). Not looked into.
-- **Frame generation in native**: DLSS-G and FSR-FG stay off in native until the plan's steps 6 to 8
-  (`plans/native-frame-generation-plan.md`). In place since 2026-11-19 (steps 4 and 5): BasicRHI swap chains a presentation
-  layer may wrap, and `Native::RequestPresentation`, which replaces the swap chain on the submission thread with a torn-down
-  step between destroy and create. HDR's colour space switch goes through it, so it no longer drains the render thread.
+- **Frame generation in native**: FSR-FG runs on native Vulkan (2026-11-19, the plan's step 6,
+  `plans/native-frame-generation-plan.md`). `sl.fsr_g` wraps the swap chain BasicRHI makes through Streamline, and every on/off,
+  HDR or vsync change is a replacement on the submission thread (`Native::RequestPresentation`) with the plugin's load change in
+  its torn-down step. `native-fg` presents x2 (46 rendered, 92 presented a second, as guest's 46 / 91), with HDR10 too
+  (`native-vulkan+fg-hdr`). Native D3D12 is step 7, DLSS-G step 8. Not checked yet: the foreground eye check (HUD ghosting,
+  pacing, menu and loading-screen passthrough).
 
 - **Frame generation's inputs on the UI stage** (2026-11-19, A7): the hudless copy, the screenshot's clean scene and HDR output are
   steps of the UI stage in both graph modes; no anchor runs an epoch of its own. Guest FSR-FG engages as before (`fg`), and its

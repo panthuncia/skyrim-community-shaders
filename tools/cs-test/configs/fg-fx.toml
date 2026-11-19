@@ -1,0 +1,70 @@
+# Frame generation with the lens and camera effects that the motion vectors do not describe (native-frame-generation-plan.md,
+# decision 8): Physical Lens's image mapping and Camera's distortion and grain on, then off, with FSR-FG on. Ghosts and the
+# starburst stay off: with them on (Intensity 1, Diffraction) native Vulkan lost the device in cs.pp.physical-lens.request-plans
+# on the RX 6600 before frame generation was on (2026-11-19).
+# It needs the graph post chain: "Post Processing Mode": "PostProcessing" in the saved settings for the run. Compose it with a
+# mode: native-vulkan+fg-fx, guest+fg-fx. Generated frames cannot be captured, so the shots are the rendered frames.
+extends = ["base"]
+
+[run]
+timeout_s = 400
+
+[features]
+PostProcessing = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = 'PostProcessing.Physical Lens={"enabled":true,"settings":{"LensPreset":5,"ZoomPosition":0.0,"FNumber":1.0,"FocusDistanceM":0,"Intensity":0.0,"Diffraction":false,"ImageEffects":true}}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'PostProcessing.Camera={"enabled":true,"settings":{}}'
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "fg"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "fx-on"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "setting"
+arg = 'PostProcessing.Physical Lens={"enabled":false,"settings":{}}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'PostProcessing.Camera={"enabled":false,"settings":{}}'
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "fx-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "fg"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fx-on", "fx-off"]
