@@ -7,9 +7,22 @@
 #include "Common/Random.hlsli"
 #include "PhysicalSky/AlligatorNoise.hlsli"
 
-#define NDF_NOISE_FIELDS(M, A) 	M(uint, noiseType)         	M(uint, seed)              	M(uint, frequency)         	M(uint, octaves)           	M(float, persistence)      	M(uint, lacunarity)        	M(float, contrast)         	M(float, bias)             	M(uint, repetitions)       	M(float, responseExponent) 	M(float2, padding)
+#define NDF_NOISE_FIELDS(M, A) \
+	M(uint, noiseType)         \
+	M(uint, seed)              \
+	M(uint, frequency)         \
+	M(uint, octaves)           \
+	M(float, persistence)      \
+	M(uint, lacunarity)        \
+	M(float, contrast)         \
+	M(float, bias)             \
+	M(uint, repetitions)       \
+	M(float, responseExponent) \
+	M(float2, padding)
 
-#define NDF_NOISE_RESOURCES(X)          	X(UAV, RWTexture2D<float>, Output, 0) 	X(LATCH, NdfNoiseConstants, CB, 1)
+#define NDF_NOISE_RESOURCES(X)            \
+	X(UAV, RWTexture2D<float>, Output, 0) \
+	X(LATCH, NdfNoiseConstants, CB, 1)
 ORG_PUSH_BLOCK(NDF_NOISE_RESOURCES(ORG_HANDLE))
 
 ORG_GLOBAL_LATCH_BEGIN(NdfNoiseConstants, CB, 1)

@@ -13,9 +13,26 @@ struct NoiseLayer
 	float4 range;
 };
 
-#define CIRRUS_FIELDS(M, A)     	A(NoiseLayer, weather, 2)   	M(float2, windOffset)       	M(float, localWeight)       	M(float, localWindScale)    	M(uint, localBlendMode)     	M(float, weight)            	M(uint, hasPrevious)        	M(float, padding)
+#define CIRRUS_FIELDS(M, A)   \
+	A(NoiseLayer, weather, 2) \
+	M(float2, windOffset)     \
+	M(float, localWeight)     \
+	M(float, localWindScale)  \
+	M(uint, localBlendMode)   \
+	M(float, weight)          \
+	M(uint, hasPrevious)      \
+	M(float, padding)
 
-#define CIRRUS_RESOURCES(X)                           	X(SRV, Texture2D<float>, Noise0, 0)               	X(SRV, Texture2D<float>, Noise1, 1)               	X(SRV, Texture2D<float>, Noise2, 2)               	X(SRV, Texture2D<float>, Noise3, 3)               	X(SRV, Texture2D<float4>, LocalWeather, 4)        	X(SRV, Texture2D<float2>, PreviousWeather, 5)     	X(UAV, RWTexture2D<float2>, OutputWeather, 0)     	X(SAMPLER, SamplerState, NoiseSampler, 0)         	X(LATCH, CirrusConstants, CB, 1)
+#define CIRRUS_RESOURCES(X)                       \
+	X(SRV, Texture2D<float>, Noise0, 0)           \
+	X(SRV, Texture2D<float>, Noise1, 1)           \
+	X(SRV, Texture2D<float>, Noise2, 2)           \
+	X(SRV, Texture2D<float>, Noise3, 3)           \
+	X(SRV, Texture2D<float4>, LocalWeather, 4)    \
+	X(SRV, Texture2D<float2>, PreviousWeather, 5) \
+	X(UAV, RWTexture2D<float2>, OutputWeather, 0) \
+	X(SAMPLER, SamplerState, NoiseSampler, 0)     \
+	X(LATCH, CirrusConstants, CB, 1)
 ORG_PUSH_BLOCK(CIRRUS_RESOURCES(ORG_HANDLE))
 
 ORG_GLOBAL_LATCH_BEGIN(CirrusConstants, CB, 1)

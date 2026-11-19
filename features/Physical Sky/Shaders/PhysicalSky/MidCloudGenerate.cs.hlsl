@@ -13,9 +13,24 @@ struct NoiseLayer
 
 // weather: primary, type, secondary, coverage gain, thickness variation.
 // shape: coverage-to-height exponent, displacement / nominal thickness.
-#define MID_CLOUD_FIELDS(M, A)    	A(NoiseLayer, weather, 5)     	M(float, localWeight)         	M(uint, localBlendMode)       	M(float, weight)              	M(uint, hasPrevious)          	M(float4, shape)
+#define MID_CLOUD_FIELDS(M, A) \
+	A(NoiseLayer, weather, 5)  \
+	M(float, localWeight)      \
+	M(uint, localBlendMode)    \
+	M(float, weight)           \
+	M(uint, hasPrevious)       \
+	M(float4, shape)
 
-#define MID_CLOUD_RESOURCES(X)                        	X(SRV, Texture2D<float>, Noise0, 0)               	X(SRV, Texture2D<float>, Noise1, 1)               	X(SRV, Texture2D<float>, Noise2, 2)               	X(SRV, Texture2D<float>, Noise3, 3)               	X(SRV, Texture2D<float4>, LocalWeather, 4)        	X(SRV, Texture2D<float4>, PreviousWeather, 5)     	X(UAV, RWTexture2D<float4>, OutputWeather, 0)     	X(SAMPLER, SamplerState, NoiseSampler, 0)         	X(LATCH, MidCloudConstants, Parameters, 1)
+#define MID_CLOUD_RESOURCES(X)                    \
+	X(SRV, Texture2D<float>, Noise0, 0)           \
+	X(SRV, Texture2D<float>, Noise1, 1)           \
+	X(SRV, Texture2D<float>, Noise2, 2)           \
+	X(SRV, Texture2D<float>, Noise3, 3)           \
+	X(SRV, Texture2D<float4>, LocalWeather, 4)    \
+	X(SRV, Texture2D<float4>, PreviousWeather, 5) \
+	X(UAV, RWTexture2D<float4>, OutputWeather, 0) \
+	X(SAMPLER, SamplerState, NoiseSampler, 0)     \
+	X(LATCH, MidCloudConstants, Parameters, 1)
 ORG_PUSH_BLOCK(MID_CLOUD_RESOURCES(ORG_HANDLE))
 
 ORG_GLOBAL_LATCH_BEGIN(MidCloudConstants, Parameters, 1)
