@@ -280,3 +280,12 @@ final until the user confirms it.
     - **Not audited:** DCLF's `ShareImage`, Scaleform's passes, the skeleton's kMAIN copy and Cloud Shadows. A mid-frame
       import change there would now stop the game.
     - **Merges:** 9a and 9b were merged in that order; in BoundaryCheck the director kept 9b's deletions.
+55. **Batch 4: 38 of 44 passed.** The failures:
+    - `ibl` in three modes: the second recipe finding, fixed (item 50);
+    - `post-effects` in three modes: turning Local Exposure off made a declared transient (aliasable) texture take a
+      1x1 extent, which can't be versioned. Since 7a that is fatal ("has no version ... changes its shape class"; the
+      message misleads). Fix: `DeclareTexture` promotes a non-exported transient to Persistent.
+
+    Everything else passed in batch 4: DCLF family, Bink, shader reload, Physical Sky, clouds, dynamic cubemaps,
+    volumetric shadows, SSS, cloud shadows, post-lens, post-programs and the 7a full set.
+56. **Batch 5** is 7d, 8, 9a, 9b and the fixes, built after one shadowing rename in `EngineTargets.cpp`.
