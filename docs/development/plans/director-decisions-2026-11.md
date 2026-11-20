@@ -328,3 +328,13 @@ final until the user confirms it.
       listed.
 
     If any of these shows, a fix lead goes before 10c.
+62. **10a's batch 6: 21 of 23 passed.**
+    - **Waits:** every run had zero "[DCLF] frame N waited" lines (batch 4 had 2–6 of 42–67 ms per run). The one
+      "shader-reload wait" was in the shader-reload run. No tap errors, and no refused staged builds.
+    - **Coverage:** `native-census`, `native-tour`, `river`, `rain` and `flicker-taa` all passed.
+    - **Failures:** the new `dclf-toggles` config hung in both modes at `dclf:pipeline gpu`, after the CPU pipeline. The
+      next frame's adopted snapshot left the forward and first-person epochs uncovered, which is fatal by DCLF's
+      coverage rule.
+
+    A pipeline toggle switching mid-session is 10c's job (toggles as variables), so it goes into the 10c brief. It is
+    unknown whether this failed before 10a; the config is new.
