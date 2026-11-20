@@ -669,6 +669,31 @@ outside it. The light copy always moves the whole capacity. So no pass revision 
 `ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
 culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
 
+**As built (2026-11-19, 6.13, `org-native/rev-step6-13`).** LLF's local shadow cache follows the revisions.
+- `EnableLocalShadows`, `LocalShadowSlots` and `LocalShadowResolution` are `CS::Setting`s. LLF's `ProjectSizeSettings` is gone.
+- `ORGLocalShadows::Setup` runs once, at `SetupResources`, when the local shadow hooks are installed. It declares the cache with
+  `DeclareTexture2D` on `EnableLocalShadows`, `LocalShadowResolution` and `EngineShadowMap`: a new resolution is a new version, and
+  the cache is one texel while it is off. The client is `DeclareClient` on `EnableLocalShadows`, `LocalShadowSlots` and
+  `EngineShadowMap`, and its key is the slot count. There is no key while the cache is off, or the engine has no shadow map array.
+- **A new slot count is a new slice count, so another shape class.** The client's make declares a new cache texture for that
+  count. A new client registration then waits for its EarlyPrepass stage build inside the revision. The revision that adopts it
+  publishes the new texture under `LightLimitFix::LocalShadowCache`. That is one structural rebuild, at that boundary, for the
+  readers that declare the id. Each shape class's texture has a graph name of its own (`... (N slots)`), so it never meets the
+  published id. Going back to the adopted count takes the adopted texture again.
+- `Frame::DeclareClient` takes an optional fifth argument, `adopted(key)`. It is called inside the adoption point (at
+  `Declarations::NoteBegin`), once per registration, at the first Begin whose adopted values give the registered key. LLF uses it to
+  switch the cache it binds at t103 and publishes. Additive: EHF and the other callers pass nothing.
+- The slot data buffer holds every slot the setting allows (64 times 112 bytes), so a slot count changes nothing there. No buffer
+  declaration was needed. The data copy and the latch always move the whole capacity, with the slots past the adopted count zeroed.
+- The frame reads the cache's shape only from `ORGLocalShadows::Adopted()`: the adopted texture's slots, its bound extent and the
+  adopted `EngineShadowMap`. `LightLimitFix::FollowLocalShadowGraph` makes the CPU side follow it and forgets the slice
+  assignments when it changes. The copy constants and group counts are written per run from it.
+- Gone: the mid-frame `EnsureLocalShadowResources` on the graph path, `ORGLocalShadows::Release`, `Desc`, Setup's same-shape
+  guard (`SameShape`), `WithdrawCache`, `localShadowGraphFailed` and the move to D3D11 when the graph lost the cache. Plain D3D11
+  keeps `EnsureLocalShadowResources` as it was.
+- `CS_LLF_LOCAL_SHADOWS=1` (tests) turns local shadows on at PostPostLoad, so their hooks install. The config is
+  `llf-local-shadows`.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1499,6 +1524,26 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   registration, driven by the flow map's identity in `EngineImageSpace`; it still rebuilds every graph once (step 9 makes it a
   declared import).
 - **Missing engine targets and texture failures at a registration are fatal**, not a later retry.
+
+**Decided by the agent (step 6.13, 2026-11-19), to confirm:**
+- **The readers of the cache follow a new slot count one revision later.** The revision that adopts a new slot count holds LLF's
+  own stage build. The new texture is published under the old id when that revision is adopted, so the readers' graphs (the fog's
+  Prepass stage, and DCLF's while it is on) are built then, staged, and switch in with a following revision. Until then they read
+  the old texture, which nothing writes any more. A new slot count forgets every slice assignment, so no light points into it then.
+  Making the readers members of the same revision needs the closure of a published id (who declares it) in the revision, which
+  nothing gives yet. Publishing at the start of the revision instead would make the fog's export check (`IsExportOf`) fail and
+  send the fog to D3D11 for the frames in between.
+- **Slice counts are not part of `DeclareTexture2D`.** It stays extent-only. LLF makes one declaration per slice count, in the
+  client's make, at the start of a revision on the render thread. Its first extent is made from the newest values, and the next
+  revision corrects it if they differ. `ORGLocalShadows::Adopted` reads the bound extent, and is empty when that extent is not a
+  power-of-two fraction of the engine's.
+- **The data buffer is sized for the most slots**, so it never changes (the trigger is removed). 7 KB.
+- **No D3D11 fall-back at runtime.** Once the graph holds the cache, it does for the session. The graph path needs an engine shadow
+  map array (more than one slice): without one it has no cache, where D3D11 used to take it.
+- **New test switch `CS_LLF_LOCAL_SHADOWS`.** The hooks install only at startup, and cs-test cannot write saved settings before
+  launch. The native modes need DCLF, which blocks local shadows, so only guest and plain D3D11 run the cache.
+- **Before the first adoption of the client, the frame has no cache.** The adopted call sets it, so the engine never binds a cache
+  no copy wrote.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

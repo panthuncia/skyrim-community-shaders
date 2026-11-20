@@ -58,6 +58,29 @@ static int FindOptionIndex(const std::array<uint32_t, N>& a_options, uint32_t a_
 	return index;
 }
 
+LightLimitFix::LightLimitFix()
+{
+	settings.EnableLocalShadows.Bind(CS::SettingRegistry::Declare("LightLimitFix.EnableLocalShadows"));
+	settings.LocalShadowSlots.Bind(CS::SettingRegistry::Declare("LightLimitFix.LocalShadowSlots"));
+	settings.LocalShadowResolution.Bind(CS::SettingRegistry::Declare("LightLimitFix.LocalShadowResolution"));
+}
+
+uint32_t LightLimitFix::LocalShadowSlotsFor(uint32_t a_setting)
+{
+	return std::clamp(a_setting, MIN_LOCAL_SHADOW_SLOTS, MAX_LOCAL_SHADOW_SLOTS);
+}
+
+uint32_t LightLimitFix::LocalShadowResolutionFor(uint32_t a_setting, uint32_t a_engineResolution)
+{
+	const uint32_t engineResolution = std::max(a_engineResolution, 1u);
+	const uint32_t requested = a_setting == 0 ? engineResolution : std::max(a_setting, LOCAL_SHADOW_MIN_RESOLUTION);
+	const uint32_t resolution = std::min(requested, engineResolution);
+	// LocalShadowCopyCS tree-reduces, so the downsample ratio must be a power of two.
+	if (engineResolution % resolution != 0 || !std::has_single_bit(engineResolution / resolution))
+		return engineResolution;
+	return resolution;
+}
+
 bool LightLimitFix::LocalShadowsBlockedByDCLF()
 {
 	if (!globals::features::drawcallLimitFix.loaded)
@@ -76,7 +99,7 @@ void LightLimitFix::DrawLocalShadowSettings()
 
 	const bool blockedByDCLF = LocalShadowsBlockedByDCLF();
 	ImGui::BeginDisabled(blockedByDCLF);
-	ImGui::Checkbox(T(TKEY("enable_local_shadows"), "(Experimental) Enable Local Light Shadows"), &settings.EnableLocalShadows);
+	Util::Checkbox(T(TKEY("enable_local_shadows"), "(Experimental) Enable Local Light Shadows"), settings.EnableLocalShadows);
 	ImGui::EndDisabled();
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_local_shadows_tooltip"),
@@ -94,15 +117,15 @@ void LightLimitFix::DrawLocalShadowSettings()
 		ImGui::TextColored(globals::menu->GetTheme().StatusPalette.RestartNeeded, "%s", T(TKEY("local_shadows_restart_to_enable"), "Requires restart to enable Local Light Shadows."));
 
 	if (settings.EnableLocalShadows) {
-		const uint64_t slotsMegabytes = (settings.LocalShadowSlots * GetLocalShadowSlotBytes(localShadowCacheResolution, localShadowCacheFormat)) >> 20;
+		const uint64_t slotsMegabytes = (settings.LocalShadowSlots.Get() * GetLocalShadowSlotBytes(localShadowCacheResolution, localShadowCacheFormat)) >> 20;
 		const std::string slotsFormat = localShadowCacheResolution ? std::vformat(T(TKEY("local_shadow_slots_format"), "%d ({} MB)"), std::make_format_args(slotsMegabytes)) : "%d";
-		ImGui::SliderInt(T(TKEY("local_shadow_slots"), "Shadow Cache Slots"), (int*)&settings.LocalShadowSlots, MIN_LOCAL_SHADOW_SLOTS, MAX_LOCAL_SHADOW_SLOTS, slotsFormat.c_str(), ImGuiSliderFlags_AlwaysClamp);
+		Util::SliderInt(T(TKEY("local_shadow_slots"), "Shadow Cache Slots"), settings.LocalShadowSlots, static_cast<int>(MIN_LOCAL_SHADOW_SLOTS), static_cast<int>(MAX_LOCAL_SHADOW_SLOTS), slotsFormat.c_str(), ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("local_shadow_slots_tooltip"), "Maximum number of lights that can hold a cached shadow map at the same time. Each slot costs video memory at the cache resolution."));
 		}
 
 		const char* resolutionOptions[] = { T(TKEY("local_shadow_resolution_match_game"), "Match Game"), "512", "1024", "2048" };
-		int resolutionIndex = settings.LocalShadowResolution == 0 ? 0 : 1 + FindOptionIndex(LOCAL_SHADOW_RESOLUTION_OPTIONS, settings.LocalShadowResolution);
+		int resolutionIndex = settings.LocalShadowResolution.Get() == 0 ? 0 : 1 + FindOptionIndex(LOCAL_SHADOW_RESOLUTION_OPTIONS, settings.LocalShadowResolution.Get());
 		if (ImGui::Combo(T(TKEY("local_shadow_resolution"), "Shadow Cache Resolution"), &resolutionIndex, resolutionOptions, static_cast<int>(std::size(resolutionOptions))))
 			settings.LocalShadowResolution = resolutionIndex == 0 ? 0u : LOCAL_SHADOW_RESOLUTION_OPTIONS[resolutionIndex - 1];
 		if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -256,7 +279,7 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 	perFrame.EnableLightsVisualisation = settings.EnableLightsVisualisation;
 	perFrame.LightsVisualisationMode = settings.LightsVisualisationMode;
 	std::copy(clusterSize, clusterSize + 3, perFrame.ClusterSize);
-	if (!IsLocalShadowsEnabled())
+	if (localShadowOnGraph ? !IsLocalShadowCacheActive() : !IsLocalShadowsEnabled())
 		return perFrame;
 	perFrame.EnableLocalShadows = true;
 
@@ -293,6 +316,11 @@ void LightLimitFix::SetupResources()
 	// The buffers hold the display size's grid. A dynamic resolution culls a smaller grid in them.
 	if (!ORGLightCulling::Get().Setup({ clusterSize[0], clusterSize[1], clusterSize[2] }, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS))
 		EnsureLegacyCulling();
+
+	// The local shadow cache is declared once on the render graph and follows its settings through the frame revisions.
+	// Without the graph it stays on D3D11, made in the frame (EnsureLocalShadowResources).
+	if (localShadowHooksInstalled && ORGLocalShadows::Requested())
+		localShadowOnGraph = ORGLocalShadows::Get().Setup(static_cast<uint32_t>(sizeof(LocalShadowData)), MAX_LOCAL_SHADOW_SLOTS);
 
 	strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
 }
@@ -611,6 +639,9 @@ void LightLimitFix::PostPostLoad()
 	particleLightConfigs.Load();
 	Hooks::Install();
 	LightAttach::Install();
+	// CS_LLF_LOCAL_SHADOWS=1 (tests): local shadows start on, so their hooks install, whatever the saved setting.
+	if (Switches::On("CS_LLF_LOCAL_SHADOWS"))
+		settings.EnableLocalShadows = true;
 	if (settings.EnableLocalShadows && LocalShadowsBlockedByDCLF())
 		logger::info("[LLF] Local light shadows stay off: Drawcall Limit Fix is loaded");
 	else if (settings.EnableLocalShadows) {
@@ -1567,6 +1598,8 @@ void LightLimitFix::ScheduleLocalShadowCasters()
 	if (!loaded)
 		return;
 
+	if (localShadowOnGraph)
+		FollowLocalShadowGraph();
 	if (!IsLocalShadowCacheActive())
 		return;
 
@@ -1834,14 +1867,12 @@ bool LightLimitFix::FilterLocalShadowCaster(RE::BSShadowLight* a_light, const RE
 
 void LightLimitFix::ReleaseLocalShadowResources()
 {
-	if (localShadowCache || localShadowBuffer || localShadowOnGraph) {
+	if (localShadowCache || localShadowBuffer) {
 		ID3D11ShaderResourceView* nullViews[2] = {};
 		globals::d3d::context->PSSetShaderResources(102, ARRAYSIZE(nullViews), nullViews);
 	}
 	localShadowCache = nullptr;
 	localShadowBuffer = nullptr;
-	ORGLocalShadows::Get().Release();
-	localShadowOnGraph = false;
 	localShadowCacheSlots = 0;
 	localShadowRequestedSlots = 0;
 	localShadowCacheResolution = 0;
@@ -1854,18 +1885,38 @@ void LightLimitFix::ReleaseLocalShadowResources()
 	}
 }
 
+void LightLimitFix::FollowLocalShadowGraph()
+{
+	const auto shape = ORGLocalShadows::Get().Adopted();
+	if (shape.slots == localShadowCacheSlots && shape.resolution == localShadowCacheResolution && shape.engineResolution == localShadowEngineResolution &&
+		shape.engineSlices == localShadowEngineSlices)
+		return;
+	localShadowCacheSlots = shape.slots;
+	localShadowRequestedSlots = shape.slots;
+	localShadowCacheResolution = shape.resolution;
+	localShadowEngineResolution = shape.engineResolution;
+	localShadowEngineSlices = shape.engineSlices;
+	localShadowCacheFormat = shape.slots ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN;
+	localShadowSliceOwner.assign(shape.slots, nullptr);
+	for (auto& caster : localShadowCasters) {
+		caster.slice = -1;
+		caster.lastRenderedFrame = 0;
+	}
+	if (shape.slots)
+		logger::info("[LLF] Local shadow cache: {} slots at {}x{} (R32_FLOAT), engine shadow maps {}x{} ({} slices), render graph copy, from the adopted frame revision",
+			shape.slots, shape.resolution, shape.resolution, shape.engineResolution, shape.engineResolution, shape.engineSlices);
+	else
+		logger::info("[LLF] Local shadow cache: off in the adopted frame revision");
+}
+
 void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMaps)
 {
 	D3D11_TEXTURE2D_DESC engineDesc{};
 	a_engineShadowMaps->GetDesc(&engineDesc);
 
 	const uint32_t engineResolution = std::max(engineDesc.Width, 1u);
-	const uint32_t requestedResolution = settings.LocalShadowResolution == 0 ? engineResolution : std::max(settings.LocalShadowResolution, LOCAL_SHADOW_MIN_RESOLUTION);
-	uint32_t cacheResolution = std::min(requestedResolution, engineResolution);
-	// LocalShadowCopyCS tree-reduces, so the downsample ratio must be a power of two.
-	if (engineResolution % cacheResolution != 0 || !std::has_single_bit(engineResolution / cacheResolution))
-		cacheResolution = engineResolution;
-	const uint32_t requestedSlots = std::clamp(settings.LocalShadowSlots, MIN_LOCAL_SHADOW_SLOTS, MAX_LOCAL_SHADOW_SLOTS);
+	const uint32_t cacheResolution = LocalShadowResolutionFor(settings.LocalShadowResolution.Get(), engineResolution);
+	const uint32_t requestedSlots = LocalShadowSlotsFor(settings.LocalShadowSlots.Get());
 
 	auto device = globals::d3d::device;
 
@@ -1876,57 +1927,27 @@ void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMa
 			cacheFormat = DXGI_FORMAT_R16_UNORM;
 	}
 
-	// The render graph lost the cache it held: D3D11 keeps it from here on.
-	const bool graphLost = localShadowOnGraph && !ORGLocalShadows::Get().IsActive();
-	if (graphLost)
-		localShadowGraphFailed = true;
-	// CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1: LocalShadowCopyCS on the render graph does every copy, into a 32-bit float cache (its
-	// storage image's format).
-	const bool onGraph = ORGLocalShadows::Requested() && !localShadowGraphFailed && engineDesc.ArraySize > 1;
-	if (onGraph)
-		cacheFormat = DXGI_FORMAT_R32_FLOAT;
-
 	// A typed depth format (D16_UNORM, D32_FLOAT) cannot be copied into a color format, only its typeless parent can.
-	localShadowDirectCopy = !onGraph && cacheResolution == engineResolution && engineDesc.Height == engineDesc.Width &&
+	localShadowDirectCopy = cacheResolution == engineResolution && engineDesc.Height == engineDesc.Width &&
 	                        (engineDesc.Format == cacheFormat || engineDesc.Format == GetTypelessCacheFormat(cacheFormat));
 	localShadowEngineMipLevels = std::max(engineDesc.MipLevels, 1u);
 	localShadowEngineSlices = engineDesc.ArraySize;
 
 	// Without LocalShadowCopyCS a downsampled cache can never be filled, so don't hold its memory
-	if (!onGraph && !localShadowDirectCopy && !EnsureLocalShadowCopyShader()) {
+	if (!localShadowDirectCopy && !EnsureLocalShadowCopyShader()) {
 		if (localShadowCache)
 			ReleaseLocalShadowResources();
 		return;
 	}
 
 	const uint32_t renderFrame = globals::state->frameCount;
-	const bool retryDue = !localShadowCache && !localShadowOnGraph && renderFrame - localShadowAllocFailedFrame >= LOCAL_SHADOW_ALLOC_RETRY_FRAMES;
-	if (!graphLost && !retryDue && requestedSlots == localShadowRequestedSlots && cacheResolution == localShadowCacheResolution && engineResolution == localShadowEngineResolution && cacheFormat == localShadowCacheFormat)
+	const bool retryDue = !localShadowCache && renderFrame - localShadowAllocFailedFrame >= LOCAL_SHADOW_ALLOC_RETRY_FRAMES;
+	if (!retryDue && requestedSlots == localShadowRequestedSlots && cacheResolution == localShadowCacheResolution && engineResolution == localShadowEngineResolution && cacheFormat == localShadowCacheFormat)
 		return;
 
 	ReleaseLocalShadowResources();
 
 	uint32_t slots = requestedSlots;
-
-	if (onGraph) {
-		const ORGLocalShadows::Desc graphDesc{ slots, cacheResolution, cacheFormat, engineResolution / cacheResolution, static_cast<uint32_t>(sizeof(LocalShadowData)) };
-		// The runtime stopping later shows at the next call as a lost cache (graphLost), which moves the cache to D3D11.
-		if (!ORGLocalShadows::Get().Setup(graphDesc)) {
-			localShadowGraphFailed = true;
-			EnsureLocalShadowResources(a_engineShadowMaps);
-			return;
-		}
-		localShadowOnGraph = true;
-		localShadowRequestedSlots = requestedSlots;
-		localShadowCacheResolution = cacheResolution;
-		localShadowEngineResolution = engineResolution;
-		localShadowCacheFormat = cacheFormat;
-		localShadowSliceOwner.assign(slots, nullptr);
-		localShadowCacheSlots = slots;
-		logger::info("[LLF] Local shadow cache: {} slots at {}x{} (R32_FLOAT), engine shadow maps {}x{} (format {}, {} slices), render graph copy", slots, cacheResolution,
-			cacheResolution, engineResolution, engineResolution, static_cast<uint32_t>(engineDesc.Format), engineDesc.ArraySize);
-		return;
-	}
 
 	D3D11_TEXTURE2D_DESC texDesc{};
 	texDesc.Width = cacheResolution;
@@ -2084,10 +2105,17 @@ void LightLimitFix::CopyLocalShadowMaps()
 	if (!depthStencil.texture || !depthStencil.depthSRV)
 		return;
 
-	EnsureLocalShadowResources(depthStencil.texture);
+	// On the render graph the cache is the adopted revision's. D3D11 makes its own in the frame.
 	auto& graphShadows = ORGLocalShadows::Get();
-	if (localShadowOnGraph ? !graphShadows.IsActive() : (!localShadowCache || !localShadowBuffer || (!localShadowDirectCopy && (!localShadowCopyCS || !localShadowCopyCB))))
-		return;
+	if (localShadowOnGraph) {
+		FollowLocalShadowGraph();
+		if (!localShadowCacheSlots)
+			return;
+	} else {
+		EnsureLocalShadowResources(depthStencil.texture);
+		if (!localShadowCache || !localShadowBuffer || (!localShadowDirectCopy && (!localShadowCopyCS || !localShadowCopyCB)))
+			return;
+	}
 	localShadowFrameCopies.clear();
 
 	const uint32_t frame = localShadowFrame;
@@ -2318,8 +2346,9 @@ bool LightLimitFix::EnsureLocalShadowCopyShader()
 
 void LightLimitFix::EarlyPrepass()
 {
-	if (!IsLocalShadowsEnabled()) {
-		if (localShadowCache || localShadowOnGraph)
+	// The graph's cache follows the adopted revision, which turns it off by itself.
+	if (localShadowOnGraph ? !localShadowHooksInstalled : !IsLocalShadowsEnabled()) {
+		if (localShadowCache)
 			ReleaseLocalShadowResources();
 		return;
 	}
@@ -2396,12 +2425,3 @@ void LightLimitFix::Hooks::InstallLocalShadows()
 }
 
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection LightLimitFix::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("EnableLocalShadows", settings.EnableLocalShadows)
-		.Add("LocalShadowSlots", settings.LocalShadowSlots)
-		.Add("LocalShadowResolution", settings.LocalShadowResolution);
-	return projection;
-}

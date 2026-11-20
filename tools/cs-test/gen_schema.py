@@ -118,6 +118,11 @@ SPECIAL = {
         "key": "cs.hang_watchdog", "type": "int",
         "description": "seconds without progress before the hang watchdog writes its report (default 15)",
     },
+    "CS_LLF_LOCAL_SHADOWS": {
+        "key": "cs.llf_local_shadows", "type": "bool", "default": False,
+        "description": "1: Light Limit Fix's local light shadows start on, so their hooks install, whatever the saved setting "
+                       "(DCLF still blocks them unless dclf.enabled = false)",
+    },
 }
 
 # The census lines the census scenarios repeat ("org.census = true").

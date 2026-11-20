@@ -71,6 +71,7 @@ namespace Testing::SwitchRegistry
 			"CS_GRASS_COLLISION_STATS",
 			"CS_HAIR",
 			"CS_HANG_WATCHDOG",
+			"CS_LLF_LOCAL_SHADOWS",
 			"CS_NATIVE_D3D11",
 			"CS_NO_D3DX_UPGRADE",
 			"CS_NO_PASS_PREFETCH",
