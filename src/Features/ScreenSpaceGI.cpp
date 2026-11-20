@@ -203,15 +203,12 @@ void ScreenSpaceGI::DrawSettings()
 
 		if (ImGui::BeginTable("Less Work", 3, ImGuiTableFlags_SizingStretchSame)) {
 			ImGui::TableNextColumn();
-			// A click writes the setting, so the write raises its event.
-			if (ImGui::RadioButton(T(TKEY("full_res"), "Full Res"), settings.ResolutionMode.Get() == 0))
-				settings.ResolutionMode = 0;
+			// A click writes the setting, so it raises its event.
+			Util::RadioButton(T(TKEY("full_res"), "Full Res"), settings.ResolutionMode, 0);
 			ImGui::TableNextColumn();
-			if (ImGui::RadioButton(T(TKEY("half_res"), "Half Res"), settings.ResolutionMode.Get() == 1))
-				settings.ResolutionMode = 1;
+			Util::RadioButton(T(TKEY("half_res"), "Half Res"), settings.ResolutionMode, 1);
 			ImGui::TableNextColumn();
-			if (ImGui::RadioButton(T(TKEY("quarter_res"), "Quarter Res"), settings.ResolutionMode.Get() == 2))
-				settings.ResolutionMode = 2;
+			Util::RadioButton(T(TKEY("quarter_res"), "Quarter Res"), settings.ResolutionMode, 2);
 
 			ImGui::EndTable();
 		}

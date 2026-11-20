@@ -1041,6 +1041,11 @@ namespace Util
 		return EditSettingCopy<bool>(setting, [&](bool& a_value) { return ImGui::Checkbox(label, &a_value); });
 	}
 
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int a_button)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::RadioButton(label, &a_value, a_button); });
+	}
+
 	bool SliderInt(const char* label, CS::Setting<int>& setting, int min, int max, const char* format, ImGuiSliderFlags flags)
 	{
 		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::SliderInt(label, &a_value, min, max, format, flags); });

@@ -41,12 +41,8 @@ void CODBloom::DrawSettings()
 	ImGui::SliderInt(T("feature.post_processing.codbloom.mip_level", "Mip Level"), &mipLevel, 1, (int)settings.MipBlendFactor.size(), "%d", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.codbloom.the_greater_the_level_the_blurrier_the_part", "The greater the level, the blurrier the part it controls"));
-	{
-		// The factors are one setting, so an edit sets the whole array.
-		auto factors = settings.MipBlendFactor.Get();
-		if (ImGui::SliderFloat(T("feature.post_processing.codbloom.intensity", "Intensity"), &factors[mipLevel - 1], 0.f, 1.f, "%.2f"))
-			settings.MipBlendFactor = factors;
-	}
+	// The factors are one setting, so an edit sets the whole array.
+	Util::SliderFloat(T("feature.post_processing.codbloom.intensity", "Intensity"), settings.MipBlendFactor[mipLevel - 1], 0.f, 1.f, "%.2f");
 }
 
 void CODBloom::DrawDebugSection()

@@ -1158,7 +1158,7 @@ def collect_component_persisted_controls(
         persisted = {}
         for pair in re.finditer(
                 r'\{\s*"([^"]+)"\s*,\s*([A-Za-z_]\w*)\s*->\s*'
-                r'([A-Za-z_]\w*)\s*\}', method_bodies["SaveSettings"]):
+                r'([A-Za-z_]\w*)\s*(?:\.\s*Get\s*\(\s*\))?\s*\}', method_bodies["SaveSettings"]):
             container = aliases.get(pair.group(2))
             if container in containers:
                 persisted.setdefault((container, pair.group(3)), set()).add(pair.group(1))

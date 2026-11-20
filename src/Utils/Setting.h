@@ -68,6 +68,30 @@ namespace CS
 		static std::vector<SettingVariableId> Unraised();
 	};
 
+	/** @brief One element of an array setting. A write sets the whole value, so it raises the event. */
+	template <class S, class E>
+	class SettingElement
+	{
+	public:
+		SettingElement(S& a_setting, std::size_t a_index) noexcept :
+			setting(a_setting), index(a_index) {}
+
+		operator const E&() const noexcept { return setting.Get()[index]; }
+		const E& Get() const noexcept { return setting.Get()[index]; }
+
+		SettingElement& operator=(const E& a_value)
+		{
+			auto value = setting.Get();
+			value[index] = a_value;
+			setting.Set(value);
+			return *this;
+		}
+
+	private:
+		S& setting;
+		std::size_t index;
+	};
+
 	/**
 	 * @brief A feature setting whose writes raise its frame variable's event.
 	 *
@@ -121,6 +145,14 @@ namespace CS
 		auto operator[](std::size_t a_index) const noexcept -> decltype(std::declval<const U&>()[a_index])
 		{
 			return value[a_index];
+		}
+
+		/** @brief A writable element of an array value. A write sets the whole value, so it raises the event. */
+		template <class U = T>
+		auto operator[](std::size_t a_index) noexcept
+			-> SettingElement<Setting, std::remove_cvref_t<decltype(std::declval<const U&>()[a_index])>>
+		{
+			return { *this, a_index };
 		}
 
 		/** @brief The element count of an array value. */

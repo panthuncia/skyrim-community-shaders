@@ -963,6 +963,20 @@ namespace Util
 	/** @brief ImGui::SliderFloat over a float setting. @return True when the control edited the value. */
 	bool SliderFloat(const char* label, CS::Setting<float>& setting, float min, float max, const char* format = "%.3f", ImGuiSliderFlags flags = 0);
 
+	/** @brief ImGui::SliderFloat over one element of an array setting. An edit sets the whole array. */
+	template <class S>
+	bool SliderFloat(const char* label, CS::SettingElement<S, float> element, float min, float max, const char* format = "%.3f", ImGuiSliderFlags flags = 0)
+	{
+		float value = element.Get();
+		if (!ImGui::SliderFloat(label, &value, min, max, format, flags))
+			return false;
+		element = value;
+		return true;
+	}
+
+	/** @brief ImGui::RadioButton over an int setting: selected while it holds a_button, and a click stores a_button. */
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int a_button);
+
 	/** @brief ImGui::Combo over an int setting holding the item index. @return True when the control edited the value. */
 	bool Combo(const char* label, CS::Setting<int>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
 
