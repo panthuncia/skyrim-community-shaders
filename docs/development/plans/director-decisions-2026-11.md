@@ -223,3 +223,9 @@ final until the user confirms it.
 44. **The `ibl` config hangs** in native Vulkan and guest. A world recipe finding ("reads a resource before the pass that
     writes it") on `pre-main`'s new build is fatal and opens a message box. Before it, PublishedResources is read on the
     BuildManager thread. A fix lead is on it.
+45. **The graph modes require DCLF.** Guest and native now stop at startup with a clear error when DCLF is off for any
+    reason, instead of drawing a blank world. `llf-local-shadows` is D3D11 only. Left for the user:
+    - **6.13's graph local-shadow cache can't run in any supported setup.** LLF's local shadows need DCLF off, and the
+      graph modes need DCLF on. Either delete it, or let the cache follow DCLF's shadow views.
+    - **Turning DCLF off after startup** ("Disable at Boot" from saved settings, or the menu toggle) still blanks the
+      world silently in graph mode. The toggle should probably be locked there.
