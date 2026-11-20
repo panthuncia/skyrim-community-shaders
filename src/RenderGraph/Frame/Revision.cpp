@@ -706,6 +706,8 @@ namespace RenderGraph::Frame::Revision
 				static_cast<bool>(attaching) != !stagedEpochs.empty() || !recorded || !adoptedInputs || !adoptedInputs->variables ||
 				static_cast<bool>(inputWaits) != static_cast<bool>(revision->inputWaitsFragment))
 				FailRevision(fmt::format("revision {} was selected without its inputs, versions, builds or recordings", revision->serial));
+			// A new shader generation swaps the staged pipelines in once the rest of the revision is in (plan Q5).
+			const std::uint64_t shaderGenerationBefore = Vars::AdoptedShaderGeneration();
 			{
 				const Boundary::Caller caller("revision");
 				// The frame reads the variables of the revision it runs, and takes what their changes made outside the frame.
@@ -741,6 +743,12 @@ namespace RenderGraph::Frame::Revision
 			}
 			if (recorded->recordings)
 				FrameAnchors::InstallRevisionSchedules(*recorded->recordings, a_frame);
+			// After the staged attach, which a later build would refuse. Every graph is built here with the host's thread held, so
+			// every epoch takes the new pipelines in this Begin and no recording made before the swap runs after it.
+			if (const std::uint64_t shaderGeneration = Vars::AdoptedShaderGeneration(); shaderGeneration != shaderGenerationBefore) {
+				const Boundary::Caller caller("revision");
+				RenderGraphRuntime::Get().SwapStagedPipelines(fmt::format("revision {}, shader generation {}", revision->serial, shaderGeneration));
+			}
 			// The last revision's versions and recordings go once the GPU is past every frame submitted with them.
 			if (a_coordinator.adopted)
 				a_coordinator.retiring.emplace_back(DCLF::SubmittedRetirementPoint(), std::move(a_coordinator.adopted));

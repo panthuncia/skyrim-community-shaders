@@ -64,7 +64,6 @@ namespace RenderGraph
 				Epoch,
 				All,
 				For,
-				AllSynchronous,
 				Change
 			};
 			Kind kind = Kind::All;
@@ -151,8 +150,6 @@ namespace RenderGraph
 		std::uint64_t groupSerial = 0;
 		std::uint64_t frames = 0;
 		bool worldStarted = false;
-		bool synchronousAll = false;
-		std::string synchronousReason;
 		std::uint64_t warnings = 0;
 		std::uint64_t attachLogs = 0;
 		Window window;
@@ -241,11 +238,6 @@ namespace RenderGraph
 				break;
 			case PendingRequest::Kind::For:
 				(void)host.RequestRebuildFor(org::ResourceIdentifier(a_request.id), a_request.reason);
-				break;
-			case PendingRequest::Kind::AllSynchronous:
-				host.RequestRebuild(a_request.reason);
-				synchronousAll = true;
-				synchronousReason = a_request.reason;
 				break;
 			case PendingRequest::Kind::Change:
 				// No build may capture what the change edits while it runs. A build handed out before is dropped at its attach and built again.
@@ -674,9 +666,17 @@ namespace RenderGraph
 		impl->Submit({ PendingRequest::Kind::For, 0, std::string(a_id), std::string(a_reason) });
 	}
 
-	void BuildManager::RequestAllSynchronous(std::string_view a_reason)
+	bool BuildManager::SwapPipelines(std::string_view a_reason)
 	{
-		impl->Submit({ PendingRequest::Kind::AllSynchronous, 0, {}, std::string(a_reason) });
+		auto& m = *impl;
+		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
+		m.ApplyPending();
+		WarnSynchronous(fmt::format("every graph, for the pipeline swap ({})", a_reason), "revision");
+		++m.window.synchronous;
+		m.desc.host->RequestRebuild(a_reason);
+		auto scope = m.OwnerScope();
+		std::scoped_lock lock(m.buildMutex);
+		return m.desc.host->BuildIfRequested();
 	}
 
 	void BuildManager::Change(std::function<void()> a_change, std::string_view a_reason)
@@ -725,14 +725,6 @@ namespace RenderGraph
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		bool changed = false;
-		// Shader reload's safe point builds every graph here with the host's thread held. Earlier builds are rejected at attach.
-		if (std::exchange(m.synchronousAll, false)) {
-			WarnSynchronous(fmt::format("every graph asked for ({})", m.synchronousReason), a_point);
-			++m.window.synchronous;
-			auto scope = m.OwnerScope();
-			std::scoped_lock lock(m.buildMutex);
-			changed = m.desc.host->BuildIfRequested() || changed;
-		}
 		bool externalAttached = false;
 		changed = m.AttachFinished(a_attach, &externalAttached) || changed;
 		m.RequestStale();

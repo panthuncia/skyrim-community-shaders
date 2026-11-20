@@ -80,6 +80,7 @@ The shipped configs:
 | `dynamic-cubemaps` | Dynamic Cubemaps with water SSR toggled (`setting` steps), then a coc into Dragonsreach and back: the client follows the reflection cubemap and registers again only for the first colour source; compose it, `native-vulkan+dynamic-cubemaps` |
 | `volumetric-shadows` | coc into Dragonsreach and back out to Whiterun: Volumetric Shadows' client, registered once by a frame revision, stays as it is across the interior's shut gate; compose it, `native-vulkan+volumetric-shadows` |
 | `cloud-shadows` | Cloud Shadows under a forced storm, its opacity changed and back, then a coc into Dragonsreach and back: the occlusion copy's client, registered once by a frame revision, stays as it is; compose it, `native-vulkan+cloud-shadows` |
+| `shader-reload` | a forced reload of every live pipeline (`dclf:reload-shaders=all`), then an unchanged one-file reload, a shot before and after each (`wait = "reload"`): the swap is a `ShaderGeneration` event, swapped in by the revision that carries it; compose it, `native-vulkan+shader-reload` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |

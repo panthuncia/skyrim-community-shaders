@@ -23,10 +23,12 @@ once, generically, with how to build it again, and its consumers bind through th
     dependency-hashed.
 -   `Service()` runs on the render thread at each present (`RenderGraphRuntime::SignalFramePace`):
     -   It starts what was asked: it moves `SourcesGeneration`, tells the listeners, and runs the rebuilds' starts on one task.
-    -   It finishes a reload once every rebuild is in: it logs one line, stages the new payloads and asks the graph host for a
-        rebuild.
--   `Publish` is the safe point. Every graph build runs it, through the `cs.org.pipeline-registry` extension's factory. There the
-    host's thread is stopped and the old graph's work has been waited for. `Publish` swaps the staged payloads into their slots
+    -   It finishes a reload once every rebuild is in: it logs one line and stages the new payloads. With the build manager,
+        staged payloads move the `ShaderGeneration` frame variable (one event per staged set). The frame revision that carries
+        it builds every graph at its adoption, after its staged attach (`RenderGraphRuntime::SwapStagedPipelines`, frame
+        revision plan Q5). Without one, it asks the graph host for a rebuild.
+-   `Publish` is the safe point. Every owner-thread graph build runs it, through the `cs.org.pipeline-registry` extension's
+    factory. There the host's thread is stopped and the old graph's work has been waited for. `Publish` swaps the staged payloads into their slots
     and moves `Generation`. Each replaced payload is held until the host's retired callback passes `SubmissionsMade()` at that
     build. Every recording after the build is of the new graph: every epoch, revision-driven or live, records again.
 -   An entry built for an earlier `SourcesGeneration` (its build began before a reload read the files) is rebuilt by the next

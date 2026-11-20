@@ -1,0 +1,54 @@
+# Shader hot reload during play (frame revision plan, step 7c). A reload of every live pipeline, each forced to swap even when
+# unchanged, then a reload of one unchanged file (Lighting.hlsl). The forced reload stages every pipeline: one ShaderGeneration
+# event, and the revision that carries it swaps the pipelines in at its adoption and builds every graph there. The unchanged
+# reload stages nothing, so it raises no event. The shots before and after must match.
+# Compose it: native-vulkan+shader-reload, native-d3d12+shader-reload, guest+shader-reload.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:reload-shaders"
+arg = "all"
+
+# The wait holds the shot until the reload finished and its pipelines are swapped in.
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after-all"
+wait = "reload"
+wait_s = 120
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:reload-shaders"
+arg = "Lighting.hlsl"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after-file"
+wait = "reload"
+wait_s = 120
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "after-all", "after-file"]
+no_log = ["frame tap error", "a frame revision failed", "shader reload: every graph asked for", "graph failed to prepare"]

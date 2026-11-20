@@ -9065,3 +9065,22 @@ confirm are in the plan (step 6's "As built (6.1)" and section 9, "Decided by th
 
 - On first enable the client lands one revision after the volumes (it needs one Prepass's inputs), about four frames; volumetric fog is
   off in those frames, not black.
+
+## Frame revisions, step 7c: shader reload (2026-11-19)
+
+Step 7c of [plans/frame-revision-plan.md](plans/frame-revision-plan.md). CS on `org-native/rev-step7c` from `integ/hard-ports`
+`cec078238`; no submodule changes. Code only, not built or run yet.
+
+- **The event.** Once the pipeline registry stages a reload's payloads, `ServicePipelineReload` writes `Vars::ShaderGeneration`.
+  The revision that carries it builds every graph at its adoption, after its staged attach (`SwapStagedPipelines`). The
+  registry's extension publishes at that build. Nothing is built for a reload at the frame-end or Main::Draw poll any more.
+- **Why the swap is still a render-thread build (Q5).** CS programs read their slot when a pass records and keep no reference to
+  the payload. A revision's recordings are made before it is adopted, so a slot swap at adoption would leave them on the old
+  pipelines, and `Publish` frees a replaced payload once the GPU passes `SubmissionsMade()` while a kept recording made before
+  may still replay. `AttachStagedEpochGraphs` holds the host's thread but has no hook to publish inside the hold. So the swap
+  rebuilds every graph, as before, and no recording made before it survives. A slot-only swap needs revision-named pipelines
+  (OMS staged sets as host data, an ORG recording that reads its host data or retains its payloads, programs that bind through
+  it).
+- **`DeclareProgram`.** Its builds are registry entries, so every kept key reloads in place. No generation key.
+- **Test.** `shader-reload` (new): a forced reload of every pipeline, then an unchanged one-file reload, a shot before and after
+  each.
