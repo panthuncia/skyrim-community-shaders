@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <source_location>
 #include <memory>
 #include <span>
 #include <string>
@@ -22,6 +23,11 @@ namespace org
 	class VersionedBuffer;
 	class VersionedTexture;
 	struct BufferVersion;
+}
+
+namespace RenderGraph
+{
+	class RunGate;
 }
 
 /**
@@ -80,7 +86,7 @@ namespace GraphResources
 
 	/** @brief The one way to ask for a structural graph build after a resource identity change no version covers. Render thread.
 	*  An empty a_epochs means every epoch. */
-	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs = {});
+	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs = {}, const std::source_location& a_where = std::source_location::current());
 
 	/** @brief How many structural rebuilds RequestStructuralRebuild asked for this session. */
 	std::uint64_t StructuralRebuilds();
@@ -135,8 +141,18 @@ namespace GraphResources
 	/** @brief A twin texture's contents in a host-visible buffer, written once by the CPU. Immutable. */
 	struct StagedUpload;
 
-	/** @brief A copy pass for staged uploads. It copies on every run it is in, so give it as a one-shot pass. Null entries are skipped. */
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads);
+	/** @brief A gate entry an upload waits for. */
+	struct UploadGate
+	{
+		std::shared_ptr<const ::RenderGraph::RunGate> gate;
+		std::uint32_t entry = 0;
+	};
+
+	/**
+	* @brief A copy pass for staged uploads. Null entries are skipped. Ungated it copies on every run it is in.
+	* With a_gate it copies only on runs whose commit opened the entry (a first-run gate, RunGate.h), so give it as atExecution.
+	*/
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads, UploadGate a_gate = {});
 
 	/** @brief A texture's width, height and depth (1 for a 2D texture). */
 	using Extent = std::array<UINT, 3>;

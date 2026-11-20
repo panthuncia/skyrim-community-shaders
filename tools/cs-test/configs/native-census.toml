@@ -2,6 +2,7 @@
 # Read the "[ORG native] op census", "[ORG native] write census", "[ORG] run shapes" and "[ORG] undeclared access" lines. Each
 # window (menu, loading screen, world) reports every 300 frames in it and when the game leaves it, so the menu and the load get
 # their own lines before the world's. The world reports twice before the exit.
+# The "[ORG] boundary:" line's session part must show late changes 0.
 extends = ["native-vulkan", "quick"]
 
 [org]
@@ -25,3 +26,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["census"]
+# Rule R1 (frame revision plan, late changes): no registration or build request inside a frame. The site line appears only when one came.
+no_log = ["frame tap error", "session late changes by site"]

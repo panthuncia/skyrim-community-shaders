@@ -620,15 +620,15 @@ struct ORGScreenSpaceGI::Impl
 				const GraphResources::Texture2D* twin = texture->Get();
 				builder.Add(
 					std::format("reset-{}", index++), FrameAnchors::PassKind::Compute,
-					[shared = fixed, twin] { return GraphPasses::MakeUavClear(*twin, { 0.0f, 0.0f, 0.0f, 0.0f }, { shared->gate, kClearEntry }); }, false,
+					[shared = fixed, twin] { return GraphPasses::MakeUavClear(*twin, { 0.0f, 0.0f, 0.0f, 0.0f }, { shared->gate, kClearEntry }); },
 					true);
 			}
 		}
 		if (on) {
-			// Debug clears run every run, not once.
+			// Debug clears run every run.
 			const auto clearEachRun = [&](const char* a_name, const GraphResources::Texture2D* a_texture) {
 				if (a_texture)
-					builder.Add(AnchorPasses::ClearOf(a_name, *a_texture), false);
+					builder.Add(AnchorPasses::ClearOf(a_name, *a_texture));
 			};
 			if (DebugMode() == Debug::ClearHistory) {
 				clearEachRun("debug-clear-accum", state->accum);

@@ -21,6 +21,8 @@
 #	include <thread>
 #	include <unordered_map>
 #	include <unordered_set>
+#	include <utility>
+#	include <vector>
 
 namespace RenderGraph
 {
@@ -803,34 +805,91 @@ namespace RenderGraph
 			}
 		}
 
-		void Request(std::uint32_t a_epoch, std::string_view a_reason)
+		void Request(std::uint32_t a_epoch, std::string_view a_reason, const std::source_location& a_where)
 		{
 			if (auto* manager = Manager()) {
-				Frame::Boundary::NoteBuildRequest(a_reason);
+				Frame::Boundary::NoteBuildRequest(a_reason, a_where);
 				manager->Request(a_epoch, a_reason);
 			}
 		}
 
-		void RequestAll(std::string_view a_reason)
+		void RequestAll(std::string_view a_reason, const std::source_location& a_where)
 		{
 			if (auto* manager = Manager()) {
-				Frame::Boundary::NoteBuildRequest(a_reason);
+				Frame::Boundary::NoteBuildRequest(a_reason, a_where);
 				manager->RequestAll(a_reason);
 			}
 		}
 
-		void RequestFor(std::string_view a_id, std::string_view a_reason)
+		void RequestFor(std::string_view a_id, std::string_view a_reason, const std::source_location& a_where)
 		{
 			if (auto* manager = Manager()) {
-				Frame::Boundary::NoteBuildRequest(a_reason);
+				Frame::Boundary::NoteBuildRequest(a_reason, a_where);
 				manager->RequestFor(a_id, a_reason);
 			}
 		}
 
-		void Change(std::function<void()> a_change, std::string_view a_reason)
+		namespace
+		{
+			struct AddedRequest
+			{
+				std::string id;  // empty for every epoch
+				std::string reason;
+			};
+
+			struct AddedRequests
+			{
+				std::mutex mutex;
+				std::vector<AddedRequest> kept;
+				bool framesBegun = false;
+			};
+
+			AddedRequests& Added()
+			{
+				static AddedRequests added;
+				return added;
+			}
+
+			void IssueAdded(const AddedRequest& a_request)
+			{
+				if (a_request.id.empty())
+					RequestAll(a_request.reason);
+				else
+					RequestFor(a_request.id, a_request.reason);
+			}
+		}
+
+		void RequestAtAdoption(std::string_view a_id, std::string_view a_reason)
+		{
+			AddedRequest request{ std::string(a_id), std::string(a_reason) };
+			{
+				auto& added = Added();
+				const std::lock_guard lock(added.mutex);
+				if (added.framesBegun && !Frame::Boundary::InAdoptionPoint()) {
+					added.kept.push_back(std::move(request));
+					return;
+				}
+			}
+			IssueAdded(request);
+		}
+
+		void IssueAdoptionRequests()
+		{
+			std::vector<AddedRequest> kept;
+			{
+				auto& added = Added();
+				const std::lock_guard lock(added.mutex);
+				added.framesBegun = true;
+				kept = std::exchange(added.kept, {});
+			}
+			for (const auto& request : kept)
+				IssueAdded(request);
+		}
+
+		void Change(std::function<void()> a_change, std::string_view a_reason, const std::source_location& a_where)
 		{
 			if (auto* manager = Manager()) {
-				Frame::Boundary::NoteBuildRequest(a_reason);
+				Frame::Boundary::NoteBuildRequest(a_reason, a_where);
 				manager->Change(std::move(a_change), a_reason);
 			}
 			else if (a_change)
@@ -878,10 +937,12 @@ namespace RenderGraph
 
 namespace RenderGraph::Builds
 {
-	void Request(std::uint32_t, std::string_view) {}
-	void RequestAll(std::string_view) {}
-	void RequestFor(std::string_view, std::string_view) {}
-	void Change(std::function<void()> a_change, std::string_view)
+	void Request(std::uint32_t, std::string_view, const std::source_location&) {}
+	void RequestAll(std::string_view, const std::source_location&) {}
+	void RequestFor(std::string_view, std::string_view, const std::source_location&) {}
+	void RequestAtAdoption(std::string_view, std::string_view) {}
+	void IssueAdoptionRequests() {}
+	void Change(std::function<void()> a_change, std::string_view, const std::source_location&)
 	{
 		if (a_change)
 			a_change();

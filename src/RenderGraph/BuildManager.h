@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <span>
 #include <string>
 #include <string_view>
@@ -115,13 +116,22 @@ namespace RenderGraph
 	namespace Builds
 	{
 		/** @brief Any thread: the epoch's graph is built again, off the render thread. */
-		void Request(std::uint32_t a_epoch, std::string_view a_reason);
+		void Request(std::uint32_t a_epoch, std::string_view a_reason, const std::source_location& a_where = std::source_location::current());
 		/** @brief Any thread: every epoch's graph is built again, off the render thread. */
-		void RequestAll(std::string_view a_reason);
+		void RequestAll(std::string_view a_reason, const std::source_location& a_where = std::source_location::current());
 		/** @brief Any thread: the graphs that looked a_id up are built again, off the render thread. */
-		void RequestFor(std::string_view a_id, std::string_view a_reason);
+		void RequestFor(std::string_view a_id, std::string_view a_reason, const std::source_location& a_where = std::source_location::current());
+		/**
+		* @brief Any thread. A request whose cause changes nothing a running recording binds: a new id joined (the graphs that looked
+		* a_id up are built again; an empty id builds every epoch), or a diagnostic switch the next builds read. Inside a frame it
+		* waits for the next adoption point (IssueAdoptionRequests). Before the first frame, and inside the adoption point, it is made
+		* at once.
+		*/
+		void RequestAtAdoption(std::string_view a_id, std::string_view a_reason);
+		/** @brief Inside the frame's adoption point (Frame::Driver::OnBegin): makes the requests RequestAtAdoption kept. */
+		void IssueAdoptionRequests();
 		/** @brief Any thread. Runs a_change at the next poll with no build running, then rebuilds every epoch. At once while inactive. */
-		void Change(std::function<void()> a_change, std::string_view a_reason);
+		void Change(std::function<void()> a_change, std::string_view a_reason, const std::source_location& a_where = std::source_location::current());
 
 		/** @brief Inside an extension's build, defers a_attached to the graph's attach and a_failed to its failure. Neither runs if it is dropped.
 		*  Returns false outside a managed build, where the caller applies its change at once. */

@@ -666,7 +666,7 @@ bool ORGVolumetricClouds::Impl::Make(const PhysicalSky& a_feature, const CloudCl
 		const std::array<float, 4> value{ a_value[0], a_value[1], a_value[2], a_value[3] };
 		auto target = a_target;
 		const auto gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate);
-		builder.Add(a_name, FrameAnchors::PassKind::Compute, [target, value, gateRef, a_entry]() { return GraphPasses::MakeUavClear(target, value, ClearGate{ gateRef, a_entry }); }, false, true);
+		builder.Add(a_name, FrameAnchors::PassKind::Compute, [target, value, gateRef, a_entry]() { return GraphPasses::MakeUavClear(target, value, ClearGate{ gateRef, a_entry }); }, true);
 	};
 	// A gated copy of a whole texture of the twin's shape.
 	const auto copy = [&](std::string a_name, const FrameAnchors::Texture& a_source, const FrameAnchors::Texture& a_target, std::uint32_t a_entry,
@@ -805,7 +805,7 @@ bool ORGVolumetricClouds::Impl::Make(const PhysicalSky& a_feature, const CloudCl
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			auto target = ambientLayout[i];
 			const auto gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate);
-			builder.Add(std::format("ambient.reset{}", i), FrameAnchors::PassKind::Compute, [target, zero, gateRef]() { return GraphPasses::MakeUavClear(target, zero, ClearGate{ gateRef, kAmbientReset }); }, false, true);
+			builder.Add(std::format("ambient.reset{}", i), FrameAnchors::PassKind::Compute, [target, zero, gateRef]() { return GraphPasses::MakeUavClear(target, zero, ClearGate{ gateRef, kAmbientReset }); }, true);
 		}
 		dispatch("ambient.boundary", CloudProgram::AmbientBoundary, kAmbientBoundary, main.With({ { Slot::RWCloudAmbientBoundary, Bind::Uav(ambientBoundary) } }));
 		CloudTable transport = main;

@@ -13,6 +13,7 @@
 #	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -341,13 +342,14 @@ namespace GraphResources
 		struct UploadFrame
 		{
 			std::shared_ptr<const StagedUploads> uploads;
+			UploadGate gate;
 		};
 
 		class UploadCopyPass final : public org::TypedRenderGraphPass<UploadCopyPass, UploadFrame, UploadBindings>
 		{
 		public:
-			explicit UploadCopyPass(std::shared_ptr<const StagedUploads> a_uploads) :
-				uploads(std::move(a_uploads)) {}
+			UploadCopyPass(std::shared_ptr<const StagedUploads> a_uploads, UploadGate a_gate) :
+				uploads(std::move(a_uploads)), gate(std::move(a_gate)) {}
 
 			UploadBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -363,7 +365,16 @@ namespace GraphResources
 			// Everything it records is fixed with its uploads.
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(uploads.get())); }
 
-			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads }; }
+			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads, gate }; }
+
+			// Its commands depend on the run only through SkipsAtExecution, so a kept late batch keeps its list.
+			static constexpr bool kRecordKeyedBySkip = true;
+
+			// A gated upload whose entry the run left closed is not recorded.
+			static bool SkipsAtExecution(const UploadBindings&, const UploadFrame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				return a_frame.gate.gate && !a_frame.gate.gate->IsOpen(a_recording.Run(), a_frame.gate.entry);
+			}
 
 			static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 			{
@@ -389,15 +400,16 @@ namespace GraphResources
 
 		private:
 			std::shared_ptr<const StagedUploads> uploads;
+			UploadGate gate;
 		};
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads)
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads, UploadGate a_gate)
 	{
 		std::erase(a_uploads, nullptr);
 		if (a_uploads.empty())
 			return nullptr;
-		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)));
+		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)), std::move(a_gate));
 	}
 
 	struct PreparedExport
@@ -595,12 +607,12 @@ namespace GraphResources
 		}
 	}
 
-	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs)
+	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs, const std::source_location& a_where)
 	{
 		// The build manager builds this off the render thread and attaches it at a frame boundary.
 		if (!RenderGraphRuntime::Get().Host())
 			return;
-		const RenderGraph::Frame::Boundary::Change change(a_reason, "structural rebuild");
+		const RenderGraph::Frame::Boundary::Change change(a_reason, "structural rebuild", a_where);
 		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
 		const auto reason = fmt::format("structural: {}", a_reason);
 		if (a_epochs.empty()) {
@@ -1216,7 +1228,7 @@ namespace GraphResources
 namespace GraphResources
 {
 	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
-	void RequestStructuralRebuild(std::string_view, std::span<const std::uint32_t>) {}
+	void RequestStructuralRebuild(std::string_view, std::span<const std::uint32_t>, const std::source_location&) {}
 	std::uint64_t StructuralRebuilds() { return 0; }
 	bool IsTransientName(std::string_view) { return false; }
 	void NoteTransientName(const std::string&, bool) {}
@@ -1243,7 +1255,7 @@ namespace GraphResources
 	void Texture2D::Create() {}
 	struct StagedUpload
 	{};
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>>) { return nullptr; }
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>>, UploadGate) { return nullptr; }
 	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData>, UINT, UINT) const { return nullptr; }
 	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const { return nullptr; }
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :

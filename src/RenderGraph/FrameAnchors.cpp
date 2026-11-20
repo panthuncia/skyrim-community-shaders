@@ -524,8 +524,6 @@ namespace FrameAnchors
 			std::shared_ptr<const ClientDesc> desc;
 			// The first snapshot holding its passes and resources as they are now. Graphs built from it or later run them.
 			std::uint64_t serial = 0;
-			// Per pass, the snapshot a pending one-shot pass was armed in. 0 once it ran.
-			std::vector<std::uint64_t> armed;
 			// The declared segments that hold it, a bit each. Taps check this instead of comparing client ids.
 			const ClientDesc* heldOf = nullptr;
 			std::uint64_t held = 0;
@@ -657,15 +655,6 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_clients, [&](const auto& a_client) { return a_client->sharedConstants && HasPasses(*a_client, a_anchor); });
 		}
 
-		/** @brief Whether the client has a one-shot pass at the anchor that has not run yet. */
-		bool HasPendingOnce(const Client& a_client, Anchor a_anchor)
-		{
-			for (std::size_t i = 0; i < a_client.desc->passes.size(); ++i)
-				if (a_client.armed[i] && a_client.desc->passes[i].anchor == a_anchor)
-					return true;
-			return false;
-		}
-
 		Client* FindClient(State& a_state, std::string_view a_id)
 		{
 			const auto found = std::ranges::find_if(a_state.clients, [&](const Client& a_client) { return a_client.desc->id == a_id; });
@@ -747,12 +736,8 @@ namespace FrameAnchors
 				if (!InGraphs(*client.desc))
 					continue;
 				snapshot->clients.push_back(client.desc);
-				for (std::size_t i = 0; i < client.desc->passes.size(); ++i) {
-					const auto& pass = client.desc->passes[i];
-					// A one-shot pass that ran is left out until a new registration of its client.
-					if (!pass.once || client.armed[i])
-						snapshot->passes.push_back({ client.desc, &pass });
-				}
+				for (const auto& pass : client.desc->passes)
+					snapshot->passes.push_back({ client.desc, &pass });
 			}
 			// Stable: equal keys keep the registration order, and each client's own.
 			std::ranges::stable_sort(snapshot->passes, [](const ScheduledPass& a, const ScheduledPass& b) {
@@ -769,13 +754,10 @@ namespace FrameAnchors
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
-		/** @brief The client's passes and resources, and its pending one-shot passes, as of the snapshot just published. */
+		/** @brief The client's passes and resources, as of the snapshot just published. */
 		void MarkCurrent(const State& a_state, Client& a_client)
 		{
 			a_client.serial = a_state.serial;
-			for (auto& armed : a_client.armed)
-				if (armed)
-					armed = a_state.serial;
 		}
 
 		/** @brief Rebuilds the anchors' epochs at their next execution. a_reason is logged. */
@@ -930,17 +912,6 @@ namespace FrameAnchors
 			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
 				if (StepHolds(declaredInfo[a_declared].steps[k], a_client))
 					return true;
-			return false;
-		}
-
-		/** @brief Whether a declared segment holds a pass, through a step at the pass's anchor. */
-		bool SegmentHoldsPass(std::uint32_t a_declared, const ClientDesc& a_client, const PassDesc& a_pass)
-		{
-			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k) {
-				const auto& step = declaredInfo[a_declared].steps[k];
-				if (step.anchor == a_pass.anchor && StepHolds(step, a_client))
-					return true;
-			}
 			return false;
 		}
 
@@ -1739,7 +1710,7 @@ namespace FrameAnchors
 					ReleaseUnnamed(state, previous);
 					StructuralRebuild(state, ~0u, fmt::format("import '{}' now shares the slot of '{}'", a_id, shared->id));
 				} else if (state.host) {
-					RenderGraph::Builds::RequestFor(a_id, fmt::format("frame anchors: import '{}' added", a_id));
+					RenderGraph::Builds::RequestAtAdoption(a_id, fmt::format("frame anchors: import '{}' added", a_id));
 				}
 				return Texture(a_id, shared->slot);
 			}
@@ -1785,7 +1756,7 @@ namespace FrameAnchors
 			if (previous)
 				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced by another shape class", a_id));
 			else if (state.host)
-				RenderGraph::Builds::RequestFor(a_id, fmt::format("frame anchors: import '{}' added", a_id));
+				RenderGraph::Builds::RequestAtAdoption(a_id, fmt::format("frame anchors: import '{}' added", a_id));
 			return Texture(a_id, std::move(slot));
 		}
 	}
@@ -1918,7 +1889,7 @@ namespace FrameAnchors
 		}
 	}
 
-	bool Register(ClientDesc a_client)
+	bool Register(ClientDesc a_client, const std::source_location& a_where)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
@@ -1965,8 +1936,6 @@ namespace FrameAnchors
 		}
 		Client client;
 		client.desc = std::make_shared<const ClientDesc>(std::move(a_client));
-		for (const auto& pass : client.desc->passes)
-			client.armed.push_back(pass.once ? 1 : 0);
 		std::uint32_t mask = AnchorMask(*client.desc);
 		auto* existing = FindClient(state, client.desc->id);
 		std::shared_ptr<const ClientDesc> replaced;
@@ -1982,7 +1951,7 @@ namespace FrameAnchors
 		if (replaced)
 			RetireGates(state, *replaced, existing->desc->gates);
 		{
-			const RenderGraph::Frame::Boundary::Change change(existing->desc->id, replaced ? "register again" : "register");
+			const RenderGraph::Frame::Boundary::Change change(existing->desc->id, replaced ? "register again" : "register", a_where);
 			Rebuild(state, mask, fmt::format("client '{}' registered{}", existing->desc->id, replaced ? " again" : ""));
 		}
 		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
@@ -2006,7 +1975,7 @@ namespace FrameAnchors
 		return true;
 	}
 
-	void Unregister(std::string_view a_id)
+	void Unregister(std::string_view a_id, const std::source_location& a_where)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
@@ -2018,18 +1987,18 @@ namespace FrameAnchors
 		state.clients.erase(existing);
 		Publish(state);
 		RetireGates(state, *desc);
-		const RenderGraph::Frame::Boundary::Change change(desc->id, "unregister");
+		const RenderGraph::Frame::Boundary::Change change(desc->id, "unregister", a_where);
 		Rebuild(state, mask, fmt::format("client '{}' unregistered", desc->id));
 	}
 
-	void Refresh(std::string_view a_id)
+	void Refresh(std::string_view a_id, const std::source_location& a_where)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
 		if (auto* client = FindClient(state, a_id)) {
 			Publish(state);
 			MarkCurrent(state, *client);
-			const RenderGraph::Frame::Boundary::Change change(client->desc->id, "refresh");
+			const RenderGraph::Frame::Boundary::Change change(client->desc->id, "refresh", a_where);
 			Rebuild(state, AnchorMask(*client->desc), fmt::format("client '{}' refreshed", client->desc->id));
 		}
 	}
@@ -2131,7 +2100,7 @@ namespace FrameAnchors
 			return true;
 		if (!RenderGraph::Engine::LoadingScreen::Requested()) {
 			// A loading screen presents from a job thread (SE 38085). The anchor state belongs to the main thread,
-			// so one-shot passes wait for the next main-thread frame.
+			// so first-run work waits for the next main-thread frame.
 			if (main == self)
 				return true;
 			static std::atomic_flag logged;
@@ -2898,20 +2867,7 @@ namespace FrameAnchors
 				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, 0);
 			}
 			PruneRetired(a_state);
-			// Rebuild only the anchors whose one-shot passes ran. Rebuilding every anchor of the stage also rebuilt
-			// its shared anchors' epochs unstaged, which held Drawcall Limit Fix after each load.
-			std::uint32_t ranOnce = 0;
-			for (auto& client : a_state.clients)
-				for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
-					if (client.armed[i] && client.armed[i] <= built->serial && SegmentHoldsPass(a_declared, *client.desc, client.desc->passes[i])) {
-						client.armed[i] = 0;
-						ranOnce |= 1u << IndexOf(client.desc->passes[i].anchor);
-					}
-			if (ranOnce) {
-				Publish(a_state);
-				Rebuild(a_state, ranOnce, "one-shot passes ran");
-			}
-			// Last, since an executed callback may register, refresh or rearm.
+			// Last, since an executed callback may register or refresh.
 			for (const auto& [client, point] : executed)
 				if (client->executed)
 					client->executed(point);
@@ -3859,7 +3815,7 @@ namespace FrameAnchors
 		if (!runtime.IsActive())
 			return { RunStatus::Failed };
 		Service(state);
-		// The run happens when a client is active or has a one-shot pass pending.
+		// The run happens when a client is active.
 		// A client registered after the build waits for the next build.
 		std::vector<RunClient> clients;
 		bool work = false;
@@ -3867,7 +3823,7 @@ namespace FrameAnchors
 			if (!InGraphs(*client.desc) || !HasPasses(*client.desc, a_point.anchor))
 				continue;
 			const bool active = !client.desc->active || client.desc->active();
-			work = work || active || HasPendingOnce(client, a_point.anchor);
+			work = work || active;
 			clients.push_back({ client.desc, client.serial, active });
 		}
 		// Declared segments: an anchor a segment holds wholly is one of its taps whenever it fires.
@@ -3881,17 +3837,7 @@ namespace FrameAnchors
 		}
 		// At a shared anchor, clients a segment names commit into it while its window is open. The others are a mismatch.
 		// A segment-only client draws nothing outside every open window.
-		const auto hasWork = [&](const RunClient& a_client) {
-			if (a_client.active)
-				return true;
-			auto* client = FindClient(state, a_client.desc->id);
-			if (!client || !HasPendingOnce(*client, a_point.anchor))
-				return false;
-			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (state.declaredEpochs[d] && ClientHolds(*client, d))
-					return false;
-			return true;
-		};
+		const auto hasWork = [](const RunClient& a_client) { return a_client.active; };
 		const auto dropSegmentOnly = [&](std::vector<RunClient>& a_clients, std::string_view a_why) {
 			for (auto& client : a_clients)
 				if (client.active && client.desc->segmentOnly) {
@@ -4483,9 +4429,9 @@ namespace FrameAnchors
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
 	bool RecordsAtExecution(Anchor) { return false; }
-	bool Register(ClientDesc) { return false; }
-	void Unregister(std::string_view) {}
-	void Refresh(std::string_view) {}
+	bool Register(ClientDesc, const std::source_location&) { return false; }
+	void Unregister(std::string_view, const std::source_location&) {}
+	void Refresh(std::string_view, const std::source_location&) {}
 	RunResult Run(const Point&) { return {}; }
 	bool InRun() { return false; }
 	bool StagesHoldValues() { return false; }

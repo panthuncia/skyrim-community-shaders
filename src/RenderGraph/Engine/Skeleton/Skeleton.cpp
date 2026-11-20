@@ -1510,11 +1510,9 @@ namespace RenderGraph::Engine::Skeleton
 				RenderGraph::Frame::Driver::NoteHosted(where, 1);
 				return true;
 			}
-			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {
-				logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers again", kCopyNames[index]);
-				RegisterCopy(a_kind);
+			// A texture made again inside the frame: D3D11 copies until the next Begin registers the copy again.
+			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture })
 				return false;
-			}
 			if (!copy.registered)
 				return false;
 			using RenderGraph::Frame::SegmentId;
@@ -1584,6 +1582,24 @@ namespace RenderGraph::Engine::Skeleton
 			auto& group = state.groups[a_index];
 			if (group.stale && !group.failed)
 				Build(static_cast<Group>(a_index));
+		}
+
+		/**
+		* @brief Inside the frame's adoption point. Copies whose textures were made again register again here, never at a copy.
+		* Until the stage builds with them switch in, the copies lag.
+		*/
+		void RegisterRemadeCopies()
+		{
+			if (!globals::game::renderer)
+				return;
+			for (std::size_t i = 0; i < kCopies; ++i) {
+				const auto kind = static_cast<CopyKind>(i);
+				const auto& copy = CopyOf(kind);
+				if (copy.failed || EngineTexturesOf(kind) == std::pair{ copy.sourceTexture, copy.targetTexture })
+					continue;
+				logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers again", kCopyNames[i]);
+				RegisterCopy(kind);
+			}
 		}
 
 		/** @brief Checked at frame start rather than at a clear, because a slot can be lent within a frame. */
@@ -1660,8 +1676,14 @@ namespace RenderGraph::Engine::Skeleton
 	void BeginFrame()
 	{
 		auto& state = Skel();
-		if (state.setUp && FrameAnchors::IsRenderOwner())
+		if (state.setUp && FrameAnchors::IsRenderOwner()) {
 			CheckMadeAgain();
+			// Inside the frame's adoption point, so a remade target registers again here and never at a clear or copy.
+			for (std::size_t g = 0; g < kGroups; ++g)
+				if (state.groups[g].stale && !state.groups[g].failed)
+					Build(static_cast<Group>(g));
+			RegisterRemadeCopies();
+		}
 		if (!state.setUp || !FrameAnchors::IsRenderOwner())
 			return;
 		// A loading screen cut this frame short, so its waiting work is abandoned.

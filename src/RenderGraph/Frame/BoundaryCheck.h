@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <source_location>
 #include <string_view>
 
 /**
@@ -8,13 +9,11 @@
 *
 * The adoption point is Frame::Driver::OnBegin, marked with a Scope. On the render thread, outside it, this counts:
 * - late versions: every versioned resource adoption ORG reports (VersionedResource::SetAdoptionObserver), by resource name and caller tag;
-* - late changes: client registrations and rebuild requests made inside the frame;
+* - late changes: client registrations and rebuild requests made inside the frame, by what, caller tag and source site;
 * - late attaches: graph builds attached or staged graphs switched in outside the adoption point;
 * - refusals: builds ORG refused at their staging, attach or switch, by site and reason, on any thread (plan Q9).
-* Late versions and late attaches are tap errors (TapError::OutsideAdoption), fatal in development builds. There are no exceptions:
-* DCLF's, the last, went with step 10a. A new resource's first version is counted, not an error.
-* Late changes and the counts below them stay counted, not fatal. Step 10c moved DCLF's (its graph conditions); the other sources
-* are listed by site at each census and move before late changes become fatal.
+* Late versions and late attaches are tap errors (TapError::OutsideAdoption), late changes are TapError::LateChange. All are
+* fatal in development builds. There are no exceptions. A new resource's first version is counted, not an error.
 * One "[ORG] boundary:" line per statistics window and one at a test run's exit, in development builds only (not CS_RELEASE_PROFILE).
 * The render thread is the one that last opened a Scope. Other threads are not counted.
 */
@@ -53,20 +52,20 @@ namespace RenderGraph::Frame::Boundary
 	void Install();
 
 	/**
-	* @brief A registration or rebuild request, counted once when made on the render thread outside the adoption point.
-	* Build requests it makes while it lives are part of it and not counted again.
+	* @brief A registration or rebuild request. Made on the render thread outside the adoption point, it is a late change: counted
+	* once, by a_where, and a tap error. Build requests it makes while it lives are part of it and not counted again.
 	*/
 	class Change
 	{
 	public:
-		Change(std::string_view a_what, std::string_view a_caller);
+		Change(std::string_view a_what, std::string_view a_caller, const std::source_location& a_where = std::source_location::current());
 		~Change();
 		Change(const Change&) = delete;
 		Change& operator=(const Change&) = delete;
 	};
 
-	/** @brief A build request (RenderGraph::Builds). Counted like a Change unless one is open on the calling thread. */
-	void NoteBuildRequest(std::string_view a_reason);
+	/** @brief A build request (RenderGraph::Builds) from a_where. Counted like a Change unless one is open on the calling thread. */
+	void NoteBuildRequest(std::string_view a_reason, const std::source_location& a_where = std::source_location::current());
 
 	/** @brief A graph attached for a_epoch. Counted when made on the render thread outside the adoption point, with the caller tag. */
 	void NoteAttach(std::string_view a_epoch);

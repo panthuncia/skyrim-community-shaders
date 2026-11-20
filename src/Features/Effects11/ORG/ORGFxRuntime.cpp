@@ -1667,7 +1667,7 @@ struct ORGFxRuntime::Impl
 						// Recorded at execution: it clears only on runs whose commit opened its row.
 						builder.Add(
 							name, FrameAnchors::PassKind::Render,
-							[a_step, gate]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step, gate); }, false, true);
+							[a_step, gate]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step, gate); }, true);
 					} else {
 						auto step = a_step;
 						step.name = name;

@@ -242,6 +242,8 @@ struct ORGUpscaling::Impl
 	RenderGraph::Frame::DeclaredTexture2D upscaled;
 	std::array<RenderGraph::Frame::DeclaredTexture2D, kHudlessFormats.size()> hudless;
 	RenderGraph::Frame::DeclaredClient upscaleClient, hudlessClient;
+	// Frame generation's inputs, made again when a revision starts after QueueFrameGenInputs saw new textures (observed, an interim).
+	RenderGraph::Frame::DeclaredClient inputsClient;
 	// The display size before the first DisplaySize event: kMAIN's at setup.
 	RenderGraph::Frame::Vars::Extent2D setupDisplay{};
 
@@ -264,7 +266,9 @@ struct ORGUpscaling::Impl
 	std::shared_ptr<const EvaluateShared> inputsShared;
 	std::shared_ptr<const EvaluateWork> inputsWork;
 	FrameAnchors::Texture inputsDepth, inputsMotion, inputsHudless;
-	bool inputsRegistered = false, inputsArmed = false;
+	bool inputsArmed = false;
+	// Raised for new input textures; the registration made for them sets inputsMade.
+	std::uint64_t inputsWanted = 0, inputsMade = 0;
 
 	// Set only around CopyHudless's tap, so the clean scene's tap of the same step does not copy the hudless.
 	bool hudlessArmed = false;
@@ -795,6 +799,48 @@ namespace
 		return true;
 	}
 
+	/** @brief What the frame generation inputs' registration depends on: the textures QueueFrameGenInputs last saw. */
+	struct InputsKey
+	{
+		std::uint64_t serial = 0;
+		bool operator==(const InputsKey&) const = default;
+	};
+
+	/** @brief Frame generation's inputs pass for the textures QueueFrameGenInputs last saw, made when a revision starts. */
+	bool MakeFrameGenInputsClient(const std::shared_ptr<Impl>& a_impl, const InputsKey& a_key, FrameAnchors::ClientDesc& a_client)
+	{
+		auto& impl = *a_impl;
+		auto shared = impl.inputsShared;
+		auto depth = impl.inputsDepth;
+		auto motion = impl.inputsMotion;
+		auto hudless = impl.inputsHudless;
+		auto& client = a_client;
+		client.id = kFrameGenInputsClientId;
+		client.passes.push_back({ .name = kFrameGenInputsClientId,
+			.anchor = FrameAnchors::Anchor::FrameGeneration,
+			.order = kOrderBase + 1,
+			.kind = FrameAnchors::PassKind::Compute,
+			.make = [shared, depth, motion, hudless]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<FrameGenInputsPass>(shared, depth, motion, hudless);
+			},
+			.atExecution = true });
+		const std::weak_ptr<Impl> weak = a_impl;
+		client.active = [weak] {
+			const auto impl = weak.lock();
+			return impl && impl->inputsArmed;
+		};
+		client.commit = [weak](const FrameAnchors::Point&) {
+			const auto impl = weak.lock();
+			if (!impl || !impl->inputsShared)
+				return;
+			impl->inputsShared->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), impl->inputsWork);
+		};
+		// The third tap of the UI stage's frame generation step, after the clean scene's and the hudless copy's.
+		client.repeats = true;
+		impl.inputsMade = a_key.serial;
+		return true;
+	}
+
 	/** @brief The clients, declared on the variables their registrations read. False, logged, when one cannot be declared. */
 	bool DeclareClients(const std::shared_ptr<Impl>& a_impl)
 	{
@@ -838,7 +884,19 @@ namespace
 				const auto impl = weak.lock();
 				return impl && MakeHudlessClient(impl, a_key, a_client);
 			});
-		if (!a_impl->upscaleClient || !a_impl->hudlessClient) {
+		a_impl->inputsClient = DeclareClient<InputsKey>(
+			kFrameGenInputsClientId, {},
+			[weak](const Inputs&) -> std::optional<InputsKey> {
+				const auto impl = weak.lock();
+				if (!impl || impl->failed || !impl->inputsShared || !impl->inputsHudless || !impl->inputsDepth || !impl->inputsMotion)
+					return std::nullopt;
+				return InputsKey{ impl->inputsWanted };
+			},
+			[weak](const InputsKey& a_key, FrameAnchors::ClientDesc& a_client) {
+				const auto impl = weak.lock();
+				return impl && MakeFrameGenInputsClient(impl, a_key, a_client);
+			});
+		if (!a_impl->upscaleClient || !a_impl->hudlessClient || !a_impl->inputsClient) {
 			logger::error("[ORG] Upscaling: its clients could not be declared");
 			return false;
 		}
@@ -850,48 +908,6 @@ namespace
 	{
 		const auto index = HudlessIndexIn(RenderGraph::Frame::Revision::Adopted());
 		return index ? SlotOf(a_impl.hudless[*index]) : FrameAnchors::Texture();
-	}
-
-	/** @brief Frame generation's inputs pass. Registering again replaces it. False, logged, on failure. */
-	bool RegisterFrameGenInputs(const std::shared_ptr<Impl>& a_impl)
-	{
-		auto& impl = *a_impl;
-		if (!impl.inputsShared || !impl.inputsHudless || !impl.inputsDepth || !impl.inputsMotion) {
-			FrameAnchors::Unregister(kFrameGenInputsClientId);
-			impl.inputsRegistered = false;
-			return false;
-		}
-		auto shared = impl.inputsShared;
-		auto depth = impl.inputsDepth;
-		auto motion = impl.inputsMotion;
-		auto hudless = impl.inputsHudless;
-		FrameAnchors::ClientDesc client{};
-		client.id = kFrameGenInputsClientId;
-		client.passes.push_back({ .name = kFrameGenInputsClientId,
-			.anchor = FrameAnchors::Anchor::FrameGeneration,
-			.order = kOrderBase + 1,
-			.kind = FrameAnchors::PassKind::Compute,
-			.make = [shared, depth, motion, hudless]() -> std::shared_ptr<org::RenderPass> {
-				return std::make_shared<FrameGenInputsPass>(shared, depth, motion, hudless);
-			},
-			.atExecution = true });
-		const std::weak_ptr<Impl> weak = a_impl;
-		client.active = [weak] {
-			const auto impl = weak.lock();
-			return impl && impl->inputsArmed;
-		};
-		client.commit = [weak](const FrameAnchors::Point&) {
-			const auto impl = weak.lock();
-			if (!impl || !impl->inputsShared)
-				return;
-			impl->inputsShared->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), impl->inputsWork);
-		};
-		// The third tap of the UI stage's frame generation step, after the clean scene's and the hudless copy's.
-		client.repeats = true;
-		impl.inputsRegistered = FrameAnchors::Register(std::move(client));
-		if (!impl.inputsRegistered)
-			logger::error("[ORG] Upscaling: the frame generation inputs client was refused");
-		return impl.inputsRegistered;
 	}
 
 	/** @brief The Upscale anchor's engine inputs changed: the Upscale client is registered again when the next revision starts. */
@@ -1087,18 +1103,17 @@ bool ORGUpscaling::QueueFrameGenInputs(std::string a_label, EvaluateRecord a_rec
 	auto hudlessTexture = AdoptedHudless(*impl);
 	if (!depthTexture || !motionTexture || !hudlessTexture)
 		return false;
-	// A new engine target, a switch between kMAIN's depth and its copy, or another hudless format remakes the client.
-	if (!impl->inputsRegistered || depthTexture != impl->inputsDepth || motionTexture != impl->inputsMotion || hudlessTexture != impl->inputsHudless) {
+	// A new engine target, a switch between kMAIN's depth and its copy, or another hudless format remakes the client when the
+	// next revision starts.
+	if (depthTexture != impl->inputsDepth || motionTexture != impl->inputsMotion || hudlessTexture != impl->inputsHudless) {
 		impl->inputsDepth = std::move(depthTexture);
 		impl->inputsMotion = std::move(motionTexture);
 		impl->inputsHudless = std::move(hudlessTexture);
-		if (!RegisterFrameGenInputs(impl)) {
-			MarkFailed(impl, "its frame generation inputs client could not be registered");
-			return false;
-		}
+		++impl->inputsWanted;
+		impl->inputsClient.Invalidate();
 	}
-	// A new registration prepares once the UI stage's build holds it. Until then the frame is presented without generation.
-	if (!FrameAnchors::Scheduled(kFrameGenInputsClientId, FrameAnchors::Anchor::FrameGeneration))
+	// A new registration prepares once it is made and the UI stage's build holds it. Until then the frame is presented without generation.
+	if (impl->inputsMade != impl->inputsWanted || !FrameAnchors::Scheduled(kFrameGenInputsClientId, FrameAnchors::Anchor::FrameGeneration))
 		return false;
 	impl->inputsWork = std::make_shared<const EvaluateWork>(EvaluateWork{ std::move(a_label), std::move(a_record) });
 	impl->inputsArmed = true;

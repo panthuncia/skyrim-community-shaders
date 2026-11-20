@@ -435,7 +435,7 @@ struct ORGPhysicalSky::Impl
 				[twin = ApShadowTwin().Get(), gateRef] {
 					return GraphPasses::MakeUavClear(*twin, std::array<float, 4>{}, GraphPasses::ClearGate{ gateRef, kApShadowClearEntry });
 				},
-				false, true);
+				true);
 		}
 		if (builder.Failed()) {
 			logger::error("[ORG] Physical Sky: the LUT passes: {}", builder.Failure());

@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "RenderGraph/BuildManager.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
 #include "RenderGraph/Frame/Revision.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Frame/VariablesLane.h"
@@ -41,8 +42,10 @@ namespace DCLF::Draws
 		std::atomic<bool> interiorAdopted{ false };
 		// Main thread: the toggles' generation the conditions were last made for. A toggle applied without a revision moves it too.
 		std::uint32_t togglesSeen = 0;
-		// Main thread: whether DCLF's first build point made the first conditions. Until then a Begin leaves them alone.
+		// Main thread: whether the first conditions were made. Until DCLF's first build point a Begin leaves them alone.
 		bool firstMade = false;
+		// Main thread: DCLF's first build point ran, so the next adoption point makes the first conditions.
+		bool firstWanted = false;
 
 		/** @brief A producer's wait for a variable that needs no work outside the frame: ready at once, a_adopt runs at the adoption. */
 		RenderGraph::Frame::Revision::InputWait AtAdoption(std::string a_what, std::function<void()> a_adopt)
@@ -137,17 +140,24 @@ namespace DCLF::Draws
 
 	void FirstGraphConditions(org::GraphHost& a_host)
 	{
-		if (std::exchange(firstMade, true))
+		if (firstMade)
 			return;
-		inputsMoved.store(true, std::memory_order_release);
-		UpdateGraphConditions(a_host);
+		firstWanted = true;
+		// Native mode's build point is inside the adoption point, so the first conditions are made now. Guest mode's is in the
+		// frame (Main::Draw), so they wait for the next Begin's UpdateGraphConditions: builds are asked for only at a boundary.
+		if (RenderGraph::Frame::Boundary::InAdoptionPoint())
+			UpdateGraphConditions(a_host);
 	}
 
 	void UpdateGraphConditions(org::GraphHost& a_host)
 	{
 		// Before DCLF's first build point nothing of DCLF runs, so its builds are not asked for (a main menu Begin).
-		if (!firstMade)
-			return;
+		if (!firstMade) {
+			if (!firstWanted)
+				return;
+			firstMade = true;
+			inputsMoved.store(true, std::memory_order_release);
+		}
 		const std::uint32_t togglesGeneration = Toggles::Get().Generation();
 		if (!inputsMoved.exchange(false, std::memory_order_acq_rel) && togglesGeneration == togglesSeen)
 			return;

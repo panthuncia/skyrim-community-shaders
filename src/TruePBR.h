@@ -66,7 +66,7 @@ public:
 	virtual void ClearShaderCache() override;
 	/** @brief Loads PBR texture set and material object configurations from disk. */
 	virtual void SetupResources() override;
-	/** @brief On the ORG path (CS_ORG_GLINTS=1), once the render graph is up: sets up the glint noise's one-shot fill at EarlyPrepass. */
+	/** @brief On the ORG path (CS_ORG_GLINTS=1), once the render graph is up: sets up the glint noise's gated fill at EarlyPrepass. */
 	virtual void PostSetupResources() override;
 	/** @brief Per-frame prepass that initializes the glint noise texture and binds it to the pipeline. */
 	virtual void Prepass() override;

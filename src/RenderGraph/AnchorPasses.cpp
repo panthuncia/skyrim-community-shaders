@@ -517,43 +517,6 @@ namespace RenderGraph::AnchorPasses
 		private:
 			DepthCopyFrame frame;
 		};
-
-		struct UploadBindings
-		{
-			org::ResourceBindingToken target;
-		};
-
-		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, SpecFrame<Upload>, UploadBindings>
-		{
-		public:
-			explicit UploadPass(std::shared_ptr<const Spec<Upload>> a_spec) :
-				spec(std::move(a_spec)) {}
-
-			UploadBindings Declare(org::PassBuilder& a_builder)
-			{
-				a_builder.PreferQueue(org::QueueKind::Graphics);
-				return { a_builder.CopyDestination(spec->step.target) };
-			}
-
-			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
-
-			SpecFrame<Upload> Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { spec }; }
-
-			static void Record(const UploadBindings& a_bindings, const SpecFrame<Upload>& a_frame, org::PassRecordContext& a_recording)
-			{
-				const auto& upload = a_frame.spec->step;
-				rhi::BufferTextureCopyFootprint copy{};
-				copy.texture = a_recording.Resolve(a_bindings.target).GetHandle();
-				copy.buffer = upload.staging->GetAPIResource().GetHandle();
-				copy.mip = upload.mip;
-				copy.arraySlice = upload.slice;
-				copy.footprint = upload.footprint;
-				a_recording.Commands().CopyBufferToTexture(copy);
-			}
-
-		private:
-			std::shared_ptr<const Spec<Upload>> spec;
-		};
 	}
 
 	Bind Bind::Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip)
@@ -662,15 +625,13 @@ namespace RenderGraph::AnchorPasses
 		return true;
 	}
 
-	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_atExecution)
+	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_atExecution)
 	{
 		passes.push_back({ .name = std::format("{}.{}", prefix, a_step),
 			.anchor = anchor,
 			.order = orderBase + static_cast<std::int32_t>(passes.size()),
 			.kind = a_kind,
 			.make = std::move(a_make),
-			.once = a_once,
 			.atExecution = a_atExecution });
 	}
 
@@ -690,7 +651,7 @@ namespace RenderGraph::AnchorPasses
 		const std::string step = a_draw.name;
 		a_draw.name = std::format("{}.{}", prefix, step);
 		auto spec = std::make_shared<const Spec<Draw>>(Spec<Draw>{ std::move(a_draw), latch, gate });
-		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); }, false);
+		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); });
 	}
 
 	void Builder::Add(Dispatch a_dispatch)
@@ -707,7 +668,7 @@ namespace RenderGraph::AnchorPasses
 		}
 		const std::string step = a_dispatch.name;
 		auto spec = std::make_shared<const Spec<Dispatch>>(Spec<Dispatch>{ std::move(a_dispatch), latch, gate });
-		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); }, false);
+		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); });
 	}
 
 	void Builder::Add(Copy a_copy)
@@ -729,48 +690,41 @@ namespace RenderGraph::AnchorPasses
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });
 		if (program) {
 			DepthCopyFrame frame{ spec, std::move(program), HasStencil(depthFormat) };
-			Push(step, FrameAnchors::PassKind::Render, [frame]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DepthCopyPass>(frame); }, false,
+			Push(step, FrameAnchors::PassKind::Render, [frame]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DepthCopyPass>(frame); },
 				atExecution);
 			return;
 		}
-		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false,
-			atExecution);
+		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, atExecution);
 	}
 
-	void Builder::Add(Clear a_clear, bool a_once)
+	void Builder::Add(Clear a_clear)
 	{
 		if (!a_clear.target) {
 			Fail(std::format("{}: the texture to clear is missing", a_clear.name));
+			return;
+		}
+		if (a_clear.gate && (!gate || *a_clear.gate >= gate->Entries())) {
+			Fail(std::format("{}: gate entry {} is not one of the client's gate", a_clear.name, *a_clear.gate));
 			return;
 		}
 		const std::string step = a_clear.name;
 		auto target = a_clear.target;
 		const auto value = a_clear.value;
 		const auto uintValue = a_clear.uintValue;
-		Push(step, FrameAnchors::PassKind::Compute, [target, value, uintValue]() {
-			return uintValue ? GraphPasses::MakeUavClearUint(target, *uintValue) : GraphPasses::MakeUavClear(target, value);
-		}, a_once);
+		// A gated clear skips the runs that left its entry closed, so it is recorded at execution.
+		const GraphPasses::ClearGate clearGate = a_clear.gate ? GraphPasses::ClearGate{ gate, *a_clear.gate } : GraphPasses::ClearGate{};
+		Push(step, FrameAnchors::PassKind::Compute, [target, value, uintValue, clearGate]() {
+			return uintValue ? GraphPasses::MakeUavClearUint(target, *uintValue, clearGate) : GraphPasses::MakeUavClear(target, value, clearGate);
+		}, a_clear.gate.has_value());
 	}
 
-	void Builder::Add(Upload a_upload)
-	{
-		if (!a_upload.staging || !a_upload.target) {
-			Fail(std::format("{}: the staging buffer or the texture is missing", a_upload.name));
-			return;
-		}
-		const std::string step = a_upload.name;
-		auto spec = std::make_shared<const Spec<Upload>>(Spec<Upload>{ std::move(a_upload), latch, gate });
-		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UploadPass>(spec); }, true);
-	}
-
-	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_atExecution)
+	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_atExecution)
 	{
 		if (!a_make) {
 			Fail(std::format("{}: no pass", a_name));
 			return;
 		}
-		Push(a_name, a_kind, std::move(a_make), a_once, a_atExecution);
+		Push(a_name, a_kind, std::move(a_make), a_atExecution);
 	}
 
 	void Builder::Fail(std::string_view a_reason)

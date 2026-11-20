@@ -1,14 +1,20 @@
 #pragma once
 
 #include <d3d11.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string_view>
 
+namespace FrameAnchors
+{
+	struct ClientDesc;
+}
+
 /**
 * @brief TruePBR's glints noise on the render graph, with CS_ORG_GLINTS=1.
 *
-* The 128x128 noise never changes, so a one-shot pass at EarlyPrepass fills it once after Setup. That anchor runs before every reader.
+* The 128x128 noise never changes, so a gated pass at EarlyPrepass fills it once after Setup. That anchor runs before every reader.
 * The texture is persistent, exported for the engine at t20 and published for DCLF. TruePBR binds nothing at t20 until the fill ran.
 * On any failure it stops for good. Render thread throughout. Free of ORG/Vulkan includes.
 */
@@ -47,8 +53,11 @@ public:
 private:
 	ORGGlintsNoise() = default;
 
-	/** @brief Replacing the client makes the fill pending again. False on failure. */
-	bool RegisterClient(const std::shared_ptr<Impl>& a_impl);
+	/** @brief The fill's registration for the current program, made when a revision starts. A new one fills again. False on failure. */
+	bool MakeClient(const std::shared_ptr<Impl>& a_impl, FrameAnchors::ClientDesc& a_client);
+
+	/** @brief Declares the client once, on the program serial a shader reload raises. A later call evaluates it again. */
+	bool DeclareClient();
 
 	/** @brief For good. */
 	void Fail();
@@ -56,4 +65,5 @@ private:
 	std::shared_ptr<Impl> impl;
 	bool failed = false;
 	bool programFailed = false;  // a shader reload may fix a failed compile
+	std::uint64_t programSerial = 0;  // the client's key: raised when a reload replaces the program
 };

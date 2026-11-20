@@ -2,6 +2,7 @@
 
 #include "Feature.h"
 
+#include "RenderGraph/BuildManager.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -291,6 +292,8 @@ namespace RenderGraph::Frame::Driver
 			return;
 		// The frame's adoption point. Versions, builds and registrations changed outside it are counted (rule R1).
 		const Boundary::Scope boundary;
+		// Rebuilds asked for inside the last frame whose cause binds nothing new (RequestAtAdoption) are made here.
+		Builds::IssueAdoptionRequests();
 		// The newest prepared frame revision switches in whole, before anything reads what it changes.
 		Revision::AdoptLatest();
 		// After the adoption, so the values it adopted are the ones compared.
@@ -400,6 +403,8 @@ namespace RenderGraph::Frame::Driver
 			return "outside the adoption point";
 		case TapError::DclfInputChanged:
 			return "DCLF input changed after it drew";
+		case TapError::LateChange:
+			return "late change";
 		default:
 			return "?";
 		}

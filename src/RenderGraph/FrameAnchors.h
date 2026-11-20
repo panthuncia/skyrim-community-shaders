@@ -186,7 +186,7 @@ namespace FrameAnchors
 
 	/**
 	* @brief One pass of a client. order only decides between passes with no resource dependency.
-	* A once pass stays until one run with it submits, so its work must be safe to run twice. atExecution records it after the commit.
+	* atExecution records it after the commit. Work that runs once is a first-run gate (RunGate.h), never a pass that leaves the graph.
 	*/
 	struct PassDesc
 	{
@@ -198,7 +198,6 @@ namespace FrameAnchors
 		std::function<std::shared_ptr<org::RenderPass>()> make;
 		// Replaces make for a client with instances. A declared segment makes one pass per instance, an anchor's own epoch instance 0 only.
 		std::function<std::shared_ptr<org::RenderPass>(std::uint32_t a_instance)> makeInstance;
-		bool once = false;
 		bool atExecution = false;
 		// With atExecution, every draw and dispatch takes its counts from the run gate. With GPU gates on it records ahead
 		// and does nothing on a run whose entries are closed.
@@ -264,13 +263,13 @@ namespace FrameAnchors
 
 	/** @brief Registers or replaces a client. Render thread. Returns false, logged, on a bad desc or an inactive runtime.
 	*  A client reading the shared constants before CS's first upload waits until they exist. */
-	bool Register(ClientDesc a_client);
+	bool Register(ClientDesc a_client, const std::source_location& a_where = std::source_location::current());
 
 	/** @brief Removes a client. Until its anchors rebuild, old graphs still hold its passes, with gates closed and no callbacks. */
-	void Unregister(std::string_view a_id);
+	void Unregister(std::string_view a_id, const std::source_location& a_where = std::source_location::current());
 
 	/** @brief Rebuilds the client's anchors after it replaced a resource outside GraphResources. Render thread. */
-	void Refresh(std::string_view a_id);
+	void Refresh(std::string_view a_id, const std::source_location& a_where = std::source_location::current());
 
 	/** @brief Whether the anchor's last built graph holds this registration of a_id. Render thread. */
 	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
@@ -317,7 +316,7 @@ namespace FrameAnchors
 	enum class RunStatus : std::uint8_t
 	{
 		Ran,       // the epoch was submitted; the executed callbacks of the clients in the built graph ran
-		Idle,      // nothing to run: no client active and no one-shot pass pending, or the anchor has no epoch
+		Idle,      // nothing to run: no client active, or the anchor has no epoch
 		Refused,   // the caller does not own rendering (IsRenderOwner), or the runtime is not active
 		Failed,    // the epoch failed (its clients are dropped at the next poll), or the graph stopped
 	};
@@ -329,7 +328,7 @@ namespace FrameAnchors
 		constexpr operator bool() const noexcept { return status == RunStatus::Ran; }
 	};
 
-	/** @brief Runs the anchor's epoch here when it has an active client or a pending one-shot pass. Render owner only.
+	/** @brief Runs the anchor's epoch here when it has an active client. Render owner only.
 	*  Each run takes its own run lease, so it never waits for another run of the same frame. */
 	RunResult Run(const Point& a_point);
 

@@ -72,6 +72,7 @@ namespace RenderGraph::Frame::Driver
 		MissedSettingsWriter,  // a feature's size settings changed with no settings event (the missed-writer check)
 		OutsideAdoption,       // a version adopted or a build attached outside the frame's adoption point with no named exception (rule R1)
 		DclfInputChanged,      // what DCLF's graphs are built for (main targets, main resources, shadow format) changed after it first drew
+		LateChange,            // a registration or build request made inside the frame, outside its adoption point (rule R1)
 		Count
 	};
 

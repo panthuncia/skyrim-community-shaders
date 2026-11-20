@@ -13,6 +13,7 @@
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Scaleform/Display.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/Frame/Transients.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
@@ -218,6 +219,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			// Tracked textures the displays read. A new one makes the client register again after the run.
 			std::vector<Read> reads;
 			bool readsChanged = false;
+			// Raised for new reads. With surfacesGeneration it is the declared client's key.
+			std::uint64_t readsGeneration = 0;
+			// The client, made again when a revision starts after a new surface or new reads (observed, an interim).
+			RenderGraph::Frame::DeclaredClient client;
 			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
 			// A registration for new reads alone keeps the surfaces, since the graph built before it still draws them.
@@ -825,30 +830,54 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return client;
 		}
 
-		/** @brief Registers the client with a pass pair for every surface. False, failing the path, when refused. */
-		bool RegisterClient(PathState& a_state)
+		/** @brief What the client's registration depends on. */
+		struct ClientKey
 		{
-			if (!FrameAnchors::Register(MakeClient(a_state))) {
+			std::uint64_t surfaces = 0;
+			std::uint64_t reads = 0;
+			bool operator==(const ClientKey&) const = default;
+		};
+
+		/** @brief Declares the client. A new surface or new reads make it again when the next revision starts. False, failing the path. */
+		bool DeclareInterfaceClient(PathState& a_state)
+		{
+			a_state.client = RenderGraph::Frame::DeclareClient<ClientKey>(
+				kClientId, {},
+				[](const RenderGraph::Frame::Inputs&) -> std::optional<ClientKey> {
+					const auto& state = Path();
+					if (state.failed)
+						return std::nullopt;
+					return ClientKey{ state.surfacesGeneration, state.readsGeneration };
+				},
+				[](const ClientKey&, FrameAnchors::ClientDesc& a_client) {
+					auto& state = Path();
+					std::erase_if(state.reads, [&](const Read& a_read) { return a_read.lastCommit + kReadIdleCommits < state.commits; });
+					a_client = MakeClient(state);
+					++state.registrations;
+					const auto drawable = std::ranges::count_if(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
+					logger::info("[ORG] Scaleform: a client for the next revision with {} surfaces and {} tracked reads (registration {})", drawable,
+						state.reads.size(), state.registrations);
+					return true;
+				});
+			if (!a_state.client) {
 				a_state.failed = true;
-				logger::error("[ORG] Scaleform: the Interface anchor's client could not be registered; D3D11 draws every display");
+				logger::error("[ORG] Scaleform: the Interface anchor's client could not be declared; D3D11 draws every display");
 				return false;
 			}
-			++a_state.registrations;
-			const auto drawable = std::ranges::count_if(a_state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
-			logger::info("[ORG] Scaleform: registered with {} surfaces (registration {})", drawable, a_state.registrations);
 			return true;
 		}
 
 		/**
-		 * @brief Registers again with the current reads after a run found a new tracked texture. The graph rebuilds off the render
-		 * thread, and until then the old graph draws new reads through their raw indices.
+		 * @brief New tracked reads make the client again when the next revision starts. Until its build switches in, the old
+		 * graph draws new reads through their raw indices.
 		 */
 		void RegisterReads(PathState& a_state)
 		{
 			a_state.readsChanged = false;
-			std::erase_if(a_state.reads, [&](const Read& a_read) { return a_read.lastCommit + kReadIdleCommits < a_state.commits; });
-			logger::info("[ORG] Scaleform: {} tracked textures read by the displays; the Interface graph is built again to declare them", a_state.reads.size());
-			RegisterClient(a_state);
+			++a_state.readsGeneration;
+			a_state.client.Invalidate();
+			logger::info("[ORG] Scaleform: {} tracked textures read by the displays; the client is made again at the next revision to declare them",
+				a_state.reads.size());
 		}
 
 		std::int32_t EngineTargetOf(ID3D11Texture2D* a_texture)
@@ -1175,8 +1204,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					RoleName(role));
 				if (DeclareSurface(a_state, role)) {
 					++a_state.surfacesGeneration;
-					if (RegisterClient(a_state))
-						a_state.surfacesRegistration = a_state.registrations;
+					// The registration the next revision makes holds it.
+					a_state.surfacesRegistration = a_state.registrations + 1;
+					a_state.client.Invalidate();
 				}
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
@@ -1359,11 +1389,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
 			return;
 		}
-		if (!RegisterClient(state))
+		if (!DeclareInterfaceClient(state))
 			return;
-		state.surfacesRegistration = state.registrations;
+		// The first revision makes the first registration.
+		state.surfacesRegistration = 1;
 		state.setUp = true;
-		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph at setup's build point");
+		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph with the first revision");
 	}
 
 	bool Ready()
