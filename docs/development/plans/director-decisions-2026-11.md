@@ -122,3 +122,18 @@ final until the user confirms it.
     integ/hard-ports, builds once in the main checkout, fixes build and test failures, and runs the listed tests. This
     replaces the per-lead build cap in item 22. Up to six migration leads still run at once. The 6.1 lead was started under
     the old brief and finishes under it.
+24. **Migration 6.1 is merged** (`ce2edfbb0`): EHF, and the declaration API in `src/RenderGraph/Frame/Declare.h`. The
+    lead's calls are in the plan's section 9 (step 6.1). The lead saw the guest fog go black on the `nfg` stage (the old
+    non-finite kMAIN defect), while its own branch was clean. That means the defect is still in integ/hard-ports before
+    6.1, even though `dclf-open-defects.md` lists guest fog as closed. It is to be checked in the 6.1 integration run.
+25. **The first six code-only migration leads** (worktrees `org-port-worktrees/mig-*`, branches
+    `org-native/rev-step6-N`):
+    - 6.2 (ImGui pages);
+    - 6.3 (Terrain Shadows);
+    - 6.4 and 6.5 together, because Screen Space Shadows' client depends on Terrain Blending. This lead also designs
+      `DeclareProgram`, which 6.1 left to 6.4;
+    - 6.7 (ImageSpace);
+    - 6.8 (LLF clusters);
+    - 6.12 (Volumetric Lighting).
+
+    SSGI (6.6) and Sun Rays (6.10) wait for `DeclareProgram`.
