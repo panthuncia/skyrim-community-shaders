@@ -23,15 +23,15 @@ namespace GraphResources
 */
 namespace RenderGraph::Frame::Declarations
 {
-	/** @brief A twin's next extent, for the coordinator's version path. */
-	using Wish = std::function<void(GraphResources::Resource&, const std::array<unsigned int, 3>&)>;
+	/** @brief A twin's next extent, for the coordinator's version path. a_renew asks for a new version even at the same extent. */
+	using Wish = std::function<void(GraphResources::Resource&, const std::array<unsigned int, 3>&, bool a_renew)>;
 
 	/** @brief Whether a declaration was made or invalidated since the last Evaluate, so a revision must start. */
 	bool Dirty();
 
 	/**
 	* @brief When a revision starts with a_values. Evaluates every declaration whose dependencies changed since its last
-	* evaluation, or that is new or invalidated. Textures with a new extent go to a_wish. Clients with a new key are registered
+	* evaluation, or that is new or invalidated. Textures with a new extent or renew count go to a_wish. Clients with a new key are registered
 	* again here. Returns the stage builds the revision must install for them.
 	*/
 	std::vector<FrameAnchors::StageBuildNeed> Evaluate(const org::services::VariableSnapshot& a_values, const Wish& a_wish);
