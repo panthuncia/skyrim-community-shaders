@@ -229,3 +229,11 @@ final until the user confirms it.
       graph modes need DCLF on. Either delete it, or let the cache follow DCLF's shadow views.
     - **Turning DCLF off after startup** ("Disable at Boot" from saved settings, or the menu toggle) still blanks the
       world silently in graph mode. The toggle should probably be locked there.
+46. **7b, 6.15 and 6.23 are merged, and the step 6 follow-ups too** (`DeclareBuffer`, ImageSpace on `EnabledSSR`,
+    `ShadowCascades`).
+    - **7b moved nothing:** A7 had already made the own epochs into UI-stage steps.
+    - **D3D11 frames to confirm:** HDR composes on D3D11 between a new registration and its adoption. Screenshot keeps a
+      per-frame check of its key. Both are like the post chain's remaining D3D11 frames (item 43) and are to confirm.
+    - **Last section 8 hits in its files:** the capture client in `ORGScreenshot.cpp` (`Scheduled`, plus a mid-frame
+      re-registration in `SetSource`).
+    - **Still left:** 7a (the deletions) and 7d (the check made fatal), then steps 8 to 10.
