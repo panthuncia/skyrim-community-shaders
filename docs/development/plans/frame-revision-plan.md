@@ -1342,6 +1342,23 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
   drag adopts variables-only revisions and never a new version.
 
+**Decided by the agent (step 6.5, Terrain Blending, 2026-11-19), to confirm:**
+- **The frame follows the adopted `Enabled` on the graph path.** `TerrainBlending::FrameEnabled()` is the adopted value while
+  `ORGTerrainBlending` is active, and the live setting otherwise (plain D3D11 untouched). The depth hook, the draw hook, the deferred
+  terrain passes, `TerrainShaderHacks`, the HiZ source, `Util::GetCurrentSceneDepthSRV`, the GPU `Enabled` and DCLF's
+  `DefersTerrain` all read it, so they switch in the revision that switches the blend's client. It is read once a frame (keyed on
+  `State::frameCount`), since the draw hook asks per pass. DCLF's classification runs off the render thread and reads the last
+  render-thread answer (`LastFrameEnabled`).
+- **The blend's key is its depth imports**, observed at every depth pass while the depth table holds the engine's views (`Observe`,
+  on and off), with `Invalidate` on a change. The first enable after startup can still be one revision late if no depth pass has run.
+  The frames between blend on D3D11, as a missed anchor did before.
+- **Group counts come from the bound version at commit** (`Adopted().Extent`), so a new display size is a new version and no new
+  registration.
+- **The terrain depth twin stays made once.** It is not declared on `DisplaySize`: its D3D11 views live in `terrainDepth`, read by the
+  engine's draws and DCLF's import of the plain resource, which would have to follow a slot first. Guest never changes the display
+  size; native's window resize already left it at its first size. Its clear is now a declared client on `Enabled`.
+- **The GPU block is split** (`GpuSettings`, the same 16 bytes). `ProjectSizeSettings` is gone.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's

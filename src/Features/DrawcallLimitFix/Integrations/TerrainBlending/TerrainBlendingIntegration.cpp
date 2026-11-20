@@ -22,8 +22,11 @@ namespace DCLF::Integrations::TerrainBlending
 		// Classification takes it once per pass and a change drops the verdicts.
 		bool DefersTerrain()
 		{
+			// On the graph path, the adopted Enabled the frame follows, so DCLF defers terrain in the frames Terrain Blending draws it.
 			const auto& terrainBlending = globals::features::terrainBlending;
-			return terrainBlending.loaded && terrainBlending.settings.Enabled;
+			if (!terrainBlending.loaded)
+				return false;
+			return ::ORGTerrainBlending::Get().Active() ? terrainBlending.LastFrameEnabled() : terrainBlending.settings.Enabled != 0;
 		}
 
 		// The mask (t55) is bound by its replay after this epoch, so it is named here instead of captured.
