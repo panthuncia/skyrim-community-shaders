@@ -6,7 +6,7 @@
 #	include "RenderGraph/ImGuiBasicRHI.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Revision.h"
 
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -30,7 +30,6 @@
 #	include <cstring>
 #	include <map>
 #	include <mutex>
-#	include <optional>
 #	include <unordered_map>
 #	include <unordered_set>
 #	include <vector>
@@ -136,7 +135,8 @@ namespace ImGuiBasicRHI
 		using Slots = ::RenderGraph::RunSlots<Frame>;
 
 		/** @brief The font atlas pages, a fixed set of versioned RGBA8 textures. Each ImGui texture is a version of one page.
-		*  An unused page holds a 1x1 placeholder. Versions change only at frame boundaries. */
+		*  An unused page holds a 1x1 placeholder. A new version is a pending version of the next frame revision, adopted with
+		*  the stages that declare the page. */
 		struct Atlas
 		{
 			std::array<std::shared_ptr<org::VersionedTexture>, kAtlasPages> pages;
@@ -179,10 +179,7 @@ namespace ImGuiBasicRHI
 			bool callbackLogged = false;
 			std::unordered_map<std::uint64_t, std::shared_ptr<Texture>> textures;    // ImGui's, by ImTextureID
 			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until uploaded
-			std::array<std::shared_ptr<Texture>, kAtlasPages> pages;                 // the ImGui texture each page holds
-			// Each page's next version, published at the next frame boundary (PublishPages). Null stands for its placeholder.
-			std::array<std::optional<std::shared_ptr<Texture>>, kAtlasPages> nextPages;
-			bool publishQueued = false;
+			std::array<std::shared_ptr<Texture>, kAtlasPages> pages;                 // the ImGui texture each page holds, adopted or pending
 			bool pagesLogged = false;
 			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;  // by target format
 			std::map<std::uint32_t, bool> failedPrograms;
@@ -299,36 +296,18 @@ namespace ImGuiBasicRHI
 			return true;
 		}
 
-		/** @brief The pages' next versions published. Frame boundary, render thread. */
-		void PublishPages()
-		{
-			auto& state = Backend();
-			state.publishQueued = false;
-			if (!state.installed || !state.shared->atlas)
-				return;
-			const auto& atlas = *state.shared->atlas;
-			for (std::size_t page = 0; page < kAtlasPages; ++page) {
-				auto next = std::exchange(state.nextPages[page], std::nullopt);
-				if (!next)
-					continue;
-				const auto& backing = *next ? *next : atlas.placeholders[page];
-				try {
-					atlas.pages[page]->Publish(backing->image, backing);
-				} catch (const std::exception& e) {
-					const auto message = fmt::format("Community Shaders: ImGui's atlas page {} could not take a new version: {}", page, e.what());
-					logger::critical("[ORG] {}", message);
-					stl::report_and_fail(message);
-				}
-			}
-		}
-
-		/** @brief Sets a page's next version, published at the next frame boundary. Until then, work on a texture the page does not bind is skipped. */
+		/**
+		* @brief Makes a_texture its page's next version, or the page's placeholder when null. The version is pending until a frame
+		* revision adopts it. Until then, work on a texture the page does not bind is skipped. Render thread.
+		*/
 		void SetPage(State& a_state, std::size_t a_page, const std::shared_ptr<Texture>& a_texture)
 		{
-			a_state.nextPages[a_page] = a_texture;
 			a_state.pages[a_page] = a_texture;
-			if (!std::exchange(a_state.publishQueued, true))
-				RenderGraph::Frame::Driver::AtNextBegin(PublishPages);
+			if (!a_state.shared->atlas)
+				return;
+			const auto& atlas = *a_state.shared->atlas;
+			const auto& backing = a_texture ? a_texture : atlas.placeholders[a_page];
+			RenderGraph::Frame::Revision::PublishTexture(atlas.pages[a_page], backing->image, backing);
 		}
 
 		/** @brief One rectangle of ImGui's pixels to stage. */
@@ -717,7 +696,6 @@ namespace ImGuiBasicRHI
 		state.sampler = {};
 		state.shared = std::make_shared<Shared>();
 		state.pages = {};
-		state.nextPages = {};
 		state.pagesLogged = false;
 		state.pool = std::make_shared<StagingPool>();
 		auto& io = ImGui::GetIO();
