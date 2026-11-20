@@ -79,6 +79,14 @@ namespace RenderGraph::Frame::Revision
 			std::shared_ptr<const void> payload;
 		};
 
+		/** @brief A texture the caller made, waiting to become its slot's next version (PublishTexture). */
+		struct TextureWish
+		{
+			std::weak_ptr<org::VersionedTexture> texture;
+			std::shared_ptr<org::GloballyIndexedResource> image;
+			std::shared_ptr<const void> owner;
+		};
+
 		/** @brief One buffer of a revision: its pending version and what the version was made for. */
 		struct RevisionBuffer
 		{
@@ -153,6 +161,7 @@ namespace RenderGraph::Frame::Revision
 			std::vector<Extent> from;  // each twin's extent when planned
 			std::vector<Extent> to;
 			std::vector<BufferWish> bufferWishes;
+			std::vector<TextureWish> textureWishes;  // kept until adoption, so a superseded revision can give them back
 			// The newest variables when it started, and the names of those changed since the revision before.
 			std::shared_ptr<const org::services::VariableSnapshot> variables;
 			std::string changedVariables;
@@ -168,6 +177,8 @@ namespace RenderGraph::Frame::Revision
 			// Written on the lane, then done.
 			std::vector<GraphResources::PreparedVersion> versions;
 			std::shared_ptr<const org::services::TextureVersionsMade> made;
+			std::vector<std::shared_ptr<org::VersionedTexture>> published;  // the slots of textureWishes still alive
+			std::vector<std::string> publishedNames;
 			std::shared_ptr<const RevisionBuffers> buffers;
 			std::shared_ptr<org::async::RevisionFragment> buffersFragment;
 			std::shared_ptr<const org::async::GpuSubmissionSet> bufferTickets;  // notifies buffersFragment
@@ -202,6 +213,10 @@ namespace RenderGraph::Frame::Revision
 			std::mutex bufferMutex;
 			std::map<const void*, BufferWish> bufferWishes;
 			std::uint64_t bufferFirstWish = 0;
+			// Textures the callers made, from any thread.
+			std::mutex textureMutex;
+			std::map<const void*, TextureWish> textureWishes;
+			std::uint64_t textureFirstWish = 0;
 			std::atomic<std::uint64_t> beginFrame{ 0 };  // the frame of the last Begin, for wishes from other threads
 			std::map<const void*, std::shared_ptr<const void>> adoptedPayloads;
 			// Render thread from here.
@@ -353,12 +368,28 @@ namespace RenderGraph::Frame::Revision
 					requests.push_back(std::move(request));
 					job->versions.push_back(std::move(prepared));
 				}
+				// The callers' textures: their passes write them once adopted, so nothing fills them.
+				for (const auto& wish : job->textureWishes) {
+					auto texture = wish.texture.lock();
+					if (!texture)
+						continue;
+					org::services::TextureVersionRequest request;
+					request.slot = texture;
+					request.image = wish.image;
+					request.contents = org::services::TextureContents::Undefined;
+					request.owner = wish.owner;
+					requests.push_back(std::move(request));
+					job->publishedNames.push_back(wish.image->GetName());
+					job->published.push_back(std::move(texture));
+				}
 				if (!requests.empty())
 					job->made = std::make_shared<const org::services::TextureVersionsMade>(org::services::MakeTextureVersions(requests, job->uploads));
 				MakeBufferVersions(*job);
 				std::vector<const org::IVersionedResource*> slots;
 				for (const auto& version : job->versions)
 					slots.push_back(version.slot.get());
+				for (const auto& texture : job->published)
+					slots.push_back(texture.get());
 				std::vector<std::shared_ptr<org::VersionedBuffer>> held;
 				if (job->buffers)
 					for (const auto& entry : job->buffers->buffers)
@@ -512,11 +543,18 @@ namespace RenderGraph::Frame::Revision
 				if (!job->bufferWishes.empty())
 					job->firstWish = (std::min)(job->firstWish, a_coordinator.bufferFirstWish);
 			}
+			if (host) {
+				const std::lock_guard lock(a_coordinator.textureMutex);
+				for (auto& [key, wish] : std::exchange(a_coordinator.textureWishes, {}))
+					job->textureWishes.push_back(std::move(wish));
+				if (!job->textureWishes.empty())
+					job->firstWish = (std::min)(job->firstWish, a_coordinator.textureFirstWish);
+			}
 			// The variables changed since the last revision started. Every revision carries the newest snapshot.
 			const bool variablesChanged = a_coordinator.variables && a_coordinator.variables != a_coordinator.startedVariables;
 			if (variablesChanged)
 				job->firstWish = (std::min)(job->firstWish, a_coordinator.variablesFirstChange);
-			const bool lane = !job->plans.empty() || !job->bufferWishes.empty();
+			const bool lane = !job->plans.empty() || !job->bufferWishes.empty() || !job->textureWishes.empty();
 			if (!lane && !(host && FrameAnchors::StagedStages()) && !variablesChanged && job->needs.empty())
 				return;
 			if (job->firstWish == UINT64_MAX)
@@ -578,6 +616,13 @@ namespace RenderGraph::Frame::Revision
 				for (const auto& entry : revision->buffers->buffers)
 					if (const auto buffer = entry.buffer.lock(); buffer && !a_coordinator.bufferWishes.contains(entry.key))
 						a_coordinator.bufferWishes[entry.key] = { buffer, entry.elements, entry.bytes, entry.payload };
+			}
+			// So do its published textures.
+			{
+				const std::lock_guard lock(a_coordinator.textureMutex);
+				for (auto& wish : revision->textureWishes)
+					if (const auto texture = wish.texture.lock(); texture && !a_coordinator.textureWishes.contains(texture->Key()))
+						a_coordinator.textureWishes[texture->Key()] = std::move(wish);
 			}
 			const std::lock_guard lock(a_coordinator.statsMutex);
 			++a_coordinator.window.superseded;
@@ -705,6 +750,8 @@ namespace RenderGraph::Frame::Revision
 				std::string twins;
 				for (std::size_t i = 0; i < revision->twins.size(); ++i)
 					twins += fmt::format("{}{} {} -> {}", twins.empty() ? "" : ", ", revision->names[i], ExtentText(revision->from[i]), ExtentText(revision->to[i]));
+				for (const auto& name : revision->publishedNames)
+					twins += fmt::format("{}{} (published)", twins.empty() ? "" : ", ", name);
 				std::string bufferNames;
 				if (buffers)
 					for (const auto& entry : buffers->buffers)
@@ -734,6 +781,8 @@ namespace RenderGraph::Frame::Revision
 			std::vector<const org::IVersionedResource*> slots;
 			for (const auto& version : a_revision.versions)
 				slots.push_back(version.slot.get());
+			for (const auto& texture : a_revision.published)
+				slots.push_back(texture.get());
 			if (a_revision.buffers)
 				for (const auto& entry : a_revision.buffers->buffers)
 					if (auto buffer = entry.buffer.lock()) {
@@ -929,6 +978,19 @@ namespace RenderGraph::Frame::Revision
 		coordinator.bufferWishes[a_buffer->Key()] = { a_buffer, a_elements, std::make_shared<std::vector<std::byte>>(std::move(a_bytes)), std::move(a_payload) };
 	}
 
+	void PublishTexture(const std::shared_ptr<org::VersionedTexture>& a_texture, std::shared_ptr<org::GloballyIndexedResource> a_image,
+		std::shared_ptr<const void> a_owner)
+	{
+		if (!a_texture || !a_image)
+			FailRevision("a texture was published without its slot or its image");
+		auto& coordinator = GetCoordinator();
+		const auto frame = coordinator.beginFrame.load(std::memory_order_relaxed);
+		const std::lock_guard lock(coordinator.textureMutex);
+		if (coordinator.textureWishes.empty())
+			coordinator.textureFirstWish = frame;
+		coordinator.textureWishes[a_texture->Key()] = { a_texture, std::move(a_image), std::move(a_owner) };
+	}
+
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer& a_buffer)
 	{
 		auto& coordinator = GetCoordinator();
@@ -965,6 +1027,7 @@ namespace RenderGraph::Frame::Revision
 	bool RegisterInputProducer(std::string_view, InputProducer) { return false; }
 	void AdoptLatest() {}
 	void PublishBuffer(const std::shared_ptr<org::VersionedBuffer>&, std::uint32_t, std::vector<std::byte>, std::shared_ptr<const void>) {}
+	void PublishTexture(const std::shared_ptr<org::VersionedTexture>&, std::shared_ptr<org::GloballyIndexedResource>, std::shared_ptr<const void>) {}
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer&) { return nullptr; }
 	void LogStats() {}
 }

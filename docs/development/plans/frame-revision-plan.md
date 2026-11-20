@@ -650,6 +650,17 @@ namespace Revision { const AdoptedRevision& Adopted(); }
 - Worker rv61a split the GPU-copied structs (`ExponentialHeightFog::GpuSettings`, `ViewAtmosphere::GpuSettings`) and ported the fields;
   EHF's `ProjectSizeSettings` is gone and ViewAtmosphere's keeps `enabled`, `distantPixelSize`, `distantSlices`.
 
+**As built (2026-11-19, 6.2, `org-native/rev-step6-2`).** ImGui's atlas pages publish through the revision.
+- `Frame::Revision::PublishTexture(slot, image, owner)` (any thread) is a new revision input beside `PublishBuffer`: a texture the
+  caller made becomes a pending version of a `VersionedTexture`. The lane adds it to the revision's `MakeTextureVersions` call as an
+  image request with undefined contents, so it lands in the same `NamedVersions` set and fragment as the twins' versions. Its slot
+  joins the closure, the member stages record against it, and `AdoptAll` makes it current with the rest. Latest wins per slot. A
+  superseded revision gives its textures back unless newer ones came. The adoption line lists them under twins as
+  `name (published)`.
+- `ImGuiBasicRHI.cpp:SetPage` calls it for the page's texture or its placeholder. `PublishPages`, `nextPages`, `publishQueued` and the
+  `AtNextBegin` call are gone. The upload and draw passes still skip work on a texture their page does not bind, and the whole
+  texture is restaged until a recorded upload copied its bound version, so nothing else changed.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1341,6 +1352,19 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **ViewAtmosphere's four grid fields were ported in 6.1**, since EHF's volumes depend on them. 6.21 ports the rest.
 - **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
   drag adopts variables-only revisions and never a new version.
+
+**Decided by the agent (step 6.2, 2026-11-19), to confirm:**
+- **A general texture input, not an ImGui variable.** Pages change on ImGui's texture requests, not on a value, so they are not
+  variables or declarations. `PublishTexture` sits beside `PublishBuffer` in `Revision.h` and is small and additive. Terrain
+  Shadows (6.3) could publish its height map the same way if it keeps its own twin.
+- **The page's contents stay written in the frame.** The version is not uploaded on the lane: ImGui's pixels change on the render
+  thread between requests, and the existing upload pass already restages a texture whole until a recorded copy wrote its bound
+  version. So the version is born undefined and written by the first frame that binds it.
+- **A new atlas texture draws a few frames later than before.** It is drawn once a revision adopts it (its UI stage recordings
+  are made first), not at the next Begin. Text on a re-created atlas is missing for those frames, as it was for one frame before.
+  The `menu` config's font reload shows it.
+- **No fallback without ORGModuleServices.** A build with the graph but without OMS has no revisions, so pages would keep their
+  placeholders. Every real build has OMS (DCLF needs it).
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

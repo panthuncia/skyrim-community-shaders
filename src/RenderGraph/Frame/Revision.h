@@ -10,7 +10,9 @@
 
 namespace org
 {
+	class GloballyIndexedResource;
 	class VersionedBuffer;
+	class VersionedTexture;
 }
 
 namespace org::services
@@ -25,6 +27,7 @@ namespace org::services
 * - twins' size wishes (GraphResources::Texture2D/Texture3D::RequestSize): the next versions are made on the revision lane, off
 *   the render thread, born cleared for histories;
 * - CS-owned versioned buffers' new contents (PublishBuffer): uploaded from the lane, ready once the upload completes;
+* - textures a caller made as new versions of a versioned texture (PublishTexture), such as ImGui's atlas pages;
 * - staged builds of CS stages: every frame slot is recorded on the staged build;
 * - the frame-wide variables (Frame/Variables.h): every revision carries the newest snapshot it started with, and adoption
 *   makes it the frame's. A revision with only variable changes needs no lane work and is adopted in the Begin that starts it,
@@ -86,6 +89,15 @@ namespace RenderGraph::Frame::Revision
 	*/
 	void PublishBuffer(const std::shared_ptr<org::VersionedBuffer>& a_buffer, std::uint32_t a_elements, std::vector<std::byte> a_bytes,
 		std::shared_ptr<const void> a_payload);
+
+	/**
+	* @brief Any thread. a_image, a texture the caller made, becomes a new version of a_texture, kept alive with a_owner. The
+	* version is made pending on the revision lane and adopted with a revision, together with every stage that declares
+	* a_texture. Latest wins per texture. Its contents are what the caller's passes write once it is adopted. a_image must have
+	* a_texture's format, mip count and slice count; another is fatal.
+	*/
+	void PublishTexture(const std::shared_ptr<org::VersionedTexture>& a_texture, std::shared_ptr<org::GloballyIndexedResource> a_image,
+		std::shared_ptr<const void> a_owner);
 
 	/** @brief Any thread. The payload of a_buffer's version adopted last. Null until a PublishBuffer of it was adopted. */
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer& a_buffer);
