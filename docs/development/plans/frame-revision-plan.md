@@ -847,6 +847,26 @@ revisions.
 - Hot reload needs no feature code: `DrawcallLimitFix::ClearShaderCache` asks `RenderGraphRuntime::RequestShaderReload`, which
   swaps every live pipeline. That is why `programsDirty` could go without a replacement where no define follows a setting.
 
+**As built (2026-11-19, 6.19, `org-native/rev-step6-19`).** The DCLF family clients and Bink are declared at setup with
+`DeclareClient` and registered by the first frame revision.
+- Each view keeps one client state for the session (latch, gate, run slots, query ring). A registration's passes take their target
+  by value, so the old and the new registration share everything else and the target mutexes are gone.
+- **Blood splatter**: on `DisplaySize` and `PresenterFormat`; the key is the back buffer's graph slot (`EngineTarget(0)`).
+  **Shadow mask** (both views): on `DisplaySize`; the key is kSHADOW_MASK's slot. A new slot is a new key, so the revision that
+  carries it registers the client again. The `CanTake` compare and `Refresh` are gone.
+- **Sky** (main, faces, sun) and **decal occlusion**: their targets are engine targets made once (Q4), imported at setup. The key is
+  the query ring's readback count (0 without a ring). A chunk made at a commit calls `DeclaredClient::Invalidate`, so the next
+  revision registers the client with it. That replaces the commit's `Refresh`.
+- `CanTake` (and `CanTakeSun`) also need `DeclaredClient::Registered()`, so a batch before the first revision is the engine's.
+- **Bink**: on `DisplaySize`, `PresenterFormat` and `HdrOutputTarget`. The key is the framebuffer's and HDR's UI texture's graph
+  slots and view formats, imported when a revision starts. Each registration's commit reads its own targets, and a frame's size
+  comes from the bound version (`Texture::Width/Height`). `UpdateTargets`, `Update`, the between-frames `BuildPending` and
+  `Begin`'s flag (with BinkHooks' `InFrame`) are gone. `Begin` refuses until a revision registered the client and the UI stage's
+  schedule holds it.
+- A target that cannot be imported or drawn onto at a revision is fatal (make returns false). At setup it still keeps the
+  engine's path for the session, as before.
+- Tests: `dclf-family` and `bink` (new). See "Decided by the agent (step 6.19)" in section 9.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1828,6 +1848,24 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   never seen.
 - **Between setup and the first adopted registration** Volumetric and Cloud Shadows report active with no client, so their maps
   are unwritten for those frames (as before, until the first build). SSS and Dynamic Cubemaps draw D3D11 or nothing then, as before.
+
+**Decided by the agent (step 6.19, 2026-11-19), to confirm:**
+- **Blood follows `PresenterFormat`, not `HdrOutputTarget`.** The screen splatter draws after `RenderWorldPostProcess`, when HDR
+  has put kFRAMEBUFFER back, so it never draws onto HDR's texture. Native keeps its back buffer across an HDR switch, and guest's
+  swap chain keeps its format. `HdrOutputTarget` is a dependency of Bink only, whose UI texture HDR makes with its other textures.
+- **Sky and decal occlusion have no target variable.** Their targets are engine targets, made once a session (Q4). The query
+  ring's fifth chunk stays a trigger, now through the key and `Invalidate` (an interim, as EHF's inputs). Removing it means
+  making the chunks a session can reach at setup and making a later one fatal, in `OcclusionQueries.cpp`, outside this lane.
+- **The key functions import.** `EngineTarget`, HDR's `GraphOf` and `D3D11Texture` run when a revision starts, on the render
+  thread, as `CanTake` and Bink's tick did before. An import of a new image still asks for its holders' builds itself.
+- **Registration at the first revision, not at setup's build point.** Declarations are first evaluated when a revision starts,
+  so `BuildPending("CS's setup")` no longer holds these clients. The startup logo's first ticks are the engine's until the
+  revision with the Bink client is adopted. In native mode the engine's tile draw is skipped, so those few frames may be black.
+  If a run shows it, Declare.cpp could evaluate declarations at setup's build point.
+- **A guest back buffer image replaced with no event** (same size and format) is no longer joined by Bink's tick, which
+  imported the framebuffer every tick. Other importers of kFRAMEBUFFER (HDR's compose) still join it. Step 9b makes it an event.
+- **HDR's UI texture made again while HDR is off raises no event**, since `HdrOutputTarget` is none then. Bink keeps the old
+  import until HDR turns on, which raises it. Bink draws onto that texture only with HDR on.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

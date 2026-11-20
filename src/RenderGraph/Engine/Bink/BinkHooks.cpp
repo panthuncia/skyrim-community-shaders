@@ -157,18 +157,6 @@ namespace RenderGraph::Engine::Bink
 			s_log.Report(a_reason);
 		}
 
-		/** @brief Whether the engine has a frame open, via BGSMoviePlayer vfunc +0x58. A blocking tick without one starts between two frames. */
-		bool InFrame()
-		{
-			static REL::Relocation<void**> player{ REL::RelocationID(525733, 412214) };
-			void* object = *player;
-			if (!object)
-				return true;
-			using InFrameFn = bool (*)(void*);
-			const auto* vtable = *static_cast<void* const* const*>(object);
-			return reinterpret_cast<InFrameFn>(vtable[0x58 / sizeof(void*)])(object);
-		}
-
 		/** @brief Whether this tick may draw on the graph. Every case the port does not cover keeps the engine's path. */
 		bool Eligible(std::uintptr_t a_player, const void* a_set)
 		{
@@ -243,7 +231,7 @@ namespace RenderGraph::Engine::Bink
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
 				ClaimForBlockingTick(a_player);
-				if (Eligible(a_player, tick.set) && Graph::Begin(!InFrame()))
+				if (Eligible(a_player, tick.set) && Graph::Begin())
 					StartGraphTick(tick);
 				auto* const outer = std::exchange(t_tick, &tick);
 				const auto result = func(a_player, a_arg2, a_arg3, a_arg4);

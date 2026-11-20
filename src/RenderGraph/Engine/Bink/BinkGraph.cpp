@@ -70,6 +70,7 @@ namespace RenderGraph::Engine::Bink
 #	include "Globals.h"
 #	include "RenderGraph/Engine/Bink/Bink.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
@@ -159,15 +160,24 @@ namespace RenderGraph::Engine::Bink::Graph
 			bool hdr = false;  // HDR Display redirected the framebuffer there for the movie
 		};
 
-		/** @brief The framebuffer, or HDR's UI texture while HDR output is on. */
+		/** @brief The framebuffer, or HDR's UI texture while HDR output is on: its graph slot and its view's format. */
 		struct DrawTarget
 		{
-			const char* name = "";
-			FrameAnchors::Texture resource;
-			winrt::com_ptr<ID3D11Texture2D> texture;  // the target's identity
-			std::uint32_t width = 0, height = 0;
+			FrameAnchors::Texture resource;  // null when there is none
 			rhi::Format format = rhi::Format::Unknown;
-			std::shared_ptr<const RunSlots<Frame>> slots;
+			bool operator==(const DrawTarget&) const = default;
+		};
+
+		/**
+		* @brief What a registration is made for. A new texture of the same import is the slot's next version and keeps the key,
+		* so a resize changes nothing in the graph. Another graph resource (HDR's UI texture made again) is a new key.
+		*/
+		struct TargetsKey
+		{
+			DrawTarget framebuffer;
+			DrawTarget hdrUi;
+			bool hdrUiWanted = false;  // HDR Display has a UI texture
+			bool operator==(const TargetsKey&) const = default;
 		};
 
 		struct BinkState
@@ -176,8 +186,11 @@ namespace RenderGraph::Engine::Bink::Graph
 			bool failed = false;
 			std::unique_ptr<GraphResources::Texture2D> atlas;
 			std::shared_ptr<FrameStaging> staging;
-			DrawTarget framebuffer{ .name = "the framebuffer" };
-			DrawTarget hdrUi{ .name = "HDR's UI texture" };
+			// One slot set per target for the session, so every registration's passes read the same ones.
+			std::shared_ptr<const RunSlots<Frame>> framebufferSlots;
+			std::shared_ptr<const RunSlots<Frame>> hdrUiSlots;
+			::RenderGraph::Frame::DeclaredClient declared;
+			std::optional<TargetsKey> registered;  // the key of the newest registration
 			org::OwnedDescriptorBinding sampler;
 			std::optional<Pending> pending;
 			std::uint64_t queued = 0;
@@ -353,51 +366,56 @@ namespace RenderGraph::Engine::Bink::Graph
 			mutable std::uint64_t preparations = 0;
 		};
 
-		FrameAnchors::ClientDesc MakeClient()
+		/** @brief The registration for a_key: one pass per target it has. Each commit reads the targets of its own registration. */
+		FrameAnchors::ClientDesc MakeClient(const TargetsKey& a_key)
 		{
 			auto& state = Get();
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
 			// First in the Present anchor, since the other Present clients draw over the movie frame.
 			const bool late = FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present);
-			const auto add = [&](const DrawTarget& a_target, const char* a_name, std::int32_t a_order) {
+			const auto add = [&](const DrawTarget& a_target, const std::shared_ptr<const RunSlots<Frame>>& a_slots, const char* a_name, std::int32_t a_order) {
 				if (!a_target.resource)
 					return;
 				client.passes.push_back({ .name = a_name,
 					.anchor = FrameAnchors::Anchor::Present,
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_target.slots, late] {
+					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_slots, late] {
 						return std::make_shared<DrawPass>(resource, atlas, slots, late);
 					},
 					.atExecution = late });
 			};
-			add(state.framebuffer, "cs.bink.tiles", -1000);
-			add(state.hdrUi, "cs.bink.tiles.hdr", -999);
+			add(a_key.framebuffer, state.framebufferSlots, "cs.bink.tiles", -1000);
+			add(a_key.hdrUi, state.hdrUiSlots, "cs.bink.tiles.hdr", -999);
 			client.registerResources = [](org::RenderGraph& a_graph) { Get().atlas->Register(a_graph); };
-			client.commit = [](const FrameAnchors::Point&) {
+			client.commit = [framebuffer = a_key.framebuffer, hdrUi = a_key.hdrUi](const FrameAnchors::Point&) {
 				auto& current = Get();
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
 					return;
 				const org::RunRef run = host->CurrentRun();
 				// Empty every target's entry for this run first, so nothing older is left there.
-				current.framebuffer.slots->Store(run, nullptr);
-				current.hdrUi.slots->Store(run, nullptr);
+				current.framebufferSlots->Store(run, nullptr);
+				current.hdrUiSlots->Store(run, nullptr);
 				if (!current.pending)
 					return;
 				auto pending = std::move(*current.pending);
 				current.pending.reset();
-				const DrawTarget& target = pending.hdr ? current.hdrUi : current.framebuffer;
+				const DrawTarget& target = pending.hdr ? hdrUi : framebuffer;
+				// Queue checked the newest registration, which Begin found in the schedule, so this one has the target.
+				if (!target.resource)
+					return;
 				auto frame = std::make_shared<Frame>();
 				frame->movie = pending.movie;
 				frame->staging = std::move(pending.staging);
 				frame->program = ProgramFor(target.format);
 				frame->sampler = current.sampler.Index();
 				frame->samplerOwner = current.sampler.Owner();
-				frame->width = target.width;
-				frame->height = target.height;
-				target.slots->Store(run, std::move(frame));
+				// The bound version's size: a resize is a new version of the same slot.
+				frame->width = target.resource.Width();
+				frame->height = target.resource.Height();
+				(pending.hdr ? current.hdrUiSlots : current.framebufferSlots)->Store(run, std::move(frame));
 				current.committed = current.queued;
 			};
 			client.active = [] { return Get().pending.has_value(); };
@@ -436,78 +454,57 @@ namespace RenderGraph::Engine::Bink::Graph
 			return rtv;
 		}
 
-		/** @brief Imports a_texture as a_target if it changed and builds its tile program. Returns whether the target changed. */
-		bool Update(DrawTarget& a_target, winrt::com_ptr<ID3D11Texture2D> a_texture, DXGI_FORMAT a_format, bool a_isFramebuffer, bool& a_ok)
+		/**
+		* @brief The key: the framebuffer's and HDR's UI texture's graph slots and view formats, imported now. Render thread, when a
+		* revision starts (and once at setup). A target that cannot be imported has no resource, which the registration refuses.
+		*/
+		TargetsKey CurrentTargets()
 		{
-			a_ok = true;
-			if (!a_texture) {
-				const bool had = static_cast<bool>(a_target.resource);
-				a_target.resource = {};
-				a_target.texture = nullptr;
-				return had;
+			TargetsKey key;
+			DXGI_FORMAT format{};
+			if (TextureOf(FramebufferRtv(), format))
+				key.framebuffer = { FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)), rhi::helpers::ToRHI(format) };
+			const auto& hdr = globals::features::hdrDisplay;
+			if (hdr.loaded && hdr.uiTexture && hdr.uiTexture->rtv && hdr.uiTexture->resource) {
+				key.hdrUiWanted = true;
+				if (TextureOf(hdr.uiTexture->rtv.get(), format)) {
+					const auto& ui = *hdr.uiTexture;
+					FrameAnchors::Texture resource = ORGHDRDisplay::Get().GraphOf(ui.resource.get());
+					if (!resource)
+						resource = FrameAnchors::D3D11Texture(kHdrUiName, ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
+					key.hdrUi = { std::move(resource), rhi::helpers::ToRHI(format) };
+				}
 			}
-			if (a_texture == a_target.texture)
-				return false;
-			FrameAnchors::Texture resource;
-			if (a_isFramebuffer) {
-				resource = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
-			} else {
-				const auto& ui = *globals::features::hdrDisplay.uiTexture;
-				resource = ORGHDRDisplay::Get().GraphOf(ui.resource.get());
-				if (!resource)
-					resource = FrameAnchors::D3D11Texture(kHdrUiName, ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
-			}
-			const auto format = rhi::helpers::ToRHI(a_format);
-			if (!resource || format == rhi::Format::Unknown || !ProgramFor(format)) {
-				logger::warn("[ORG] Bink: {} cannot be drawn onto: {}", a_target.name,
-					!resource ? "it cannot be imported" : (format == rhi::Format::Unknown ? "its view's format has no RHI form" : "its tile program cannot be built"));
-				a_ok = false;
-				return false;
-			}
-			D3D11_TEXTURE2D_DESC desc{};
-			a_texture->GetDesc(&desc);
-			// A new texture of the same import is the slot's next version, so only another graph resource changes the passes.
-			const bool changed = resource != a_target.resource;
-			a_target.resource = std::move(resource);
-			a_target.texture = std::move(a_texture);
-			a_target.width = desc.Width;
-			a_target.height = desc.Height;
-			a_target.format = format;
-			logger::info("[ORG] Bink: drawing onto {} ({}x{}, DXGI format {}{})", a_target.name, desc.Width, desc.Height, static_cast<int>(a_format),
-				changed ? "" : ", a new version of the same target");
-			return changed;
+			return key;
 		}
 
-		/**
-		 * @brief Imports the framebuffer and HDR's UI texture. The client is refreshed only when one becomes another graph resource.
-		 * A resize is a new version and changes nothing in the graph. False when the framebuffer cannot be drawn onto.
-		 */
-		bool UpdateTargets(BinkState& a_state, bool a_build)
+		/** @brief Why a target cannot be drawn onto, or null when it can. Builds its tile program. */
+		const char* Refusal(const DrawTarget& a_target)
 		{
-			DXGI_FORMAT format{};
-			bool ok = true;
-			auto framebuffer = TextureOf(FramebufferRtv(), format);
-			if (!framebuffer) {
-				logger::warn("[ORG] Bink: kFRAMEBUFFER has no RTV of a 2D texture");
+			if (!a_target.resource)
+				return "it cannot be imported";
+			if (a_target.format == rhi::Format::Unknown)
+				return "its view's format has no RHI form";
+			if (!ProgramFor(a_target.format))
+				return "its tile program cannot be built";
+			return nullptr;
+		}
+
+		/** @brief The registration for a_key. False, logged, when a target cannot be drawn onto, which the declaration makes fatal. */
+		bool MakeRegistration(const TargetsKey& a_key, FrameAnchors::ClientDesc& a_out)
+		{
+			if (const char* why = Refusal(a_key.framebuffer)) {
+				logger::error("[ORG] Bink: the framebuffer cannot be drawn onto: {}", why);
 				return false;
 			}
-			bool changed = Update(a_state.framebuffer, std::move(framebuffer), format, true, ok);
-			if (!ok || !a_state.framebuffer.resource)
+			if (const char* why = a_key.hdrUiWanted ? Refusal(a_key.hdrUi) : nullptr) {
+				logger::error("[ORG] Bink: HDR's UI texture cannot be drawn onto: {}", why);
 				return false;
-			const auto& hdr = globals::features::hdrDisplay;
-			winrt::com_ptr<ID3D11Texture2D> ui;
-			if (hdr.loaded && hdr.uiTexture && hdr.uiTexture->rtv && hdr.uiTexture->resource)
-				ui = TextureOf(hdr.uiTexture->rtv.get(), format);
-			bool hdrOk = true;
-			changed = Update(a_state.hdrUi, std::move(ui), format, false, hdrOk) || changed;
-			if (!hdrOk)
-				EngineDraws().Report("HDR's UI texture cannot be imported, or its tile program cannot be made");
-			if (!changed || !a_state.setUp)
-				return true;
-			logger::info("[ORG] Bink: a target became another graph resource (HDR's UI texture); the Present graph is built again with it");
-			FrameAnchors::Refresh(kClientId);
-			if (a_build)
-				(void)FrameAnchors::BuildPending("Bink's tick after its target was made again");
+			}
+			a_out = MakeClient(a_key);
+			Get().registered = a_key;
+			logger::info("[ORG] Bink: the client is made for {} (RHI format {}){}", a_key.framebuffer.resource.Id(), static_cast<int>(a_key.framebuffer.format),
+				a_key.hdrUi.resource ? fmt::format(" and HDR's UI texture (RHI format {})", static_cast<int>(a_key.hdrUi.format)) : std::string());
 			return true;
 		}
 
@@ -586,8 +583,8 @@ namespace RenderGraph::Engine::Bink::Graph
 		atlas.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		// One texture for the session, refilled by every frame's chunks.
 		state.atlas = std::make_unique<GraphResources::Texture2D>(atlas, "Bink::Movie", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
-		for (auto* target : { &state.framebuffer, &state.hdrUi })
-			target->slots = std::make_shared<const RunSlots<Frame>>();
+		state.framebufferSlots = std::make_shared<const RunSlots<Frame>>();
+		state.hdrUiSlots = std::make_shared<const RunSlots<Frame>>();
 		// The engine's PS sampler for this draw, from CreateSamplerStates (SE 75831), is trilinear and clamped.
 		D3D11_SAMPLER_DESC sampler{};
 		sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -599,22 +596,29 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
 		const char* missing = !*state.atlas ? "its movie texture could not be made" :
 		                      !state.sampler ? "its sampler could not be made (no descriptor service)" :
-		                      !UpdateTargets(state, false) ? "the framebuffer cannot be imported, or its tile program cannot be built" :
-		                                                     nullptr;
+		                      Refusal(CurrentTargets().framebuffer) ? "the framebuffer cannot be imported, or its tile program cannot be built" :
+		                                                              nullptr;
 		if (missing) {
 			Fail(state, missing);
 			return;
 		}
-		// One client for the session, so a movie never rebuilds the graph.
-		if (!FrameAnchors::Register(MakeClient())) {
-			Fail(state, "the Present anchor's client could not be registered");
+		// One declaration for the session, so a movie never rebuilds the graph. The targets follow the display size, the
+		// presenter's format and HDR's output target. A key with another graph resource registers the client again with the
+		// revision that carries it.
+		namespace RF = ::RenderGraph::Frame;
+		state.declared = RF::DeclareClient<TargetsKey>(
+			kClientId, RF::DependsOn(RF::Vars::DisplaySize(), RF::Vars::PresenterFormat(), RF::Vars::HdrOutputTarget()),
+			[](const RF::Inputs&) -> std::optional<TargetsKey> { return CurrentTargets(); },
+			[](const TargetsKey& a_key, FrameAnchors::ClientDesc& a_desc) { return MakeRegistration(a_key, a_desc); });
+		if (!state.declared) {
+			Fail(state, "the Present anchor's client could not be declared");
 			return;
 		}
 		state.setUp = true;
-		logger::info("[ORG] Bink: on (CS_ORG_BINK); registered at the Present anchor for the session, joined at setup's build point");
+		logger::info("[ORG] Bink: on (CS_ORG_BINK); the Present anchor's client is declared for the session and registers with the next frame revision");
 	}
 
-	bool Begin(bool a_betweenFrames)
+	bool Begin()
 	{
 		const auto refuse = [](std::string_view a_reason) {
 			EngineDraws().Report(a_reason);
@@ -634,10 +638,10 @@ namespace RenderGraph::Engine::Bink::Graph
 			state.executed = state.queued;
 		}
 		state.pending.reset();
-		if (!UpdateTargets(state, a_betweenFrames))
-			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
-		// The UI stage's last schedule must hold this registration, since a tick can come before the frame's Begin.
-		// Until a build with HDR's new UI texture switches in, the tick stays the engine's.
+		if (!state.declared.Registered() || !state.registered)
+			return refuse("no frame revision has registered the Bink client yet");
+		// The UI stage's last schedule must hold the newest registration, since a tick can come before the frame's Begin.
+		// Until the revision that carries it is adopted, the tick stays the engine's.
 		if (!FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present))
 			return refuse("no stage holds the Present anchor");
 		if (!FrameAnchors::InStage(kClientId, FrameAnchors::Anchor::Present))
@@ -698,7 +702,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		auto& state = Get();
 		if (state.failed || !state.setUp || !a_movie)
 			return false;
-		if (a_hdr && !state.hdrUi.resource)
+		if (a_hdr && !(state.registered && state.registered->hdrUi.resource))
 			return false;
 		if (a_movie->decoding) {
 			a_movie->last = std::move(a_movie->decoding);
@@ -742,7 +746,7 @@ namespace RenderGraph::Engine::Bink::Graph
 	class Movie
 	{};
 	void Setup() {}
-	bool Begin(bool) { return false; }
+	bool Begin() { return false; }
 	std::shared_ptr<Movie> CreateMovie(const Layout&, std::uint32_t) { return nullptr; }
 	std::byte* Lock(Movie&, std::uint32_t, std::uint32_t&) { return nullptr; }
 	bool Queue(const std::shared_ptr<Movie>&, bool) { return false; }

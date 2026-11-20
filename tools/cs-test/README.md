@@ -71,6 +71,8 @@ The shipped configs:
 | `terrain-shadows` | coc between worldspaces (the save's, Raven Rock, Riverwood), a shot in each: Terrain Shadows' heightmap and shadow height map switch with a frame revision; compose it, `native-vulkan+terrain-shadows` |
 | `ibl` | Image Based Lighting on, static IBL off, a DALC mode that reads the environment SH and back, then IBL off (`setting` steps): IBL's client and the fog's IBL inputs switch with frame revisions; compose it, `native-vulkan+ibl` |
 | `skylighting-reset` | coc into Dragonsreach and back out to Whiterun: each loading screen resets Skylighting's probe volumes as new versions in a frame revision; compose it, `native-vulkan+skylighting-reset` |
+| `dclf-family` | Riverwood in cloudy weather with a melee bandit: screen blood in first person, blood decals in third, then HDR on and off with shots of the blood and the sky: the DCLF family clients (sky, decal occlusion, blood, shadow mask) declared on frame variables; compose it, `native-vulkan+dclf-family` |
+| `bink` | BGS_Logo.bik played through the `bink` step in SDR, then again with HDR on: Bink's client declared on its targets' variables; compose it, `native-vulkan+bink` |
 
 | `river-sgtm` | Riverwood's river with the global time multiplier at 4, then 1: the water client's heightmap bound changes with a frame revision; compose it, `native-vulkan+river-sgtm` |
 

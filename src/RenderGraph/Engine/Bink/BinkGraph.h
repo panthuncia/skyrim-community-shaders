@@ -37,14 +37,14 @@ namespace RenderGraph::Engine::Bink
 	{
 		class Movie;
 
-		/** @brief Makes the movie texture, sampler, targets and the client. Logged and off when a part cannot be made. */
+		/** @brief Makes the movie texture and sampler and declares the client on its targets. Logged and off when a part cannot be made. */
 		void Setup();
 
 		/**
-		 * @brief Whether this tick may draw on the graph. With a_betweenFrames a needed rebuild happens here, between two frames.
-		 * False while that build is not attached yet, or when the framebuffer cannot be imported. Render thread.
+		 * @brief Whether this tick may draw on the graph. False until the UI stage's schedule holds the client's newest
+		 * registration, which a frame revision makes when the targets change. Render thread.
 		 */
-		bool Begin(bool a_betweenFrames);
+		bool Begin();
 
 		/** @brief A movie's tiles laid out in staging and in the movie texture's chunks. Null only for a layout with no tiles. Render thread. */
 		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout, std::uint32_t a_tileSize);
