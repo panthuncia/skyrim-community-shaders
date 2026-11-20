@@ -74,9 +74,13 @@ namespace RenderGraph
 		void RequestAll(std::string_view a_reason);
 		/** @brief Any thread: the graphs that looked a_id up are built again (GraphHost::RequestRebuildFor). */
 		void RequestFor(std::string_view a_id, std::string_view a_reason);
-		/** @brief Any thread. Rebuilds every graph on the owner thread at the next poll, with the host's thread held.
-		*  For changes that need the host's safe point, such as a shader reload's pipeline swap. */
-		void RequestAllSynchronous(std::string_view a_reason);
+		/**
+		* @brief Owner thread, inside a frame revision's adoption. Rebuilds every graph now, with the host's thread held, so the shader
+		* reload's staged pipelines are swapped in (the pipeline registry's extension publishes them at this build). The one
+		* render-thread build left: a kept recording binds its pipelines at record time, so none may outlive the swap (plan Q5).
+		* Returns whether a graph was built.
+		*/
+		bool SwapPipelines(std::string_view a_reason);
 		/** @brief Any thread. Runs a_change on the owner thread at the next poll while no build runs, then rebuilds every epoch.
 		*  For changes to what a graph captures at its build, which must not race a build in progress. */
 		void Change(std::function<void()> a_change, std::string_view a_reason);

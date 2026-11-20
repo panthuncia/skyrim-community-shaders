@@ -16,6 +16,7 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/ExternalWork.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
 #include "RenderGraph/Frame/Transients.h"
@@ -3618,16 +3619,32 @@ void RenderGraphRuntime::ServicePipelineReload()
 	}
 	if (!result.staged)
 		return;
-	// Swapped in at the next owner-thread build, where nothing records. The build manager's next poll builds every graph there.
-	// With no graph, at once.
+	// With the build manager, the swap is an event: the revision that carries the new generation swaps the staged pipelines in at
+	// its adoption (SwapStagedPipelines). One event per staged set: a set still staged after its swap ran asks again.
+	// Render owner only: a loading screen's thread presents too, and the adopted values are the render thread's. With no graph, at once.
 	if (impl && impl->builds) {
-		impl->builds->RequestAllSynchronous("shader reload: pipelines staged");
+		if (!FrameAnchors::IsRenderOwner())
+			return;
+		const std::uint64_t adopted = RenderGraph::Frame::Vars::AdoptedShaderGeneration();
+		if (shaderGenerationRaised == adopted &&
+			RenderGraph::Frame::Vars::SetShaderGeneration(adopted + 1, fmt::format("shader reload {}: pipelines staged", registry.LastReload().serial)))
+			shaderGenerationRaised = adopted + 1;
 	} else if (impl && impl->host) {
 		impl->host->RequestRebuild("shader reload: pipelines staged");
 	} else if (registry.Publish(0)) {
 		registry.Retire(~0ull);
 	}
 #endif
+}
+
+void RenderGraphRuntime::SwapStagedPipelines(std::string_view a_reason)
+{
+	if (!IsActive() || !impl->builds)
+		return;
+	const auto begin = std::chrono::steady_clock::now();
+	const bool built = GuardedBuild([&] { return impl->builds->SwapPipelines(a_reason); });
+	logger::info("[ORG] shader reload: {}: every graph built on the render thread for the pipeline swap ({}, {:.2f} ms)", a_reason,
+		built ? "built" : "nothing built", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
 }
 
 const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
@@ -4155,4 +4172,5 @@ void RenderGraphRuntime::DropDclfLists(bool) {}
 void RenderGraphRuntime::SetSkippedEpochWorkerLoad(std::uint32_t, bool) {}
 void RenderGraphRuntime::SetEarlyFlush(int) {}
 void RenderGraphRuntime::ServicePipelineReload() {}
+void RenderGraphRuntime::SwapStagedPipelines(std::string_view) {}
 #endif

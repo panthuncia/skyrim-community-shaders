@@ -356,8 +356,16 @@ public:
 	/** @brief Shader hot reload. Every live pipeline built from Data/Shaders registers here and binds through its slot.
 	*  Lives for the whole process, since a rebuild may complete at teardown. */
 	static org::services::PipelineRegistry* PipelineRegistry();
-	/** @brief Any thread. Rebuilds the live pipelines built from a_changedFile, or all. Swapped in at the graph's next build. */
+	/**
+	* @brief Any thread. Rebuilds the live pipelines built from a_changedFile, or all, off the render thread. Once they are staged,
+	* the ShaderGeneration variable moves, and the frame revision that carries it swaps them in (SwapStagedPipelines).
+	*/
 	static void RequestShaderReload(std::string_view a_changedFile = {}, bool a_force = false);
+	/**
+	* @brief Render thread, inside the adoption of the revision that carries a new ShaderGeneration. Swaps the staged pipelines in
+	* and builds every graph, with the host's thread held (BuildManager::SwapPipelines). A throw stops the graph.
+	*/
+	void SwapStagedPipelines(std::string_view a_reason);
 	/** @brief Any thread: the next a_epochs completed epochs log each graphics timestamp range in GPU order ("[TSDUMP]"). */
 	static void RequestTimestampDump(std::uint32_t a_epochs);
 	/** @brief Diagnostics. DCLF's epochs in a_segments report submitted without submitting.
@@ -424,6 +432,7 @@ private:
 	EpochCpuTotals epochTotals;
 	std::uint64_t buildPoints = 0;  // BuildIfRequested's calls
 	std::uint64_t buildPointsAtSeal = 0;  // buildPoints at the last SealPresented
+	std::uint64_t shaderGenerationRaised = 0;  // the last ShaderGeneration that ServicePipelineReload wrote. Render thread
 	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 	FrameConfig frameConfig;  // ConfigureFrame's (frameConfigured)

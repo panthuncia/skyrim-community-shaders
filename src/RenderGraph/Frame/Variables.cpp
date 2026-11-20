@@ -57,6 +57,8 @@ namespace RenderGraph::Frame::Vars
 			Variable<ImageSpaceShape> engineImageSpace = set.Declare("EngineImageSpace", ImageSpaceShape{});
 			Variable<FrameGen::PresentationConfig> presentationConfig = set.Declare("PresentationConfig", FrameGen::PresentationConfig{});
 			Variable<bool> interior = set.Declare("Interior", false);
+			// Sizes nothing: a reload changes pipelines only.
+			Variable<std::uint64_t> shaderGeneration = set.Declare("ShaderGeneration", std::uint64_t{}, { .sizes = false });
 
 			std::mutex eventsMutex;
 			std::map<std::string, VariableEventCounts, std::less<>> events;
@@ -149,6 +151,10 @@ namespace RenderGraph::Frame::Vars
 	bool SetPresenterFormat(SurfaceFormat a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().presenterFormat, a_value, "PresenterFormat", a_writer); }
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().upscalerOptions, a_value, "UpscalerOptions", a_writer); }
 	bool SetInterior(bool a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().interior, a_value, "Interior", a_writer); }
+	bool SetShaderGeneration(std::uint64_t a_value, std::string_view a_writer)
+	{
+		return SetFrameVariable(FrameVariableSet().shaderGeneration, a_value, "ShaderGeneration", a_writer);
+	}
 	bool SetEngineImageSpace(const ImageSpaceShape& a_value, std::string_view a_writer)
 	{
 		return SetFrameVariable(FrameVariableSet().engineImageSpace, a_value, "EngineImageSpace", a_writer);
@@ -170,6 +176,7 @@ namespace RenderGraph::Frame::Vars
 	HeightMapIdentity AdoptedHeightMap() { return AdoptedFrameValue(FrameVariableSet().heightMap); }
 	SurfaceFormat AdoptedPresenterFormat() { return AdoptedFrameValue(FrameVariableSet().presenterFormat); }
 	UpscalerOptions AdoptedUpscalerOptions() { return AdoptedFrameValue(FrameVariableSet().upscalerOptions); }
+	std::uint64_t AdoptedShaderGeneration() { return AdoptedFrameValue(FrameVariableSet().shaderGeneration); }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return AdoptedFrameValue(FrameVariableSet().presentationConfig); }
 
 	void RaiseFeatureSettings(std::string_view a_feature, std::string_view a_writer)
@@ -356,6 +363,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetPresenterFormat(SurfaceFormat, std::string_view) { return false; }
 	bool SetUpscalerOptions(UpscalerOptions, std::string_view) { return false; }
 	bool SetInterior(bool, std::string_view) { return false; }
+	bool SetShaderGeneration(std::uint64_t, std::string_view) { return false; }
 	bool SetEngineImageSpace(const ImageSpaceShape&, std::string_view) { return false; }
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view)
 	{
@@ -379,6 +387,7 @@ namespace RenderGraph::Frame::Vars
 	HeightMapIdentity AdoptedHeightMap() { return {}; }
 	SurfaceFormat AdoptedPresenterFormat() { return {}; }
 	UpscalerOptions AdoptedUpscalerOptions() { return {}; }
+	std::uint64_t AdoptedShaderGeneration() { return 0; }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return WrittenPresentationConfig(); }
 
 	void RaiseFeatureSettings(std::string_view, std::string_view) {}

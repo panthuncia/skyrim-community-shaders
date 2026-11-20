@@ -139,6 +139,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<bool> Interior() { return { "Interior" }; }
 	constexpr Var<ImageSpaceShape> EngineImageSpace() { return { "EngineImageSpace" }; }
 	constexpr Var<SurfaceFormat> PresenterFormat() { return { "PresenterFormat" }; }
+	constexpr Var<std::uint64_t> ShaderGeneration() { return { "ShaderGeneration" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -166,6 +167,11 @@ namespace RenderGraph::Frame::Vars
 	bool SetPresenterFormat(SurfaceFormat a_value, std::string_view a_writer);
 	/** @brief Any thread. What the upscaler SDK is configured with. */
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer);
+	/**
+	* @brief Render thread. A shader reload's staged pipelines, as a serial. The revision that carries a new value swaps them in
+	* at its adoption and builds every graph there (RenderGraphRuntime::SwapStagedPipelines). Constants only.
+	*/
+	bool SetShaderGeneration(std::uint64_t a_value, std::string_view a_writer);
 	/**
 	* @brief Any thread. What the swap chain presents with. A revision that changes it is adopted only once the swap chain has it
 	* (the presenter's input fragment, FrameGen::PresentationRevision).
@@ -196,6 +202,8 @@ namespace RenderGraph::Frame::Vars
 	SurfaceFormat AdoptedPresenterFormat();
 	/** @brief Render thread. The adopted upscaler options. */
 	UpscalerOptions AdoptedUpscalerOptions();
+	/** @brief Render thread. The adopted shader generation: the last shader reload whose pipelines were swapped in. */
+	std::uint64_t AdoptedShaderGeneration();
 	/** @brief Render thread. The presentation of the adopted revision: the swap chain had it when the revision was adopted. */
 	FrameGen::PresentationConfig AdoptedPresentationConfig();
 

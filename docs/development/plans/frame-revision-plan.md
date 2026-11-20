@@ -927,6 +927,20 @@ event (`Vars::ShaderGeneration`) whose revision has every epoch as a member, bui
 thread held happens inside `AdoptLatest` **(not investigated; open question Q5)**. If the swap cannot be made safe that way, keep
 `RequestAllSynchronous` for the pipeline swap only and record why in the dated doc.
 
+**As built (7c, 2026-11-19, `org-native/rev-step7c`).** Q5 is answered no (section 9), so the swap stays a render-thread build
+of every graph, now inside the adoption of the revision that carries the event.
+- `Vars::ShaderGeneration` (a serial, `sizes = false`). `ServicePipelineReload` writes it once the registry stages a set: one event
+  per staged set, written again only after the last one's swap was adopted. The frame-end poll no longer builds anything for a
+  reload.
+- `Revision::Adopt` compares the adopted generation before and after the values switch. On a change it calls
+  `RenderGraphRuntime::SwapStagedPipelines` after the staged attach and the schedules, under `Boundary::Caller("revision")`.
+  That is `BuildManager::SwapPipelines` (it replaces `RequestAllSynchronous` and the poll's `synchronousAll` branch): every graph
+  built at once with the host's thread held, where the registry extension publishes. Every epoch takes the new pipelines in that
+  Begin, in all three modes. In guest the build no longer happens at Main::Draw's or the frame end's poll.
+- `DeclareProgram`'s programs need neither a generation key nor a cleared cache: each build is a `ComputeProgram::Load`, a live
+  registry entry, so the reload rebuilds every kept key in place (section 9, step 7c).
+- Test: `shader-reload` (new).
+
 **7d. Fatal.** The boundary check's late versions and late attaches become `NoteTapError` (a new `TapError::OutsideAdoption`), fatal
 in development builds. Allowed callers left: `dclf` (until 10a), the engine-import exception (until 9). Late changes (in-frame build
 requests) stay counted until step 10c.
@@ -1371,7 +1385,7 @@ return nothing (or only the stated exception) at the end.
 | `RenderGraphRuntime::AttachDclfBuilds`, DCLF `external` epochs, frame-end `Attach::All` for DCLF | 10a | `rg -n "AttachDclfBuilds\|Attach::All\|\.external" src` |
 | DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
-| `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5) | `rg -n "RequestAllSynchronous" src` |
+| `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
 | Boundary check's allowed callers (`dclf`, engine-import exception) and its counted (non-fatal) mode | 10a, 9b, 7d/10c | `rg -n "Allowed\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` |
 | Writer shims: `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`, and the wrappers' event calls | 7a | `rg -n "SettingsWritten\|ProjectSizeSettings\|SizeProjection" src` |
 | The lane's `RequestSize` input and the coordinator's "wish" path | 7a | `rg -n "Wish\|wishes" src/RenderGraph/Frame/Revision.*` |
@@ -1396,7 +1410,7 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q2 | Cost of making a twin's D3D11 export at adoption on the render thread (DXVK interop wrap of existing memory). | Tracy zone around `AdoptPrepared` in a `resize` run. If it costs more than about 0.2 ms per twin, investigate making exports on the lane (D3D11 device creation is free-threaded, the interop call is not known to be). |
 | Q3 | Which executor the revision lane runs on. | Read `RenderGraphRuntime.cpp` for the executors used by `BuildManager`'s build thread and DCLF's pumps (`DCLF/Core/Scene/Coordinator/ScenePump.cpp`). Do not add a thread if a serialized pump on an existing executor works. |
 | Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | Grep run logs for "creating its render targets again". Read `Hooks.cpp`'s thunk caller (`Renderer::WindowSizeChanged`). If it never runs mid-session, implement 9a's event path without a test and say so in the dated doc. |
-| Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | Read `RenderGraphRuntime::ServicePipelineReload` and ORG's `BuildIfRequested` with the host held. |
+| Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | **Answered (7c, 2026-11-19): not as a swap of slots alone.** The swap now runs inside `AdoptLatest`, but as a render-thread build of every graph (`BuildManager::SwapPipelines`). Why, from the code: (1) `ComputeProgram`/`RasterProgram::Pipeline()` read the slot (`LivePipelineSlot::Peek`) when a pass records, and keep no reference. (2) A revision's recordings are made before its adoption, on the host's thread, so they would bind the old payloads. (3) `Publish` retires a replaced payload at `SubmissionsMade()`, and a kept recording made before the swap may replay after it: a freed pipeline. (4) `AttachStagedEpochGraphs` holds the host's thread, but gives no hook to publish inside the hold. Making it safe needs pipelines named by the revision: the registry's staged set as host data (`IResourceVersions`-like, OMS), a recording that can read its host data or retains its payloads (ORG `RecordingContext`), and programs that bind through it. |
 | Q6 | Where the engine shadow map's size and format are created and whether they change in a session. | Read `LightLimitFix.cpp:EnsureLocalShadowResources` (it reads `kSHADOWMAPS`) and the engine target plan in `docs/development/p4/render-targets.md`. |
 | Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | Read `FrameDriver.cpp:OnBegin`'s comment and `DCLF/Core/Render/FrameDriver.cpp:BeginFrame`'s caller in guest; check the epoch order in a `guest-quick` census. |
 | Q8 | TextureStreaming `BaseSize` and WetnessEffects `RaindropGridSize`: size-relevant or not. | Read `TextureStreaming.cpp:SetSettings` and the wetness shaders. Port only if a texture size follows them. |
@@ -1927,6 +1941,21 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   client is always active and commits every run. A toggle shows one frame on D3D11.
 - **No variable for Effects11's ownership of Exponential Height Fog.** EHF's key does not read it: `IsSuppressed` is read by EHF's
   Prepass and `GetCommonBufferData` each frame. None fell out of these migrations.
+
+**Decided by the agent (step 7c, shader reload, 2026-11-19), to confirm:**
+- **The swap stays a render-thread build of every graph (Q5).** It runs inside the adoption of the revision that carries
+  `ShaderGeneration`, after the staged attach (a build before it would make the attach refuse its staged graphs, which is fatal).
+  The same cost as before, at a frame boundary in every mode. It takes the build mutex, so it waits for a managed build in
+  progress, as the old poll did. The rest of a reload (the compiles) was already off the render thread.
+- **No revision members of its own.** The event's revision carries the variable only; the build at its adoption rebuilds every
+  epoch, which is what "every epoch as a member" asked for. Recording every member ahead would bind the old pipelines (Q5).
+- **`DeclareProgram` keys get no generation, and the kept builds are not cleared.** Every build is a registry entry, so the
+  registry rebuilds each kept key in place. A generation key would compile each program twice per reload and register a second
+  slot set. A future `DeclareProgram` whose build is not a registry entry would need `ShaderGeneration` in its dependencies.
+- **One event per staged set.** `ServicePipelineReload` writes `adopted + 1` only while the last written value is adopted, so a
+  set staged across several frames is one event. A set still staged after its swap (a slot that missed `Publish`) asks again.
+- **Render owner only.** `ServicePipelineReload` runs at every `SignalFramePace`, which a loading screen's thread also calls; the
+  write is skipped there, since it reads the adopted values.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
