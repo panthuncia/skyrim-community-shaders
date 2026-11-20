@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils/Setting.h"
+
 /** @brief Adds configurable volumetric lighting with god rays and atmospheric scattering effects. */
 struct VolumetricLighting : Feature
 {
@@ -10,17 +12,22 @@ public:
 		int32_t Width = 320;
 		int32_t Height = 192;
 		int32_t Depth = 90;
+		friend bool operator==(const TextureSize&, const TextureSize&) = default;
 	};
 
+	/** @brief The volume's size and the engine's VL on/off follow these, so they are CS::Setting. */
 	struct Settings
 	{
-		bool ExteriorEnabled = true;
-		int32_t ExteriorQuality = 2;
-		TextureSize ExteriorCustomSize;
-		bool InteriorEnabled = true;
-		int32_t InteriorQuality = 2;
-		TextureSize InteriorCustomSize;
+		CS::Setting<bool> ExteriorEnabled = true;
+		CS::Setting<int32_t> ExteriorQuality = 2;
+		CS::Setting<TextureSize> ExteriorCustomSize;
+		CS::Setting<bool> InteriorEnabled = true;
+		CS::Setting<int32_t> InteriorQuality = 2;
+		CS::Setting<TextureSize> InteriorCustomSize;
 	};
+
+	/** @brief Binds the settings to their frame variables. The global is the only instance. */
+	VolumetricLighting();
 
 	Settings settings;
 
@@ -43,8 +50,6 @@ public:
 
 	virtual void SaveSettings(json&) override;
 	virtual void LoadSettings(json&) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void RestoreDefaultSettings() override;
 	/** @brief Draws the ImGui settings panel for volumetric lighting configuration. */
 	virtual void DrawSettings() override;
@@ -54,7 +59,10 @@ public:
 	virtual void PostPostLoad() override;
 	/** @brief Creates the volumetric lighting constant buffer. */
 	virtual void SetupResources() override;
-	/** @brief Updates screen dimensions, detects interior/exterior transitions, and configures VL quality. */
+	/**
+	 * @brief Updates screen dimensions, writes the Interior frame variable, and gives the engine its VL quality. On the render
+	 * graph the quality is the adopted revision's, so the engine's volume size matches the declared volume.
+	 */
 	virtual void EarlyPrepass() override;
 
 	virtual bool IsCore() const override { return true; };
@@ -115,10 +123,10 @@ public:
 	void SetGroupCountsVCS(uint32_t& threadGroupCountX, uint32_t& threadGroupCountY) const;
 
 	/**
-	 * @brief The volume size SetupVL gives the engine for interiors or exteriors (the quality's preset, or the custom size), in
-	 * texels. The ORG path makes a volume for each at setup.
+	 * @brief The volume size the engine is given for a quality (its preset, or a_custom for Custom), in texels. The ORG path
+	 * declares its volume with it.
 	 */
-	TextureSize VolumeSize(bool a_interior) const;
+	TextureSize VolumeSizeFor(int32_t a_quality, const TextureSize& a_custom) const;
 
 private:
 	struct VolumetricLightingDescriptor
@@ -127,9 +135,20 @@ private:
 	static const char* FromUnits(int32_t value, int32_t unitScale);
 	static VolumetricLightingDescriptor& GetVLDescriptor();
 	static void SetVLQuality(VolumetricLightingDescriptor& descriptor, std::uint32_t quality);
-	void DrawVolumetricLightingSettings(int32_t& quality, TextureSize& customSize, bool isInterior, bool inLocationType);
+	void DrawVolumetricLightingSettings(CS::Setting<int32_t>& quality, CS::Setting<TextureSize>& customSize, bool isInterior);
 	TextureSize& FetchCurrentSizeInUnits(bool interior);
-	void SetupVL();
+
+	/** @brief What the engine is given: VL on or off, the quality, and the High preset's size (the custom size for Custom). */
+	struct EngineVL
+	{
+		bool enabled = false;
+		int32_t quality = 0;
+		TextureSize highSize;
+		friend bool operator==(const EngineVL&, const EngineVL&) = default;
+	};
+	/** @brief From the live settings, or on the render graph from the adopted revision's. */
+	EngineVL WantedEngineVL() const;
+	void ApplyEngineVL(const EngineVL& a_vl);
 
 	enum class Quality : uint8_t
 	{
@@ -150,9 +169,10 @@ private:
 	TextureSize* gVolumetricLightingSizeMedium = nullptr;
 	TextureSize* gVolumetricLightingSizeLow = nullptr;
 
-	bool initialised = false;
+	// The location as the live cell gives it. The engine is given the adopted location's settings on the render graph.
 	bool inInterior = false;
 	bool inInteriorWithSun = false;
+	std::optional<EngineVL> appliedVL;
 
 	/**
 	 * @brief Bounds of the dynamic resolution render area, in pixels.

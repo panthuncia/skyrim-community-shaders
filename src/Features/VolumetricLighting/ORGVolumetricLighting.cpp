@@ -30,6 +30,7 @@ ORGVolumetricLighting& ORGVolumetricLighting::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -38,6 +39,7 @@ ORGVolumetricLighting& ORGVolumetricLighting::Get()
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
+#	include "State.h"
 #	include "Utils/Game.h"
 #	include "Utils/Logging.h"
 
@@ -49,6 +51,7 @@ ORGVolumetricLighting& ORGVolumetricLighting::Get()
 
 #	include <algorithm>
 #	include <array>
+#	include <atomic>
 #	include <cstddef>
 #	include <cstring>
 #	include <functional>
@@ -69,8 +72,6 @@ namespace
 	constexpr const char* kClientId = "cs.volumetric-lighting";
 	constexpr Anchor kAnchor = Anchor::VolumetricLighting;
 	constexpr const char* kLogPrefix = "[ORG] Volumetric Lighting";
-	// The exterior's and the interior's volume sizes.
-	constexpr std::uint32_t kMaxVolumes = 2;
 	// The size SetComputeShaderConstants uses for the density generation's PerTechnique block.
 	constexpr std::size_t kGenerateBytes = 0x180;
 	constexpr std::uint32_t kGenerateRows = static_cast<std::uint32_t>(kGenerateBytes / 16);
@@ -83,14 +84,14 @@ namespace
 	constexpr std::uint32_t OutputOf(std::uint32_t a_output) { return a_output == 0 ? kVolumetricTarget : kPreviousTarget; }
 	constexpr std::uint32_t PreviousOf(std::uint32_t a_output) { return a_output == 0 ? kPreviousTarget : kVolumetricTarget; }
 
-	// Gate entries: noise, four per volume (generate, raymarch, apply into either output), the blurs by output, then the depth copy.
+	// Gate entries: noise, generate, raymarch, the apply into either output, the blurs by output, then the depth copy.
 	constexpr std::uint32_t kNoiseEntry = 0;
-	constexpr std::uint32_t GenerateEntry(std::uint32_t a_volume) { return 1 + 4 * a_volume; }
-	constexpr std::uint32_t RaymarchEntry(std::uint32_t a_volume) { return 2 + 4 * a_volume; }
-	constexpr std::uint32_t ApplyEntry(std::uint32_t a_volume, std::uint32_t a_output) { return 3 + 4 * a_volume + a_output; }
-	constexpr std::uint32_t BlurHEntry(std::uint32_t a_output) { return 1 + 4 * kMaxVolumes + a_output; }
-	constexpr std::uint32_t BlurVEntry(std::uint32_t a_output) { return 3 + 4 * kMaxVolumes + a_output; }
-	constexpr std::uint32_t kDepthCopyEntry = 5 + 4 * kMaxVolumes;
+	constexpr std::uint32_t kGenerateEntry = 1;
+	constexpr std::uint32_t kRaymarchEntry = 2;
+	constexpr std::uint32_t ApplyEntry(std::uint32_t a_output) { return 3 + a_output; }
+	constexpr std::uint32_t BlurHEntry(std::uint32_t a_output) { return 5 + a_output; }
+	constexpr std::uint32_t BlurVEntry(std::uint32_t a_output) { return 7 + a_output; }
+	constexpr std::uint32_t kDepthCopyEntry = 9;
 	constexpr std::uint32_t kGateEntries = kDepthCopyEntry + 1;
 
 	using Float4 = std::array<float, 4>;
@@ -159,6 +160,34 @@ namespace
 		auto operator<=>(const VolumeSize&) const = default;
 		explicit operator bool() const { return width >= 32 && height >= 32 && depth > 0; }
 	};
+
+	/** @brief The density volume's description. The engine's accumulation volume format (AE 0x1414c5fa0). */
+	D3D11_TEXTURE3D_DESC VolumeDesc(const VolumeSize& a_size)
+	{
+		D3D11_TEXTURE3D_DESC desc{};
+		desc.Width = (std::max)(a_size.width, 1u);
+		desc.Height = (std::max)(a_size.height, 1u);
+		desc.Depth = (std::max)(a_size.depth, 1u);
+		desc.MipLevels = 1;
+		desc.Format = DXGI_FORMAT_R16_FLOAT;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		return desc;
+	}
+
+	VolumeSize SizeOf(const VolumetricLighting::TextureSize& a_size)
+	{
+		return { static_cast<std::uint32_t>((std::max)(a_size.Width, 0)), static_cast<std::uint32_t>((std::max)(a_size.Height, 0)),
+			static_cast<std::uint32_t>((std::max)(a_size.Depth, 0)) };
+	}
+
+	[[noreturn]] void Fail(std::string_view a_why)
+	{
+		const auto message = fmt::format("Community Shaders: Volumetric Lighting on the render graph: {}", a_why);
+		logger::critical("{}: {}", kLogPrefix, a_why);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
+	}
 
 	// ---- The engine's data ----
 
@@ -230,7 +259,7 @@ namespace
 		return ORGVolumetricLighting::Requested() && (FeatureOn() || FrameAnchors::StageStepsAt(Anchor::VolumetricLighting));
 	}
 
-	/** @brief The dynamic resolution part of the screen and its last pixel. */
+	/** @brief The dynamic resolution part of the screen and its last pixel. A per-frame constant, never a declaration. */
 	std::array<std::int32_t, 4> BlurArea()
 	{
 		const float2 size = Util::ConvertToDynamic(float2{ static_cast<float>(globals::game::graphicsState->screenWidth),
@@ -276,26 +305,25 @@ namespace
 		std::map<SamplerModes, org::OwnedDescriptorBinding> samplers;
 	};
 
-	struct VLSource
+	/**
+	* @brief What a registration reads that is not a variable yet: the sky's noise gradient and the published ids of Terrain and
+	* Cloud Shadows. The VL render finds them. A change invalidates the client's key, and the next revision registers it again.
+	*/
+	struct VLInputs
 	{
-		FrameAnchors::Texture resource;
-		std::string published;
-
-		explicit operator bool() const { return resource || !published.empty(); }
-		AnchorPasses::Bind ToBind() const { return resource ? AnchorPasses::Bind::Srv(resource) : AnchorPasses::Bind::Published(published); }
+		ID3D11ShaderResourceView* noiseGradient = nullptr;
+		std::string shadowHeights, cloudShadows;  // published ids, empty for none
+		friend bool operator==(const VLInputs&, const VLInputs&) = default;
 	};
 
-	/** @brief Immutable once registered. */
+	/** @brief One registration of the client. Immutable once made, but for the passes its builds made. */
 	struct VLRegistration
 	{
-		std::vector<VolumeSize> sizes;
-		std::vector<std::unique_ptr<GraphResources::Texture3D>> volumes;
 		FrameAnchors::Texture targets[3];
 		FrameAnchors::Texture motionVectors, depth, previousDepth, shadowmap, shadowmapVL, noiseGradient;
-		VLSource shadowHeights, cloudShadows;
-		// A change means a resize, and the client registers again.
-		std::vector<const void*> engineObjects;
-		const ID3D11ShaderResourceView* noiseGradientView = nullptr;
+		std::string shadowHeights, cloudShadows;
+		// Written at its builds. A published input not declarable yet leaves the generate out.
+		mutable std::array<std::atomic<bool>, kGateEntries> passMade{};
 	};
 
 	/** @brief Held until the blur's call runs it. */
@@ -311,28 +339,32 @@ namespace
 
 	struct VLRun
 	{
-		std::uint32_t volume = 0;
 		std::uint32_t output = 0;
 		VolumeSize size;
 		bool noise = false;
 		LatchData data{};
 		std::array<std::uint32_t, 2> blurHGroups{}, blurVGroups{};
+		// The commit of the build this run executes opened the gates.
+		bool opened = false;
 	};
 }
 
 struct ORGVolumetricLighting::Impl
 {
 	std::shared_ptr<VLFixed> fixed;
-	std::shared_ptr<const VLRegistration> registration;
-	std::string lastMissing;  // logged when it changes
+	// The density volume, declared on the size settings and the Interior variable (the engine's size with the feature off).
+	RenderGraph::Frame::DeclaredTexture3D volume;
+	// The client, declared on the inputs the last VL render found.
+	RenderGraph::Frame::DeclaredClient client;
+	std::optional<VLInputs> observed;
 	VLPending pending;
 	std::optional<VLRun> run;
 	bool inRender = false;
 	bool noiseDone = false;
 	bool announced = false;
-	// A published input not declarable yet leaves the generate out.
-	std::array<bool, kGateEntries> passMade{};
-	Util::ReasonLog skipped{ fmt::format("{}: a frame's volumetric lighting is skipped", kLogPrefix) };
+	static constexpr std::uint32_t kLateSkipsLogged = 16;
+	std::uint32_t lateSkips = 0;
+	Util::ReasonLog skipped{ fmt::format("{}: a frame has no volumetric lighting", kLogPrefix) };
 	Util::ReasonLog engineDispatches{ fmt::format("{}: the VL render's dispatch is withheld", kLogPrefix) };
 
 	/** @brief Made at a graph build. UINT32_MAX when the engine's table has none. */
@@ -352,32 +384,22 @@ struct ORGVolumetricLighting::Impl
 		return index;
 	}
 
-	/** @brief In a fixed order, read from the renderer's tables. */
-	static std::vector<const void*> EngineObjects()
-	{
-		auto* renderer = globals::game::renderer;
-		const auto& targets = renderer->GetRuntimeData().renderTargets;
-		const auto& depths = renderer->GetDepthStencilData().depthStencils;
-		return { targets[kVolumetricTarget].texture, targets[kPreviousTarget].texture, targets[kSwapTarget].texture, targets[RenderTarget::kMOTION_VECTOR].texture,
-			depths[DepthTarget::kMAIN].texture, depths[DepthTarget::kMAIN_COPY].texture, depths[DepthTarget::kSHADOWMAPS_ESRAM].texture,
-			depths[DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM].texture };
-	}
-
 	/**
 	* @brief The feature's published id, when it is on the graph. Empty otherwise, since a D3D11 import is not ordered after
 	* its producer and an id nobody publishes would hold the generate back for good.
 	*/
-	static VLSource FeatureInput(bool a_loaded, bool a_orgPath, std::string_view a_id)
+	static std::string FeatureInput(bool a_loaded, bool a_orgPath, std::string_view a_id)
 	{
 		if (!a_loaded)
 			return {};
 		if (a_orgPath || PublishedResources::IsRegistered(a_id))
-			return { nullptr, std::string(a_id) };
+			return std::string(a_id);
 		return {};
 	}
 
 	/** @brief Null, logged, when it cannot be made. */
-	std::shared_ptr<org::RenderPass> MakeStep(std::uint32_t a_entry, std::string_view a_name, const std::function<void(AnchorPasses::Builder&)>& a_add)
+	std::shared_ptr<org::RenderPass> MakeStep(const VLRegistration& a_registration, std::uint32_t a_entry, std::string_view a_name,
+		const std::function<void(AnchorPasses::Builder&)>& a_add)
 	{
 		AnchorPasses::Builder builder(kAnchor, kClientId, 0, fixed->latch, fixed->gate);
 		a_add(builder);
@@ -388,7 +410,7 @@ struct ORGVolumetricLighting::Impl
 		else
 			pass = passes.front().make();
 		if (a_entry < kGateEntries)
-			passMade[a_entry] = pass != nullptr;
+			a_registration.passMade[a_entry] = pass != nullptr;
 		return pass;
 	}
 
@@ -407,27 +429,78 @@ struct ORGVolumetricLighting::Impl
 		return true;
 	}
 
-	/** @brief False with a_missing set when an input is not there yet. It is tried again at the next VL render. */
-	bool Register(std::vector<VolumeSize> a_sizes, std::string& a_missing)
+	// ---- Declarations ----
+
+	/** @brief With the feature on: the size the engine is given for the location, and one texel while its VL is off. */
+	bool DeclareFeatureVolume()
 	{
-		auto* renderer = globals::game::renderer;
-		if (!renderer) {
-			a_missing = "no renderer";
-			return false;
-		}
-		// The engine's current size first, each once, at most kMaxVolumes.
-		std::vector<VolumeSize> sizes;
-		for (const auto& size : a_sizes)
-			if (size && std::ranges::find(sizes, size) == sizes.end() && sizes.size() < kMaxVolumes)
-				sizes.push_back(size);
-		a_sizes = std::move(sizes);
-		if (a_sizes.empty()) {
-			a_missing = "no volume size";
-			return false;
-		}
+		using namespace RenderGraph::Frame;
+		const auto& s = globals::features::volumetricLighting.settings;
+		volume = DeclareTexture3D(
+			"VolumetricLighting::Volume",
+			DependsOn(Vars::Interior(), s.ExteriorEnabled, s.ExteriorQuality, s.ExteriorCustomSize, s.InteriorEnabled, s.InteriorQuality,
+				s.InteriorCustomSize),
+			[](const Inputs& a_in) {
+				const auto& feature = globals::features::volumetricLighting;
+				const auto& f = feature.settings;
+				const bool interior = a_in.Get(Vars::Interior());
+				if (!(interior ? a_in.Get(f.InteriorEnabled) : a_in.Get(f.ExteriorEnabled)))
+					return VolumeDesc({ 1, 1, 1 });
+				const auto size = interior ? feature.VolumeSizeFor(a_in.Get(f.InteriorQuality), a_in.Get(f.InteriorCustomSize)) :
+				                             feature.VolumeSizeFor(a_in.Get(f.ExteriorQuality), a_in.Get(f.ExteriorCustomSize));
+				return VolumeDesc(SizeOf(size));
+			},
+			// Written by the generate and read by the apply in the same run. Not transient, so a new size is a new version.
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+		return static_cast<bool>(volume);
+	}
+
+	/** @brief With the feature off: the engine's own size, which nothing changes in a session. Declared once it is known. */
+	void DeclareVanillaVolume(const VolumeSize& a_size)
+	{
+		using namespace RenderGraph::Frame;
+		volume = DeclareTexture3D(
+			"VolumetricLighting::Volume", Dependencies{}, [a_size](const Inputs&) { return VolumeDesc(a_size); },
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+		if (!volume)
+			Fail(fmt::format("the volume ({}x{}x{}) could not be made", a_size.width, a_size.height, a_size.depth));
+		logger::info("{}: the engine's volume is {}x{}x{}", kLogPrefix, a_size.width, a_size.height, a_size.depth);
+		client.Invalidate();
+	}
+
+	bool DeclareClient()
+	{
+		client = RenderGraph::Frame::DeclareClient<VLInputs>(
+			kClientId, RenderGraph::Frame::Dependencies{},
+			[this](const RenderGraph::Frame::Inputs&) -> std::optional<VLInputs> {
+				// Until a VL render found the sky's noise gradient, there is no client.
+				if (!volume || !observed || !observed->noiseGradient)
+					return std::nullopt;
+				return *observed;
+			},
+			[this](const VLInputs& a_inputs, FrameAnchors::ClientDesc& a_client) { return MakeClient(a_inputs, a_client); });
+		return static_cast<bool>(client);
+	}
+
+	/** @brief In each VL render. A change makes a new client, registered when the next revision starts. */
+	void Observe()
+	{
+		VLInputs seen;
+		seen.noiseGradient = NoiseGradientView();
+		auto& terrainShadows = globals::features::terrainShadows;
+		auto& cloudShadows = globals::features::cloudShadows;
+		seen.shadowHeights = FeatureInput(!fixed->vanilla && terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId);
+		seen.cloudShadows = FeatureInput(!fixed->vanilla && cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId);
+		if (observed && *observed == seen)
+			return;
+		observed = std::move(seen);
+		client.Invalidate();
+	}
+
+	/** @brief The registration for a new key, at the start of the revision that adopts it. A new volume size is a version, never this. */
+	bool MakeClient(const VLInputs& a_inputs, FrameAnchors::ClientDesc& a_client)
+	{
 		auto made = std::make_shared<VLRegistration>();
-		made->sizes = a_sizes;
-		made->engineObjects = EngineObjects();
 		constexpr std::array kTargets{ kVolumetricTarget, kPreviousTarget, kSwapTarget };
 		for (std::size_t i = 0; i < kTargets.size(); ++i)
 			made->targets[i] = FrameAnchors::EngineTarget(kTargets[i]);
@@ -438,135 +511,104 @@ struct ORGVolumetricLighting::Impl
 		made->shadowmapVL = FrameAnchors::EngineDepth(DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM);
 		if (!made->targets[0] || !made->targets[1] || !made->targets[2] || !made->motionVectors || !made->depth || !made->previousDepth || !made->shadowmap ||
 			!made->shadowmapVL) {
-			a_missing = "an engine target or depth could not be imported";
+			logger::error("{}: an engine target or depth could not be imported", kLogPrefix);
 			return false;
 		}
-		auto* noiseGradient = NoiseGradientView();
-		if (noiseGradient) {
-			winrt::com_ptr<ID3D11Resource> resource;
-			noiseGradient->GetResource(resource.put());
-			const auto texture = resource.try_as<ID3D11Texture2D>();
-			made->noiseGradient = texture ? FrameAnchors::ImmutableTexture("volumetric-lighting.noise-gradient", texture.get(), noiseGradient) : nullptr;
-			made->noiseGradientView = noiseGradient;
-		}
+		winrt::com_ptr<ID3D11Resource> resource;
+		a_inputs.noiseGradient->GetResource(resource.put());
+		const auto texture = resource.try_as<ID3D11Texture2D>();
+		made->noiseGradient = texture ? FrameAnchors::ImmutableTexture("volumetric-lighting.noise-gradient", texture.get(), a_inputs.noiseGradient) : nullptr;
 		if (!made->noiseGradient) {
-			a_missing = "the sky's noise gradient texture is not loaded yet";
+			logger::error("{}: the sky's noise gradient texture could not be imported", kLogPrefix);
 			return false;
 		}
-		auto& terrainShadows = globals::features::terrainShadows;
-		auto& cloudShadows = globals::features::cloudShadows;
-		made->shadowHeights = FeatureInput(!fixed->vanilla && terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId);
-		made->cloudShadows = FeatureInput(!fixed->vanilla && cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId);
-		for (const auto& size : a_sizes) {
-			D3D11_TEXTURE3D_DESC desc{};
-			desc.Width = size.width;
-			desc.Height = size.height;
-			desc.Depth = size.depth;
-			desc.MipLevels = 1;
-			// The engine's accumulation volume format (AE 0x1414c5fa0).
-			desc.Format = DXGI_FORMAT_R16_FLOAT;
-			desc.Usage = D3D11_USAGE_DEFAULT;
-			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-			// Written by the generate and read by the apply in the same run, so transient.
-			auto volume = std::make_unique<GraphResources::Texture3D>(desc, fmt::format("VolumetricLighting::Volume{}x{}x{}", size.width, size.height, size.depth),
-				GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
-			if (!*volume) {
-				a_missing = "a volume could not be made";
-				return false;
-			}
-			made->volumes.push_back(std::move(volume));
-		}
+		made->shadowHeights = a_inputs.shadowHeights;
+		made->cloudShadows = a_inputs.cloudShadows;
 
+		// Passes bind the volume's slot, so each frame binds the version its revision adopted.
+		auto* twin = volume.Get();
 		const std::shared_ptr<const VLRegistration> shared = made;
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
+		a_client.id = kClientId;
 		std::int32_t order = 0;
 		const auto add = [&](std::string a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
 			// Gated so the anchor can run in a frame phase. A copy skips at execution when its entry is closed.
-			client.passes.push_back({ .name = fmt::format("{}.{}", kClientId, a_name),
+			a_client.passes.push_back({ .name = fmt::format("{}.{}", kClientId, a_name),
 				.anchor = kAnchor,
 				.order = order++,
 				.kind = a_kind,
 				.make = std::move(a_make),
 				.atExecution = a_kind == FrameAnchors::PassKind::Copy });
 		};
-		add("noise", FrameAnchors::PassKind::Compute, [this] {
-			return MakeStep(kNoiseEntry, "noise", [&](AnchorPasses::Builder& a_builder) {
+		add("noise", FrameAnchors::PassKind::Compute, [this, shared] {
+			return MakeStep(*shared, kNoiseEntry, "noise", [&](AnchorPasses::Builder& a_builder) {
 				a_builder.Add(AnchorPasses::Dispatch{ .name = "noise",
 					.program = fixed->noise,
 					.bindings = { AnchorPasses::Bind::Uav(fixed->noiseVolume->Graph()), AnchorPasses::Bind::Latch(offsetof(LatchData, noise)) },
 					.gate = kNoiseEntry });
 			});
 		});
-		for (std::uint32_t v = 0; v < made->volumes.size(); ++v) {
-			const auto volume = made->volumes[v]->Graph();
-			add(fmt::format("generate.{}", v), FrameAnchors::PassKind::Compute, [this, shared, volume, v]() -> std::shared_ptr<org::RenderPass> {
-				const auto name = fmt::format("generate.{}", v);
-				// A published input not declarable yet leaves the generate out of this build.
-				for (const auto* input : { &shared->shadowHeights, &shared->cloudShadows })
-					if (!input->published.empty() && !PublishedResources::IsDeclarable(input->published)) {
-						logger::info("{}: {} waits for {} to be published; its frames are skipped until the graph is built with it", kLogPrefix, name, input->published);
-						passMade[GenerateEntry(v)] = false;
-						return nullptr;
-					}
-				std::array<AnchorPasses::Bind, 3> samplers{};
-				if (!Samplers(std::array{ kClampPoint, kClampLinear, kNoiseModes }, samplers, name)) {
-					passMade[GenerateEntry(v)] = false;
+		add("generate", FrameAnchors::PassKind::Compute, [this, shared, twin]() -> std::shared_ptr<org::RenderPass> {
+			// A published input not declarable yet leaves the generate out of this build. Its first publish builds every graph again.
+			for (const auto* input : { &shared->shadowHeights, &shared->cloudShadows })
+				if (!input->empty() && !PublishedResources::IsDeclarable(*input)) {
+					logger::info("{}: the generate waits for {} to be published; its frames have no volumetric lighting until the graph is built with it",
+						kLogPrefix, *input);
+					shared->passMade[kGenerateEntry] = false;
 					return nullptr;
 				}
-				return MakeStep(GenerateEntry(v), name, [&](AnchorPasses::Builder& a_builder) {
-					a_builder.Add(AnchorPasses::Dispatch{ .name = name,
-						.program = fixed->generate,
-						.bindings = { AnchorPasses::Bind::Shared(), samplers[0], samplers[1], samplers[2], AnchorPasses::Bind::SrvArray(shared->shadowmap),
-							AnchorPasses::Bind::SrvArray(shared->shadowmapVL), AnchorPasses::Bind::Srv(fixed->noiseVolume->Graph()), AnchorPasses::Bind::Uav(volume),
-							AnchorPasses::Bind::Latch(offsetof(LatchData, generate)),
-							shared->shadowHeights ? shared->shadowHeights.ToBind() : AnchorPasses::Bind::Unused(),
-							shared->cloudShadows ? shared->cloudShadows.ToBind() : AnchorPasses::Bind::Unused() },
-						.gate = GenerateEntry(v) });
-				});
+			std::array<AnchorPasses::Bind, 3> samplers{};
+			if (!Samplers(std::array{ kClampPoint, kClampLinear, kNoiseModes }, samplers, "generate")) {
+				shared->passMade[kGenerateEntry] = false;
+				return nullptr;
+			}
+			const auto feature = [](const std::string& a_id) { return a_id.empty() ? AnchorPasses::Bind::Unused() : AnchorPasses::Bind::Published(a_id); };
+			return MakeStep(*shared, kGenerateEntry, "generate", [&](AnchorPasses::Builder& a_builder) {
+				a_builder.Add(AnchorPasses::Dispatch{ .name = "generate",
+					.program = fixed->generate,
+					.bindings = { AnchorPasses::Bind::Shared(), samplers[0], samplers[1], samplers[2], AnchorPasses::Bind::SrvArray(shared->shadowmap),
+						AnchorPasses::Bind::SrvArray(shared->shadowmapVL), AnchorPasses::Bind::Srv(fixed->noiseVolume->Graph()), AnchorPasses::Bind::Uav(*twin),
+						AnchorPasses::Bind::Latch(offsetof(LatchData, generate)), feature(shared->shadowHeights), feature(shared->cloudShadows) },
+					.gate = kGenerateEntry });
 			});
-			add(fmt::format("raymarch.{}", v), FrameAnchors::PassKind::Compute, [this, volume, v] {
-				return MakeStep(RaymarchEntry(v), fmt::format("raymarch.{}", v), [&](AnchorPasses::Builder& a_builder) {
-					a_builder.Add(AnchorPasses::Dispatch{ .name = fmt::format("raymarch.{}", v),
-						.program = fixed->raymarch,
-						.bindings = { AnchorPasses::Bind::Uav(volume), AnchorPasses::Bind::Latch(offsetof(LatchData, raymarch)) },
-						.gate = RaymarchEntry(v) });
-				});
+		});
+		add("raymarch", FrameAnchors::PassKind::Compute, [this, shared, twin] {
+			return MakeStep(*shared, kRaymarchEntry, "raymarch", [&](AnchorPasses::Builder& a_builder) {
+				a_builder.Add(AnchorPasses::Dispatch{ .name = "raymarch",
+					.program = fixed->raymarch,
+					.bindings = { AnchorPasses::Bind::Uav(*twin), AnchorPasses::Bind::Latch(offsetof(LatchData, raymarch)) },
+					.gate = kRaymarchEntry });
 			});
-		}
-		// Each volume's apply, then the blurs, so each frame's three steps are adjacent.
+		});
+		// The apply, then the blurs, so each frame's three steps are adjacent.
 		for (std::uint32_t o = 0; o < 2; ++o) {
 			const auto output = made->targets[o == 0 ? 0 : 1];
 			const auto previous = made->targets[o == 0 ? 1 : 0];
-			for (std::uint32_t v = 0; v < made->volumes.size(); ++v) {
-				const auto volume = made->volumes[v]->Graph();
-				add(fmt::format("apply.{}.{}", v, o), FrameAnchors::PassKind::Render, [this, shared, volume, output, previous, v, o]() -> std::shared_ptr<org::RenderPass> {
-					const auto name = fmt::format("apply.{}.{}", v, o);
-					std::array<AnchorPasses::Bind, 6> samplers{};
-					if (!Samplers(std::array{ kClampLinear, kClampLinear, kClampLinear, kWrapPoint, kClampLinear, kClampLinear }, samplers, name)) {
-						passMade[ApplyEntry(v, o)] = false;
-						return nullptr;
-					}
-					return MakeStep(ApplyEntry(v, o), name, [&](AnchorPasses::Builder& a_builder) {
-						AnchorPasses::Draw draw{};
-						draw.name = name;
-						draw.program = fixed->apply;
-						draw.bindings = { AnchorPasses::Bind::Shared(), AnchorPasses::Bind::Srv(shared->depth), AnchorPasses::Bind::Srv(previous),
-							AnchorPasses::Bind::Srv(volume), AnchorPasses::Bind::Srv(shared->noiseGradient), AnchorPasses::Bind::Srv(shared->motionVectors),
-							AnchorPasses::Bind::Srv(shared->previousDepth), samplers[0], samplers[1], samplers[2], samplers[3], samplers[4], samplers[5],
-							AnchorPasses::Bind::Latch(offsetof(LatchData, applyIntensityTemporal)) };
-						draw.target = output;
-						// The whole target. The shader keeps the engine's dynamic-resolution part.
-						draw.viewport = { .x = 0, .y = 0, .width = output.Width(), .height = output.Height() };
-						draw.load = rhi::LoadOp::Load;
-						draw.gate = ApplyEntry(v, o);
-						a_builder.Add(std::move(draw));
-					});
+			add(fmt::format("apply.{}", o), FrameAnchors::PassKind::Render, [this, shared, twin, output, previous, o]() -> std::shared_ptr<org::RenderPass> {
+				const auto name = fmt::format("apply.{}", o);
+				std::array<AnchorPasses::Bind, 6> samplers{};
+				if (!Samplers(std::array{ kClampLinear, kClampLinear, kClampLinear, kWrapPoint, kClampLinear, kClampLinear }, samplers, name)) {
+					shared->passMade[ApplyEntry(o)] = false;
+					return nullptr;
+				}
+				return MakeStep(*shared, ApplyEntry(o), name, [&](AnchorPasses::Builder& a_builder) {
+					AnchorPasses::Draw draw{};
+					draw.name = name;
+					draw.program = fixed->apply;
+					draw.bindings = { AnchorPasses::Bind::Shared(), AnchorPasses::Bind::Srv(shared->depth), AnchorPasses::Bind::Srv(previous),
+						AnchorPasses::Bind::Srv(*twin), AnchorPasses::Bind::Srv(shared->noiseGradient), AnchorPasses::Bind::Srv(shared->motionVectors),
+						AnchorPasses::Bind::Srv(shared->previousDepth), samplers[0], samplers[1], samplers[2], samplers[3], samplers[4], samplers[5],
+						AnchorPasses::Bind::Latch(offsetof(LatchData, applyIntensityTemporal)) };
+					draw.target = output;
+					// The whole target. The shader keeps the engine's dynamic-resolution part.
+					draw.viewport = { .x = 0, .y = 0, .width = output.Width(), .height = output.Height() };
+					draw.load = rhi::LoadOp::Load;
+					draw.gate = ApplyEntry(o);
+					a_builder.Add(std::move(draw));
 				});
-			}
+			});
 			const auto swap = made->targets[2];
 			add(fmt::format("blur-h.{}", o), FrameAnchors::PassKind::Compute, [this, shared, output, swap, o] {
-				return MakeStep(BlurHEntry(o), fmt::format("blur-h.{}", o), [&](AnchorPasses::Builder& a_builder) {
+				return MakeStep(*shared, BlurHEntry(o), fmt::format("blur-h.{}", o), [&](AnchorPasses::Builder& a_builder) {
 					a_builder.Add(AnchorPasses::Dispatch{ .name = fmt::format("blur-h.{}", o),
 						.program = fixed->blurH,
 						.bindings = { AnchorPasses::Bind::Shared(), AnchorPasses::Bind::Srv(output), AnchorPasses::Bind::Srv(shared->depth), AnchorPasses::Bind::Uav(swap),
@@ -575,7 +617,7 @@ struct ORGVolumetricLighting::Impl
 				});
 			});
 			add(fmt::format("blur-v.{}", o), FrameAnchors::PassKind::Compute, [this, shared, previous, swap, o] {
-				return MakeStep(BlurVEntry(o), fmt::format("blur-v.{}", o), [&](AnchorPasses::Builder& a_builder) {
+				return MakeStep(*shared, BlurVEntry(o), fmt::format("blur-v.{}", o), [&](AnchorPasses::Builder& a_builder) {
 					a_builder.Add(AnchorPasses::Dispatch{ .name = fmt::format("blur-v.{}", o),
 						.program = fixed->blurV,
 						.bindings = { AnchorPasses::Bind::Shared(), AnchorPasses::Bind::Srv(swap), AnchorPasses::Bind::Srv(shared->depth), AnchorPasses::Bind::Uav(previous),
@@ -586,7 +628,7 @@ struct ORGVolumetricLighting::Impl
 		}
 		// The apply's last D3D11 step copies the main depth into kMAIN_COPY, which next frame's apply reads at t6.
 		add("depth-copy", FrameAnchors::PassKind::Copy, [this, shared] {
-			return MakeStep(kDepthCopyEntry, "depth-copy", [&](AnchorPasses::Builder& a_builder) {
+			return MakeStep(*shared, kDepthCopyEntry, "depth-copy", [&](AnchorPasses::Builder& a_builder) {
 				a_builder.Add(AnchorPasses::Copy{ .name = "depth-copy",
 					.source = shared->depth,
 					.target = shared->previousDepth,
@@ -595,72 +637,19 @@ struct ORGVolumetricLighting::Impl
 					.gate = kDepthCopyEntry });
 			});
 		});
-		client.registerResources = [shared, fixedState = fixed](org::RenderGraph& a_graph) {
+		a_client.registerResources = [fixedState = fixed, twin](org::RenderGraph& a_graph) {
 			fixedState->noiseVolume->Register(a_graph);
-			for (const auto& volume : shared->volumes)
-				volume->Register(a_graph);
+			twin->Register(a_graph);
 		};
-		client.commit = [this](const FrameAnchors::Point&) { Commit(); };
-		client.active = [this] { return run.has_value(); };
-		client.executed = [this](const FrameAnchors::Point&) { Executed(); };
-		client.sharedConstants = true;
-		client.gates = { fixed->gate };
-		passMade.fill(false);
-		if (!FrameAnchors::Register(std::move(client))) {
-			a_missing = "the VolumetricLighting anchor refused the client";
-			return false;
-		}
-		registration = std::move(made);
-		std::string sizeList;
-		for (const auto& size : registration->sizes)
-			sizeList += fmt::format("{}{}x{}x{}", sizeList.empty() ? "" : ", ", size.width, size.height, size.depth);
-		logger::info("{}: registered with volumes {} (Terrain Shadows {}, Cloud Shadows {}); the anchor's graph holds it from its next build", kLogPrefix, sizeList,
-			registration->shadowHeights ? (registration->shadowHeights.published.empty() ? "imported" : "by its published id") : "off",
-			registration->cloudShadows ? (registration->cloudShadows.published.empty() ? "imported" : "by its published id") : "off");
+		// The commit and the gates are this registration's, so a run of an older build commits for the passes it holds.
+		a_client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
+		a_client.active = [this] { return run.has_value(); };
+		a_client.executed = [this](const FrameAnchors::Point&) { Executed(); };
+		a_client.sharedConstants = true;
+		a_client.gates = { fixed->gate };
+		logger::info("{}: a client for the next revision (Terrain Shadows {}, Cloud Shadows {})", kLogPrefix,
+			made->shadowHeights.empty() ? "off" : "by its published id", made->cloudShadows.empty() ? "off" : "by its published id");
 		return true;
-	}
-
-	/** @brief a_also first, then the exterior and interior sizes. With the feature off, the descriptor's size, which is the same everywhere. */
-	std::vector<VolumeSize> SettingsSizes(std::optional<VolumeSize> a_also = std::nullopt) const
-	{
-		auto& feature = globals::features::volumetricLighting;
-		std::vector<VolumeSize> sizes;
-		if (a_also)
-			sizes.push_back(*a_also);
-		if (fixed->vanilla) {
-			sizes.push_back(DescriptorSize());
-			return sizes;
-		}
-		for (const bool interior : { false, true }) {
-			const auto size = feature.VolumeSize(interior);
-			sizes.push_back({ static_cast<std::uint32_t>((std::max)(size.Width, 0)), static_cast<std::uint32_t>((std::max)(size.Height, 0)),
-				static_cast<std::uint32_t>((std::max)(size.Depth, 0)) });
-		}
-		return sizes;
-	}
-
-	/** @brief Logs what is missing when it changes. */
-	bool EnsureRegistered(std::optional<VolumeSize> a_also = std::nullopt)
-	{
-		if (registration)
-			return true;
-		std::string missing;
-		if (Register(SettingsSizes(a_also), missing)) {
-			lastMissing.clear();
-			return true;
-		}
-		if (missing != lastMissing) {
-			logger::info("{}: not registered yet ({}); the volumetric lighting is skipped until it is", kLogPrefix, missing);
-			lastMissing = missing;
-		}
-		return false;
-	}
-
-	void RegisterAgain(std::string_view a_why, std::optional<VolumeSize> a_size = std::nullopt)
-	{
-		logger::info("{}: {}; the client registers again, and its graph is built with it at the next build point", kLogPrefix, a_why);
-		registration.reset();
-		EnsureRegistered(a_size);
 	}
 
 	// ---- The engine's calls ----
@@ -681,9 +670,9 @@ struct ORGVolumetricLighting::Impl
 		pending.rangeFactor = DescriptorField<float>(0x2C);
 		std::memcpy(pending.generateConstants.data(), GenerateConstants(), kGenerateBytes);
 		pending.generateConstants[kGenerateRows] = { pending.rangeFactor != 0.0f ? 1.0f / pending.rangeFactor : 0.0f, 0.0f, 0.0f, 0.0f };
-		// A new size registers again now, and its frames are skipped until the graph has it.
-		if (registration && std::ranges::find(registration->sizes, pending.size) == registration->sizes.end())
-			RegisterAgain(fmt::format("the volume size changed to {}x{}x{}", pending.size.width, pending.size.height, pending.size.depth), pending.size);
+		// With the feature off the engine's size is known only once it renders.
+		if (!volume && fixed->vanilla && pending.size)
+			DeclareVanillaVolume(pending.size);
 	}
 
 	std::uint32_t Apply(std::uint8_t* a_helper, std::uint32_t a_previous, std::uint32_t a_output)
@@ -705,55 +694,51 @@ struct ORGVolumetricLighting::Impl
 		return a_output;
 	}
 
-	/** @brief The frame's work runs on the graph now. */
+	/** @brief The frame's work runs on the graph now, with the client and the volume version of the adopted revision. */
 	void Blur(std::uint32_t a_source, std::uint32_t a_destination, std::uint32_t a_swap)
 	{
 		const auto clear = [&] { pending = {}; };
+		Observe();
+		const auto skip = [&](std::string_view a_reason) {
+			skipped.Report(a_reason);
+			// Once a frame ran, a change switches in with its revision and the old one draws until then, so every frame has it.
+			if (announced && lateSkips < kLateSkipsLogged)
+				logger::warn("{}: frame {} has no volumetric lighting after the first one ran ({}){}", kLogPrefix, globals::state->frameCount, a_reason,
+					++lateSkips == kLateSkipsLogged ? "; later ones are counted only" : "");
+		};
 		if (!pending.output) {
-			skipped.Report("the blur ran without an apply on the VL pair");
+			skip("the blur ran without an apply on the VL pair");
 			return clear();
 		}
 		const std::uint32_t output = *pending.output;
 		if (a_source != OutputOf(output) || a_destination != PreviousOf(output) || a_swap != kSwapTarget) {
-			skipped.Report(fmt::format("the blur's targets are {}, {} and {}, not the apply's", a_source, a_destination, a_swap));
+			skip(fmt::format("the blur's targets are {}, {} and {}, not the apply's", a_source, a_destination, a_swap));
 			return clear();
 		}
 		if (!pending.generate) {
-			skipped.Report("the apply ran without the VL render's generate this frame");
+			skip("the apply ran without the VL render's generate this frame");
 			return clear();
 		}
-		if (!EnsureRegistered(pending.size))
-			return clear();
-		if (registration->engineObjects != EngineObjects() || registration->noiseGradientView != NoiseGradientView()) {
-			RegisterAgain("the engine made a target or the noise gradient texture again");
+		if (!volume) {
+			skip("the engine gave no volume size yet");
 			return clear();
 		}
-		const auto found = std::ranges::find(registration->sizes, pending.size);
-		if (found == registration->sizes.end()) {
-			skipped.Report("its volume size is not registered yet");
+		if (!client.Registered()) {
+			skip("the client is not registered yet (the first revision after a VL render found the sky's noise gradient registers it)");
 			return clear();
 		}
-		const auto volume = static_cast<std::uint32_t>(found - registration->sizes.begin());
-		if (!FrameAnchors::Scheduled(kClientId, kAnchor)) {
-			skipped.Report("the frame's schedule does not hold the client yet");
-			return clear();
-		}
-		const bool noise = !noiseDone;
-		for (const auto entry : { GenerateEntry(volume), RaymarchEntry(volume), ApplyEntry(volume, output), BlurHEntry(output), BlurVEntry(output) })
-			if (!passMade[entry]) {
-				skipped.Report("a pass was left out of the graph's build (logged above)");
-				return clear();
-			}
-		if (noise && !passMade[kNoiseEntry]) {
-			skipped.Report("the noise volume's pass was left out of the graph's build (logged above)");
-			return clear();
-		}
+		// The engine was given the adopted revision's quality at EarlyPrepass, so its size is the bound version's.
+		const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(volume);
+		const VolumeSize size{ extent[0], extent[1], extent[2] };
+		if (size != pending.size)
+			Fail(fmt::format("the engine renders a {}x{}x{} volume, but the adopted revision's is {}x{}x{}", pending.size.width, pending.size.height,
+				pending.size.depth, size.width, size.height, size.depth));
 
-		VLRun next{ .volume = volume, .output = output, .size = pending.size, .noise = noise };
+		VLRun next{ .output = output, .size = size, .noise = !noiseDone };
 		auto& data = next.data;
 		const auto& noiseSize = fixed->noiseSize;
 		data.noise = { static_cast<float>(noiseSize.width), static_cast<float>(noiseSize.height), static_cast<float>(noiseSize.depth), 0.0f };
-		data.raymarch = { static_cast<float>(pending.size.width), static_cast<float>(pending.size.height), static_cast<float>(pending.size.depth), 0.0f };
+		data.raymarch = { static_cast<float>(size.width), static_cast<float>(size.height), static_cast<float>(size.depth), 0.0f };
 		data.blur = BlurArea();
 		data.applyIntensityTemporal = { pending.intensity, pending.temporal, 0.0f, 0.0f };
 		data.applyRepartition = { pending.rangeFactor, 0.0f, 0.0f, 0.0f };
@@ -765,16 +750,27 @@ struct ORGVolumetricLighting::Impl
 		next.blurVGroups = { width, (height + span - 1) / span };
 		run = next;
 		const auto result = FrameAnchors::Run(kAnchor);
+		const bool opened = run->opened;
 		run.reset();
 		if (!result)
-			skipped.Report(fmt::format("the anchor's run did not submit (status {})", static_cast<std::uint32_t>(result.status)));
+			skip(fmt::format("the anchor's run did not submit (status {})", static_cast<std::uint32_t>(result.status)));
+		else if (!opened)
+			skip("the frame's graph does not hold the client yet (until the revision that registered it is adopted), or a pass was left out");
 		clear();
 	}
 
-	void Commit()
+	/** @brief For the registration whose build this run executes. */
+	void Commit(const VLRegistration& a_registration)
 	{
 		if (!run)
 			return;
+		// A pass this build left out (logged at the build) leaves the frame without volumetric lighting.
+		for (const auto entry : { kGenerateEntry, kRaymarchEntry, ApplyEntry(run->output), BlurHEntry(run->output), BlurVEntry(run->output) })
+			if (!a_registration.passMade[entry])
+				return;
+		if (run->noise && !a_registration.passMade[kNoiseEntry])
+			return;
+		run->opened = true;
 		const auto& gate = *fixed->gate;
 		fixed->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, run->data);
 		const auto& size = run->size;
@@ -783,9 +779,9 @@ struct ORGVolumetricLighting::Impl
 			gate.OpenDispatch(kNoiseEntry, noise.width >> 5, noise.height >> 5, noise.depth);
 		}
 		// The engine uses 32x32 threads and one group per slice. The raymarch walks the slices itself.
-		gate.OpenDispatch(GenerateEntry(run->volume), size.width >> 5, size.height >> 5, size.depth);
-		gate.OpenDispatch(RaymarchEntry(run->volume), size.width >> 5, size.height >> 5, 1);
-		gate.OpenDraw(ApplyEntry(run->volume, run->output));
+		gate.OpenDispatch(kGenerateEntry, size.width >> 5, size.height >> 5, size.depth);
+		gate.OpenDispatch(kRaymarchEntry, size.width >> 5, size.height >> 5, 1);
+		gate.OpenDraw(ApplyEntry(run->output));
 		gate.OpenDispatch(BlurHEntry(run->output), run->blurHGroups[0], run->blurHGroups[1], 1);
 		gate.OpenDispatch(BlurVEntry(run->output), run->blurVGroups[0], run->blurVGroups[1], 1);
 		gate.OpenDispatch(kDepthCopyEntry, 1);
@@ -794,14 +790,14 @@ struct ORGVolumetricLighting::Impl
 	/** @brief The noise volume counts as made once a run with it is submitted. */
 	void Executed()
 	{
-		if (!run)
+		if (!run || !run->opened)
 			return;
 		if (run->noise && !noiseDone) {
 			noiseDone = true;
 			logger::info("{}: the noise volume ({}x{}x{}) is made on the graph", kLogPrefix, fixed->noiseSize.width, fixed->noiseSize.height, fixed->noiseSize.depth);
 		}
 		if (!std::exchange(announced, true))
-			logger::info("{}: the first frame's volumetric lighting ran on the graph", kLogPrefix);
+			logger::info("{}: the first frame's volumetric lighting ran on the graph ({}x{}x{} volume)", kLogPrefix, run->size.width, run->size.height, run->size.depth);
 	}
 };
 
@@ -949,12 +945,21 @@ bool ORGVolumetricLighting::Setup()
 		if (!*fixed->noiseVolume)
 			return off("the noise volume could not be made");
 
-		impl = std::make_unique<Impl>();
-		impl->fixed = std::move(fixed);
-		logger::info("{}: on (CS_ORG_VOLUMETRIC_LIGHTING{}); noise volume {}x{}x{}", kLogPrefix,
+		auto made = std::make_unique<Impl>();
+		made->fixed = std::move(fixed);
+		// The client exists from the first revision after a VL render found its inputs. The volume follows the revisions.
+		if (!made->DeclareClient())
+			return off("its client could not be declared");
+		if (!made->fixed->vanilla) {
+			if (!made->DeclareFeatureVolume())
+				return off("its volume could not be declared");
+		} else if (const auto size = DescriptorSize()) {
+			made->DeclareVanillaVolume(size);
+		}
+		impl = std::move(made);
+		logger::info("{}: on (CS_ORG_VOLUMETRIC_LIGHTING{}); noise volume {}x{}x{}; the volume and the client follow the frame revisions", kLogPrefix,
 			impl->fixed->vanilla ? ", the feature off: the engine's volumetric lighting" : "", impl->fixed->noiseSize.width, impl->fixed->noiseSize.height,
 			impl->fixed->noiseSize.depth);
-		impl->EnsureRegistered();
 		return true;
 	} catch (const std::exception& e) {
 		impl.reset();

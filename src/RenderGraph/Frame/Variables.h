@@ -102,6 +102,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<TargetIdentity> HdrOutputTarget() { return { "HdrOutputTarget" }; }
 	constexpr Var<ShadowMapShape> EngineShadowMap() { return { "EngineShadowMap" }; }
 	constexpr Var<CubemapShape> ReflectionCubemap() { return { "ReflectionCubemap" }; }
+	constexpr Var<bool> Interior() { return { "Interior" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -119,6 +120,8 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. The engine's reflection cubemap. */
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer);
+	/** @brief Any thread. Whether the player is in an interior cell. Volumetric Lighting's EarlyPrepass writes it each frame. */
+	bool SetInterior(bool a_value, std::string_view a_writer);
 	/** @brief Any thread. What the upscaler SDK is configured with. */
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer);
 	/**

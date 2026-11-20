@@ -8,7 +8,9 @@
 *
 * The engine's CPU side runs as before. Inside the VL render every DispatchCSShader is withheld, and the apply and blur are
 * detoured whole. The blur's call runs the VolumetricLighting anchor, which holds all the passes, each gated except the depth copy.
-* A frame the graph cannot run is skipped and logged once per reason, with no fallback to the engine.
+* The density volume is declared on the feature's size settings and the Interior variable (frame revision plan 6.12), and the
+* client on the inputs the VL render finds. A change switches in with its revision; until then the old one draws. The feature
+* gives the engine the adopted revision's quality, so the engine's volume size is always the bound version's (a mismatch is fatal).
 * The engine subsystems install it, not the feature. Native mode installs it with the feature off too, since it has no D3D11 path,
 * and then draws the engine's own volumetric lighting. Render thread throughout. Free of ORG/Vulkan includes.
 */
@@ -25,7 +27,8 @@ public:
 	static void Install();
 
 	/**
-	* @brief After the features' SetupResources. An input missing now, such as the noise gradient before the sky loads, registers at the first VL render.
+	* @brief After the features' SetupResources. Declares the volume and the client. The client registers in the first revision
+	* after a VL render found its inputs (the sky's noise gradient loads late).
 	* @return False keeps the D3D11 path.
 	*/
 	bool Setup();
