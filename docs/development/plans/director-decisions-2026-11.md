@@ -171,3 +171,23 @@ final until the user confirms it.
     - IBL's client depends on `DALCMode`, not on `EnableIBL`/`UseStaticIBL`, because Effects 11 can turn IBL on while
       `EnableIBL` is 0. The lead decided this; it is to confirm.
     - 6.18 (the setup-only features) started in the free slot.
+33. **Batch 2 (6.4/6.5, 6.7, 6.8, 6.12) passed 21 of 21 on nfg**, including `llf-parity`, both interior configs, and
+    `shadows-blend` in four modes.
+34. **Batch 3 merged and built:** 6.6, 6.9, 6.13, 6.14, 6.16/6.17, 6.21, the wading fix and 6.18. The director's
+    integration fixes:
+    - The scene catalog generator now accepts `.Get()` in SaveSettings pairs.
+    - New `Util::SliderFloat` over a `CS::SettingElement`, a writable element of an array Setting. Together with 6.18's
+      `Util::RadioButton`, it keeps COD Bloom's mip factors and SSGI's resolution mode bound in the scene editor. The
+      catalog floors would otherwise have failed: 9 controllable entries were lost.
+    - A merge between `DeclareProgram` and `DeriveFromSetting` needed two hand-placed braces. The keep-both script only
+      handles a split struct; a split function needs a hand fix.
+    - `schema.toml` is regenerated for `CS_LLF_LOCAL_SHADOWS`.
+35. **6.9 breaks two rules.** It builds the chain, shader compiles included, on the render thread at revision start, and
+    it falls back to D3D11 when a chain build fails. The 6.20 lead also moves the chain's programs onto `DeclareProgram`
+    and makes a failed build fatal.
+36. **To measure:** SSGI keeps display-size partners at every resolution mode (6.6), about 115–180 MB more at 4K.
+    LensFlare Ultra keeps all 8 spectra (up to 56 MB). Dynamic Cubemaps and Cloud Shadows make a new cubemap edge fatal
+    instead of declaring textures (6.18; the passes are made for 9 mips).
+37. **A step 6 follow-ups lead:** `DeclareBuffer` (the LLF cluster buffers, the HistogramAutoExposure buffers),
+    ImageSpace depending on `EnabledSSR`, the Volumetric Shadows cascades variable, and the section 8 grep review.
+    6.15 (HDR) and 6.23 (Screenshot) wait for step 7b.
