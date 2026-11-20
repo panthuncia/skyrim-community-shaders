@@ -92,6 +92,8 @@ namespace RenderGraph::Frame::Vars
 		std::uint64_t id = 0;  // 0 for none
 		Extent2D size{};
 		friend bool operator==(const HeightMapIdentity&, const HeightMapIdentity&) = default;
+	};
+
 	/**
 	* @brief The engine's ImageSpace shape: the loops its effects run and the water's textures (frame revision plan, 6.7).
 	* The engine raises no event for these, so ImageSpace writes them at each Begin.
