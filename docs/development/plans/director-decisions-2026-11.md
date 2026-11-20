@@ -147,3 +147,19 @@ final until the user confirms it.
     The change is kept while worktrees need the local-only commits. Restore the upstream URLs before any push.
 28. **Next migration leads:** 6.13 (LLF local shadows, which may add `DeclareBuffer`), 6.14 (Upscaling, together with the
     upscaler options from the adopted revision) and 6.16 with 6.17 (IBL and Skylighting).
+29. **6.2 and 6.3 integration:** `menu` passed in all four modes. `terrain-shadows` passed in guest and native D3D12, and
+    the quick runs passed. Native Vulkan `terrain-shadows` stopped on a fatal schedule mismatch after `coc Riverwood`:
+    "ISWaterWadingHeightmap instance 4 of the frame is past the start stage's 4 instances". A code-only fix lead
+    (`org-native/fix-wading-instances`) is on it. The mismatch is a gap in the native schedule, not something 6.3 did.
+30. **Merged and built together:** 6.4 with 6.5 (Screen Space Shadows, Terrain Blending, and `DeclareProgram`), 6.7
+    (ImageSpace, which adds an `EngineImageSpace` variable), 6.8 and 6.12. The director fixed three integration errors:
+    - a missing `Frame/Declare.h` include in `ORGTerrainBlending.cpp`;
+    - the scene settings generator didn't handle a struct wrapped in `CS::Setting` (VL's `TextureSize`); it now reaches
+      the struct's members through `Get()`;
+    - a merge that dropped a closing brace in `Variables.h`.
+
+    Every lead adds frame variables at the same spots in `Variables.h`/`.cpp` and `Declare.cpp`. Each merge keeps both
+    sides.
+31. **Leads now running:** 6.6 (SSGI, the second `DeclareProgram` user), 6.9, 6.13, 6.14 and 6.16+6.17, plus the wading
+    fix. Still to come: 6.10 and 6.11 (Effects11, with programs), 6.15 (HDR, which depends on 7b), 6.18, 6.19, 6.20,
+    6.21, 6.22 and 6.23 (which moves with 7b).
