@@ -267,3 +267,9 @@ final until the user confirms it.
     change re-registers them. The VRAM measurement procedure is in the plan (`dynres-vram`, at 4K).
 52. **Steps 9a and 9b run in parallel** with separate leads, as the plan allows. 9a resolves Q4 from the code before it
     writes any. Step 10 is serial afterwards: 10a, 10b and 10c, one lead each, with full runs between them.
+53. **9a is merged.** Q4's answer: the engine reads its new targets at once (`ReInit`, `State::Setup`), so `EndSet` is
+    not made a boundary. A second `Create` while the graph runs is now an explicit fatal, per the user's 2026-11-18
+    decision.
+    - **Visible effect:** dragging the window frame in windowed mode stops the game. The user should know this.
+    - **Native HDR:** a colour-space-only switch now happens at adoption. With frame generation on, the old wait stays.
+    - **Boundary exceptions:** `EngineImports` is narrowed to `JoinSlot` (9b).
