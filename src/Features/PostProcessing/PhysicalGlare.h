@@ -30,9 +30,13 @@
 
 #include "Buffer.h"
 #include "PostProcessFeature.h"
+#include "Utils/Setting.h"
 
 struct PhysicalGlare : public PostProcessFeature
 {
+	/** @brief Binds the settings the ORG chain declares on. */
+	PhysicalGlare();
+
 	bool outputReady = false;
 	virtual inline std::string GetType() const override { return "Physical Glare"; }
 	virtual inline std::string GetDisplayName() const override { return T("feature.post_processing.physical_glare.name", "Physical Glare"); }
@@ -50,12 +54,12 @@ struct PhysicalGlare : public PostProcessFeature
 		// --- Core ---
 		float ThresholdEV = 8.0f;  // Neutral-equivalent EV100; exp2(EV100 - 3) is applied per RGB channel before exposure.
 		float Intensity = 0.1f;
-		int ApertureMode = 0;  // 0 = Lens (N-polygon), 1 = Pupil (circle)
+		CS::Setting<int> ApertureMode = 0;  // 0 = Lens (N-polygon), 1 = Pupil (circle)
 		int ApertureBlades = 6;
 		float ApertureRotation = 0.f;
 		float ScatterStrength = 1.f;
 		float AdaptSpeed = 3.f;
-		int FFTResolution = 1024;
+		CS::Setting<int> FFTResolution = 1024;
 		float FresnelExponent = 0.f;
 		float ChromaticSpread = 1.f;
 		float FStop = 2.8f;               // F-number (e.g. F2.8). ApertureSize = 1.0 / FStop.

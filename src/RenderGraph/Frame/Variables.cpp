@@ -282,6 +282,11 @@ namespace RenderGraph::Frame::Vars
 			return FrameVariableSet().set;
 		}
 
+		std::uint32_t DeriveUint(std::string a_name, std::uint32_t a_dependency, std::function<std::uint32_t(const org::services::VariableSnapshot&)> a_fn)
+		{
+			return FrameVariableSet().set.Derive<std::uint32_t>(std::move(a_name), { a_dependency }, std::move(a_fn)).index;
+		}
+
 		std::uint32_t IndexOf(std::string_view a_name)
 		{
 			return FrameVariableSet().set.Find(a_name);

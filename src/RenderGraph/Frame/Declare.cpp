@@ -1,5 +1,7 @@
 #include "RenderGraph/Frame/Declare.h"
 
+#include <deque>
+
 #if defined(CS_HAS_RENDER_GRAPH) && defined(CS_HAS_ORG_MODULE_SERVICES)
 
 #	include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
@@ -388,6 +390,7 @@ namespace RenderGraph::Frame
 	template Vars::HeightMapIdentity Inputs::Get(Vars::Var<Vars::HeightMapIdentity>) const;
 	template Vars::ImageSpaceShape Inputs::Get(Vars::Var<Vars::ImageSpaceShape>) const;
 	template Vars::SurfaceFormat Inputs::Get(Vars::Var<Vars::SurfaceFormat>) const;
+	template std::uint32_t Inputs::Get(Vars::Var<std::uint32_t>) const;
 
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const
 	{
@@ -479,6 +482,29 @@ namespace RenderGraph::Frame
 	Detail::ErasedProgram Detail::AdoptedProgram(const ProgramDeclaration* a_program)
 	{
 		return a_program ? a_program->adopted : nullptr;
+	}
+
+	Vars::Var<std::uint32_t> Detail::DeriveFromSetting(std::string_view a_name, const Dependency& a_setting, std::function<std::uint32_t(const void*)> a_fn)
+	{
+		// A Var holds a view of its name, so the names live for the process. Render thread, at setup.
+		static std::deque<std::string> s_names;
+		const auto name = fmt::format("Derived.{}", a_name);
+		for (const auto& known : s_names)
+			if (known == name)
+				return { known };
+		if (!a_fn)
+			FailDeclaration(fmt::format("{} has no function", name));
+		const auto setting = IndexOfDependency(a_setting, name);
+		const auto size = a_setting.settingSize;
+		const auto& stored = s_names.emplace_back(name);
+		// Runs where the lane takes its values. It reads the setting's bytes from the snapshot being built.
+		Vars::Lane::DeriveUint(stored, setting, [fn = std::move(a_fn), setting, size, label = std::string_view(stored)](const org::services::VariableSnapshot& a_values) {
+			const auto& value = a_values.Get(org::services::Variable<Vars::Lane::SettingValue>{ setting });
+			if (value.size != size)
+				FailDeclaration(fmt::format("{} reads a setting of {} bytes, which holds {}", label, size, value.size));
+			return fn(value.bytes.data());
+		});
+		return { stored };
 	}
 
 	Inputs AdoptedRevision::Values() const
@@ -640,6 +666,7 @@ namespace RenderGraph::Frame
 	template Vars::HeightMapIdentity Inputs::Get(Vars::Var<Vars::HeightMapIdentity>) const;
 	template Vars::ImageSpaceShape Inputs::Get(Vars::Var<Vars::ImageSpaceShape>) const;
 	template Vars::SurfaceFormat Inputs::Get(Vars::Var<Vars::SurfaceFormat>) const;
+	template std::uint32_t Inputs::Get(Vars::Var<std::uint32_t>) const;
 
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const { CS::SettingRegistry::RaisedBytes(a_id, a_out, a_size); }
 	DeclaredTexture2D DeclareTexture2D(std::string, Dependencies, Texture2DDescFn, const GraphResources::Options&, RenewFn) { return {}; }
@@ -650,6 +677,11 @@ namespace RenderGraph::Frame
 	std::shared_ptr<Detail::ProgramDeclaration> Detail::DeclareProgram(std::string, Dependencies, ProgramFunctions) { return nullptr; }
 	Detail::ErasedProgram Detail::ProgramFor(const ProgramDeclaration*, const Inputs&) { return nullptr; }
 	Detail::ErasedProgram Detail::AdoptedProgram(const ProgramDeclaration*) { return nullptr; }
+	Vars::Var<std::uint32_t> Detail::DeriveFromSetting(std::string_view a_name, const Dependency&, std::function<std::uint32_t(const void*)>)
+	{
+		static std::deque<std::string> s_names;
+		return { s_names.emplace_back(a_name) };
+	}
 	Inputs AdoptedRevision::Values() const { return Inputs(nullptr); }
 	std::array<std::uint32_t, 3> AdoptedRevision::ExtentOf(const Detail::TextureDeclaration*) const { return {}; }
 	bool AdoptedRevision::FirstFrameOf(const Detail::TextureDeclaration*) const { return false; }

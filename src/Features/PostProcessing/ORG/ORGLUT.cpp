@@ -33,9 +33,33 @@ namespace ORGPostChain
 		* @brief LUT::Draw on the graph, one draw over the dynamic-resolution area. A 2D LUT is imported from D3D11.
 		* A 3D LUT is copied into a graph texture by a declared copy pass, since the anchors import 2D textures only.
 		*/
+		/** @brief One build's draw: its constants region, or nothing without a LUT. */
+		class LUTRun final : public Run
+		{
+		public:
+			LUTRun(LatchRegion<LUT::LUTCB> a_constants, bool a_drawn) :
+				constants(a_constants), drawn(a_drawn) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
+			{
+				if (drawn)
+					a_commit.Write(constants, static_cast<LUT&>(a_feature).Constants());
+			}
+
+		private:
+			LatchRegion<LUT::LUTCB> constants;
+			bool drawn = false;
+		};
+
+		/**
+		* The LUT file (LutPath, a string) is no variable, so the loaded texture's identity is observed. A new file is a new
+		* texture of its own shape and format, so it cannot be a declared texture's version.
+		*/
 		class LUTEffect final : public Effect
 		{
 		public:
+			bool Legacy() const override { return false; }
+
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& lut = static_cast<LUT&>(a_feature);
@@ -60,15 +84,16 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
-			void Build(Builder& a_builder, PostProcessFeature& a_feature) override
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t>) override
 			{
-				lutType = static_cast<LUT&>(a_feature).LutType;
+				// Observed in the key with the source it reads.
+				const int lutType = static_cast<LUT&>(a_feature).LutType;
 				if (lutType == kNoLut)
-					return;
+					return std::make_shared<LUTRun>(LatchRegion<LUT::LUTCB>{}, false);
 				// As LUT::SetupResources, the output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				auto image = a_builder.CreateImage("PostProcessing::LUT::Output", format, D3D11_BIND_RENDER_TARGET);
-				constants = a_builder.Latch<LUT::LUTCB>();
+				const auto constants = a_builder.Latch<LUT::LUTCB>();
 				const bool is3D = lutType == kLut3D;
 				if (is3D) {
 					a_builder.Register(*copy);
@@ -83,12 +108,7 @@ namespace ORGPostChain
 					.target = image,
 					.viewport = a_builder.DynamicViewport() });
 				a_builder.SetCurrent(image);
-			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				if (lutType != kNoLut)
-					a_commit.Write(constants, static_cast<LUT&>(a_feature).Constants());
+				return std::make_shared<LUTRun>(constants, true);
 			}
 
 		private:
@@ -144,8 +164,6 @@ namespace ORGPostChain
 			std::shared_ptr<const GraphResources::StagedUpload> staged;  // for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held so a new LUT never takes the old one's address
 			FrameAnchors::Texture source;
-			LatchRegion<LUT::LUTCB> constants;
-			int lutType = kNoLut;
 		};
 	}
 

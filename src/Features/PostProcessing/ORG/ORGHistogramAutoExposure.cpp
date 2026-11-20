@@ -54,13 +54,38 @@ namespace ORGPostChain
 			return desc;
 		}
 
+		class HistogramAutoExposureEffect;
+
+		/** @brief One build's constants region, its readback stamp and the reset's gate entry. */
+		class HistogramAutoExposureRun final : public Run
+		{
+		public:
+			HistogramAutoExposureRun(HistogramAutoExposureEffect& a_effect, LatchRegion<HistogramAutoExposure::AutoExposureCB> a_constants,
+				LatchRegion<RenderGraph::RunReadback::Stamp> a_stamp, GateEntry a_resetGate) :
+				effect(a_effect), constants(a_constants), stamp(a_stamp), resetGate(a_resetGate) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override;
+			void Executed(PostProcessFeature& a_feature) override;
+
+		private:
+			HistogramAutoExposureEffect& effect;
+			LatchRegion<HistogramAutoExposure::AutoExposureCB> constants;
+			LatchRegion<RenderGraph::RunReadback::Stamp> stamp;
+			GateEntry resetGate;
+			bool resetOpened = false;  // the last commit opened the reset
+		};
+
 		/**
-		* @brief HistogramAutoExposure::Draw on the graph. The histogram and adaptation are history buffers owned here, cleared once by a
-		* one-shot CS_Reset until a frame with it reached the GPU. CS_Reset reads no constants, so it may run on a frame the chain does not.
+		* @brief HistogramAutoExposure::Draw on the graph. The histogram and adaptation are history buffers owned here, for the session.
+		* Their first frame (and the first after a shader reload) opens a gated CS_Reset, until a frame with it reached the GPU: the
+		* buffers' FirstFrame. Buffers are no declared textures, so the effect keeps that state. The readback stays a per-frame,
+		* late-bound value: its passes copy every run, so a kept recording replays them, and the pre-exposure takes what arrived.
 		*/
 		class HistogramAutoExposureEffect final : public Effect
 		{
 		public:
+			bool Legacy() const override { return false; }
+
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>&) override
 			{
 				// The adaptation starts over after a shader reload, as ClearShaderCache's resetAdaptation.
@@ -72,7 +97,7 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
-			void Build(Builder& a_builder, PostProcessFeature&) override
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				if (!histogram || !adaptation) {
 					const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History };
@@ -80,37 +105,39 @@ namespace ORGPostChain
 						"PostProcessing::HistogramAutoExposure::Histogram", history);
 					adaptation = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(1, sizeof(float)), 1,
 						"PostProcessing::HistogramAutoExposure::Adaptation", history);
-					clearPending = true;
+					// New buffers hold nothing yet.
+					firstFrame = true;
 					reset = true;
 				}
 				if (!*histogram || !*adaptation) {
 					a_builder.Fail("its history buffers could not be made");
 					histogram.reset();
 					adaptation.reset();
-					return;
+					return nullptr;
 				}
 				if (!readback)
 					readback = RunReadback::Create("PostProcessing::HistogramAutoExposure::Readback",
 						{ kBins * static_cast<std::uint32_t>(sizeof(std::uint32_t)), static_cast<std::uint32_t>(sizeof(float)) });
 				if (!readback) {
 					a_builder.Fail("its readback buffer could not be made");
-					return;
+					return nullptr;
 				}
-				readback->Build(a_builder);
+				const auto stamp = readback->BuildStamp(a_builder);
 				a_builder.Register(*histogram);
 				a_builder.Register(*adaptation);
 
 				const auto words = ShaderBindings::Words<HistogramBlock>();
-				constants = a_builder.Latch<HistogramAutoExposure::AutoExposureCB>();
+				const auto constants = a_builder.Latch<HistogramAutoExposure::AutoExposureCB>();
 				const auto input = a_builder.Current();
 				const auto shape = a_builder.GetShape();
 				const auto groups = HistogramAutoExposure::HistogramGroups(shape.width, shape.height);
 
-				if (clearPending)
-					a_builder.Dispatch({ .name = "reset",
-						.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
-						.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
-						.once = true });
+				// Gated, so it runs only on a committed frame that opened it: the buffers' first frame. It reads no constants.
+				const auto resetGate = a_builder.Gate();
+				a_builder.Dispatch({ .name = "reset",
+					.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
+					.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
+					.gate = resetGate });
 				a_builder.Dispatch({ .name = "histogram",
 					.program = a_builder.Compute(kShader, words, {}, L"CS_Histogram"),
 					.bindings = { Bind::Shared(), Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
@@ -123,28 +150,12 @@ namespace ORGPostChain
 				readback->AddBuffer(a_builder, "adaptation-readback", kAdaptationPart, adaptation->Graph());
 				a_builder.Publish(Published::kAdaptation, Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
 				a_builder.PublishLatch(Published::kAutoExposureConstants, constants);
-			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				auto& exposure = static_cast<HistogramAutoExposure&>(a_feature);
-				a_commit.Write(constants, exposure.Constants(reset || clearPending));
-				reset = false;
-				if (readback) {
-					readback->Commit(a_commit);
-					TakeReadbacks(exposure);
-				}
-			}
-
-			// The one-shot clear ran before or with the first frame of this build.
-			void Executed(PostProcessFeature&) override
-			{
-				clearPending = false;
-				if (readback)
-					readback->Executed();
+				return std::make_shared<HistogramAutoExposureRun>(*this, constants, stamp, resetGate);
 			}
 
 		private:
+			friend class HistogramAutoExposureRun;
+
 			/**
 			* @brief Moves arrived readbacks into the UI values and the pre-exposure metering. Every run copies both parts.
 			* As the D3D11 staging copies, only what the settings UI or the metering under linear lighting wants is taken.
@@ -173,6 +184,7 @@ namespace ORGPostChain
 					float value = 0.0f;
 					std::memcpy(&value, adapted.data(), sizeof(value));
 					// As GetPreExposure takes the D3D11 staging copy: the graph's adaptation meters the next frames' pre-exposure.
+					// A per-frame value: it reaches the frame through State::UpdateSharedData, never a revision.
 					if (std::isfinite(value) && value > 0.0f)
 						a_exposure.preExposureLuminance = value;
 					a_exposure.adaptationValue = value;
@@ -183,12 +195,31 @@ namespace ORGPostChain
 			std::unique_ptr<GraphResources::StructuredBuffer> histogram;
 			std::unique_ptr<GraphResources::StructuredBuffer> adaptation;
 			std::shared_ptr<RunReadback> readback;  // kept across builds
-			LatchRegion<HistogramAutoExposure::AutoExposureCB> constants;
 			std::uint64_t shaderGeneration = 0;
 			std::uint64_t loggedFrame = 0;  // CS_ORG_PP_LOG's last line
-			bool clearPending = false;      // new history buffers not cleared yet
-			bool reset = true;
+			bool firstFrame = false;        // the buffers hold nothing yet, until a frame that reset them reached the GPU
+			bool reset = true;              // the adaptation starts over at the next commit
 		};
+
+		void HistogramAutoExposureRun::Commit(const CommitContext& a_commit, PostProcessFeature& a_feature)
+		{
+			auto& exposure = static_cast<HistogramAutoExposure&>(a_feature);
+			resetOpened = effect.firstFrame;
+			if (resetOpened)
+				a_commit.Open(resetGate, 1);
+			a_commit.Write(constants, exposure.Constants(effect.reset || effect.firstFrame));
+			effect.reset = false;
+			effect.readback->Commit(a_commit, stamp);
+			effect.TakeReadbacks(exposure);
+		}
+
+		// The reset ran with the frame that opened it.
+		void HistogramAutoExposureRun::Executed(PostProcessFeature&)
+		{
+			if (resetOpened)
+				effect.firstFrame = false;
+			effect.readback->Executed();
+		}
 	}
 
 	std::unique_ptr<Effect> MakeHistogramAutoExposure() { return std::make_unique<HistogramAutoExposureEffect>(); }

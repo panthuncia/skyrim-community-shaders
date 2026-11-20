@@ -2,9 +2,13 @@
 
 #include "Buffer.h"
 #include "PostProcessFeature.h"
+#include "Utils/Setting.h"
 
 struct LensFlare : public PostProcessFeature
 {
+	/** @brief Binds the settings the ORG chain declares on. */
+	LensFlare();
+
 	bool outputReady = false;
 	virtual inline std::string GetType() const override { return "Lens Flare"; }
 	virtual inline std::string GetDisplayName() const override { return T("feature.post_processing.lens_flare.name", "Lens Flare"); }
@@ -41,8 +45,8 @@ struct LensFlare : public PostProcessFeature
 		float ThresholdRange = 1.0f;
 		float GhostStrength = 0.3f;
 		float GhostChromaShift = 0.015f;
-		int GhostModeInt = 1;  // 0 = Fast, 1 = Quality, 2 = Ultra
-		int FFTResolution = 512;
+		CS::Setting<int> GhostModeInt = 1;  // 0 = Fast, 1 = Quality, 2 = Ultra
+		CS::Setting<int> FFTResolution = 512;
 		float KernelScale = 0.1f;      // Fraction of FFT resolution for bokeh kernel size
 		float FStop = 14.3f;           // F-number for procedural aperture (e.g. F2.8)
 		int ApertureBlades = 6;        // Number of aperture blades (3-10)

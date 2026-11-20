@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -294,6 +295,27 @@ namespace RenderGraph::Frame
 			return program;
 		};
 		return DeclaredProgram<Program>(Detail::DeclareProgram(std::move(a_name), std::move(a_dependencies), std::move(functions)));
+	}
+
+	namespace Detail
+	{
+		Vars::Var<std::uint32_t> DeriveFromSetting(std::string_view a_name, const Dependency& a_setting, std::function<std::uint32_t(const void*)> a_fn);
+	}
+
+	/**
+	* @brief Render thread, at setup. A frame variable "Derived.<a_name>" computed from one bound setting when a revision takes
+	* the values. Its event fires only when the result changes, so a declaration on it ignores edits that keep the result (Post
+	* Processing's COD Bloom: the used mips of its blend factors). Declaring a name again returns its variable and keeps the
+	* first function. A declaration depends on it and reads it as on any frame variable. Without the graph it reads zero.
+	*/
+	template <class T>
+	Vars::Var<std::uint32_t> DeriveFromSetting(std::string_view a_name, const CS::Setting<T>& a_setting, std::function<std::uint32_t(const T&)> a_fn)
+	{
+		return Detail::DeriveFromSetting(a_name, DependencyOf(a_setting), [fn = std::move(a_fn)](const void* a_bytes) {
+			T value{};
+			std::memcpy(&value, a_bytes, sizeof(T));
+			return fn(value);
+		});
 	}
 
 	/** @brief What the frame reads: the variables of the revision adopted last, and the declared textures as they are bound. */

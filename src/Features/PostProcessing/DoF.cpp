@@ -50,6 +50,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	targetFocusFocalLength,
 	consoleSelection)
 
+DoF::DoF()
+{
+	settings.UseAdaptiveGather.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.UseAdaptiveGather"));
+	settings.GatherQuality.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.GatherQuality"));
+	settings.BokehMode.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.BokehMode"));
+	settings.HighlightShape.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.HighlightShape"));
+}
+
 void DoF::DrawSettings()
 {
 	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
@@ -194,7 +202,7 @@ void DoF::DrawSettings()
 			Util::SettingHint(T("feature.post_processing.do_f.procedural_requires_adaptive", "Procedural blades require Adaptive Gather; the compatibility path uses a circle."), false);
 	} else if (owner) {
 		const int shapeCount = owner->bokehResources.GetTotalShapeCount();
-		const int shape = std::clamp(settings.HighlightShape, 1, std::max(shapeCount, 1));
+		const int shape = std::clamp(settings.HighlightShape.Get(), 1, std::max(shapeCount, 1));
 		if (!SceneWidgetInterceptor::IsArmed())
 			settings.HighlightShape = shape;
 		const int selectedShape = shape - 1;
@@ -242,7 +250,7 @@ void DoF::DrawSettings()
 			T("feature.post_processing.do_f.gather_quality_performance", "Performance (4 rings)"),
 			T("feature.post_processing.do_f.gather_quality_quality", "Quality (5 rings)")
 		};
-		ImGui::Combo(T("feature.post_processing.do_f.gather_quality", "Gather Quality"), &settings.GatherQuality, gatherQuality, IM_ARRAYSIZE(gatherQuality));
+		Util::Combo(T("feature.post_processing.do_f.gather_quality", "Gather Quality"), settings.GatherQuality, gatherQuality, IM_ARRAYSIZE(gatherQuality));
 	}
 	if (!adaptiveGather)
 		ImGui::SliderFloat(T("feature.post_processing.do_f.blur_quality", "Compatibility Blur Quality"), &settings.BlurQuality, 2.0f, 30.0f, "%.1f");
@@ -700,7 +708,7 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 	// A Cinematic Camera lens always gathers: the compatibility blur cannot draw its aperture.
 	frame.cameraLens = cam != nullptr;
 	frame.adaptiveGather = frame.cameraLens || renderSettings.UseAdaptiveGather;
-	frame.gatherQuality = (size_t)std::clamp(renderSettings.GatherQuality, 0, 1);
+	frame.gatherQuality = (size_t)std::clamp(renderSettings.GatherQuality.Get(), 0, 1);
 
 	const uint halfResX = std::max(1u, (uint)a_width / 2);
 	const uint halfResY = std::max(1u, (uint)a_height / 2);
@@ -708,7 +716,7 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 	const uint tileDimY = std::max(1u, (halfResY + 7) / 8);
 	UpdateProceduralBokehSamples(bladeCount, bladeRoundness);
 
-	const int requestedBokehMode = cam ? 0 : std::clamp(renderSettings.BokehMode, 0, 1);
+	const int requestedBokehMode = cam ? 0 : std::clamp(renderSettings.BokehMode.Get(), 0, 1);
 	int customShapeIndex = 0;
 	bool customShapeLoaded = false;
 	if (owner && requestedBokehMode == 1) {
