@@ -1,0 +1,205 @@
+# The post chain's effects toggled and changed after world-ready, a shot after each change (frame revision plan 6.9).
+# NEEDS THE CHAIN ON: the test profile runs Post Processing in "Vanilla" mode, which bypasses the chain. Switch the profile's mode
+# to "Post Processing" for this run and back after it; the config cannot do it.
+# Each change is a CS::Setting event. A change of a pass list or size builds the chain when the next revision starts; a change
+# of a value only (Mip Blend Factor 3, a blend that keeps the used mip count) must build nothing.
+# The log must show "chain N built for the next revision" once per structural change and "the chain runs on the render graph"
+# after it, and no "the chain could not be built" or "stale recording" line.
+# Compose it: guest+post-effects, native-vulkan+post-effects, native-d3d12+post-effects (and d3d11+post-effects for reference shots).
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+PostProcessing = true
+
+[[steps]]
+at = "world-ready"
+frames = 120
+do = "shot"
+arg = "pp-base"
+
+# COD Bloom: a factor that keeps the used mips (no build), then the last mip's factor, which adds a mip (a build).
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.CODBloom.MipBlendFactor[3]=0.2"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "bloom-blend"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.CODBloom.MipBlendFactor[7]=0.5"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "bloom-mips"
+
+# Depth of Field on, then its gather ring count, the compatibility blur, and back to the gather.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.GatherQuality=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-rings"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.UseAdaptiveGather=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-legacy"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.enabled=false"
+
+# Physical Glare on, then a smaller FFT (a new version of its declared textures), then the pupil aperture.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalGlare.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "glare-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalGlare.FFTResolution=256"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "glare-fft"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalGlare.ApertureMode=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "glare-pupil"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalGlare.enabled=false"
+
+# Lens Flare's ghost mode and FFT size.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.LensFlare.GhostModeInt=2"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "flare-mode"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.LensFlare.FFTResolution=256"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "flare-fft"
+
+# Motion Blur, Vignette, Border and Local Exposure on and off: the effect list.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.MotionBlur.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.Border.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "list-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.Vignette.enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.LocalExposure.enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "list-off"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["pp-base", "bloom-blend", "bloom-mips", "dof-on", "dof-rings", "dof-legacy", "glare-on", "glare-fft", "glare-pupil", "flare-mode",
+	"flare-fft", "list-on", "list-off"]
+no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer"]

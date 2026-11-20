@@ -1170,8 +1170,9 @@ def collect_component_persisted_controls(
             arguments = split_args(draw_body[control.end():close])
             if len(arguments) < 2:
                 continue
+            # "&feat->enabled", or "feat->enabled" for a CS::Setting through Util::Checkbox.
             storage = re.fullmatch(
-                r"\s*&\s*([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)\s*",
+                r"\s*&?\s*([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)\s*",
                 arguments[1])
             if not storage or aliases.get(storage.group(1)) not in containers:
                 continue

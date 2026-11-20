@@ -59,18 +59,16 @@ namespace ORGPostChain
 					.target = image,
 					.viewport = a_builder.DynamicViewport() });
 				a_builder.SetCurrent(image);
-				size = float2(shape.dynamicWidth, shape.dynamicHeight);
 			}
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
 			{
-				a_commit.Write(constants, static_cast<Camera&>(a_feature).Constants(size));
+				a_commit.Write(constants, static_cast<Camera&>(a_feature).Constants(a_commit.DynamicSize()));
 			}
 
 		private:
 			org::OwnedDescriptorBinding sampler;
 			LatchRegion<Camera::CameraCB> constants;
-			float2 size;
 		};
 	}
 

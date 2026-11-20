@@ -10,9 +10,11 @@
 #	include "Globals.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "State.h"
 
 #	include <Resources/ExternalTextureResource.h>
 
+#	include <algorithm>
 #	include <format>
 
 namespace ORGPostChain
@@ -25,8 +27,6 @@ namespace ORGPostChain
 		constexpr DXGI_FORMAT kTileFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		constexpr DXGI_FORMAT kFocusFormat = DXGI_FORMAT_R32_FLOAT;
 		constexpr std::size_t kPyramidLevels = 3;
-		// A commit cannot tell whether its epoch runs the new build yet, so restart the focus for a few commits after a build.
-		constexpr std::uint32_t kFocusResetCommits = 4;
 
 		// DOF_RESOURCES, then the DoFFrame latch, then the BokehSamples latch region.
 		struct DoFBlock
@@ -63,14 +63,62 @@ namespace ORGPostChain
 		std::uint32_t Half(std::uint32_t a_size) { return (std::max)(1u, a_size / 2); }
 		std::uint32_t HalfUp(std::uint32_t a_size) { return (std::max)(1u, (a_size + 1) / 2); }
 
+		/** @brief What one build's passes are: the gather path, its ring count, post smoothing and whether it binds a custom shape. */
+		struct DoFShape
+		{
+			bool adaptiveGather = false;
+			bool postSmoothing = false;
+			bool customShape = false;
+			std::size_t gatherQuality = 0;
+		};
+
+		class DoFEffect;
+
+		/** @brief One build's latch regions and pass list. Its commit keeps the frame's constants to what the build binds. */
+		class DoFRun final : public Run
+		{
+		public:
+			DoFRun(DoFEffect& a_effect, DoFShape a_shape, LatchRegion<DoFLatch> a_constants, LatchRegion<SampleTable> a_samples) :
+				effect(a_effect), shape(a_shape), constants(a_constants), samples(a_samples) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override;
+
+		private:
+			DoFEffect& effect;
+			DoFShape shape;
+			LatchRegion<DoFLatch> constants;
+			LatchRegion<SampleTable> samples;
+		};
+
 		/**
-		* @brief DoF::Draw on the graph, 11 to 18 dispatches. Only what changes the pass list is in the key. The rest, including the sample
-		* table, is latched, so a blade or shape change needs no rebuild. The focus history stays on the GPU in a 1x1 texture owned here.
-		* The custom aperture textures stay BokehResources' D3D11 textures, imported by name.
+		* @brief DoF::Draw on the graph, 11 to 18 dispatches. Only what changes the pass list is in the key: the gather settings and the
+		* bokeh mode from the revision (CS::Setting variables), and what is no variable yet (a Cinematic Camera lens, post smoothing,
+		* the custom aperture's import) observed by Update. The rest, including the sample table, is latched, so a blade or shape
+		* change needs no build. The focus history stays on the GPU in a 1x1 texture owned here. The custom aperture textures stay
+		* BokehResources' D3D11 textures, imported by name.
+		* The ring count is a define (GATHER_RING_COUNT), a program choice: DeclareProgram later.
 		*/
 		class DoFEffect final : public Effect
 		{
 		public:
+			bool Legacy() const override { return false; }
+
+			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
+			{
+				const auto& settings = static_cast<DoF&>(a_feature).settings;
+				for (const auto& dependency : RenderGraph::Frame::DependsOn(settings.UseAdaptiveGather, settings.GatherQuality, settings.BokehMode, settings.HighlightShape))
+					a_dependencies.push_back(dependency);
+			}
+
+			void Key(const RenderGraph::Frame::Inputs& a_values, PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
+			{
+				const auto& settings = static_cast<DoF&>(a_feature).settings;
+				a_key.push_back(a_values.Get(settings.UseAdaptiveGather) ? 1u : 0u);
+				a_key.push_back(static_cast<std::uint64_t>(std::clamp(a_values.Get(settings.GatherQuality), 0, 1)));
+				a_key.push_back(static_cast<std::uint64_t>(std::clamp(a_values.Get(settings.BokehMode), 0, 1)));
+				a_key.push_back(static_cast<std::uint64_t>(static_cast<std::uint32_t>(a_values.Get(settings.HighlightShape))));
+			}
+
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& dof = static_cast<DoF&>(a_feature);
@@ -97,15 +145,25 @@ namespace ORGPostChain
 						return "its custom aperture cannot be imported";
 				}
 
-				for (const std::uint64_t word : { std::uint64_t(frame.adaptiveGather), std::uint64_t(frame.gatherQuality),
-						 std::uint64_t(frame.postSmoothing), std::uint64_t(frame.constants.BokehMode),
+				// The settings come from the revision (Key). These are no variables yet.
+				for (const std::uint64_t word : { std::uint64_t(frame.cameraLens), std::uint64_t(frame.postSmoothing),
 						 std::uint64_t(reinterpret_cast<std::uintptr_t>(shape.Key())), std::uint64_t(reinterpret_cast<std::uintptr_t>(depth.Key())) })
 					a_key.push_back(word);
 				return nullptr;
 			}
 
-			void Build(Builder& a_builder, PostProcessFeature&) override
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
 			{
+				if (a_key.size() < 4) {
+					a_builder.Fail("its key is incomplete");
+					return nullptr;
+				}
+				// As DoF::PrepareFrame: a Cinematic Camera lens always gathers and draws no custom shape.
+				DoFShape built;
+				built.adaptiveGather = frame.cameraLens || a_key[0] != 0;
+				built.gatherQuality = static_cast<std::size_t>(a_key[1]);
+				built.postSmoothing = frame.postSmoothing;
+				built.customShape = !frame.cameraLens && a_key[2] == 1 && static_cast<bool>(shape);
 				if (!sampler) {
 					// DoF::linearSampler: linear, mirrored, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{
@@ -114,7 +172,7 @@ namespace ORGPostChain
 						.addressW = rhi::AddressMode::Mirror });
 					if (!sampler) {
 						a_builder.Fail("its sampler could not be made");
-						return;
+						return nullptr;
 					}
 				}
 				if (!focus) {
@@ -131,7 +189,6 @@ namespace ORGPostChain
 				}
 				a_builder.Register(*focus);
 				a_builder.Publish(Published::kDoFFocus, Image{ focus->Graph(), kFocusFormat });
-				focusReset = kFocusResetCommits;
 
 				const auto& size = a_builder.GetShape();
 				const DXGI_FORMAT colorFormat = size.mainCopyFormat;  // kMAIN_COPY's, as DoF::SetupResources
@@ -156,7 +213,7 @@ namespace ORGPostChain
 				const Image cocTileDilated = image("CoCTileDilated", kTileFormat, tileWidth, tileHeight);
 				std::array<Image, kPyramidLevels> gatherColor, gatherCoC;
 				std::array<std::array<std::uint32_t, 2>, kPyramidLevels> gatherSize{};
-				if (frame.adaptiveGather) {
+				if (built.adaptiveGather) {
 					std::uint32_t levelWidth = halfWidth, levelHeight = halfHeight;
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						levelWidth = HalfUp(levelWidth);
@@ -167,12 +224,12 @@ namespace ORGPostChain
 					}
 				}
 
-				constants = a_builder.Latch<DoFLatch>();
-				samples = a_builder.Latch<SampleTable>();
+				const auto constants = a_builder.Latch<DoFLatch>();
+				const auto samples = a_builder.Latch<SampleTable>();
 				const auto program = [&](const wchar_t* a_entry, bool a_gather = false) {
 					std::vector<std::pair<std::string, std::string>> defines;
 					if (a_gather)
-						defines.emplace_back("GATHER_RING_COUNT", frame.gatherQuality == 0 ? "4" : "5");
+						defines.emplace_back("GATHER_RING_COUNT", built.gatherQuality == 0 ? "4" : "5");
 					return a_builder.Compute(kShader, ShaderBindings::Words<DoFBlock>(), std::move(defines), a_entry);
 				};
 				const auto dispatch = [&](const char* a_name, std::shared_ptr<const ComputeProgram> a_program, const Slots& a_slots,
@@ -187,9 +244,9 @@ namespace ORGPostChain
 					bindings.push_back(Bind::Latch(samples));
 					a_builder.Dispatch({ .name = a_name, .program = std::move(a_program), .bindings = std::move(bindings), .groups = { a_groupsX, a_groupsY, 1 } });
 				};
-				const Bind shapeBind = shape ? Bind::Srv(shape) : Bind::Unused();
+				const Bind shapeBind = built.customShape ? Bind::Srv(shape) : Bind::Unused();
 				const auto gatherInputs = [&](Slots& a_slots) {
-					if (!frame.adaptiveGather)
+					if (!built.adaptiveGather)
 						return;
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						a_slots.gatherColor[i] = Bind::Srv(gatherColor[i]);
@@ -201,11 +258,11 @@ namespace ORGPostChain
 				dispatch("coc", program(L"CS_CalculateCoC"),
 					{ .coc = Bind::Uav(coc), .color = Bind::Srv(input), .previousFocus = Bind::Srv(focus->Graph()), .depth = Bind::Srv(depth) },
 					Groups(width), Groups(height));
-				dispatch("downsample", program(frame.adaptiveGather ? L"CS_Downsample" : L"CS_DownsampleLegacy"),
+				dispatch("downsample", program(built.adaptiveGather ? L"CS_Downsample" : L"CS_DownsampleLegacy"),
 					{ .out = Bind::Uav(setupColor), .coc = Bind::Uav(setupCoC), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc) },
 					Groups(halfWidth), Groups(halfHeight));
 				// The CoC-aware colour pyramid for the fixed gather.
-				if (frame.adaptiveGather) {
+				if (built.adaptiveGather) {
 					auto reduce = program(L"CS_ReduceColorCoC");
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						dispatch(std::format("reduce-{}", i + 1).c_str(), reduce,
@@ -222,10 +279,10 @@ namespace ORGPostChain
 				{
 					Slots slots{ .out = Bind::Uav(farLayer), .color = Bind::Srv(setupColor), .bokehShape = shapeBind, .cocHalf = Bind::Srv(setupCoC), .cocTile = Bind::Srv(cocTile) };
 					gatherInputs(slots);
-					dispatch("far", frame.adaptiveGather ? program(L"CS_FarGather", true) : program(L"CS_FarBlur"), slots, Groups(halfWidth), Groups(halfHeight));
+					dispatch("far", built.adaptiveGather ? program(L"CS_FarGather", true) : program(L"CS_FarBlur"), slots, Groups(halfWidth), Groups(halfHeight));
 				}
 				// The near gather reads a colour-only pyramid of the far result.
-				if (frame.adaptiveGather) {
+				if (built.adaptiveGather) {
 					auto reduce = program(L"CS_ReduceColor");
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						dispatch(std::format("reduce-near-{}", i + 1).c_str(), reduce,
@@ -236,18 +293,18 @@ namespace ORGPostChain
 				{
 					Slots slots{ .out = Bind::Uav(nearLayer), .color = Bind::Srv(farLayer), .bokehShape = shapeBind, .cocHalf = Bind::Srv(setupCoC), .cocTileDilated = Bind::Srv(cocTileDilated) };
 					gatherInputs(slots);
-					dispatch("near", frame.adaptiveGather ? program(L"CS_NearGather", true) : program(L"CS_NearBlur"), slots, Groups(halfWidth), Groups(halfHeight));
+					dispatch("near", built.adaptiveGather ? program(L"CS_NearGather", true) : program(L"CS_NearBlur"), slots, Groups(halfWidth), Groups(halfHeight));
 				}
 				// The setup colour takes the filtered near layer.
 				dispatch("postfilter", program(L"CS_GatherPostfilter"),
 					{ .out = Bind::Uav(farFiltered), .tile = Bind::Uav(setupColor), .color = Bind::Srv(farLayer), .nearBlur = Bind::Srv(nearLayer) },
 					Groups(halfWidth), Groups(halfHeight));
 				// Straight into the output unless post smoothing follows.
-				const Image smooth = frame.postSmoothing ? image("PostSmooth", colorFormat, width, height) : Image{};
+				const Image smooth = built.postSmoothing ? image("PostSmooth", colorFormat, width, height) : Image{};
 				dispatch("combine", program(L"CS_Combiner"),
-					{ .out = Bind::Uav(frame.postSmoothing ? smooth : output), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc), .farBlur = Bind::Srv(farFiltered), .nearBlur = Bind::Srv(setupColor) },
+					{ .out = Bind::Uav(built.postSmoothing ? smooth : output), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc), .farBlur = Bind::Srv(farFiltered), .nearBlur = Bind::Srv(setupColor) },
 					Groups(width), Groups(height));
-				if (frame.postSmoothing) {
+				if (built.postSmoothing) {
 					const Image smooth2 = image("PostSmooth2", colorFormat, width, height);
 					dispatch("smooth-1", program(L"CS_PostSmoothing1"), { .out = Bind::Uav(smooth2), .color = Bind::Srv(smooth), .cocInput = Bind::Srv(coc) },
 						Groups(width), Groups(height));
@@ -256,27 +313,37 @@ namespace ORGPostChain
 						Groups(width), Groups(height));
 				}
 				a_builder.SetCurrent(output);
-			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				// The chain commits only frames it runs, after Update.
-				DoFLatch latch{ .cb = frame.constants, .resetFocus = focusReset > 0 ? 1u : 0u };
-				a_commit.Write(constants, latch);
-				a_commit.Write(samples, static_cast<DoF&>(a_feature).BokehSamples(frame));
-				if (focusReset > 0)
-					--focusReset;
+				return std::make_shared<DoFRun>(*this, built, constants, samples);
 			}
 
 		private:
+			friend class DoFRun;
+
 			FrameAnchors::Texture depth, shape;
-			std::unique_ptr<GraphResources::Texture2D> focus;  // focus distance in km, updated in place each frame
+			// Focus distance in km, updated in place each frame. It is no declared texture: Physical Lens reads it as a plain
+			// resource (its focus readback), and it never changes size.
+			std::unique_ptr<GraphResources::Texture2D> focus;
 			org::OwnedDescriptorBinding sampler;
-			DoF::Frame frame;
-			LatchRegion<DoFLatch> constants;
-			LatchRegion<SampleTable> samples;
-			std::uint32_t focusReset = 0;
+			DoF::Frame frame;                       // this frame's, from Update
+			std::uint32_t lastCommit = UINT32_MAX;  // the frame count of the last commit, for the focus snap
 		};
+
+		void DoFRun::Commit(const CommitContext& a_commit, PostProcessFeature& a_feature)
+		{
+			// The chain commits only frames it runs, after Update. Until the revision with a new build is adopted, the frame's
+			// constants may name a shape this build does not bind, so they keep to the build's.
+			DoF::Frame frame = effect.frame;
+			if (!shape.customShape) {
+				frame.constants.BokehMode = 0;
+				frame.constants.HighlightShape = 0;
+			}
+			// As DoF::Draw: the focus snaps when DoF did not run the previous frame or the history resets.
+			const std::uint32_t frameCount = globals::state->frameCount;
+			const bool resetFocus = effect.lastCommit == UINT32_MAX || frameCount != effect.lastCommit + 1 || globals::state->ShouldResetHistory();
+			effect.lastCommit = frameCount;
+			a_commit.Write(constants, DoFLatch{ .cb = frame.constants, .resetFocus = resetFocus ? 1u : 0u });
+			a_commit.Write(samples, static_cast<DoF&>(a_feature).BokehSamples(frame));
+		}
 	}
 
 	std::unique_ptr<Effect> MakeDoF() { return std::make_unique<DoFEffect>(); }

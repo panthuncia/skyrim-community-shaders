@@ -98,7 +98,7 @@ LensFlare::LensFlareCB LensFlare::BuildConstants(uint a_width, uint a_height) co
 	data.ApertureSize = 1.0f / std::max(fStop, 1.0f);
 
 	// Compute PadScale based on mode
-	GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
+	GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt.Get());
 	float maxKernelScale = settings.KernelScale;  // Quality mode: use global directly
 	if (mode == GhostMode::Ultra) {
 		// Ultra: PadScale based on max effective scale across enabled ghosts
@@ -118,7 +118,7 @@ std::vector<LensFlare::KernelGroup> LensFlare::KernelGroups(uint32_t a_activeGho
 {
 	std::vector<KernelGroup> groups;
 
-	if (static_cast<GhostMode>(settings.GhostModeInt) == GhostMode::Ultra) {
+	if (static_cast<GhostMode>(settings.GhostModeInt.Get()) == GhostMode::Ultra) {
 		// Group enabled ghosts by effective kernel scale (merge similar within 0.001)
 		for (int i = 0; i < NUM_GHOSTS; i++) {
 			if (!(a_activeGhostMask & (1u << i)))
@@ -159,6 +159,12 @@ std::vector<LensFlare::KernelGroup> LensFlare::KernelGroups(uint32_t a_activeGho
 	return groups;
 }
 
+LensFlare::LensFlare()
+{
+	settings.FFTResolution.Bind(CS::SettingRegistry::Declare("PostProcessing.LensFlare.FFTResolution"));
+	settings.GhostModeInt.Bind(CS::SettingRegistry::Declare("PostProcessing.LensFlare.GhostModeInt"));
+}
+
 void LensFlare::DrawSettings()
 {
 	auto tooltip = [](const char* text) {
@@ -187,7 +193,7 @@ void LensFlare::DrawSettings()
 			T("feature.post_processing.lens_flare.ghost_mode_quality", "Quality (FFT Bokeh)"),
 			T("feature.post_processing.lens_flare.ghost_mode_ultra", "Ultra (Per-Ghost FFT)")
 		};
-		ImGui::Combo(T("feature.post_processing.lens_flare.ghost_mode", "Ghost Mode"), &settings.GhostModeInt, modeNames, 3);
+		Util::Combo(T("feature.post_processing.lens_flare.ghost_mode", "Ghost Mode"), settings.GhostModeInt, modeNames, 3);
 		tooltip(T("feature.post_processing.lens_flare.tooltip_ghost_mode",
 			"Fast: procedural radial ghosts (low cost).\n"
 			"Quality: FFT convolution with bokeh shape.\n"
@@ -870,7 +876,7 @@ void LensFlare::Draw(TextureInfo& inout_tex)
 	// Build base constant buffer data
 	LensFlareCB data = BuildConstants(fullW, fullH);
 	data.FFTResolution = currentFFTResolution;
-	const GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt);
+	const GhostMode mode = static_cast<GhostMode>(settings.GhostModeInt.Get());
 
 	std::array<ID3D11ShaderResourceView*, 1> srvs = { nullptr };
 	std::array<ID3D11UnorderedAccessView*, 1> uavs = { nullptr };

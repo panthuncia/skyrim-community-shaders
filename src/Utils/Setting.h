@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json_fwd.hpp>
@@ -114,6 +115,20 @@ namespace CS
 		operator const T&() const noexcept { return value; }
 
 		const T& Get() const noexcept { return value; }
+
+		/** @brief An element of an array value, read only. A write sets the whole value, so it raises the event. */
+		template <class U = T>
+		auto operator[](std::size_t a_index) const noexcept -> decltype(std::declval<const U&>()[a_index])
+		{
+			return value[a_index];
+		}
+
+		/** @brief The element count of an array value. */
+		template <class U = T>
+		constexpr auto size() const noexcept -> decltype(std::declval<const U&>().size())
+		{
+			return value.size();
+		}
 
 		/** @brief Stores a_value. When it differs and the setting is bound, raises the event. */
 		void Set(const T& a_value)

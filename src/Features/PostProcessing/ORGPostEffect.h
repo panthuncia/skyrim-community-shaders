@@ -8,8 +8,10 @@
 * The chain runs on the graph only when every listed sub-effect has an Effect here and none reports a reason not to run.
 * Otherwise the whole chain runs on D3D11 that frame. There is never a mixed frame.
 *
-* Per effect: Update runs on the render thread every frame and builds the key, Build runs at a rebuild, Commit writes the
-* frame's values in the epoch. Never put a per-frame value in the key, since a changed key rebuilds the chain.
+* The chain is one declared client (Frame/Declare.h). Its key is what each effect's passes depend on: its settings and frame
+* variables (Key, from the revision's values) and what is no variable yet (Update, observed each frame). A changed key builds
+* the chain when the next revision starts, and the frame keeps running the build it has until the revision is adopted. So an
+* effect keeps what one build's commits need in that build's Run, never in the effect. Never put a per-frame value in the key.
 * Includers must include <rhi_interop_vulkan.h> first.
 */
 
@@ -18,6 +20,7 @@
 #	include "Features/PostProcessing.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RunReadback.h"
@@ -29,6 +32,7 @@
 #	include <functional>
 #	include <memory>
 #	include <optional>
+#	include <span>
 #	include <string>
 #	include <string_view>
 #	include <utility>
@@ -80,12 +84,13 @@ namespace ORGPostChain
 		}
 	};
 
-	/** @brief kMAIN's size and the main targets' formats. */
+	/**
+	* @brief kMAIN's size and the main targets' formats. The dynamic-resolution part is not in it: a ratio is a per-frame value
+	* (CommitContext::DynamicSize), so it never builds the chain.
+	*/
 	struct Shape
 	{
 		UINT width = 0, height = 0;  // every chain image has kMAIN's size
-		float dynamicWidth = 0.0f;   // the D3D11 passes' viewport size
-		float dynamicHeight = 0.0f;
 		DXGI_FORMAT mainFormat = DXGI_FORMAT_UNKNOWN;
 		DXGI_FORMAT mainCopyFormat = DXGI_FORMAT_UNKNOWN;  // the format most D3D11 sub-effects give their output
 	};
@@ -149,6 +154,9 @@ namespace ORGPostChain
 		static Bind SrvArray(const Image& a_image) { return { Base::SrvArray(a_image.graph) }; }
 		static Bind Uav(const FrameAnchors::Texture& a_texture) { return { Base::Uav(a_texture) }; }
 		static Bind Uav(const Image& a_image) { return { Base::Uav(a_image.graph, a_image.mip) }; }
+		/** @brief A kept twin: its slot when it is declared (versioned), so a new version needs no build. */
+		static Bind Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips) { return { Base::Srv(a_twin, a_mip) }; }
+		static Bind Uav(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips) { return { Base::Uav(a_twin, a_mip) }; }
 		static Bind Handle(std::uint32_t a_index) { return { Base::Handle(a_index) }; }
 		static Bind Unused() { return { Base::Unused() }; }
 		static Bind Shared() { return { Base::Shared() }; }
@@ -208,7 +216,10 @@ namespace ORGPostChain
 		/** @brief Each mip is read and written through Image::Mip. */
 		Image CreateMipChain(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_mips);
 
-		/** @brief An effect-owned history or persistent resource. Call at every build. */
+		/**
+		* @brief An effect-owned history or persistent twin. Call at every build. A declared twin registers its slot, so passes
+		* bind it with Bind::Srv(twin) or ImageOf, never through Graph(). Any other twin is held through its graph resource.
+		*/
 		void Register(const GraphResources::Resource& a_resource);
 		/** @brief An effect-owned graph resource that is not a twin, such as a constant buffer, by name. Call at every build. */
 		void Register(std::string_view a_name, std::shared_ptr<org::Resource> a_resource);
@@ -256,8 +267,13 @@ namespace ORGPostChain
 		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 
-		/** @brief The whole of kMAIN, and the dynamic-resolution part the D3D11 viewports cover. */
+		/** @brief The whole of kMAIN. */
 		RasterProgram::Viewport FullViewport() const;
+		/**
+		* @brief For draws the D3D11 path limits to the dynamic-resolution part. The ratio is a per-frame value, so a recording
+		* cannot bake it. Until the viewport comes from the latch (frame revision plan, step 8) this is the whole of kMAIN, and
+		* the effect's constants carry CommitContext::DynamicSize.
+		*/
 		RasterProgram::Viewport DynamicViewport() const;
 		/** @brief As a D3D11 viewport of width >> a_mip. */
 		RasterProgram::Viewport MipViewport(std::uint32_t a_mip) const;
@@ -287,11 +303,14 @@ namespace ORGPostChain
 		std::string effect;
 	};
 
+	/** @brief An image of a kept twin, its slot when it is declared. */
+	Image ImageOf(const GraphResources::Resource& a_twin, DXGI_FORMAT a_format);
+
 	class CommitContext
 	{
 	public:
-		CommitContext(const org::LatchBlock& a_latch, const org::RunRef& a_run, const RenderGraph::RunGate& a_gate) :
-			latch(a_latch), run(a_run), gate(a_gate) {}
+		CommitContext(const org::LatchBlock& a_latch, const org::RunRef& a_run, const RenderGraph::RunGate& a_gate, float2 a_dynamicSize) :
+			latch(a_latch), run(a_run), gate(a_gate), dynamicSize(a_dynamicSize) {}
 
 		template <class T>
 		void Write(const LatchRegion<T>& a_region, const T& a_value) const
@@ -305,12 +324,16 @@ namespace ORGPostChain
 		/** @brief The run being committed, for an effect's own latch block. */
 		const org::RunRef& Run() const { return run; }
 
+		/** @brief This frame's dynamic-resolution part of kMAIN in pixels, as the D3D11 viewports cover it. A per-frame value. */
+		float2 DynamicSize() const { return dynamicSize; }
+
 	private:
 		void WriteBytes(std::uint32_t a_offset, const void* a_data, std::size_t a_size) const;
 
 		const org::LatchBlock& latch;
 		org::RunRef run;
 		const RenderGraph::RunGate& gate;
+		float2 dynamicSize;
 	};
 
 	/**
@@ -323,7 +346,9 @@ namespace ORGPostChain
 		/** @brief One part per copy, a_parts[i] bytes each. Null and logged when the buffer cannot be made. */
 		static std::shared_ptr<RunReadback> Create(std::string_view a_name, std::vector<std::uint32_t> a_parts);
 
-		/** @brief At every build, before AddBuffer and AddTexture. */
+		/** @brief At every build, before AddBuffer and AddTexture. Returns the build's stamp region, for its Run's Commit. */
+		LatchRegion<RenderGraph::RunReadback::Stamp> BuildStamp(Builder& a_builder);
+		/** @brief The legacy form, for an effect that keeps one state for every build: the stamp region is the newest build's. */
 		void Build(Builder& a_builder);
 		/** @brief A pass that copies the first bytes of buffer a_source into part a_part. */
 		void AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source);
@@ -336,6 +361,8 @@ namespace ORGPostChain
 		* @return This run's stamp. Stamps grow by one each commit.
 		*/
 		std::uint32_t Commit(const CommitContext& a_commit);
+		/** @brief As Commit, writing the stamp into a_stamp, the region BuildStamp gave the build being committed. */
+		std::uint32_t Commit(const CommitContext& a_commit, const LatchRegion<RenderGraph::RunReadback::Stamp>& a_stamp);
 		/** @brief In the effect's Executed: the run last committed was submitted. */
 		void Executed();
 		/** @brief The newest copy of part a_part read since the last Take, and its run's stamp. Empty when none arrived. */
@@ -349,6 +376,22 @@ namespace ORGPostChain
 		LatchRegion<RenderGraph::RunReadback::Stamp> stamp;  // the current build's
 	};
 
+	/**
+	* @brief What one build's commits use: its latch regions, gate entries and what it was built for. Made by the effect's
+	* BuildRun and held by the registration of that build, so a frame that still runs an older build commits that build's Run.
+	*/
+	class Run
+	{
+	public:
+		virtual ~Run() = default;
+
+		/** @brief In the epoch, each frame this build runs. */
+		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) = 0;
+
+		/** @brief After a frame whose commit reached the GPU with this build. Render thread. */
+		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
+	};
+
 	/** @brief One per pipeline slot for the session. Never keep the sub-feature, since SyncPipelineResources may replace it. */
 	class Effect
 	{
@@ -356,23 +399,67 @@ namespace ORGPostChain
 		virtual ~Effect() = default;
 
 		/**
-		* @brief Render thread, each frame the effect is in the chain. Refreshes imports and appends what the passes depend on to a_key.
-		* @return Null when the graph can run it this frame, else why not.
+		* @brief Render thread, once, when the chain is set up. Adds the settings and frame variables Key reads to a_dependencies,
+		* and declares the effect's kept textures (Frame::DeclareTexture2D/3D). The settings are bound by then.
 		*/
-		virtual const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key)
+		virtual void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies)
 		{
 			(void)a_feature;
+			(void)a_dependencies;
+		}
+
+		/**
+		* @brief When a revision starts, render thread. Appends what the passes depend on among the revision's values (a_values) to
+		* a_key. BuildRun gets these words back, so a build reads its settings from them, never from the live settings.
+		*/
+		virtual void Key(const RenderGraph::Frame::Inputs& a_values, PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key)
+		{
+			(void)a_values;
+			(void)a_feature;
 			(void)a_key;
+		}
+
+		/**
+		* @brief Render thread, each frame the effect is in the chain. Refreshes imports and appends what the passes depend on that
+		* is no variable yet (an import's identity, a loaded file) to a_observed. A change builds the chain at the next revision.
+		* @return Null when the graph can run it this frame, else why not.
+		*/
+		virtual const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_observed)
+		{
+			(void)a_feature;
+			(void)a_observed;
 			return nullptr;
 		}
 
-		/** @brief Render thread, at a rebuild. Fail the builder when it cannot. */
-		virtual void Build(Builder& a_builder, PostProcessFeature& a_feature) = 0;
+		/**
+		* @brief Render thread, when a revision builds the chain. a_key holds the words Key appended for that revision.
+		* @return The build's Run. Null only after failing the builder.
+		* The default is the legacy form below: it calls Build and commits through the effect itself.
+		*/
+		virtual std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key);
 
-		/** @brief In the epoch, each frame. */
-		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) = 0;
+		/**
+		* @brief Whether the effect keeps one state for every build (the legacy form: Build, Commit and Executed below).
+		* A chain that holds one commits only its newest build, so a frame whose schedule still holds an older one runs the chain
+		* on D3D11. Physical Lens and Camera FX keep it until they migrate (frame revision plan, 6.20).
+		*/
+		virtual bool Legacy() const { return true; }
 
-		/** @brief After a frame whose Commit reached the GPU with this build's passes. Not called when the epoch ran an older build. Render thread. */
+		/** @brief Legacy form. Render thread, at a build. Fail the builder when it cannot. */
+		virtual void Build(Builder& a_builder, PostProcessFeature& a_feature)
+		{
+			(void)a_feature;
+			a_builder.Fail("it has no build");
+		}
+
+		/** @brief Legacy form. In the epoch, each frame. */
+		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature)
+		{
+			(void)a_commit;
+			(void)a_feature;
+		}
+
+		/** @brief Legacy form. After a frame whose Commit reached the GPU with the newest build's passes. Render thread. */
 		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
 	};
 

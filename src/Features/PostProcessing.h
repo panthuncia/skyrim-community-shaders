@@ -118,6 +118,9 @@ struct PostProcessing : Feature
 
 	void UpdateVanillaEffects(bool active);
 
+	/** @brief Binds a sub-feature's on/off to its frame variable, "PostProcessing.<slot>.enabled". At each new instance. */
+	static void BindPipelineSettings(PostProcessFeature& a_feature, FeaturePipelineIndex a_index);
+
 	/** @brief Creates the sub-feature at a pipeline slot, at its defaults and without GPU resources. */
 	static std::shared_ptr<PostProcessFeature> MakePipelineFeature(FeaturePipelineIndex idx);
 

@@ -669,6 +669,35 @@ outside it. The light copy always moves the whole capacity. So no pass revision 
 `ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
 culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
 
+**As built (2026-11-19, 6.9, `org-native/rev-step6-9`).** The post chain is one declared client, `cs.pp`
+(`ORGPostProcessing.cpp`), composed of per-effect declarations (`ORGPostEffect.h`):
+- `Effect::Declare` adds the effect's settings to the client's dependencies and declares its kept textures; `Effect::Key` appends
+  what its passes depend on from the revision's values; `Effect::Update` still observes each frame what is no variable yet
+  (imports, loaded LUTs and shapes, Cinematic Camera); `Effect::BuildRun` builds from its key words and returns a `Run`.
+- The chain's key is the observed state (order, kMAIN's shape and imports, linear lighting, the Update words) plus the per-effect
+  key words. A new observed state invalidates the client; the key function builds the chain when the revision starts and a key
+  that fails to build takes the client off (the chain runs on D3D11, logged), so a compile failure stays non-fatal.
+- Each registration holds its build and its effects' `Run`s, and registers with `matchesById` and its `generation`, so the frames
+  until the revision is adopted commit the build their schedule holds (`FrameAnchors::HeldNow`). The `ScheduledThisFrame`/`Scheduled`
+  gates are gone. Physical Lens and Camera FX keep the legacy form (one state for every build, `Effect::Legacy`): a chain that
+  holds one runs on D3D11 on a frame whose schedule holds an older build, until 6.20.
+- `Shape::dynamicWidth/Height` are gone from the key. `DynamicViewport()` is the whole of kMAIN and effects take
+  `CommitContext::DynamicSize()` for their constants until step 8 puts the viewport in the latch.
+- Ported to `CS::Setting`: `PostProcessFeature::enabled` (bound per slot as `PostProcessing.<slot>.enabled`), COD Bloom's
+  `MipBlendFactor` (`std::array<float, 8>`), DoF's `UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`, Physical
+  Glare's `FFTResolution`, `ApertureMode`, Lens Flare's `FFTResolution`, `GhostModeInt`. Their `ProjectSizeSettings` entries are gone;
+  LUT, Color Grading and Physical Lens keep theirs.
+- `Frame::DeriveFromSetting` (Declare.h) makes a derived variable of one setting (OMS `Derive`, `Vars::Lane::DeriveUint`). COD Bloom's
+  `Derived.PostProcessing.CODBloom.usedMips` is its key, so a blend of the factors builds nothing unless the count changes.
+  `CS::Setting` gained a read-only `operator[]` and `size()` for array values.
+- Declared textures: Color Grading's LUT, Motion Blur's horizontal grid, Local Exposure's levels, blur and grid, Physical Glare's
+  aperture and PSF spectra (on `FFTResolution`), Lens Flare's spectra (on `FFTResolution`, `GhostModeInt`), each one texel while
+  its effect is off. `Builder::Register` registers a declared twin's slot; `Bind::Srv/Uav(twin)` and `ImageOf` bind it.
+- Histogram Auto Exposure: `clearPending` and the one-shot reset are gone; the buffers' first frame opens a gated `CS_Reset` until a
+  frame with it reached the GPU. Its readback stays a per-frame late-bound value (the pre-exposure), each build with its own stamp
+  region (`RunReadback::BuildStamp`). DoF's focus resets on a frame that does not follow its last commit, as D3D11 does.
+- Test: `tools/cs-test/configs/post-effects.toml` (needs the profile's Post Processing mode on).
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1421,6 +1450,33 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **`ExteriorEnabled` and `InteriorEnabled` are ported too** (`Setting<bool>`), so `ProjectSizeSettings` is gone for the feature.
 - **A frame without VL after the first one ran logs a warning** (the first 16, "has no volumetric lighting after the first one
   ran"), so a test can show none.
+
+**Decided by the agent (step 6.9, Post effects), to confirm:**
+- **One client for the chain, composed of per-effect declarations**, not a client per effect. The chain's images are transients
+  of one build and effects find each other's outputs inside it (`Builder::Find`), so per-effect clients would need published
+  ids and orders for every intermediate image.
+- **The effect order stays observed.** `enabled` is a dependency (a toggle wakes the lane), but the order comes from the last
+  observed `ChainOrder`, since it also depends on `IsActive` overrides, the menu, the upscaler and the pre-exposure. A toggle can
+  take two revisions: one for the event, one after the next frame observes the order.
+- **A chain build that fails takes the client off** (D3D11 runs the chain, logged) instead of failing the revision, so a shader
+  compile failure disables cleanly. The key function builds the chain, and the make function only takes that build.
+- **`LutPath` and Color Grading's tonemapper stay observed:** strings cannot be `CS::Setting`. The LUT's 3D copy is no declared
+  texture, since a new file has its own size and format. The tonemapper define is a program choice for `DeclareProgram` (6.4).
+- **Program permutations noted for `DeclareProgram`:** DoF's `GATHER_RING_COUNT` (GatherQuality), Color Grading's `TONEMAP_FUNC`,
+  Physical Glare's `FFT_SIZE` passes and tear film, Lens Flare's `FFT_SIZE` passes and its fast or FFT path, Composite's `HAS_*`
+  set. They are chosen in the build from the key for now.
+- **The dynamic viewport is the whole of kMAIN until step 8.** At the tonemap the ratio is 1 with CS's upscalers (they lock it);
+  only the engine's own dynamic resolution without an upscaler would now draw past the dynamic part, with constants from
+  `DynamicSize`.
+- **Histogram Auto Exposure's buffers are not declared** (no buffer declaration exists); the effect keeps their first-frame state.
+  DoF's 1x1 focus is not declared either: Physical Lens reads it as a plain resource for its readback.
+- **Declared sizes come from `DisplaySize`, the passes from kMAIN's observed size.** They are the same texture size today; if they
+  ever differ, the extents and the passes disagree.
+- **COD Bloom's level slider edits a copy** of the factors and sets the whole array, so the scene widget interceptor no longer sees
+  the element's address. The scene editor may lose that slider's per-scene binding; the catalog entries stay.
+- **The scene catalog generator accepts `feat->enabled`** without `&` (Util::Checkbox over the setting) for sub-feature toggles.
+- **Lens Flare in Ultra keeps every spectrum at full size** while on (up to 56 MB at 1024), as the ghosts' kernel groups are no
+  variable yet. D3D11 frees the unused ones.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

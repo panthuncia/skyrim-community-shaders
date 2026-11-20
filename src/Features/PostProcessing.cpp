@@ -134,7 +134,7 @@ void PostProcessing::DrawSettings()
 	const char* settingsTooltip = T("feature.post_processing.edit_settings_for_this_feature", "Edit settings for this feature.");
 
 	// Draws a read-only checkbox for a forced-on sub-feature and returns true. Otherwise callers bind
-	// `&feat->enabled` themselves: the scene catalog generator only recognises that form as a scene toggle.
+	// `feat->enabled` themselves: the scene catalog generator only recognises that form as a scene toggle.
 	auto isForcedOn = [this](PostProcessFeature& feature) {
 		return feature.IsAutoEnabled() ||
 		       (&feature == GetPipelineFeature<HistogramAutoExposure>(FeaturePipelineIndex::AutoExposure) && GetActivePhysicalCameraState());
@@ -216,7 +216,7 @@ void PostProcessing::DrawSettings()
 			const bool automatic = isForcedOn(*feat);
 			const bool experimental = feat->IsExperimental();
 			if (!drawForcedEnabled("##Enabled", *feat))
-				ImGui::Checkbox("##Enabled", &feat->enabled);
+				Util::Checkbox("##Enabled", feat->enabled);
 
 			// The name opens the settings too, so the whole row reads as one entry
 			ImGui::SameLine();
@@ -281,7 +281,7 @@ void PostProcessing::DrawSettings()
 			ImGui::SetCursorPosY(headerBottom);
 
 			if (!drawForcedEnabled(T("feature.post_processing.enabled", "Enabled"), *feat))
-				ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &feat->enabled);
+				Util::Checkbox(T("feature.post_processing.enabled", "Enabled"), feat->enabled);
 			ImGui::Spacing();
 			if (feat->IsActive()) {
 				// Some settings pages preview the feature's textures before its first frame has run.
@@ -404,7 +404,7 @@ void PostProcessing::SaveSettings(json& o_json)
 			json featureSetting{};
 			pipe->SaveSettings(featureSetting);
 			o_json[pipe->GetType()] = {
-				{ "enabled", pipe->enabled },
+				{ "enabled", pipe->enabled.Get() },
 				{ "settings", featureSetting }
 			};
 		}
@@ -424,6 +424,18 @@ void PostProcessing::ApplyContextualDefaults(json& a_defaults) const
 		if (auto section = a_defaults.find(pipe->GetType()); section != a_defaults.end() && section->contains("settings"))
 			pipe->ApplyContextualDefaults((*section)["settings"]);
 	}
+}
+
+void PostProcessing::BindPipelineSettings(PostProcessFeature& a_feature, FeaturePipelineIndex a_index)
+{
+	// One name per pipeline slot in FeaturePipelineIndex order. A new instance takes the same variable.
+	static constexpr std::array<std::string_view, static_cast<size_t>(FeaturePipelineIndex::COUNT)> kSlotNames = {
+		"DoF", "Vignette", "LocalExposure", "AutoExposure", "MotionBlur", "PhysicalGlare", "CODBloom", "LensFlare", "PhysicalLens", "Composite",
+		"ColorGrading", "LUT", "Camera", "Border"
+	};
+	const auto slot = static_cast<size_t>(a_index);
+	if (slot < kSlotNames.size())
+		a_feature.enabled.Bind(CS::SettingRegistry::Declare(std::format("PostProcessing.{}.enabled", kSlotNames[slot])));
 }
 
 std::shared_ptr<PostProcessFeature> PostProcessing::MakePipelineFeature(FeaturePipelineIndex idx)
@@ -480,6 +492,9 @@ void PostProcessing::BuildPipeline()
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Vignette)] = std::make_shared<Vignette>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Camera)] = std::make_shared<Camera>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Border)] = std::make_shared<Border>();
+	for (size_t index = 0; index < pipeline.size(); ++index)
+		if (pipeline[index])
+			BindPipelineSettings(*pipeline[index], static_cast<FeaturePipelineIndex>(index));
 	ApplyDefaultEnabledStates();
 }
 
@@ -507,6 +522,7 @@ void PostProcessing::SyncPipelineResources()
 		json featureSettings{};
 		pipe->SaveSettings(featureSettings);
 		auto fresh = MakePipelineFeature(static_cast<FeaturePipelineIndex>(index));
+		BindPipelineSettings(*fresh, static_cast<FeaturePipelineIndex>(index));
 		fresh->owner = this;
 		fresh->enabled = pipe->enabled;
 		fresh->LoadSettings(featureSettings);
@@ -1011,30 +1027,10 @@ void PostProcessing::PostPostLoad()
 
 Feature::SizeProjection PostProcessing::ProjectSizeSettings() const
 {
-	// Field names are literals, one per pipeline slot in FeaturePipelineIndex order.
-	static constexpr std::array<std::string_view, static_cast<size_t>(FeaturePipelineIndex::COUNT)> kEnabledFields = {
-		"DoF.enabled", "Vignette.enabled", "LocalExposure.enabled", "AutoExposure.enabled", "MotionBlur.enabled",
-		"PhysicalGlare.enabled", "CODBloom.enabled", "LensFlare.enabled", "PhysicalLens.enabled", "Composite.enabled",
-		"ColorGrading.enabled", "LUT.enabled", "Camera.enabled", "Border.enabled"
-	};
+	// The effects' on/off, COD Bloom's used mips, and the DoF, Physical Glare and Lens Flare shape fields are CS::Setting
+	// variables now (frame revision plan 6.9). What is left is no Setting yet: strings, and Physical Lens until 6.20.
 	SizeProjection projection;
-	// Before SetupResources the pipeline does not exist and the settings wait in pendingSettings.
-	for (size_t index = 0; index < pipeline.size(); ++index)
-		if (pipeline[index])
-			projection.Add(kEnabledFields[index], pipeline[index]->enabled);
 	const auto slot = [&](FeaturePipelineIndex a_index) { return pipeline[static_cast<size_t>(a_index)].get(); };
-	// The bloom's blend factors count only through the mips they use.
-	if (const auto* bloom = static_cast<const ::CODBloom*>(slot(FeaturePipelineIndex::CODBloom)))
-		projection.Add("CODBloom.usedMips", bloom->UsedMips());
-	if (const auto* dof = static_cast<const ::DoF*>(slot(FeaturePipelineIndex::DoF)))
-		projection.Add("DoF.UseAdaptiveGather", dof->settings.UseAdaptiveGather)
-			.Add("DoF.GatherQuality", dof->settings.GatherQuality)
-			.Add("DoF.BokehMode", dof->settings.BokehMode)
-			.Add("DoF.HighlightShape", dof->settings.HighlightShape);
-	if (const auto* glare = static_cast<const ::PhysicalGlare*>(slot(FeaturePipelineIndex::PhysicalGlare)))
-		projection.Add("PhysicalGlare.FFTResolution", glare->settings.FFTResolution).Add("PhysicalGlare.ApertureMode", glare->settings.ApertureMode);
-	if (const auto* flare = static_cast<const ::LensFlare*>(slot(FeaturePipelineIndex::LensFlare)))
-		projection.Add("LensFlare.FFTResolution", flare->settings.FFTResolution).Add("LensFlare.GhostModeInt", flare->settings.GhostModeInt);
 	if (const auto* lut = static_cast<const ::LUT*>(slot(FeaturePipelineIndex::LUT)))
 		projection.Add("LUT.LutPath", lut->settings.LutPath);
 	if (const auto* grading = static_cast<const ::ColorGrading*>(slot(FeaturePipelineIndex::ColorGrading)))

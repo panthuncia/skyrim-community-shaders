@@ -93,6 +93,7 @@ namespace ORGPostChain
 		std::vector<std::string> once;
 		std::vector<std::unique_ptr<GraphResources::Texture2D>> images;
 		std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> registered;
+		std::vector<const GraphResources::Resource*> twins;  // declared, so alive for the session
 		std::map<std::string, Image, std::less<>> published;
 		std::map<std::string, std::pair<std::uint32_t, std::uint32_t>, std::less<>> publishedLatches;  // offset, size
 		Image current;
@@ -113,9 +114,6 @@ namespace ORGPostChain
 				key += std::format("|{}={}", name, value);
 			return key;
 		}
-
-		/** @brief Pixels whose centre lies inside a D3D11 viewport a_size wide. */
-		std::uint32_t CoveredPixels(float a_size) { return static_cast<std::uint32_t>((std::max)(std::ceil(a_size - 0.5f), 0.0f)); }
 	}
 
 	Builder::Builder(BuildState& a_state, Programs& a_programs, const Shape& a_shape, std::string_view a_effect) :
@@ -170,7 +168,14 @@ namespace ORGPostChain
 			Fail(std::format("{} is missing", a_resource.Name()));
 			return;
 		}
-		state.registered.emplace_back(a_resource.Name(), a_resource.Graph());
+		// A declared twin registers its slot, so its versions need no build. Declarations live for the session.
+		// Any other twin is held by its graph resource, since its effect may replace it while an older build still runs.
+		if (!a_resource.Versioned()) {
+			state.registered.emplace_back(a_resource.Name(), a_resource.Graph());
+			return;
+		}
+		if (std::ranges::find(state.twins, &a_resource) == state.twins.end())
+			state.twins.push_back(&a_resource);
 	}
 
 	void Builder::Register(std::string_view a_name, std::shared_ptr<org::Resource> a_resource)
@@ -314,7 +319,8 @@ namespace ORGPostChain
 
 	RasterProgram::Viewport Builder::DynamicViewport() const
 	{
-		return { .width = (std::min)(CoveredPixels(shape.dynamicWidth), shape.width), .height = (std::min)(CoveredPixels(shape.dynamicHeight), shape.height) };
+		// A recording cannot follow the ratio, so the draw covers kMAIN until step 8 puts the viewport in the latch.
+		return FullViewport();
 	}
 
 	RasterProgram::Viewport Builder::MipViewport(std::uint32_t a_mip) const
@@ -381,17 +387,45 @@ namespace ORGPostChain
 
 	void CommitContext::Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const { gate.OpenDispatch(a_entry.index, a_x, a_y, a_z); }
 
+	Image ImageOf(const GraphResources::Resource& a_twin, DXGI_FORMAT a_format) { return Image{ RenderGraph::AnchorPasses::TextureOf(a_twin), a_format }; }
+
+	namespace
+	{
+		/** @brief The legacy form's Run: one state for every build, kept by the effect. */
+		class LegacyRun final : public Run
+		{
+		public:
+			explicit LegacyRun(Effect& a_effect) :
+				effect(a_effect) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override { effect.Commit(a_commit, a_feature); }
+			void Executed(PostProcessFeature& a_feature) override { effect.Executed(a_feature); }
+
+		private:
+			Effect& effect;
+		};
+	}
+
+	std::shared_ptr<Run> Effect::BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t>)
+	{
+		Build(a_builder, a_feature);
+		return std::make_shared<LegacyRun>(*this);
+	}
+
 	std::shared_ptr<RunReadback> RunReadback::Create(std::string_view a_name, std::vector<std::uint32_t> a_parts)
 	{
 		auto readback = RenderGraph::RunReadback::Create(a_name, std::move(a_parts));
 		return readback ? std::make_shared<RunReadback>(std::move(readback)) : nullptr;
 	}
 
-	void RunReadback::Build(Builder& a_builder)
+	LatchRegion<RenderGraph::RunReadback::Stamp> RunReadback::BuildStamp(Builder& a_builder)
 	{
-		stamp = a_builder.Latch<RenderGraph::RunReadback::Stamp>();
-		readback->Bind(a_builder.LatchBlock(), stamp.offset);
+		const auto region = a_builder.Latch<RenderGraph::RunReadback::Stamp>();
+		readback->Bind(a_builder.LatchBlock(), region.offset);
+		return region;
 	}
+
+	void RunReadback::Build(Builder& a_builder) { stamp = BuildStamp(a_builder); }
 
 	void RunReadback::AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source)
 	{
@@ -416,10 +450,12 @@ namespace ORGPostChain
 		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, std::move(make));
 	}
 
-	std::uint32_t RunReadback::Commit(const CommitContext& a_commit)
+	std::uint32_t RunReadback::Commit(const CommitContext& a_commit) { return Commit(a_commit, stamp); }
+
+	std::uint32_t RunReadback::Commit(const CommitContext& a_commit, const LatchRegion<RenderGraph::RunReadback::Stamp>& a_stamp)
 	{
 		const auto value = readback->Commit(a_commit.Run());
-		a_commit.Write(stamp, RenderGraph::RunReadback::Stamp{ .value = value });
+		a_commit.Write(a_stamp, RenderGraph::RunReadback::Stamp{ .value = value });
 		return value;
 	}
 
@@ -543,13 +579,44 @@ namespace
 		std::uint32_t pad[3]{};
 	};
 	static_assert(offsetof(CopyLatch, source) == sizeof(PostProcessing::CopyCB));
+}
 
-	std::uint64_t Bits(float a_value)
+namespace
+{
+	/** @brief What the last BeforeTonemap found that is no variable yet: the chain's order, kMAIN and the effects' imports. */
+	struct Observed
 	{
-		std::uint32_t bits = 0;
-		std::memcpy(&bits, &a_value, sizeof(bits));
-		return bits;
-	}
+		std::vector<Index> order;
+		ORGPostChain::Shape shape;
+		FrameAnchors::Texture main, mainCopy;  // mainCopy is empty when the chain reads and writes one target
+		std::vector<std::uint64_t> words;      // what the passes depend on of the above, then the effects' Update words
+
+		friend bool operator==(const Observed& a_left, const Observed& a_right) { return a_left.words == a_right.words; }
+	};
+
+	/** @brief The chain's key: what it observed, and per effect in its order what Key read from the revision. */
+	struct ChainKey
+	{
+		Observed observed;
+		std::vector<std::vector<std::uint64_t>> effects;
+		std::uint64_t programs = 0;  // ClearShaderCache's count, so a reload builds again
+
+		friend bool operator==(const ChainKey& a_left, const ChainKey& a_right)
+		{
+			return a_left.observed == a_right.observed && a_left.effects == a_right.effects && a_left.programs == a_right.programs;
+		}
+	};
+
+	/** @brief One build of the chain. Its registration holds it, so a frame whose schedule holds it commits it. */
+	struct ChainBuild
+	{
+		std::shared_ptr<ORGPostChain::BuildState> state;
+		std::vector<Index> order;
+		std::vector<std::shared_ptr<ORGPostChain::Run>> runs;  // one per order entry
+		ORGPostChain::LatchRegion<CopyLatch> input, output;
+		std::uint64_t generation = 0;
+		bool legacy = false;  // holds an effect of the legacy form, so only the newest build may commit
+	};
 }
 
 struct ORGPostProcessing::Impl
@@ -557,11 +624,19 @@ struct ORGPostProcessing::Impl
 	ORGPostChain::Programs programs;
 	std::array<std::unique_ptr<ORGPostChain::Effect>, kSlots> effects;
 
-	// A key that failed to build is not tried again.
-	std::shared_ptr<ORGPostChain::BuildState> build;
-	std::vector<std::uint64_t> key;
-	std::vector<std::uint64_t> failedKey;
-	ORGPostChain::LatchRegion<CopyLatch> input, output;
+	// The chain's client, declared on the effects' settings. Its key reads observed.
+	RenderGraph::Frame::DeclaredClient declared;
+	std::optional<Observed> observed;
+	// The build the key function made for the registration the revision makes next.
+	std::optional<ChainKey> pendingKey;
+	std::shared_ptr<ChainBuild> pendingBuild;
+	FrameAnchors::ClientDesc pendingDesc;
+	// A key that failed to build is not tried again. The chain then runs on D3D11.
+	std::optional<ChainKey> failedKey;
+	// Builds a registration may still hold, newest last.
+	std::vector<std::shared_ptr<ChainBuild>> builds;
+	std::uint64_t generation = 0;
+	std::uint64_t programsGeneration = 0;
 
 	// Set by BeforeTonemap for the commit.
 	bool ready = false;
@@ -570,7 +645,8 @@ struct ORGPostProcessing::Impl
 	bool linear = false;
 	bool colorGraded = false;
 	bool exposureResolved = true;
-	std::vector<Index> order;
+	std::uint64_t readyGeneration = 0;  // the build this frame's schedule holds
+	float2 dynamicSize{};
 	// A tonemap after the post stage was seen and logged.
 	bool passedLogged = false;
 
@@ -587,7 +663,7 @@ struct ORGPostProcessing::Impl
 		if (reason && *reason == a_reason)
 			return;
 		if (a_reason.empty())
-			logger::info("[ORG] Post Processing: the chain runs on the render graph ({} passes)", build ? build->descs.size() : 0);
+			logger::info("[ORG] Post Processing: the chain runs on the render graph ({} passes)", builds.empty() ? 0 : builds.back()->state->descs.size());
 		else
 			logger::info("[ORG] Post Processing: the chain runs on D3D11: {}", a_reason);
 		reason = std::move(a_reason);
@@ -621,12 +697,76 @@ struct ORGPostProcessing::Impl
 		members = a_members;
 	}
 
-	/** @brief False, with the reason in a_failure, when it cannot. */
-	bool Rebuild(const ORGPostChain::Shape& a_shape, const ORGPostChain::Image& a_main, const ORGPostChain::Image& a_mainCopy,
-		const std::vector<Index>& a_order, std::vector<std::uint64_t> a_key, std::string& a_failure)
+	/** @brief Render thread, at setup. Declares the effects' textures and the chain's client on their settings. */
+	void Declare()
 	{
+		auto& pp = globals::features::postProcessing;
+		RenderGraph::Frame::Dependencies dependencies;
+		for (std::size_t i = 0; i < kSlots; ++i) {
+			if (!effects[i] || !pp.pipeline[i])
+				continue;
+			dependencies.push_back(RenderGraph::Frame::DependencyOf(pp.pipeline[i]->enabled));
+			effects[i]->Declare(*pp.pipeline[i], dependencies);
+		}
+		declared = RenderGraph::Frame::DeclareClient<ChainKey>(
+			ORGPostChain::kClientId, std::move(dependencies), [this](const RenderGraph::Frame::Inputs& a_values) { return Prepare(a_values); },
+			[this](const ChainKey& a_key, FrameAnchors::ClientDesc& a_client) { return Make(a_key, a_client); });
+	}
+
+	/**
+	* @brief The key function, when a revision starts. The chain's key for a_values, built here when it is new, so a key that
+	* cannot be built takes the chain off the graph (nullopt) rather than failing the revision. Make then takes the build.
+	*/
+	std::optional<ChainKey> Prepare(const RenderGraph::Frame::Inputs& a_values)
+	{
+		if (!observed)
+			return std::nullopt;
+		auto& pp = globals::features::postProcessing;
+		ChainKey key{ .observed = *observed, .programs = programsGeneration };
+		for (const auto index : observed->order) {
+			const auto slot = static_cast<std::size_t>(index);
+			auto& words = key.effects.emplace_back();
+			effects[slot]->Key(a_values, *pp.pipeline[slot], words);
+		}
+		if (pendingKey && *pendingKey == key)
+			return key;
+		if (failedKey && *failedKey == key)
+			return std::nullopt;
+		std::string failure;
+		bool built = false;
+		try {
+			built = Rebuild(key, failure);
+		} catch (const std::exception& e) {
+			failure = e.what();
+		}
+		if (!built) {
+			logger::error("[ORG] Post Processing: the chain could not be built: {}", failure);
+			failedKey = std::move(key);
+			return std::nullopt;
+		}
+		failedKey.reset();
+		return pendingKey;
+	}
+
+	/** @brief The make function: the registration Prepare built for a_key. */
+	bool Make(const ChainKey& a_key, FrameAnchors::ClientDesc& a_client)
+	{
+		if (!pendingKey || !(*pendingKey == a_key) || !pendingBuild)
+			return false;
+		a_client = pendingDesc;
+		builds.push_back(pendingBuild);
+		return true;
+	}
+
+	/** @brief False, with the reason in a_failure, when it cannot. Leaves the build and its registration pending for Make. */
+	bool Rebuild(const ChainKey& a_key, std::string& a_failure)
+	{
+		const auto& shape = a_key.observed.shape;
+		const ORGPostChain::Image main{ a_key.observed.main, shape.mainFormat };
+		const ORGPostChain::Image mainCopy{ a_key.observed.mainCopy, shape.mainCopyFormat };
+		const auto& order = a_key.observed.order;
 		// CS's native chain has one image, read and written back.
-		const auto& second = a_mainCopy ? a_mainCopy : a_main;
+		const auto& second = mainCopy ? mainCopy : main;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host) {
 			a_failure = "the render graph has no host";
@@ -642,17 +782,19 @@ struct ORGPostProcessing::Impl
 		next->passes = std::make_unique<RenderGraph::AnchorPasses::Builder>(FrameAnchors::Anchor::Tonemap, ORGPostChain::kClientId, ORGPostChain::kOrderBase,
 			next->latch, next->gate);
 		auto& pp = globals::features::postProcessing;
-		ORGPostChain::LatchRegion<CopyLatch> nextInput, nextOutput;
+		auto build = std::make_shared<ChainBuild>();
+		build->state = next;
+		build->order = order;
 
 		// As BeginLinearProcessing. The input pass also picks kMAIN or kMAIN_COPY from the latch, so one recording serves either.
 		{
-			ORGPostChain::Builder builder(*next, programs, a_shape, "input");
+			ORGPostChain::Builder builder(*next, programs, shape, "input");
 			auto program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { ORGPostChain::kInputFormat });
 			auto image = builder.CreateImage("PostProcessing::Input", ORGPostChain::kInputFormat, D3D11_BIND_RENDER_TARGET);
-			nextInput = builder.Latch<CopyLatch>();
+			build->input = builder.Latch<CopyLatch>();
 			builder.Draw({ .name = "copy",
 				.program = std::move(program),
-				.bindings = { Bind::Srv(a_main), Bind::Srv(second), Bind::Latch(nextInput) },
+				.bindings = { Bind::Srv(main), Bind::Srv(second), Bind::Latch(build->input) },
 				.target = image });
 			builder.SetCurrent(image);
 		}
@@ -662,11 +804,17 @@ struct ORGPostProcessing::Impl
 		if (probe == "input")
 			probed = next->current;
 
-		for (const auto index : a_order) {
+		for (std::size_t i = 0; i < order.size(); ++i) {
 			if (!next->failure.empty() || next->passes->Failed())
 				break;
-			ORGPostChain::Builder builder(*next, programs, a_shape, StepName(index));
-			effects[static_cast<std::size_t>(index)]->Build(builder, *pp.pipeline[static_cast<std::size_t>(index)]);
+			const auto index = order[i];
+			const auto slot = static_cast<std::size_t>(index);
+			ORGPostChain::Builder builder(*next, programs, shape, StepName(index));
+			auto run = effects[slot]->BuildRun(builder, *pp.pipeline[slot], a_key.effects[i]);
+			if (!run && !builder.Failed())
+				builder.Fail("it made no run");
+			build->runs.push_back(std::move(run));
+			build->legacy = build->legacy || effects[slot]->Legacy();
 			if (probe == StepName(index))
 				probed = next->current;
 		}
@@ -684,15 +832,15 @@ struct ORGPostProcessing::Impl
 		// As PreProcess's two CopyToRenderTarget, into both main targets. Each is a copy.ps draw rather than a copy,
 		// because a copy has no run gate and would run on frames the chain does not.
 		{
-			ORGPostChain::Builder builder(*next, programs, a_shape, "output");
+			ORGPostChain::Builder builder(*next, programs, shape, "output");
 			const auto chainOutput = probed ? probed : builder.Current();
-			nextOutput = builder.Latch<CopyLatch>();
-			for (const auto& [target, name] : { std::pair{ &a_main, "main" }, std::pair{ &a_mainCopy, "main-copy" } }) {
+			build->output = builder.Latch<CopyLatch>();
+			for (const auto& [target, name] : { std::pair{ &main, "main" }, std::pair{ &mainCopy, "main-copy" } }) {
 				if (!*target)
 					continue;
 				builder.Draw({ .name = name,
 					.program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { target->format }),
-					.bindings = { Bind::Srv(chainOutput), Bind::Unused(), Bind::Latch(nextOutput) },
+					.bindings = { Bind::Srv(chainOutput), Bind::Unused(), Bind::Latch(build->output) },
 					.target = *target });
 			}
 		}
@@ -715,6 +863,7 @@ struct ORGPostProcessing::Impl
 			}
 		}
 
+		build->generation = ++generation;
 		FrameAnchors::ClientDesc client{};
 		client.id = ORGPostChain::kClientId;
 		client.passes = next->descs;
@@ -723,52 +872,87 @@ struct ORGPostProcessing::Impl
 		client.registerResources = [next](org::RenderGraph& a_graph) {
 			for (const auto& image : next->images)
 				image->Register(a_graph);
+			for (const auto* twin : next->twins)
+				twin->Register(a_graph);
 			for (const auto& [name, resource] : next->registered)
 				a_graph.RegisterResource(org::ResourceIdentifier(name), resource);
 		};
-		client.commit = [this](const FrameAnchors::Point&) { Commit(); };
-		client.executed = [this](const FrameAnchors::Point&) { Executed(); };
+		// Each registration commits its own build. A schedule that still holds an older one taps as it (matchesById),
+		// unless an effect of the legacy form shares its state across builds.
+		client.commit = [this, build](const FrameAnchors::Point&) { Commit(*build); };
+		client.executed = [this, build](const FrameAnchors::Point&) { Executed(*build); };
 		client.active = [this] { return ready; };
-		if (!FrameAnchors::Register(std::move(client))) {
-			a_failure = "the Tonemap anchor refused the client";
-			return false;
-		}
-		build = std::move(next);
-		key = std::move(a_key);
+		client.matchesById = !build->legacy;
+		client.generation = build->generation;
 		programs.chainBuilt = true;
-		input = nextInput;
-		output = nextOutput;
 		std::string steps = "input";
-		for (const auto index : a_order)
+		for (const auto index : order)
 			steps += std::format(", {}", StepName(index));
-		logger::info("[ORG] Post Processing: chain built ({}, output; {} passes, {}x{})", steps, build->descs.size(), a_shape.width, a_shape.height);
+		logger::info("[ORG] Post Processing: chain {} built for the next revision ({}, output; {} passes, {}x{})", build->generation, steps, next->descs.size(),
+			shape.width, shape.height);
+		pendingKey = a_key;
+		pendingBuild = std::move(build);
+		pendingDesc = std::move(client);
 		return true;
 	}
 
-	void Commit()
+	void Commit(const ChainBuild& a_build)
 	{
 		ran = false;
-		if (!ready || !build)
+		if (!ready || a_build.generation != readyGeneration)
 			return;
 		auto& pp = globals::features::postProcessing;
-		const auto& gate = *build->gate;
-		const ORGPostChain::CommitContext commit(*build->latch, RenderGraphRuntime::Get().Host()->CurrentRun(), gate);
+		const auto& gate = *a_build.state->gate;
+		const ORGPostChain::CommitContext commit(*a_build.state->latch, RenderGraphRuntime::Get().Host()->CurrentRun(), gate, dynamicSize);
 		gate.OpenDraw(ORGPostChain::kDrawEntry);
-		for (const auto& [groups, entry] : build->fixed)
+		for (const auto& [groups, entry] : a_build.state->fixed)
 			gate.OpenDispatch(entry, groups[0], groups[1], groups[2]);
-		commit.Write(input, CopyLatch{ .conversion = { .gamma = linear ? 1.0f : Util::ColorSpace::GAME_GAMMA }, .source = readsMainCopy ? 1u : 0u });
-		for (const auto index : order)
-			effects[static_cast<std::size_t>(index)]->Commit(commit, *pp.pipeline[static_cast<std::size_t>(index)]);
-		commit.Write(output, CopyLatch{ .conversion = pp.OutputConversion(colorGraded, exposureResolved) });
+		commit.Write(a_build.input, CopyLatch{ .conversion = { .gamma = linear ? 1.0f : Util::ColorSpace::GAME_GAMMA }, .source = readsMainCopy ? 1u : 0u });
+		for (std::size_t i = 0; i < a_build.order.size(); ++i)
+			a_build.runs[i]->Commit(commit, *pp.pipeline[static_cast<std::size_t>(a_build.order[i])]);
+		commit.Write(a_build.output, CopyLatch{ .conversion = pp.OutputConversion(colorGraded, exposureResolved) });
 		ran = true;
 	}
 
-	/** @brief After a run whose commit reached the GPU with this build. */
-	void Executed()
+	/** @brief After a run whose commit reached the GPU with a_build. */
+	void Executed(const ChainBuild& a_build)
 	{
 		auto& pp = globals::features::postProcessing;
-		for (const auto index : order)
-			effects[static_cast<std::size_t>(index)]->Executed(*pp.pipeline[static_cast<std::size_t>(index)]);
+		for (std::size_t i = 0; i < a_build.order.size(); ++i)
+			a_build.runs[i]->Executed(*pp.pipeline[static_cast<std::size_t>(a_build.order[i])]);
+	}
+
+	/** @brief The build this frame's schedule holds, or null with the reason in a_why. Drops the builds older than it. */
+	const ChainBuild* HeldBuild(std::string& a_why)
+	{
+		if (builds.empty()) {
+			a_why = failedKey ? "the chain failed to build for these settings (logged above)" : "the chain's client is not registered yet";
+			return nullptr;
+		}
+		// A frame kind without a post stage, such as the main menu's, has no place for the chain, so D3D11 draws it.
+		const auto hold = FrameAnchors::HeldNow(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap);
+		if (!hold.held) {
+			a_why = "this frame has no post stage that holds the chain";
+			return nullptr;
+		}
+		if (!hold.scheduled) {
+			a_why = "the post stage has no schedule that holds the chain yet";
+			return nullptr;
+		}
+		const auto found = std::ranges::find_if(builds, [&](const auto& a_build) { return a_build->generation == hold.generation; });
+		if (found == builds.end()) {
+			static Util::ReasonLog s_lost("[ORG] Post Processing: the post stage holds a chain build this driver no longer has", spdlog::level::err);
+			s_lost.Report(std::format("build {}", hold.generation));
+			a_why = "the post stage holds an unknown chain build (logged above)";
+			return nullptr;
+		}
+		builds.erase(builds.begin(), found);
+		const auto& build = *builds.front();
+		if (build.legacy && build.generation != builds.back()->generation) {
+			a_why = "the post stage still runs an older build, and Physical Lens or Camera FX keep one state for every build";
+			return nullptr;
+		}
+		return &build;
 	}
 };
 
@@ -798,8 +982,10 @@ void ORGPostProcessing::Setup()
 		if (state->effects[i] && pp.pipeline[i])
 			ported += std::format("{}{}", ported.empty() ? "" : ", ", pp.pipeline[i]->GetType());
 	}
+	state->Declare();
 	impl = std::move(state);
-	logger::info("[ORG] Post Processing: the tonemap chain runs on the render graph while every enabled effect is ported ({})", ported);
+	logger::info("[ORG] Post Processing: the tonemap chain runs on the render graph while every enabled effect is ported ({}); it follows the frame revisions",
+		ported);
 }
 
 void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets& a_targets, bool a_refraction)
@@ -849,19 +1035,19 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	if (!exposureResolved)
 		std::erase_if(order, [&](Index a_index) { return a_index == Index::ColorGrading || pp.pipeline[static_cast<std::size_t>(a_index)]->DrawAfterColorGrading(); });
 
-	// The graph runs the chain only when it can run every effect in it.
-	std::vector<std::uint64_t> key;
+	// The graph runs the chain only when it can run every effect in it. A held frame keeps the observed state, so the build stays.
+	Observed seen{ .order = order };
 	std::string held;
 	const auto hold = [&](const std::string& a_why) { held += std::format("{}{}", held.empty() ? "" : "; ", a_why); };
 	for (const auto index : order) {
 		const auto slot = static_cast<std::size_t>(index);
 		auto& feature = *pp.pipeline[slot];
-		key.push_back(slot);
+		seen.words.push_back(slot);
 		if (!s.effects[slot]) {
 			hold(std::format("{} has no ORG implementation", feature.GetType()));
 			continue;
 		}
-		if (const char* why = s.effects[slot]->Update(feature, key))
+		if (const char* why = s.effects[slot]->Update(feature, seen.words))
 			hold(std::format("{}: {}", feature.GetType(), why));
 	}
 	if (!held.empty()) {
@@ -890,62 +1076,33 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 		}
 	} else
 		mainCopyDesc = mainDesc;
-	ORGPostChain::Shape shape{};
-	shape.width = mainDesc.Width;
-	shape.height = mainDesc.Height;
-	const auto dynamic = Util::ConvertToDynamic(float2(static_cast<float>(mainDesc.Width), static_cast<float>(mainDesc.Height)));
-	shape.dynamicWidth = dynamic.x;
-	shape.dynamicHeight = dynamic.y;
-	shape.mainFormat = mainDesc.Format;
-	shape.mainCopyFormat = mainCopyDesc.Format;
+	seen.shape.width = mainDesc.Width;
+	seen.shape.height = mainDesc.Height;
+	seen.shape.mainFormat = mainDesc.Format;
+	seen.shape.mainCopyFormat = mainCopyDesc.Format;
+	seen.main = mainTarget;
+	seen.mainCopy = mainCopyTarget;
+	// The dynamic-resolution ratio is a per-frame value: it reaches the commit, never the key.
+	s.dynamicSize = Util::ConvertToDynamic(float2(static_cast<float>(mainDesc.Width), static_cast<float>(mainDesc.Height)));
+	for (const std::uint64_t word : { std::uint64_t(seen.shape.width), std::uint64_t(seen.shape.height), std::uint64_t(seen.shape.mainFormat),
+			 std::uint64_t(seen.shape.mainCopyFormat), std::uint64_t(linear), reinterpret_cast<std::uintptr_t>(mainTarget.Key()),
+			 reinterpret_cast<std::uintptr_t>(mainCopyTarget.Key()) })
+		seen.words.push_back(word);
 
-	const bool colorGraded = std::ranges::find(order, Index::ColorGrading) != order.end();
-	const auto conversion = pp.OutputConversion(colorGraded);
-	for (const std::uint64_t word : { std::uint64_t(shape.width), std::uint64_t(shape.height), Bits(shape.dynamicWidth), Bits(shape.dynamicHeight),
-			 std::uint64_t(shape.mainFormat), std::uint64_t(shape.mainCopyFormat), std::uint64_t(linear), reinterpret_cast<std::uintptr_t>(mainTarget.Key()), reinterpret_cast<std::uintptr_t>(mainCopyTarget.Key()) })
-		key.push_back(word);
-
-	if (key != s.key || !s.build) {
-		if (key == s.failedKey) {
-			s.SetReason("the chain failed to build for these settings (logged above)");
-			return;
-		}
-		std::string failure;
-		bool built = false;
-		try {
-			built = s.Rebuild(shape, { mainTarget, shape.mainFormat }, { mainCopyTarget, shape.mainCopyFormat }, order, key, failure);
-		} catch (const std::exception& e) {
-			failure = e.what();
-		}
-		if (!built) {
-			logger::error("[ORG] Post Processing: the chain could not be built: {}", failure);
-			s.failedKey = std::move(key);
-			s.SetReason("the chain failed to build for these settings (logged above)");
-			return;
-		}
-		s.failedKey.clear();
+	// A new shape is a new key, built when the next revision starts. This frame runs the build its schedule holds.
+	if (!s.observed || !(*s.observed == seen)) {
+		s.observed = std::move(seen);
+		s.declared.Invalidate();
 	}
 
-	// The Tonemap anchor has no epoch of its own. The chain's work must land in the post stage's Tonemap step.
-	// That step shares the anchor with Effects11 and does not hold it wholly, so HeldByStage is false for it and cannot be the test.
-	// The frame's schedules, taken at Renderer::Begin, say whether a stage of this frame draws this registration.
-	// A frame kind without the post stage, such as the main menu's, has none. Nor does the post stage after a rebuild,
-	// until the build with the new registration switches in. Those are D3D11 frames for the chain, so D3D11 draws it.
-	if (!FrameAnchors::ScheduledThisFrame(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
-		s.SetReason("this frame's schedule has no post stage that holds the chain's build (a frame kind without one, or a build not switched in yet)");
-		return;
-	}
-	// The frame's schedule holds the chain, so the open stage must take the tap now. If it does not, that is a schedule bug.
-	// It is logged, and D3D11 draws the chain this frame, since no stage would take the graph's work.
-	if (!FrameAnchors::Scheduled(ORGPostChain::kClientId, FrameAnchors::Anchor::Tonemap)) {
-		static Util::ReasonLog s_lag("[ORG] Post Processing: the post stage does not take the Tonemap tap, though the frame's schedule holds the chain",
-			spdlog::level::err);
-		s_lag.Report("not scheduled at the tap");
-		s.SetReason("the post stage does not take the Tonemap tap this frame (logged above)");
+	std::string why;
+	const auto* build = s.HeldBuild(why);
+	if (!build) {
+		s.SetReason(why);
 		return;
 	}
 
-	s.order = std::move(order);
+	const bool colorGraded = std::ranges::find(build->order, Index::ColorGrading) != build->order.end();
 	s.linear = linear;
 	// CS's ImageSpace steps keep the world scene in kMAIN, so the engine's kMAIN_COPY input or a refraction does not move it.
 	// kMAIN_COPY then holds an older copy of the scene at best, from before the volumetric composite and the upscale.
@@ -953,14 +1110,15 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.readsMainCopy = !single && !sceneInMain && (a_refraction || a_targets.input == mainCopyTarget);
 	s.colorGraded = colorGraded;
 	s.exposureResolved = exposureResolved;
+	s.readyGeneration = build->generation;
 	s.ready = true;
 	s.SetReason({});
-	s.SetMembers(s.order);
+	s.SetMembers(build->order);
 	if (ORGPostChain::LogFrame())
-		logger::info("[ORG] Post Processing log: frame {}: reads {} (one target {}, refraction {}, engine input kMAIN_COPY {}, scene in kMAIN {}); linear {}, "
-					 "exposure resolved {}, pre-exposure {}",
-			globals::state->frameCount, s.readsMainCopy ? "kMAIN_COPY" : "kMAIN", single, a_refraction, a_targets.input == mainCopyTarget && !single, sceneInMain,
-			linear, exposureResolved, state->preExposure);
+		logger::info("[ORG] Post Processing log: frame {}: build {} reads {} (one target {}, refraction {}, engine input kMAIN_COPY {}, scene in kMAIN {}); "
+					 "linear {}, exposure resolved {}, pre-exposure {}",
+			globals::state->frameCount, build->generation, s.readsMainCopy ? "kMAIN_COPY" : "kMAIN", single, a_refraction,
+			a_targets.input == mainCopyTarget && !single, sceneInMain, linear, exposureResolved, state->preExposure);
 
 	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
@@ -976,11 +1134,12 @@ void ORGPostProcessing::ClearShaderCache()
 {
 	if (!impl)
 		return;
-	// Failed compiles are cached as null and failed keys are not retried, so clear both.
+	// Failed compiles are cached as null and failed keys are not retried, so clear both. A new count is a new key.
 	impl->programs.raster.clear();
 	impl->programs.compute.clear();
-	impl->failedKey.clear();
-	impl->key.clear();
+	impl->failedKey.reset();
+	++impl->programsGeneration;
+	impl->declared.Invalidate();
 }
 
 #else  // !CS_HAS_RENDER_GRAPH

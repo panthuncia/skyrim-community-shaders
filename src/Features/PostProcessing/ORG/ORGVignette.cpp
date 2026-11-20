@@ -19,34 +19,46 @@ namespace ORGPostChain
 			ShaderBindings::Latch vignette;
 		};
 
+		/** @brief One build's latch region. */
+		class VignetteRun final : public Run
+		{
+		public:
+			explicit VignetteRun(LatchRegion<Vignette::VignetteCB> a_constants) :
+				constants(a_constants) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
+			{
+				// The dynamic size is this frame's, so it goes to the constants.
+				a_commit.Write(constants, static_cast<Vignette&>(a_feature).Constants(a_commit.DynamicSize()));
+			}
+
+		private:
+			LatchRegion<Vignette::VignetteCB> constants;
+		};
+
 		/** @brief Vignette::Draw on the graph. */
 		class VignetteEffect final : public Effect
 		{
 		public:
-			void Build(Builder& a_builder, PostProcessFeature&) override
+			bool Legacy() const override { return false; }
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				// The output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				auto program = a_builder.Raster("PostProcessing/Vignette/vignette.ps.hlsl", ShaderBindings::Words<VignetteBlock>(), { format });
 				auto image = a_builder.CreateImage("PostProcessing::Vignette::Output", format, D3D11_BIND_RENDER_TARGET);
-				constants = a_builder.Latch<Vignette::VignetteCB>();
+				const auto constants = a_builder.Latch<Vignette::VignetteCB>();
 				a_builder.Draw({ .name = "draw",
 					.program = std::move(program),
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Latch(constants) },
 					.target = image,
 					.viewport = a_builder.DynamicViewport() });
 				a_builder.SetCurrent(image);
-				size = float2(a_builder.GetShape().dynamicWidth, a_builder.GetShape().dynamicHeight);
+				if (a_builder.Failed())
+					return nullptr;
+				return std::make_shared<VignetteRun>(constants);
 			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				a_commit.Write(constants, static_cast<Vignette&>(a_feature).Constants(size));
-			}
-
-		private:
-			LatchRegion<Vignette::VignetteCB> constants;
-			float2 size;
 		};
 	}
 

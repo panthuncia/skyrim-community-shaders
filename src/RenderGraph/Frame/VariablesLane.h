@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -40,6 +41,12 @@ namespace RenderGraph::Frame::Vars::Lane
 	* a_name is the setting's registry name. With null a_bytes nothing is declared, and UINT32_MAX means none.
 	*/
 	std::uint32_t SettingIndex(std::uint32_t a_settingId, std::string_view a_name, const void* a_bytes, std::size_t a_size);
+
+	/**
+	* @brief Render thread, at setup. Declares a_name, an unsigned variable derived from the variable at a_dependency. a_fn runs
+	* in Take, on the lane, with the snapshot being built, and only when the dependency changed. Returns its index.
+	*/
+	std::uint32_t DeriveUint(std::string a_name, std::uint32_t a_dependency, std::function<std::uint32_t(const org::services::VariableSnapshot&)> a_fn);
 
 	/** @brief The set itself, for the newest written values (VariableSet::Get). Any thread. */
 	const org::services::VariableSet& Set();

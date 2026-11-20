@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -206,6 +207,27 @@ namespace RenderGraph::Frame
 		functions.equal = [](const void* a_left, const void* a_right) { return *static_cast<const Key*>(a_left) == *static_cast<const Key*>(a_right); };
 		functions.make = [make = std::move(a_make)](const void* a_keyValue, FrameAnchors::ClientDesc& a_out) { return make(*static_cast<const Key*>(a_keyValue), a_out); };
 		return Detail::DeclareClient(std::move(a_id), std::move(a_dependencies), std::move(functions));
+	}
+
+	namespace Detail
+	{
+		Vars::Var<std::uint32_t> DeriveFromSetting(std::string_view a_name, const Dependency& a_setting, std::function<std::uint32_t(const void*)> a_fn);
+	}
+
+	/**
+	* @brief Render thread, at setup. A frame variable "Derived.<a_name>" computed from one bound setting when a revision takes
+	* the values. Its event fires only when the result changes, so a declaration on it ignores edits that keep the result (Post
+	* Processing's COD Bloom: the used mips of its blend factors). Declaring a name again returns its variable and keeps the
+	* first function. A declaration depends on it and reads it as on any frame variable. Without the graph it reads zero.
+	*/
+	template <class T>
+	Vars::Var<std::uint32_t> DeriveFromSetting(std::string_view a_name, const CS::Setting<T>& a_setting, std::function<std::uint32_t(const T&)> a_fn)
+	{
+		return Detail::DeriveFromSetting(a_name, DependencyOf(a_setting), [fn = std::move(a_fn)](const void* a_bytes) {
+			T value{};
+			std::memcpy(&value, a_bytes, sizeof(T));
+			return fn(value);
+		});
 	}
 
 	/** @brief What the frame reads: the variables of the revision adopted last, and the declared textures as they are bound. */
