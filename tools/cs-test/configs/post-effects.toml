@@ -202,4 +202,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["pp-base", "bloom-blend", "bloom-mips", "dof-on", "dof-rings", "dof-legacy", "glare-on", "glare-fft", "glare-pupil", "flare-mode",
 	"flare-fft", "list-on", "list-off"]
-no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer"]
+no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer:"]

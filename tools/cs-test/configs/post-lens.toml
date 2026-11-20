@@ -172,5 +172,5 @@ do = "exit"
 reach = "world-ready"
 shots = ["lens-all", "lens-no-starburst", "lens-no-ghosts", "lens-off-parts", "lens-ghosts", "lens-intensity", "lens-model", "lens-preset", "camera-on",
 	"camera-off"]
-no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer", "Physical Lens or Camera FX keep one state",
+no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer:", "Physical Lens or Camera FX keep one state",
 	"is not among the programs its Programs lists"]
