@@ -1,0 +1,176 @@
+# Physical Lens and Camera FX on the post chain (frame revision plan 6.20): the lens's parts toggled, the lens model changed,
+# Camera FX on and off, a shot after each.
+# NEEDS THE CHAIN ON: the test profile runs Post Processing in "Vanilla" mode, which bypasses the chain. Switch the profile's mode
+# to "Post Processing" for this run and back after it; the config cannot do it.
+# ImageEffects, Diffraction and the ghosts (Intensity above zero, a derived variable) are the lens's key: each toggle builds the
+# chain when the next revision starts. The lens model (preset, f-number, focus, zoom, coating) and an Intensity that stays above
+# zero are CPU input: they must build nothing (no "chain N built" line after them), and a new model shows when the revision that
+# carries its ghost paths is adopted. Cinematic Camera must stay off (it drives the lens).
+# The log must show "chain N built for the next revision" once per toggle, "the chain runs on the render graph" after it, and
+# no "the chain runs on D3D11" line while the chain is on the graph.
+# Compose it: guest+post-lens, native-vulkan+post-lens, native-d3d12+post-lens (and d3d11+post-lens for reference shots).
+extends = ["base"]
+
+[run]
+timeout_s = 480
+
+[features]
+PostProcessing = true
+
+# The lens with every part on: a 24 mm lens wide open (Canon RF 24-70, preset 5).
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = 'PostProcessing.Physical Lens={"enabled":true,"settings":{"LensPreset":5,"ZoomPosition":0.0,"FNumber":1.0,"FocusDistanceM":0,"Intensity":1.0,"Diffraction":true,"ImageEffects":true}}'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "lens-all"
+
+# The starburst off: a build without the diffraction passes.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.Diffraction=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-no-starburst"
+
+# The ghosts off (Intensity 0): the derived variable changes, a build without the ghost passes.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.Intensity=0.0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-no-ghosts"
+
+# Every part off: the lens publishes nothing, so Composite draws without HAS_PHYSICAL_LENS.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.ImageEffects=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-off-parts"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.ImageEffects=true"
+
+# Ghosts and the mapping back.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.Intensity=2.0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-ghosts"
+
+# A brighter ghost intensity stays above zero: no build.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.Intensity=4.0"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "lens-intensity"
+
+# The lens model: f-number, zoom, preset and coating. CPU input: no build, new ghost paths through a revision.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.FNumber=4.0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.ZoomPosition=1.0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-model"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.LensPreset=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.PhysicalLens.Coating=0.0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "lens-preset"
+
+# Camera FX on, then off: the effect list. Its lens image is a transient of the chain.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.Camera.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "camera-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.Camera.enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "camera-off"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["lens-all", "lens-no-starburst", "lens-no-ghosts", "lens-off-parts", "lens-ghosts", "lens-intensity", "lens-model", "lens-preset", "camera-on",
+	"camera-off"]
+no_log = ["the chain could not be built", "stale recording", "frame declaration failed", "missed settings writer", "Physical Lens or Camera FX keep one state",
+	"is not among the programs its Programs lists"]

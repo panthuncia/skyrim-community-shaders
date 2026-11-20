@@ -240,6 +240,7 @@ namespace RenderGraph::Frame
 		std::shared_ptr<ProgramDeclaration> DeclareProgram(std::string a_name, Dependencies a_dependencies, ProgramFunctions a_functions);
 		ErasedProgram ProgramFor(const ProgramDeclaration* a_program, const Inputs& a_values);
 		ErasedProgram AdoptedProgram(const ProgramDeclaration* a_program);
+		void InvalidateProgram(ProgramDeclaration* a_program);
 	}
 
 	/** @brief A declared program. Keep it as long as the feature uses the program. */
@@ -259,6 +260,12 @@ namespace RenderGraph::Frame
 		{
 			return std::static_pointer_cast<const P>(Detail::ProgramFor(declaration.get(), a_values));
 		}
+
+		/**
+		* @brief Render thread. The key reads state that is not a variable yet, and it changed. The key is evaluated again
+		* before the next revision starts. An interim, as DeclaredClient::Invalidate.
+		*/
+		void Invalidate() const { Detail::InvalidateProgram(declaration.get()); }
 
 		const std::shared_ptr<Detail::ProgramDeclaration>& Declaration() const { return declaration; }
 

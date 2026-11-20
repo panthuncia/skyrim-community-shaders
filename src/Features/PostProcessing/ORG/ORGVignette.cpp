@@ -40,13 +40,13 @@ namespace ORGPostChain
 		class VignetteEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override { LoadProgram(a_programs); }
 
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				// The output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
-				auto program = a_builder.Raster("PostProcessing/Vignette/vignette.ps.hlsl", ShaderBindings::Words<VignetteBlock>(), { format });
+				auto program = LoadProgram(a_builder);
 				auto image = a_builder.CreateImage("PostProcessing::Vignette::Output", format, D3D11_BIND_RENDER_TARGET);
 				const auto constants = a_builder.Latch<Vignette::VignetteCB>();
 				a_builder.Draw({ .name = "draw",
@@ -58,6 +58,13 @@ namespace ORGPostChain
 				if (a_builder.Failed())
 					return nullptr;
 				return std::make_shared<VignetteRun>(constants);
+			}
+
+		private:
+			/** @brief Listed in Programs and built on the programs lane. */
+			static std::shared_ptr<const RasterProgram> LoadProgram(ProgramSource& a_programs)
+			{
+				return a_programs.Raster("PostProcessing/Vignette/vignette.ps.hlsl", ShaderBindings::Words<VignetteBlock>(), { a_programs.GetShape().mainCopyFormat });
 			}
 		};
 	}

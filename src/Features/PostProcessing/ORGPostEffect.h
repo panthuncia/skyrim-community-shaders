@@ -191,15 +191,62 @@ namespace ORGPostChain
 	};
 
 	struct BuildState;
-	struct Programs;
+	struct ChainPrograms;
 
-	/** @brief Render thread, during one rebuild. */
-	class Builder
+	/**
+	* @brief What a build asks of the chain besides images: its shape, linear lighting, what earlier effects published, and
+	* programs. Builder gives them to a build; a plan gives them to Effect::Programs, where a program is only listed.
+	* Render thread.
+	*/
+	class ProgramSource
 	{
 	public:
-		Builder(BuildState& a_state, Programs& a_programs, const Shape& a_shape, std::string_view a_effect);
+		virtual ~ProgramSource() = default;
 
 		const Shape& GetShape() const { return shape; }
+
+		/** @brief Whether linear lighting is on for this chain: the scene is stored pre-exposed. */
+		bool Linear() const { return linear; }
+
+		/** @brief Whether an earlier effect of this chain published an image or a latch region under a_name. */
+		virtual bool Published(std::string_view a_name) const = 0;
+
+		/**
+		* @brief In Effect::Programs: this effect publishes a_name in its build, so a later effect's Published sees it. A build
+		* does nothing here (Builder::Publish and PublishLatch do it).
+		*/
+		virtual void Publishes(std::string_view a_name) { (void)a_name; }
+
+		/**
+		* @brief A program. Common and stage defines are added as Util::CompileShader adds them. In a build, a program its
+		* effect's Programs did not list fails the build and returns null. In a plan it is listed, and the result is null.
+		*/
+		std::shared_ptr<const RasterProgram> Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
+			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
+		/** @brief For an accumulating draw. A vertex source replaces the fullscreen triangle; both stages get the defines. */
+		std::shared_ptr<const RasterProgram> RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
+			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main", std::string_view a_vertexSource = {},
+			std::wstring a_vertexEntry = L"main");
+		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
+			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
+
+	protected:
+		ProgramSource(const Shape& a_shape, bool a_linear) :
+			shape(a_shape), linear(a_linear) {}
+
+		/** @brief a_key names the program by its desc, so equal keys are one program. */
+		virtual std::shared_ptr<const RasterProgram> TakeRaster(std::string a_key, RasterProgram::Desc a_desc) = 0;
+		virtual std::shared_ptr<const ComputeProgram> TakeCompute(std::string a_key, ComputeProgram::Desc a_desc) = 0;
+
+		Shape shape;
+		bool linear = false;
+	};
+
+	/** @brief Render thread, during one build, in the chain client's make function. */
+	class Builder final : public ProgramSource
+	{
+	public:
+		Builder(BuildState& a_state, const ChainPrograms& a_programs, const Shape& a_shape, bool a_linear, std::string_view a_effect);
 
 		/** @brief The last image an earlier stage wrote. */
 		const Image& Current() const;
@@ -227,6 +274,8 @@ namespace ORGPostChain
 		/** @brief Find returns it, or a null image. */
 		void Publish(std::string_view a_name, const Image& a_image);
 		Image Find(std::string_view a_name) const;
+
+		bool Published(std::string_view a_name) const override;
 
 		/** @brief FindLatch returns it. A region published for another type fails the build. */
 		template <class T>
@@ -257,16 +306,6 @@ namespace ORGPostChain
 		/** @brief The regions are offsets into a run's region of it. */
 		std::shared_ptr<const org::LatchBlock> LatchBlock() const;
 
-		/** @brief Cached across builds. Common and stage defines are added as Util::CompileShader adds them. Null fails the build. */
-		std::shared_ptr<const RasterProgram> Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
-			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
-		/** @brief For an accumulating draw. A vertex source replaces the fullscreen triangle; both stages get the defines. */
-		std::shared_ptr<const RasterProgram> RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
-			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main", std::string_view a_vertexSource = {},
-			std::wstring a_vertexEntry = L"main");
-		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
-			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
-
 		/** @brief The whole of kMAIN. */
 		RasterProgram::Viewport FullViewport() const;
 		/**
@@ -285,10 +324,14 @@ namespace ORGPostChain
 		/** @brief make is called at each graph build. It has no gate and runs on every anchor run, so it decides in Prepare whether it has work. */
 		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make);
 
-		/** @brief The reason is logged. */
+		/** @brief The reason is logged and the build fails, which is fatal. */
 		void Fail(std::string_view a_reason);
 
 		bool Failed() const;
+
+	protected:
+		std::shared_ptr<const RasterProgram> TakeRaster(std::string a_key, RasterProgram::Desc a_desc) override;
+		std::shared_ptr<const ComputeProgram> TakeCompute(std::string a_key, ComputeProgram::Desc a_desc) override;
 
 	private:
 		std::uint32_t Reserve(std::uint32_t a_bytes);
@@ -298,8 +341,7 @@ namespace ORGPostChain
 		std::optional<std::uint32_t> FindLatchBytes(std::string_view a_name, std::uint32_t a_size);
 
 		BuildState& state;
-		Programs& programs;
-		Shape shape;
+		const ChainPrograms& programs;
 		std::string effect;
 	};
 
@@ -348,8 +390,6 @@ namespace ORGPostChain
 
 		/** @brief At every build, before AddBuffer and AddTexture. Returns the build's stamp region, for its Run's Commit. */
 		LatchRegion<RenderGraph::RunReadback::Stamp> BuildStamp(Builder& a_builder);
-		/** @brief The legacy form, for an effect that keeps one state for every build: the stamp region is the newest build's. */
-		void Build(Builder& a_builder);
 		/** @brief A pass that copies the first bytes of buffer a_source into part a_part. */
 		void AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source);
 		/** @brief A pass that copies mip 0 of a small 2D texture into part a_part. Rows are 256 bytes apart. */
@@ -357,11 +397,10 @@ namespace ORGPostChain
 			std::uint32_t a_width, std::uint32_t a_height);
 
 		/**
-		* @brief In the effect's Commit, before Take. Reads the lease's last run and stamps this run.
+		* @brief In the Run's Commit, before Take. Reads the lease's last run, stamps this run and writes the stamp into a_stamp, the
+		* region BuildStamp gave the build being committed.
 		* @return This run's stamp. Stamps grow by one each commit.
 		*/
-		std::uint32_t Commit(const CommitContext& a_commit);
-		/** @brief As Commit, writing the stamp into a_stamp, the region BuildStamp gave the build being committed. */
 		std::uint32_t Commit(const CommitContext& a_commit, const LatchRegion<RenderGraph::RunReadback::Stamp>& a_stamp);
 		/** @brief In the effect's Executed: the run last committed was submitted. */
 		void Executed();
@@ -373,7 +412,6 @@ namespace ORGPostChain
 
 	private:
 		std::shared_ptr<RenderGraph::RunReadback> readback;
-		LatchRegion<RenderGraph::RunReadback::Stamp> stamp;  // the current build's
 	};
 
 	/**
@@ -432,35 +470,24 @@ namespace ORGPostChain
 		}
 
 		/**
-		* @brief Render thread, when a revision builds the chain. a_key holds the words Key appended for that revision.
-		* @return The build's Run. Null only after failing the builder.
-		* The default is the legacy form below: it calls Build and commits through the effect itself.
+		* @brief Render thread, when a revision starts, before BuildRun for the same key words. Lists every program BuildRun will
+		* ask a_programs for, through the same Raster, RasterTargets and Compute calls, and with Publishes every name BuildRun will
+		* publish. The programs lane builds the chain's list before the revision starts. A program BuildRun asks for that is not
+		* listed fails the build, which is fatal. Read only what BuildRun reads: a_key, the shape, and what Update observed.
 		*/
-		virtual std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key);
+		virtual void Programs(ProgramSource& a_programs, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key)
+		{
+			(void)a_programs;
+			(void)a_feature;
+			(void)a_key;
+		}
 
 		/**
-		* @brief Whether the effect keeps one state for every build (the legacy form: Build, Commit and Executed below).
-		* A chain that holds one commits only its newest build, so a frame whose schedule still holds an older one runs the chain
-		* on D3D11. Physical Lens and Camera FX keep it until they migrate (frame revision plan, 6.20).
+		* @brief Render thread, when a revision builds the chain, in the chain client's make function. a_key holds the words Key
+		* appended for that revision. Programs come from a_builder, never from a compile.
+		* @return The build's Run. Null only after failing the builder, which is fatal.
 		*/
-		virtual bool Legacy() const { return true; }
-
-		/** @brief Legacy form. Render thread, at a build. Fail the builder when it cannot. */
-		virtual void Build(Builder& a_builder, PostProcessFeature& a_feature)
-		{
-			(void)a_feature;
-			a_builder.Fail("it has no build");
-		}
-
-		/** @brief Legacy form. In the epoch, each frame. */
-		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature)
-		{
-			(void)a_commit;
-			(void)a_feature;
-		}
-
-		/** @brief Legacy form. After a frame whose Commit reached the GPU with the newest build's passes. Render thread. */
-		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
+		virtual std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key) = 0;
 	};
 
 	/**

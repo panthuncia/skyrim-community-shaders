@@ -55,8 +55,6 @@ namespace ORGPostChain
 		class CODBloomEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
 			{
 				usedMips = RenderGraph::Frame::DeriveFromSetting<std::array<float, CODBloom::s_BloomMips - 1>>("PostProcessing.CODBloom.usedMips",
@@ -68,6 +66,12 @@ namespace ORGPostChain
 			void Key(const RenderGraph::Frame::Inputs& a_values, PostProcessFeature&, std::vector<std::uint64_t>& a_key) override
 			{
 				a_key.push_back(a_values.Get(usedMips));
+			}
+
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				LoadPrograms(a_programs);
+				a_programs.Publishes(Published::kBloomOutput);
 			}
 
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
@@ -87,20 +91,7 @@ namespace ORGPostChain
 
 				// kMAIN_COPY's size and format, the whole mip chain.
 				const auto format = a_builder.GetShape().mainCopyFormat;
-				const auto words = ShaderBindings::Words<BloomBlock>();
-				auto threshold = a_builder.Raster(kShader, words, { format }, {}, L"PS_Threshold");
-				auto downsampleFirst = a_builder.Raster(kShader, words, { format }, { { "FIRST_MIP", "" } }, L"PS_Downsample");
-				auto downsample = a_builder.Raster(kShader, words, { format }, {}, L"PS_Downsample");
-				const RasterProgram::Target accumulate{ .format = rhi::helpers::ToRHI(format),
-					.blend = { .enable = true,
-						.srcColor = rhi::BlendFactor::One,
-						.dstColor = rhi::BlendFactor::SrcAlpha,
-						.colorOp = rhi::BlendOp::Add,
-						.srcAlpha = rhi::BlendFactor::One,
-						.dstAlpha = rhi::BlendFactor::Zero,
-						.alphaOp = rhi::BlendOp::Add,
-						.writeMask = static_cast<rhi::ColorWriteEnable>(rhi::ColorWriteEnable::R | rhi::ColorWriteEnable::G | rhi::ColorWriteEnable::B) } };
-				auto upsample = a_builder.RasterTargets(kShader, words, { accumulate }, {}, L"PS_Upsample");
+				auto [threshold, downsampleFirst, downsample, upsample] = LoadPrograms(a_builder);
 				auto image = a_builder.CreateMipChain("PostProcessing::CODBloom::Bloom", format, D3D11_BIND_RENDER_TARGET, kMips);
 				if (a_builder.Failed())
 					return nullptr;
@@ -138,6 +129,31 @@ namespace ORGPostChain
 			}
 
 		private:
+			struct BloomPrograms
+			{
+				std::shared_ptr<const RasterProgram> threshold, downsampleFirst, downsample, upsample;
+			};
+
+			/** @brief Listed in Programs and built on the programs lane. Every mip count uses all four. */
+			static BloomPrograms LoadPrograms(ProgramSource& a_programs)
+			{
+				const auto format = a_programs.GetShape().mainCopyFormat;
+				const auto words = ShaderBindings::Words<BloomBlock>();
+				const RasterProgram::Target accumulate{ .format = rhi::helpers::ToRHI(format),
+					.blend = { .enable = true,
+						.srcColor = rhi::BlendFactor::One,
+						.dstColor = rhi::BlendFactor::SrcAlpha,
+						.colorOp = rhi::BlendOp::Add,
+						.srcAlpha = rhi::BlendFactor::One,
+						.dstAlpha = rhi::BlendFactor::Zero,
+						.alphaOp = rhi::BlendOp::Add,
+						.writeMask = static_cast<rhi::ColorWriteEnable>(rhi::ColorWriteEnable::R | rhi::ColorWriteEnable::G | rhi::ColorWriteEnable::B) } };
+				return { .threshold = a_programs.Raster(kShader, words, { format }, {}, L"PS_Threshold"),
+					.downsampleFirst = a_programs.Raster(kShader, words, { format }, { { "FIRST_MIP", "" } }, L"PS_Downsample"),
+					.downsample = a_programs.Raster(kShader, words, { format }, {}, L"PS_Downsample"),
+					.upsample = a_programs.RasterTargets(kShader, words, { accumulate }, {}, L"PS_Upsample") };
+			}
+
 			org::OwnedDescriptorBinding sampler;
 			RenderGraph::Frame::Vars::Var<std::uint32_t> usedMips;
 		};

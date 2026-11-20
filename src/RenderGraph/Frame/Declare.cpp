@@ -141,6 +141,7 @@ namespace RenderGraph::Frame
 			std::vector<std::pair<ErasedKey, ErasedProgram>> built;
 			std::vector<std::shared_ptr<ProgramBuild>> building;
 			ErasedKey wanted;  // the key of the newest values checked
+			bool invalid = false;  // the key reads other state, and it changed
 			ErasedProgram adopted;
 			std::shared_ptr<const void> adoptedValues;  // the snapshot adopted was looked up for
 		};
@@ -484,6 +485,12 @@ namespace RenderGraph::Frame
 		return a_program ? a_program->adopted : nullptr;
 	}
 
+	void Detail::InvalidateProgram(ProgramDeclaration* a_program)
+	{
+		if (a_program)
+			a_program->invalid = true;
+	}
+
 	Vars::Var<std::uint32_t> Detail::DeriveFromSetting(std::string_view a_name, const Dependency& a_setting, std::function<std::uint32_t(const void*)> a_fn)
 	{
 		// A Var holds a view of its name, so the names live for the process. Render thread, at setup.
@@ -575,7 +582,8 @@ namespace RenderGraph::Frame
 			for (const auto& weak : registry.programs) {
 				const auto program = weak.lock();
 				CollectProgramBuilds(*program);
-				if (program->dependencies.Changed(a_values))
+				const bool changed = program->dependencies.Changed(a_values);
+				if (changed || std::exchange(program->invalid, false))
 					program->wanted = program->functions.key(inputs);
 				if (FindProgram(*program, program->wanted))
 					continue;
@@ -677,6 +685,7 @@ namespace RenderGraph::Frame
 	std::shared_ptr<Detail::ProgramDeclaration> Detail::DeclareProgram(std::string, Dependencies, ProgramFunctions) { return nullptr; }
 	Detail::ErasedProgram Detail::ProgramFor(const ProgramDeclaration*, const Inputs&) { return nullptr; }
 	Detail::ErasedProgram Detail::AdoptedProgram(const ProgramDeclaration*) { return nullptr; }
+	void Detail::InvalidateProgram(ProgramDeclaration*) {}
 	Vars::Var<std::uint32_t> Detail::DeriveFromSetting(std::string_view a_name, const Dependency&, std::function<std::uint32_t(const void*)>)
 	{
 		static std::deque<std::string> s_names;

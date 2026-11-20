@@ -84,8 +84,6 @@ namespace ORGPostChain
 		class HistogramAutoExposureEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>&) override
 			{
 				// The adaptation starts over after a shader reload, as ClearShaderCache's resetAdaptation.
@@ -95,6 +93,13 @@ namespace ORGPostChain
 					reset = true;
 				}
 				return nullptr;
+			}
+
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				LoadPrograms(a_programs);
+				a_programs.Publishes(Published::kAdaptation);
+				a_programs.Publishes(Published::kAutoExposureConstants);
 			}
 
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
@@ -126,7 +131,7 @@ namespace ORGPostChain
 				a_builder.Register(*histogram);
 				a_builder.Register(*adaptation);
 
-				const auto words = ShaderBindings::Words<HistogramBlock>();
+				auto programs = LoadPrograms(a_builder);
 				const auto constants = a_builder.Latch<HistogramAutoExposure::AutoExposureCB>();
 				const auto input = a_builder.Current();
 				const auto shape = a_builder.GetShape();
@@ -135,17 +140,17 @@ namespace ORGPostChain
 				// Gated, so it runs only on a committed frame that opened it: the buffers' first frame. It reads no constants.
 				const auto resetGate = a_builder.Gate();
 				a_builder.Dispatch({ .name = "reset",
-					.program = a_builder.Compute(kShader, words, {}, L"CS_Reset"),
+					.program = std::move(programs.reset),
 					.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
 					.gate = resetGate });
 				a_builder.Dispatch({ .name = "histogram",
-					.program = a_builder.Compute(kShader, words, {}, L"CS_Histogram"),
+					.program = std::move(programs.histogram),
 					.bindings = { Bind::Shared(), Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
 					.groups = { groups[0], groups[1], 1 } });
 				// Before CS_Average clears the histogram, as the D3D11 staging copy.
 				readback->AddBuffer(a_builder, "histogram-readback", kHistogramPart, histogram->Graph());
 				a_builder.Dispatch({ .name = "average",
-					.program = a_builder.Compute(kShader, words, {}, L"CS_Average"),
+					.program = std::move(programs.average),
 					.bindings = { Bind::Shared(), Bind::Unused(), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) } });
 				readback->AddBuffer(a_builder, "adaptation-readback", kAdaptationPart, adaptation->Graph());
 				a_builder.Publish(Published::kAdaptation, Image{ adaptation->Graph(), DXGI_FORMAT_UNKNOWN });
@@ -155,6 +160,20 @@ namespace ORGPostChain
 
 		private:
 			friend class HistogramAutoExposureRun;
+
+			struct ExposurePrograms
+			{
+				std::shared_ptr<const ComputeProgram> reset, histogram, average;
+			};
+
+			/** @brief Listed in Programs and built on the programs lane. */
+			static ExposurePrograms LoadPrograms(ProgramSource& a_programs)
+			{
+				const auto words = ShaderBindings::Words<HistogramBlock>();
+				return { .reset = a_programs.Compute(kShader, words, {}, L"CS_Reset"),
+					.histogram = a_programs.Compute(kShader, words, {}, L"CS_Histogram"),
+					.average = a_programs.Compute(kShader, words, {}, L"CS_Average") };
+			}
 
 			/**
 			* @brief Moves arrived readbacks into the UI values and the pre-exposure metering. Every run copies both parts.

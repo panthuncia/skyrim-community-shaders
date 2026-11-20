@@ -84,8 +84,6 @@ namespace ORGPostChain
 		class MotionBlurEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies&) override
 			{
 				using namespace RenderGraph::Frame;
@@ -111,6 +109,8 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override { LoadPrograms(a_programs); }
+
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				const auto& shape = a_builder.GetShape();
@@ -129,21 +129,22 @@ namespace ORGPostChain
 				// size in its constants.
 				const std::uint32_t width = shape.width;
 				const std::uint32_t height = shape.height;
+				auto programs = LoadPrograms(a_builder);
 
 				a_builder.Dispatch({ .name = "horizontal",
-					.program = a_builder.Compute("PostProcessing/MotionBlur/motionblur_horizontalpass.cs.hlsl", ShaderBindings::Words<HorizontalBlock>()),
+					.program = std::move(programs.horizontal),
 					.bindings = { Bind::Srv(motion), Bind::Uav(*horizontal), Bind::Latch(reduction) },
 					.groups = { kGridGroups, (height + 7) >> 3, 1 } });
 				a_builder.Dispatch({ .name = "vertical",
-					.program = a_builder.Compute("PostProcessing/MotionBlur/motionblur_verticalpass.cs.hlsl", ShaderBindings::Words<GridBlock>()),
+					.program = std::move(programs.vertical),
 					.bindings = { Bind::Srv(*horizontal), Bind::Uav(*vertical) },
 					.groups = { kGridGroups, kGridGroups, 1 } });
 				a_builder.Dispatch({ .name = "neighbor-max",
-					.program = a_builder.Compute("PostProcessing/MotionBlur/motionblur_neighborpass.cs.hlsl", ShaderBindings::Words<GridBlock>()),
+					.program = std::move(programs.neighborMax),
 					.bindings = { Bind::Srv(*vertical), Bind::Uav(*neighborMax) },
 					.groups = { kGridGroups, kGridGroups, 1 } });
 				a_builder.Dispatch({ .name = "blur",
-					.program = a_builder.Compute("PostProcessing/MotionBlur/motionblur_blurpass.cs.hlsl", ShaderBindings::Words<BlurBlock>()),
+					.program = std::move(programs.blur),
 					.bindings = { Bind::Srv(input), Bind::Srv(motion), Bind::Srv(*neighborMax), Bind::Srv(depth), Bind::Uav(image),
 						Bind::Handle(linearSampler.Index()), Bind::Handle(pointSampler.Index()), Bind::Latch(blur) },
 					.groups = { (width + 7) >> 3, (height + 7) >> 3, 1 } });
@@ -154,6 +155,20 @@ namespace ORGPostChain
 			}
 
 		private:
+			struct BlurPrograms
+			{
+				std::shared_ptr<const ComputeProgram> horizontal, vertical, neighborMax, blur;
+			};
+
+			/** @brief Listed in Programs and built on the programs lane. */
+			static BlurPrograms LoadPrograms(ProgramSource& a_programs)
+			{
+				return { .horizontal = a_programs.Compute("PostProcessing/MotionBlur/motionblur_horizontalpass.cs.hlsl", ShaderBindings::Words<HorizontalBlock>()),
+					.vertical = a_programs.Compute("PostProcessing/MotionBlur/motionblur_verticalpass.cs.hlsl", ShaderBindings::Words<GridBlock>()),
+					.neighborMax = a_programs.Compute("PostProcessing/MotionBlur/motionblur_neighborpass.cs.hlsl", ShaderBindings::Words<GridBlock>()),
+					.blur = a_programs.Compute("PostProcessing/MotionBlur/motionblur_blurpass.cs.hlsl", ShaderBindings::Words<BlurBlock>()) };
+			}
+
 			/** @brief False, with the build failed, when one cannot be made. */
 			bool Prepare(Builder& a_builder)
 			{

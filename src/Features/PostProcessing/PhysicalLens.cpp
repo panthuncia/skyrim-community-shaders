@@ -11,6 +11,13 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(PhysicalLens::Settings,
 
 using PhysicalLensInternal::OpticalBindings;
 
+PhysicalLens::PhysicalLens()
+{
+	settings.Intensity.Bind(CS::SettingRegistry::Declare("PostProcessing.PhysicalLens.Intensity"));
+	settings.ImageEffects.Bind(CS::SettingRegistry::Declare("PostProcessing.PhysicalLens.ImageEffects"));
+	settings.Diffraction.Bind(CS::SettingRegistry::Declare("PostProcessing.PhysicalLens.Diffraction"));
+}
+
 void PhysicalLens::SanitizeSettings()
 {
 	settings.LensPreset = std::clamp(settings.LensPreset, 0, int(LensPresetCount) - 1);
@@ -92,10 +99,10 @@ void PhysicalLens::DrawSettings()
 			ImGui::TextWrapped("%s", T("feature.post_processing.physical_lens.focus_unavailable", "This lens cannot focus at the current distance. Increase the focus distance or reduce the focal length."));
 	}
 	DrawLensPresetCombo();
-	ImGui::Checkbox(T("feature.post_processing.physical_lens.image_effects", "Lens Distortion, Vignetting and Color"), &settings.ImageEffects);
+	Util::Checkbox(T("feature.post_processing.physical_lens.image_effects", "Lens Distortion, Vignetting and Color"), settings.ImageEffects);
 	if (auto tooltip = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.physical_lens.image_effects_hint", "Adds lens distortion, darkened corners and color fringing. Scene framing stays fixed; depth of field is unchanged."));
-	ImGui::Checkbox(T("feature.post_processing.physical_lens.diffraction", "Diffraction Starburst"), &settings.Diffraction);
+	Util::Checkbox(T("feature.post_processing.physical_lens.diffraction", "Diffraction Starburst"), settings.Diffraction);
 	if (auto tooltip = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.physical_lens.diffraction_hint", "Adds starbursts around bright lights. Aperture shape controls the rays; higher F-Numbers make the pattern larger and fainter."));
 	ImGui::SliderFloat(T("feature.post_processing.physical_lens.starburst_size", "Starburst Size"), &settings.StarburstSize, .1f, 32.f, "%.2f", ImGuiSliderFlags_Logarithmic);
@@ -144,7 +151,7 @@ void PhysicalLens::DrawSettings()
 				ImGui::TextUnformatted(T("feature.post_processing.physical_lens.zoom_hint", "Changes the lens flare appearance from wide-angle to telephoto. Scene framing stays fixed."));
 		}
 	}
-	ImGui::SliderFloat(T("feature.post_processing.physical_lens.intensity", "Ghost Intensity"), &settings.Intensity, 0.f, 64.f, "%.2f");
+	Util::SliderFloat(T("feature.post_processing.physical_lens.intensity", "Ghost Intensity"), settings.Intensity, 0.f, 64.f, "%.2f");
 	if (auto tooltip = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.physical_lens.intensity_hint", "Controls ghost brightness independently of the starburst."));
 	ImGui::SliderInt(T("feature.post_processing.physical_lens.max_sources", "Maximum Highlight Sources"), &settings.MaxSources, 1, (int)SourceCount);

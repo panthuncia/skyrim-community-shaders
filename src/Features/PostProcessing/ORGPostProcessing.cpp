@@ -29,6 +29,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "Globals.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
@@ -53,9 +54,11 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include <format>
 #	include <map>
 #	include <mutex>
+#	include <set>
 #	include <span>
 #	include <stdexcept>
 #	include <unordered_map>
+#	include <variant>
 
 namespace ORGPostChain
 {
@@ -70,14 +73,11 @@ namespace ORGPostChain
 		constexpr std::uint32_t kDrawEntry = 0;
 	}
 
-	/** @brief For the session, so a rebuild finds the programs it built before. */
-	struct Programs
+	/** @brief The programs one chain plan lists, by key. Built on the programs lane, read by the build. */
+	struct ChainPrograms
 	{
-		rhi::Device device;
 		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
 		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
-		// After the first chain, a newly built program is logged.
-		bool chainBuilt = false;
 	};
 
 	/** @brief Immutable once registered. */
@@ -116,8 +116,8 @@ namespace ORGPostChain
 		}
 	}
 
-	Builder::Builder(BuildState& a_state, Programs& a_programs, const Shape& a_shape, std::string_view a_effect) :
-		state(a_state), programs(a_programs), shape(a_shape), effect(a_effect) {}
+	Builder::Builder(BuildState& a_state, const ChainPrograms& a_programs, const Shape& a_shape, bool a_linear, std::string_view a_effect) :
+		ProgramSource(a_shape, a_linear), state(a_state), programs(a_programs), effect(a_effect) {}
 
 	const Image& Builder::Current() const { return state.current; }
 
@@ -195,6 +195,11 @@ namespace ORGPostChain
 		return found != state.published.end() ? found->second : Image{};
 	}
 
+	bool Builder::Published(std::string_view a_name) const
+	{
+		return state.published.find(a_name) != state.published.end() || state.publishedLatches.find(a_name) != state.publishedLatches.end();
+	}
+
 	void Builder::PublishLatchBytes(std::string_view a_name, std::uint32_t a_offset, std::uint32_t a_size)
 	{
 		state.publishedLatches.insert_or_assign(std::string(a_name), std::pair{ a_offset, a_size });
@@ -250,7 +255,7 @@ namespace ORGPostChain
 
 	std::shared_ptr<const RenderGraph::RunGate> Builder::RunGate() const { return state.gate; }
 
-	std::shared_ptr<const RasterProgram> Builder::Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
+	std::shared_ptr<const RasterProgram> ProgramSource::Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
 	{
 		std::vector<RasterProgram::Target> targets;
@@ -259,7 +264,7 @@ namespace ORGPostChain
 		return RasterTargets(a_source, a_words, std::move(targets), std::move(a_defines), std::move(a_entry));
 	}
 
-	std::shared_ptr<const RasterProgram> Builder::RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
+	std::shared_ptr<const RasterProgram> ProgramSource::RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
 		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry, std::string_view a_vertexSource, std::wstring a_vertexEntry)
 	{
 		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
@@ -274,10 +279,6 @@ namespace ORGPostChain
 			else if (blend.writeMask != rhi::ColorWriteEnable::All)
 				key += std::format("m{}", static_cast<int>(blend.writeMask));
 		}
-		if (const auto found = programs.raster.find(key); found != programs.raster.end())
-			return found->second;
-		if (programs.chainBuilt)
-			logger::info("[ORG] Post Processing: {} ({}) is new to this session; building it now", a_source, key);
 		RasterProgram::Desc desc{};
 		desc.pixelSource = std::string(a_source);
 		desc.pixelEntry = std::move(a_entry);
@@ -288,31 +289,31 @@ namespace ORGPostChain
 		desc.constantWords = a_words;
 		desc.defines = RenderGraph::AnchorPasses::Defines(a_defines);
 		desc.targets = std::move(a_targets);
-		auto program = RasterProgram::Load(programs.device, desc);
-		if (!program) {
-			Fail(std::format("{} did not build", a_source));
-			return nullptr;
-		}
-		programs.raster.emplace(std::move(key), program);
-		return program;
+		return TakeRaster(std::move(key), std::move(desc));
 	}
 
-	std::shared_ptr<const ComputeProgram> Builder::Compute(std::string_view a_source, std::uint32_t a_words,
+	std::shared_ptr<const ComputeProgram> ProgramSource::Compute(std::string_view a_source, std::uint32_t a_words,
 		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
 	{
 		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
-		if (const auto found = programs.compute.find(key); found != programs.compute.end())
+		ComputeProgram::Desc desc{ .source = std::string(a_source), .entry = std::move(a_entry), .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(a_defines) };
+		return TakeCompute(std::move(key), std::move(desc));
+	}
+
+	std::shared_ptr<const RasterProgram> Builder::TakeRaster(std::string a_key, RasterProgram::Desc a_desc)
+	{
+		if (const auto found = programs.raster.find(a_key); found != programs.raster.end() && found->second)
 			return found->second;
-		if (programs.chainBuilt)
-			logger::info("[ORG] Post Processing: {} ({}) is new to this session; building it now", a_source, key);
-		auto program = ComputeProgram::Load(programs.device,
-			{ .source = std::string(a_source), .entry = std::move(a_entry), .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(a_defines) });
-		if (!program) {
-			Fail(std::format("{} did not build", a_source));
-			return nullptr;
-		}
-		programs.compute.emplace(std::move(key), program);
-		return program;
+		Fail(std::format("{} ({}) is not among the programs its Programs lists", a_desc.pixelSource, a_key));
+		return nullptr;
+	}
+
+	std::shared_ptr<const ComputeProgram> Builder::TakeCompute(std::string a_key, ComputeProgram::Desc a_desc)
+	{
+		if (const auto found = programs.compute.find(a_key); found != programs.compute.end() && found->second)
+			return found->second;
+		Fail(std::format("{} ({}) is not among the programs its Programs lists", a_desc.source, a_key));
+		return nullptr;
 	}
 
 	RasterProgram::Viewport Builder::FullViewport() const { return { .width = shape.width, .height = shape.height }; }
@@ -389,29 +390,6 @@ namespace ORGPostChain
 
 	Image ImageOf(const GraphResources::Resource& a_twin, DXGI_FORMAT a_format) { return Image{ RenderGraph::AnchorPasses::TextureOf(a_twin), a_format }; }
 
-	namespace
-	{
-		/** @brief The legacy form's Run: one state for every build, kept by the effect. */
-		class LegacyRun final : public Run
-		{
-		public:
-			explicit LegacyRun(Effect& a_effect) :
-				effect(a_effect) {}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override { effect.Commit(a_commit, a_feature); }
-			void Executed(PostProcessFeature& a_feature) override { effect.Executed(a_feature); }
-
-		private:
-			Effect& effect;
-		};
-	}
-
-	std::shared_ptr<Run> Effect::BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t>)
-	{
-		Build(a_builder, a_feature);
-		return std::make_shared<LegacyRun>(*this);
-	}
-
 	std::shared_ptr<RunReadback> RunReadback::Create(std::string_view a_name, std::vector<std::uint32_t> a_parts)
 	{
 		auto readback = RenderGraph::RunReadback::Create(a_name, std::move(a_parts));
@@ -424,8 +402,6 @@ namespace ORGPostChain
 		readback->Bind(a_builder.LatchBlock(), region.offset);
 		return region;
 	}
-
-	void RunReadback::Build(Builder& a_builder) { stamp = BuildStamp(a_builder); }
 
 	void RunReadback::AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source)
 	{
@@ -449,8 +425,6 @@ namespace ORGPostChain
 		}
 		a_builder.Add(a_name, FrameAnchors::PassKind::Copy, std::move(make));
 	}
-
-	std::uint32_t RunReadback::Commit(const CommitContext& a_commit) { return Commit(a_commit, stamp); }
 
 	std::uint32_t RunReadback::Commit(const CommitContext& a_commit, const LatchRegion<RenderGraph::RunReadback::Stamp>& a_stamp)
 	{
@@ -589,6 +563,7 @@ namespace
 		std::vector<Index> order;
 		ORGPostChain::Shape shape;
 		FrameAnchors::Texture main, mainCopy;  // mainCopy is empty when the chain reads and writes one target
+		bool linear = false;                   // linear lighting: the scene is stored pre-exposed
 		std::vector<std::uint64_t> words;      // what the passes depend on of the above, then the effects' Update words
 
 		friend bool operator==(const Observed& a_left, const Observed& a_right) { return a_left.words == a_right.words; }
@@ -599,12 +574,93 @@ namespace
 	{
 		Observed observed;
 		std::vector<std::vector<std::uint64_t>> effects;
-		std::uint64_t programs = 0;  // ClearShaderCache's count, so a reload builds again
+		std::uint64_t generation = 0;  // ClearShaderCache's count, so a reload builds again
+		// The programs the plan of this key lists, built on the programs lane. Follows from the rest, so it is not compared.
+		std::shared_ptr<const ORGPostChain::ChainPrograms> programs;
 
 		friend bool operator==(const ChainKey& a_left, const ChainKey& a_right)
 		{
-			return a_left.observed == a_right.observed && a_left.effects == a_right.effects && a_left.programs == a_right.programs;
+			return a_left.observed == a_right.observed && a_left.effects == a_right.effects && a_left.generation == a_right.generation;
 		}
+	};
+
+	/** @brief One program of a chain plan: its key and its desc, with the defines resolved on the render thread. */
+	struct PlannedProgram
+	{
+		std::string key;
+		std::variant<RasterProgram::Desc, ComputeProgram::Desc> desc;
+	};
+
+	/** @brief The chain's declared program: every program one chain key's build asks for. Equal keys are one plan. */
+	struct ProgramPlanKey
+	{
+		std::uint64_t generation = 0;
+		std::vector<std::string> keys;  // sorted
+		std::shared_ptr<const std::vector<PlannedProgram>> programs;
+
+		friend bool operator==(const ProgramPlanKey& a_left, const ProgramPlanKey& a_right)
+		{
+			return a_left.generation == a_right.generation && a_left.keys == a_right.keys;
+		}
+	};
+
+	/** @brief Every program compiled this session, by generation and key, so a plan rebuilds only what is new. Any thread. */
+	struct ProgramStore
+	{
+		std::mutex mutex;
+		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
+		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
+	};
+
+	/** @brief Render thread. Resolved descs by key: the common defines read State, so they are resolved here, never on the lane. */
+	using ResolvedPrograms = std::unordered_map<std::string, std::variant<RasterProgram::Desc, ComputeProgram::Desc>>;
+
+	/** @brief Effect::Programs' source: it lists each program once and records what effects publish. Render thread. */
+	class ProgramPlan final : public ORGPostChain::ProgramSource
+	{
+	public:
+		ProgramPlan(const ORGPostChain::Shape& a_shape, bool a_linear, ResolvedPrograms& a_resolved) :
+			ProgramSource(a_shape, a_linear), resolved(a_resolved) {}
+
+		bool Published(std::string_view a_name) const override { return published.find(a_name) != published.end(); }
+		void Publishes(std::string_view a_name) override { published.emplace(a_name); }
+
+		std::vector<PlannedProgram> programs;
+
+	protected:
+		std::shared_ptr<const RasterProgram> TakeRaster(std::string a_key, RasterProgram::Desc a_desc) override
+		{
+			Add(std::move(a_key), [&] {
+				RenderGraph::ProgramCacheDetail::ResolveDefines(a_desc);
+				return std::variant<RasterProgram::Desc, ComputeProgram::Desc>(std::move(a_desc));
+			});
+			return nullptr;
+		}
+
+		std::shared_ptr<const ComputeProgram> TakeCompute(std::string a_key, ComputeProgram::Desc a_desc) override
+		{
+			Add(std::move(a_key), [&] {
+				RenderGraph::ProgramCacheDetail::ResolveDefines(a_desc);
+				return std::variant<RasterProgram::Desc, ComputeProgram::Desc>(std::move(a_desc));
+			});
+			return nullptr;
+		}
+
+	private:
+		template <class Resolve>
+		void Add(std::string a_key, Resolve&& a_resolve)
+		{
+			if (!seen.insert(a_key).second)
+				return;
+			auto found = resolved.find(a_key);
+			if (found == resolved.end())
+				found = resolved.emplace(a_key, a_resolve()).first;
+			programs.push_back({ std::move(a_key), found->second });
+		}
+
+		ResolvedPrograms& resolved;
+		std::set<std::string, std::less<>> seen;
+		std::set<std::string, std::less<>> published;
 	};
 
 	/** @brief One build of the chain. Its registration holds it, so a frame whose schedule holds it commits it. */
@@ -615,27 +671,23 @@ namespace
 		std::vector<std::shared_ptr<ORGPostChain::Run>> runs;  // one per order entry
 		ORGPostChain::LatchRegion<CopyLatch> input, output;
 		std::uint64_t generation = 0;
-		bool legacy = false;  // holds an effect of the legacy form, so only the newest build may commit
 	};
 }
 
 struct ORGPostProcessing::Impl
 {
-	ORGPostChain::Programs programs;
+	rhi::Device device;
 	std::array<std::unique_ptr<ORGPostChain::Effect>, kSlots> effects;
 
-	// The chain's client, declared on the effects' settings. Its key reads observed.
+	// The chain's client and its programs, declared on the effects' settings. Both keys read observed.
 	RenderGraph::Frame::DeclaredClient declared;
+	RenderGraph::Frame::DeclaredProgram<ORGPostChain::ChainPrograms> chainPrograms;
+	std::shared_ptr<ProgramStore> store = std::make_shared<ProgramStore>();
+	ResolvedPrograms resolved;
 	std::optional<Observed> observed;
-	// The build the key function made for the registration the revision makes next.
-	std::optional<ChainKey> pendingKey;
-	std::shared_ptr<ChainBuild> pendingBuild;
-	FrameAnchors::ClientDesc pendingDesc;
-	// A key that failed to build is not tried again. The chain then runs on D3D11.
-	std::optional<ChainKey> failedKey;
 	// Builds a registration may still hold, newest last.
 	std::vector<std::shared_ptr<ChainBuild>> builds;
-	std::uint64_t generation = 0;
+	std::uint64_t buildGeneration = 0;
 	std::uint64_t programsGeneration = 0;
 
 	// Set by BeforeTonemap for the commit.
@@ -697,7 +749,7 @@ struct ORGPostProcessing::Impl
 		members = a_members;
 	}
 
-	/** @brief Render thread, at setup. Declares the effects' textures and the chain's client on their settings. */
+	/** @brief Render thread, at setup. Declares the effects' textures, the chain's programs and its client on their settings. */
 	void Declare()
 	{
 		auto& pp = globals::features::postProcessing;
@@ -708,76 +760,167 @@ struct ORGPostProcessing::Impl
 			dependencies.push_back(RenderGraph::Frame::DependencyOf(pp.pipeline[i]->enabled));
 			effects[i]->Declare(*pp.pipeline[i], dependencies);
 		}
+		// The first plan is empty (nothing is observed yet), so the declaration builds nothing. Later plans build on the lane.
+		chainPrograms = RenderGraph::Frame::DeclareProgram(
+			"PostProcessing::Chain", dependencies, [this](const RenderGraph::Frame::Inputs& a_values) { return PlanFor(a_values); },
+			[store = store, device = device](const ProgramPlanKey& a_plan) { return BuildPlan(*store, device, a_plan); });
+		if (!chainPrograms)
+			stl::report_and_fail("Community Shaders: the post chain's programs could not be declared");
 		declared = RenderGraph::Frame::DeclareClient<ChainKey>(
 			ORGPostChain::kClientId, std::move(dependencies), [this](const RenderGraph::Frame::Inputs& a_values) { return Prepare(a_values); },
 			[this](const ChainKey& a_key, FrameAnchors::ClientDesc& a_client) { return Make(a_key, a_client); });
 	}
 
-	/**
-	* @brief The key function, when a revision starts. The chain's key for a_values, built here when it is new, so a key that
-	* cannot be built takes the chain off the graph (nullopt) rather than failing the revision. Make then takes the build.
-	*/
-	std::optional<ChainKey> Prepare(const RenderGraph::Frame::Inputs& a_values)
+	/** @brief The chain's key for a_values, without its programs. Nullopt before BeforeTonemap observed the chain. Render thread. */
+	std::optional<ChainKey> KeyFor(const RenderGraph::Frame::Inputs& a_values)
 	{
 		if (!observed)
 			return std::nullopt;
 		auto& pp = globals::features::postProcessing;
-		ChainKey key{ .observed = *observed, .programs = programsGeneration };
+		ChainKey key{ .observed = *observed, .generation = programsGeneration };
 		for (const auto index : observed->order) {
 			const auto slot = static_cast<std::size_t>(index);
 			auto& words = key.effects.emplace_back();
 			effects[slot]->Key(a_values, *pp.pipeline[slot], words);
 		}
-		if (pendingKey && *pendingKey == key)
-			return key;
-		if (failedKey && *failedKey == key)
+		return key;
+	}
+
+	/** @brief The declared program's key: every program the build of a_values' chain key asks for, in build order. Render thread. */
+	ProgramPlanKey PlanFor(const RenderGraph::Frame::Inputs& a_values)
+	{
+		ProgramPlanKey plan{ .generation = programsGeneration };
+		const auto key = KeyFor(a_values);
+		if (!key)
+			return plan;
+		auto& pp = globals::features::postProcessing;
+		const auto& shape = key->observed.shape;
+		ProgramPlan source(shape, key->observed.linear, resolved);
+		// As Rebuild: the input copy, the effects in order, then the output copies.
+		source.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { ORGPostChain::kInputFormat });
+		for (std::size_t i = 0; i < key->observed.order.size(); ++i) {
+			const auto slot = static_cast<std::size_t>(key->observed.order[i]);
+			effects[slot]->Programs(source, *pp.pipeline[slot], key->effects[i]);
+		}
+		source.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { shape.mainFormat });
+		if (key->observed.mainCopy)
+			source.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { shape.mainCopyFormat });
+		for (const auto& program : source.programs)
+			plan.keys.push_back(program.key);
+		std::ranges::sort(plan.keys);
+		plan.programs = std::make_shared<const std::vector<PlannedProgram>>(std::move(source.programs));
+		return plan;
+	}
+
+	/** @brief The declared program's build, on the programs lane. Null, logged, when a program does not build: that is fatal. */
+	static std::shared_ptr<const ORGPostChain::ChainPrograms> BuildPlan(ProgramStore& a_store, rhi::Device a_device, const ProgramPlanKey& a_plan)
+	{
+		auto built = std::make_shared<ORGPostChain::ChainPrograms>();
+		if (!a_plan.programs)
+			return built;
+		std::uint32_t compiled = 0;
+		for (const auto& planned : *a_plan.programs) {
+			const auto stored = std::format("{}|{}", a_plan.generation, planned.key);
+			if (const auto* raster = std::get_if<RasterProgram::Desc>(&planned.desc)) {
+				std::shared_ptr<const RasterProgram> program;
+				{
+					const std::lock_guard lock(a_store.mutex);
+					if (const auto found = a_store.raster.find(stored); found != a_store.raster.end())
+						program = found->second;
+				}
+				if (!program) {
+					program = RasterProgram::Load(a_device, *raster);
+					if (!program) {
+						logger::critical("[ORG] Post Processing: {} ({}) did not build on the programs lane", raster->pixelSource, planned.key);
+						return nullptr;
+					}
+					++compiled;
+					const std::lock_guard lock(a_store.mutex);
+					a_store.raster.emplace(stored, program);
+				}
+				built->raster.emplace(planned.key, std::move(program));
+			} else {
+				const auto& compute = std::get<ComputeProgram::Desc>(planned.desc);
+				std::shared_ptr<const ComputeProgram> program;
+				{
+					const std::lock_guard lock(a_store.mutex);
+					if (const auto found = a_store.compute.find(stored); found != a_store.compute.end())
+						program = found->second;
+				}
+				if (!program) {
+					program = ComputeProgram::Load(a_device, compute);
+					if (!program) {
+						logger::critical("[ORG] Post Processing: {} ({}) did not build on the programs lane", compute.source, planned.key);
+						return nullptr;
+					}
+					++compiled;
+					const std::lock_guard lock(a_store.mutex);
+					a_store.compute.emplace(stored, program);
+				}
+				built->compute.emplace(planned.key, std::move(program));
+			}
+		}
+		logger::info("[ORG] Post Processing: the chain's {} programs are built on the programs lane ({} new)", a_plan.programs->size(), compiled);
+		return built;
+	}
+
+	/**
+	* @brief The client's key function, when a revision starts. Reads values and programs only: the revision started once the
+	* programs of its values were built, so the plan's programs are there.
+	*/
+	std::optional<ChainKey> Prepare(const RenderGraph::Frame::Inputs& a_values)
+	{
+		auto key = KeyFor(a_values);
+		if (!key)
 			return std::nullopt;
+		key->programs = chainPrograms.For(a_values);
+		return key;
+	}
+
+	/** @brief The make function: builds the chain for a_key. False is fatal (Frame/Declare.h), so the reason is logged first. */
+	bool Make(const ChainKey& a_key, FrameAnchors::ClientDesc& a_client)
+	{
 		std::string failure;
-		bool built = false;
+		std::shared_ptr<ChainBuild> build;
 		try {
-			built = Rebuild(key, failure);
+			build = Rebuild(a_key, a_client, failure);
 		} catch (const std::exception& e) {
 			failure = e.what();
 		}
-		if (!built) {
-			logger::error("[ORG] Post Processing: the chain could not be built: {}", failure);
-			failedKey = std::move(key);
-			return std::nullopt;
-		}
-		failedKey.reset();
-		return pendingKey;
-	}
-
-	/** @brief The make function: the registration Prepare built for a_key. */
-	bool Make(const ChainKey& a_key, FrameAnchors::ClientDesc& a_client)
-	{
-		if (!pendingKey || !(*pendingKey == a_key) || !pendingBuild)
+		if (!build) {
+			logger::critical("[ORG] Post Processing: the chain could not be built: {}", failure);
 			return false;
-		a_client = pendingDesc;
-		builds.push_back(pendingBuild);
+		}
+		builds.push_back(std::move(build));
 		return true;
 	}
 
-	/** @brief False, with the reason in a_failure, when it cannot. Leaves the build and its registration pending for Make. */
-	bool Rebuild(const ChainKey& a_key, std::string& a_failure)
+	/** @brief The build and its registration in a_client, or null with the reason in a_failure. */
+	std::shared_ptr<ChainBuild> Rebuild(const ChainKey& a_key, FrameAnchors::ClientDesc& a_client, std::string& a_failure)
 	{
 		const auto& shape = a_key.observed.shape;
 		const ORGPostChain::Image main{ a_key.observed.main, shape.mainFormat };
 		const ORGPostChain::Image mainCopy{ a_key.observed.mainCopy, shape.mainCopyFormat };
 		const auto& order = a_key.observed.order;
+		const bool linearKey = a_key.observed.linear;
 		// CS's native chain has one image, read and written back.
 		const auto& second = mainCopy ? mainCopy : main;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host) {
 			a_failure = "the render graph has no host";
-			return false;
+			return nullptr;
 		}
+		if (!a_key.programs) {
+			a_failure = "its programs are not built";
+			return nullptr;
+		}
+		const auto& programSet = *a_key.programs;
 		auto next = std::make_shared<ORGPostChain::BuildState>();
 		next->latch = std::make_shared<org::LatchBlock>("cs.pp.latch", ORGPostChain::kLatchBytes);
 		next->gate = RenderGraph::RunGate::Create("cs.pp.gate", ORGPostChain::kGateEntries);
 		if (!next->gate) {
 			a_failure = "the chain's run gate could not be made";
-			return false;
+			return nullptr;
 		}
 		next->passes = std::make_unique<RenderGraph::AnchorPasses::Builder>(FrameAnchors::Anchor::Tonemap, ORGPostChain::kClientId, ORGPostChain::kOrderBase,
 			next->latch, next->gate);
@@ -788,7 +931,7 @@ struct ORGPostProcessing::Impl
 
 		// As BeginLinearProcessing. The input pass also picks kMAIN or kMAIN_COPY from the latch, so one recording serves either.
 		{
-			ORGPostChain::Builder builder(*next, programs, shape, "input");
+			ORGPostChain::Builder builder(*next, programSet, shape, linearKey, "input");
 			auto program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { ORGPostChain::kInputFormat });
 			auto image = builder.CreateImage("PostProcessing::Input", ORGPostChain::kInputFormat, D3D11_BIND_RENDER_TARGET);
 			build->input = builder.Latch<CopyLatch>();
@@ -809,12 +952,11 @@ struct ORGPostProcessing::Impl
 				break;
 			const auto index = order[i];
 			const auto slot = static_cast<std::size_t>(index);
-			ORGPostChain::Builder builder(*next, programs, shape, StepName(index));
+			ORGPostChain::Builder builder(*next, programSet, shape, linearKey, StepName(index));
 			auto run = effects[slot]->BuildRun(builder, *pp.pipeline[slot], a_key.effects[i]);
 			if (!run && !builder.Failed())
 				builder.Fail("it made no run");
 			build->runs.push_back(std::move(run));
-			build->legacy = build->legacy || effects[slot]->Legacy();
 			if (probe == StepName(index))
 				probed = next->current;
 		}
@@ -832,7 +974,7 @@ struct ORGPostProcessing::Impl
 		// As PreProcess's two CopyToRenderTarget, into both main targets. Each is a copy.ps draw rather than a copy,
 		// because a copy has no run gate and would run on frames the chain does not.
 		{
-			ORGPostChain::Builder builder(*next, programs, shape, "output");
+			ORGPostChain::Builder builder(*next, programSet, shape, linearKey, "output");
 			const auto chainOutput = probed ? probed : builder.Current();
 			build->output = builder.Latch<CopyLatch>();
 			for (const auto& [target, name] : { std::pair{ &main, "main" }, std::pair{ &mainCopy, "main-copy" } }) {
@@ -847,7 +989,7 @@ struct ORGPostProcessing::Impl
 
 		if (!next->failure.empty() || next->passes->Failed()) {
 			a_failure = next->Failure();
-			return false;
+			return nullptr;
 		}
 		next->descs = next->passes->Take();
 		for (auto& desc : next->descs)
@@ -859,11 +1001,11 @@ struct ORGPostProcessing::Impl
 			std::uint64_t revision = 0;
 			if (!pass || !pass->RevisionHash(revision)) {
 				a_failure = std::format("{} gives no revision, so a kept recording cannot hold it", desc.name);
-				return false;
+				return nullptr;
 			}
 		}
 
-		build->generation = ++generation;
+		build->generation = ++buildGeneration;
 		FrameAnchors::ClientDesc client{};
 		client.id = ORGPostChain::kClientId;
 		client.passes = next->descs;
@@ -877,23 +1019,19 @@ struct ORGPostProcessing::Impl
 			for (const auto& [name, resource] : next->registered)
 				a_graph.RegisterResource(org::ResourceIdentifier(name), resource);
 		};
-		// Each registration commits its own build. A schedule that still holds an older one taps as it (matchesById),
-		// unless an effect of the legacy form shares its state across builds.
+		// Each registration commits its own build. A schedule that still holds an older one taps as it (matchesById).
 		client.commit = [this, build](const FrameAnchors::Point&) { Commit(*build); };
 		client.executed = [this, build](const FrameAnchors::Point&) { Executed(*build); };
 		client.active = [this] { return ready; };
-		client.matchesById = !build->legacy;
+		client.matchesById = true;
 		client.generation = build->generation;
-		programs.chainBuilt = true;
 		std::string steps = "input";
 		for (const auto index : order)
 			steps += std::format(", {}", StepName(index));
-		logger::info("[ORG] Post Processing: chain {} built for the next revision ({}, output; {} passes, {}x{})", build->generation, steps, next->descs.size(),
-			shape.width, shape.height);
-		pendingKey = a_key;
-		pendingBuild = std::move(build);
-		pendingDesc = std::move(client);
-		return true;
+		logger::info("[ORG] Post Processing: chain {} built for the next revision ({}, output; {} passes, {} programs, {}x{})", build->generation, steps,
+			next->descs.size(), programSet.raster.size() + programSet.compute.size(), shape.width, shape.height);
+		a_client = std::move(client);
+		return build;
 	}
 
 	void Commit(const ChainBuild& a_build)
@@ -926,7 +1064,7 @@ struct ORGPostProcessing::Impl
 	const ChainBuild* HeldBuild(std::string& a_why)
 	{
 		if (builds.empty()) {
-			a_why = failedKey ? "the chain failed to build for these settings (logged above)" : "the chain's client is not registered yet";
+			a_why = "the chain's client is not registered yet";
 			return nullptr;
 		}
 		// A frame kind without a post stage, such as the main menu's, has no place for the chain, so D3D11 draws it.
@@ -947,12 +1085,7 @@ struct ORGPostProcessing::Impl
 			return nullptr;
 		}
 		builds.erase(builds.begin(), found);
-		const auto& build = *builds.front();
-		if (build.legacy && build.generation != builds.back()->generation) {
-			a_why = "the post stage still runs an older build, and Physical Lens or Camera FX keep one state for every build";
-			return nullptr;
-		}
-		return &build;
+		return builds.front().get();
 	}
 };
 
@@ -974,7 +1107,7 @@ void ORGPostProcessing::Setup()
 		return;
 	}
 	auto state = std::make_unique<Impl>();
-	state->programs.device = runtime.Host()->Device();
+	state->device = runtime.Host()->Device();
 	std::string ported;
 	auto& pp = globals::features::postProcessing;
 	for (std::size_t i = 0; i < kSlots; ++i) {
@@ -1082,6 +1215,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	seen.shape.mainCopyFormat = mainCopyDesc.Format;
 	seen.main = mainTarget;
 	seen.mainCopy = mainCopyTarget;
+	seen.linear = linear;
 	// The dynamic-resolution ratio is a per-frame value: it reaches the commit, never the key.
 	s.dynamicSize = Util::ConvertToDynamic(float2(static_cast<float>(mainDesc.Width), static_cast<float>(mainDesc.Height)));
 	for (const std::uint64_t word : { std::uint64_t(seen.shape.width), std::uint64_t(seen.shape.height), std::uint64_t(seen.shape.mainFormat),
@@ -1092,6 +1226,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	// A new shape is a new key, built when the next revision starts. This frame runs the build its schedule holds.
 	if (!s.observed || !(*s.observed == seen)) {
 		s.observed = std::move(seen);
+		s.chainPrograms.Invalidate();
 		s.declared.Invalidate();
 	}
 
@@ -1134,11 +1269,15 @@ void ORGPostProcessing::ClearShaderCache()
 {
 	if (!impl)
 		return;
-	// Failed compiles are cached as null and failed keys are not retried, so clear both. A new count is a new key.
-	impl->programs.raster.clear();
-	impl->programs.compute.clear();
-	impl->failedKey.reset();
+	// A new count is a new plan, so the programs lane compiles every program again, and a new chain key.
+	{
+		const std::lock_guard lock(impl->store->mutex);
+		impl->store->raster.clear();
+		impl->store->compute.clear();
+	}
+	impl->resolved.clear();
 	++impl->programsGeneration;
+	impl->chainPrograms.Invalidate();
 	impl->declared.Invalidate();
 }
 
