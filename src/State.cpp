@@ -1739,7 +1739,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		auto& upscaling = globals::features::upscaling;
 
 		if (upscaling.loaded) {
-			auto upscaleMethod = upscaling.GetUpscaleMethod();
+			auto upscaleMethod = upscaling.FrameUpscaleMethod();
 			if (temporal && upscaleMethod != Upscaling::UpscaleMethod::kTAA) {
 				float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 				auto renderSize = Util::ConvertToDynamic(screenSz, true);

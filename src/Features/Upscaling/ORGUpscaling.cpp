@@ -11,7 +11,9 @@
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
@@ -27,11 +29,13 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
 
 #	include <array>
 #	include <map>
 #	include <mutex>
+#	include <optional>
 #	include <utility>
 #	include <vector>
 
@@ -46,7 +50,9 @@ namespace
 	// On only while an SDK upscaler is the method, so the post stage's build leaves the pass out with TAA or no upscaler.
 	constexpr const char* kEvaluateClientId = "cs.upscaling.evaluate";
 	constexpr const char* kUpscaledName = "Upscaling::UpscaledTexture";
-	constexpr const char* kHudlessName = "Upscaling::HudlessTexture";
+	// One texture per format, in ORGUpscaling::kHudlessFormats' order.
+	constexpr std::array<const char*, ORGUpscaling::kHudlessFormats.size()> kHudlessNames{ "Upscaling::HudlessTexture.RGBA8", "Upscaling::HudlessTexture.BGRA8",
+		"Upscaling::HudlessTexture.RGB10A2" };
 	constexpr const char* kDepthShader = "Upscaling/DepthRefractionUpscalePS.hlsl";
 	constexpr const char* kUnderwaterShader = "Upscaling/UnderwaterMaskUpscalePS.hlsl";
 	// A plain Load and write, for the hudless copy and the upscaled colour's copy into kMAIN.
@@ -232,9 +238,20 @@ struct ORGUpscaling::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> upscaleGate, hudlessGate;
 
-	std::unique_ptr<GraphResources::Texture2D> upscaled, hudless;
+	// Declared on variables (frame revision plan 6.14). Their extents change only at adoption.
+	RenderGraph::Frame::DeclaredTexture2D upscaled;
+	std::array<RenderGraph::Frame::DeclaredTexture2D, kHudlessFormats.size()> hudless;
+	RenderGraph::Frame::DeclaredClient upscaleClient, hudlessClient;
+	// The display size before the first DisplaySize event: kMAIN's at setup.
+	RenderGraph::Frame::Vars::Extent2D setupDisplay{};
+
+	// The engine targets the Upscale anchor imports, as the last frame found them. A change bumps the serial, which the Upscale
+	// client's key holds: an interim until engine imports are declared (frame revision plan, step 9b).
 	DepthInputs inputs;
+	std::uint64_t inputsSerial = 0;
+	// The hudless copy's source, as the last copy found it. The hudless client's key holds the serial, as for inputsSerial.
 	FrameAnchors::Texture hudlessSource;
+	std::uint64_t hudlessSourceSerial = 0;
 
 	// Render thread.
 	std::uint32_t queued = 0;
@@ -245,13 +262,11 @@ struct ORGUpscaling::Impl
 	// Frame generation's inputs: each run's prepare, stored by the commit, and the engine targets the pass imports.
 	std::shared_ptr<const EvaluateShared> inputsShared;
 	std::shared_ptr<const EvaluateWork> inputsWork;
-	FrameAnchors::Texture inputsDepth, inputsMotion;
+	FrameAnchors::Texture inputsDepth, inputsMotion, inputsHudless;
 	bool inputsRegistered = false, inputsArmed = false;
 
-	bool registered = false, hudlessRegistered = false;
 	// Set only around CopyHudless's tap, so the clean scene's tap of the same step does not copy the hudless.
 	bool hudlessArmed = false;
-	bool depthRegistered = false;
 	bool failed = false;
 };
 
@@ -355,7 +370,7 @@ namespace
 	class EvaluatePass final : public org::TypedRenderGraphPass<EvaluatePass, EvaluateFrame, EvaluateBindings>
 	{
 	public:
-		EvaluatePass(std::shared_ptr<const EvaluateShared> a_shared, DepthInputs a_inputs, std::shared_ptr<org::Resource> a_output) :
+		EvaluatePass(std::shared_ptr<const EvaluateShared> a_shared, DepthInputs a_inputs, FrameAnchors::Texture a_output) :
 			shared(std::move(a_shared)), inputs(std::move(a_inputs)), output(std::move(a_output)) {}
 
 		EvaluateBindings Declare(org::PassBuilder& a_builder)
@@ -366,8 +381,10 @@ namespace
 			bindings.colorOut = a_builder.LegacyInteropUse(output).Resource();
 			bindings.depth = a_builder.LegacyInteropUse(inputs.mainDepth).Resource();
 			bindings.motion = a_builder.LegacyInteropUse(inputs.motion).Resource();
-			if (RenderGraph::Backend::IsD3D12())
-				a_builder.InternalTransition(output, org::ResourceState{ rhi::ResourceAccessType::Common, rhi::ResourceLayout::Common, rhi::ResourceSyncState::All });
+			// The upscaled texture is declared through its slot, so a new version needs no build.
+			if (RenderGraph::Backend::IsD3D12() && output.Slot())
+				a_builder.InternalTransition(org::ResourceResolverAndRange(*output.Slot()),
+					org::ResourceState{ rhi::ResourceAccessType::Common, rhi::ResourceLayout::Common, rhi::ResourceSyncState::All });
 			return bindings;
 		}
 
@@ -412,7 +429,7 @@ namespace
 	private:
 		std::shared_ptr<const EvaluateShared> shared;
 		DepthInputs inputs;
-		std::shared_ptr<org::Resource> output;
+		FrameAnchors::Texture output;
 	};
 
 	struct InputsBindings
@@ -429,7 +446,7 @@ namespace
 	{
 	public:
 		FrameGenInputsPass(std::shared_ptr<const EvaluateShared> a_shared, FrameAnchors::Texture a_depth, FrameAnchors::Texture a_motion,
-			std::shared_ptr<org::Resource> a_hudless) :
+			FrameAnchors::Texture a_hudless) :
 			shared(std::move(a_shared)), depth(std::move(a_depth)), motion(std::move(a_motion)), hudless(std::move(a_hudless)) {}
 
 		InputsBindings Declare(org::PassBuilder& a_builder)
@@ -483,7 +500,7 @@ namespace
 	private:
 		std::shared_ptr<const EvaluateShared> shared;
 		FrameAnchors::Texture depth, motion;
-		std::shared_ptr<org::Resource> hudless;
+		FrameAnchors::Texture hudless;
 	};
 
 	void MarkFailed(const std::shared_ptr<Impl>& a_impl, const char* a_why)
@@ -492,9 +509,6 @@ namespace
 			logger::error("[ORG] Upscaling returns to D3D11: {}", a_why);
 		a_impl->failed = true;
 	}
-
-	/** @brief Every format Upscaling::CreateHudlessTexture can produce, built at setup. */
-	constexpr std::array kHudlessFormats{ DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM };
 
 	/** @brief A format not built at setup, such as a new kMAIN format, is built at first sight and logged. */
 	std::shared_ptr<const RasterProgram> CopyProgram(Impl& a_impl, rhi::Format a_format, bool a_atSetup = false)
@@ -509,24 +523,71 @@ namespace
 		return program;
 	}
 
+	namespace Vars = RenderGraph::Frame::Vars;
+	constexpr const auto& kHudlessFormats = ORGUpscaling::kHudlessFormats;
+
+	bool SdkMethod(Vars::Upscaler a_method)
+	{
+		return a_method == Vars::Upscaler::FSR || a_method == Vars::Upscaler::DLSS || a_method == Vars::Upscaler::XeSS;
+	}
+
+	/** @brief The display size, or a_setup before the first DisplaySize event. */
+	Vars::Extent2D DisplayOr(Vars::Extent2D a_display, Vars::Extent2D a_setup)
+	{
+		return a_display.width && a_display.height ? a_display : a_setup;
+	}
+
+	/** @brief Which hudless texture a revision's values choose: none without frame generation. Inputs or the adopted revision. */
+	template <class Values>
+	std::optional<std::uint32_t> HudlessIndexIn(const Values& a_values)
+	{
+		if (!a_values.Get(globals::features::upscaling.settings.frameGeneration))
+			return std::nullopt;
+		const auto surface = a_values.Get(Vars::PresenterFormat());
+		return ORGUpscaling::HudlessFormatIndex(a_values.Get(Vars::HdrEnabled()), static_cast<DXGI_FORMAT>(surface.format), surface.hdr10);
+	}
+
+	/** @brief What the Upscale client's registration depends on. */
+	struct UpscaleKey
+	{
+		Vars::Extent2D display{};  // kMAIN's, the copy's render area
+		bool depth = false;        // the depth upscale runs: an SDK upscaler below native
+		std::uint64_t inputs = 0;  // Impl::inputsSerial
+		bool operator==(const UpscaleKey&) const = default;
+	};
+
+	/** @brief What the hudless client's registration depends on. */
+	struct HudlessKey
+	{
+		std::uint32_t format = 0;  // the index in kHudlessFormats
+		Vars::Extent2D display{};
+		std::uint64_t source = 0;  // Impl::hudlessSourceSerial
+		bool operator==(const HudlessKey&) const = default;
+	};
+
+	/** @brief A declared twin as passes declare it: its slot. */
+	FrameAnchors::Texture SlotOf(const RenderGraph::Frame::DeclaredTexture2D& a_texture)
+	{
+		return a_texture ? FrameAnchors::Texture(a_texture->Name(), a_texture->Versioned()) : FrameAnchors::Texture();
+	}
+
 	/**
-	* @brief The copy into kMAIN while the graph holds the upscaled texture, plus the depth upscale when a_depth.
-	* Registering again replaces the client. False, logged, on failure.
+	* @brief The Upscale client for a_key: the copy into kMAIN, plus the depth upscale when the key has it. Registers the evaluate
+	* client beside it. False, logged, on failure.
 	*/
-	bool RegisterUpscale(const std::shared_ptr<Impl>& a_impl, bool a_depth)
+	bool MakeUpscaleClient(const std::shared_ptr<Impl>& a_impl, const UpscaleKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
 		auto& impl = *a_impl;
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Upscale, kClientId, kOrderBase, impl.latch, impl.upscaleGate);
 		if (impl.upscaled && impl.inputs.main) {
-			const auto& desc = impl.upscaled->Desc();
 			builder.Add(RenderGraph::AnchorPasses::Draw{ .name = "copy-to-main",
 				.program = CopyProgram(impl, impl.inputs.mainFormat),
-				.bindings = { Bind::Srv(impl.upscaled->Graph()) },
+				.bindings = { Bind::Srv(*impl.upscaled) },
 				.target = impl.inputs.main,
-				.viewport = { .width = desc.Width, .height = desc.Height },
+				.viewport = { .width = a_key.display.width, .height = a_key.display.height },
 				.gate = kCopyEntry });
 		}
-		const bool depth = a_depth && impl.inputs.DepthComplete();
+		const bool depth = a_key.depth && impl.inputs.DepthComplete();
 		if (depth) {
 			const auto& inputs = impl.inputs;
 			builder.Add(RenderGraph::AnchorPasses::Copy{
@@ -559,14 +620,12 @@ namespace
 			return false;
 		}
 
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
 		// The evaluate first, recorded at execution and not gated. Its own client, declared while an SDK upscaler is the method.
-		const std::weak_ptr<Impl> weakImpl = a_impl;
+		const std::weak_ptr<Impl> weak = a_impl;
 		if (impl.evaluateShared && impl.upscaled && impl.inputs.main && impl.inputs.mainDepth && impl.inputs.motion) {
 			auto shared = impl.evaluateShared;
 			auto inputs = impl.inputs;
-			auto output = std::static_pointer_cast<org::Resource>(impl.upscaled->Graph());
+			auto output = SlotOf(impl.upscaled);
 			FrameAnchors::ClientDesc evaluate{};
 			evaluate.id = kEvaluateClientId;
 			evaluate.passes.push_back({ .name = std::string(kClientId) + ".evaluate",
@@ -576,8 +635,8 @@ namespace
 				.make = [shared, inputs, output]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<EvaluatePass>(shared, inputs, output); },
 				.atExecution = true });
 			evaluate.declared = [] { return RenderGraph::Frame::Driver::Current().post.upscaler; };
-			evaluate.active = [weakImpl] {
-				const auto current = weakImpl.lock();
+			evaluate.active = [weak] {
+				const auto current = weak.lock();
 				return current && (current->queued & kEvaluate) != 0;
 			};
 			if (!FrameAnchors::Register(std::move(evaluate))) {
@@ -587,16 +646,15 @@ namespace
 		} else
 			FrameAnchors::Unregister(kEvaluateClientId);
 		for (auto& pass : builder.Take())
-			client.passes.push_back(std::move(pass));
+			a_client.passes.push_back(std::move(pass));
 		// The depth upscale's own pass reads the shared constants too.
-		client.sharedConstants = depth;
-		client.gates = { impl.upscaleGate };
-		const std::weak_ptr<Impl> weak = a_impl;
-		client.registerResources = [weak](org::RenderGraph& a_graph) {
+		a_client.sharedConstants = depth;
+		a_client.gates = { impl.upscaleGate };
+		a_client.registerResources = [weak](org::RenderGraph& a_graph) {
 			if (const auto impl = weak.lock(); impl && impl->upscaled)
 				impl->upscaled->Register(a_graph);
 		};
-		client.commit = [weak](const FrameAnchors::Point&) {
+		a_client.commit = [weak](const FrameAnchors::Point&) {
 			const auto impl = weak.lock();
 			if (!impl)
 				return;
@@ -604,69 +662,171 @@ namespace
 			impl->latch->WriteValue(run, 0, impl->jitter);
 			if (impl->evaluateShared)
 				impl->evaluateShared->runs.Store(run, (impl->queued & kEvaluate) ? impl->evaluate : nullptr);
-			// While a newly chosen upscaler's build has not switched in, its output was not written, so do not copy it.
+			// The evaluate is in the post stage's build only while its keyed build for an SDK upscaler has switched in.
+			// Until then its output was not written, so do not copy it.
 			const bool evaluated = !(impl->queued & kEvaluate) || !impl->evaluateShared || FrameAnchors::Scheduled(kEvaluateClientId, FrameAnchors::Anchor::Upscale);
 			if ((impl->queued & kCopyToMain) && evaluated)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
 			if (impl->queued & kDepthUpscale)
 				impl->upscaleGate->OpenDraw(kDepthEntry);
 		};
-		client.active = [weak] {
+		a_client.active = [weak] {
 			const auto impl = weak.lock();
 			return impl && impl->queued != 0;
 		};
-		impl.registered = FrameAnchors::Register(std::move(client));
-		impl.depthRegistered = impl.registered && depth;
-		return impl.registered;
+		return true;
 	}
 
-	/** @brief Registering again replaces it. False, logged, on failure. */
-	bool RegisterHudless(const std::shared_ptr<Impl>& a_impl)
+	/** @brief The hudless client for a_key: the copy into the key's format's texture. False, logged, on failure. */
+	bool MakeHudlessClient(const std::shared_ptr<Impl>& a_impl, const HudlessKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
 		auto& impl = *a_impl;
-		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kClientId, kOrderBase, nullptr, impl.hudlessGate);
-		if (impl.hudless && impl.hudlessSource) {
-			const auto& desc = impl.hudless->Desc();
-			builder.Add(RenderGraph::AnchorPasses::Draw{ .name = "hudless-copy",
-				.program = CopyProgram(impl, rhi::helpers::ToRHI(desc.Format)),
-				.bindings = { Bind::Srv(impl.hudlessSource) },
-				.target = impl.hudless->Graph(),
-				.viewport = { .width = desc.Width, .height = desc.Height },
-				.gate = 0 });
+		const auto index = a_key.format;
+		if (index >= impl.hudless.size() || !impl.hudless[index] || !impl.hudlessSource) {
+			logger::error("[ORG] Upscaling: the hudless copy has no texture or no source for format index {}", index);
+			return false;
 		}
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kClientId, kOrderBase, nullptr, impl.hudlessGate);
+		builder.Add(RenderGraph::AnchorPasses::Draw{ .name = "hudless-copy",
+			.program = CopyProgram(impl, rhi::helpers::ToRHI(kHudlessFormats[index])),
+			.bindings = { Bind::Srv(impl.hudlessSource) },
+			.target = SlotOf(impl.hudless[index]),
+			.viewport = { .width = a_key.display.width, .height = a_key.display.height },
+			.gate = 0 });
 		if (builder.Failed()) {
 			logger::error("[ORG] Upscaling: {}", builder.Failure());
 			return false;
 		}
 
-		FrameAnchors::ClientDesc client{};
-		client.id = kHudlessClientId;
-		client.passes = builder.Take();
-		client.gates = { impl.hudlessGate };
+		a_client.passes = builder.Take();
+		a_client.gates = { impl.hudlessGate };
 		const std::weak_ptr<Impl> weak = a_impl;
-		client.registerResources = [weak](org::RenderGraph& a_graph) {
-			if (const auto impl = weak.lock(); impl && impl->hudless)
-				impl->hudless->Register(a_graph);
+		a_client.registerResources = [weak, index](org::RenderGraph& a_graph) {
+			if (const auto impl = weak.lock(); impl && impl->hudless[index])
+				impl->hudless[index]->Register(a_graph);
 		};
-		client.active = [weak] {
+		a_client.active = [weak] {
 			const auto impl = weak.lock();
 			return impl && impl->hudlessArmed;
 		};
-		client.commit = [weak](const FrameAnchors::Point&) {
+		a_client.commit = [weak](const FrameAnchors::Point&) {
 			if (const auto impl = weak.lock())
 				impl->hudlessGate->OpenDraw(0);
 		};
 		// The UI stage's frame generation step also takes the clean scene's tap in the same frame.
-		client.repeats = true;
-		impl.hudlessRegistered = FrameAnchors::Register(std::move(client));
-		return impl.hudlessRegistered;
+		a_client.repeats = true;
+		return true;
+	}
+
+	/** @brief The textures, declared on the variables they follow. False, logged, when one could not be made. */
+	bool DeclareTextures(const std::shared_ptr<Impl>& a_impl, const D3D11_TEXTURE2D_DESC& a_main)
+	{
+		using namespace RenderGraph::Frame;
+		const auto& settings = globals::features::upscaling.settings;
+		const auto setup = a_impl->setupDisplay;
+		// Streamline writes and reads these through their D3D11 images outside the graph, so they are exported and kept.
+		const auto upscaledDesc = Sanitized(a_main, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		a_impl->upscaled = DeclareTexture2D(
+			kUpscaledName, DependsOn(Vars::DisplaySize(), Vars::UpscaleMethod(), settings.frameGeneration),
+			[upscaledDesc, setup](const Inputs& a_in) {
+				// An SDK upscaler evaluates into it, and so does guest DLSS-G's evaluate without one. One texel otherwise.
+				const bool used = SdkMethod(a_in.Get(Vars::UpscaleMethod())) || a_in.Get(globals::features::upscaling.settings.frameGeneration);
+				const auto display = DisplayOr(a_in.Get(Vars::DisplaySize()), setup);
+				auto desc = upscaledDesc;
+				desc.Width = used ? display.width : 1;
+				desc.Height = used ? display.height : 1;
+				return desc;
+			},
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV });
+		if (!a_impl->upscaled || !a_impl->upscaled->D3D11() || !a_impl->upscaled->UAV() || !a_impl->upscaled->Versioned()) {
+			logger::error("[ORG] Upscaling: the upscaled texture could not be declared");
+			return false;
+		}
+		for (std::uint32_t i = 0; i < kHudlessFormats.size(); ++i) {
+			const D3D11_TEXTURE2D_DESC hudlessDesc{ .Width = 1,
+				.Height = 1,
+				.MipLevels = 1,
+				.ArraySize = 1,
+				.Format = kHudlessFormats[i],
+				.SampleDesc = { .Count = 1 },
+				.Usage = D3D11_USAGE_DEFAULT,
+				.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET };
+			// FFX derives the UI as the back buffer minus the hudless colour, so the two agree in format and the copy draws through an RTV.
+			a_impl->hudless[i] = DeclareTexture2D(
+				kHudlessNames[i], DependsOn(Vars::DisplaySize(), Vars::HdrEnabled(), Vars::PresenterFormat(), settings.frameGeneration),
+				[hudlessDesc, setup, i](const Inputs& a_in) {
+					auto desc = hudlessDesc;
+					if (HudlessIndexIn(a_in) == i) {
+						const auto display = DisplayOr(a_in.Get(Vars::DisplaySize()), setup);
+						desc.Width = display.width;
+						desc.Height = display.height;
+					}
+					return desc;
+				},
+				GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::RTV });
+			if (!a_impl->hudless[i] || !a_impl->hudless[i]->D3D11() || !a_impl->hudless[i]->Versioned()) {
+				logger::error("[ORG] Upscaling: the hudless texture for format {} could not be declared", static_cast<int>(kHudlessFormats[i]));
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** @brief The clients, declared on the variables their registrations read. False, logged, when one cannot be declared. */
+	bool DeclareClients(const std::shared_ptr<Impl>& a_impl)
+	{
+		using namespace RenderGraph::Frame;
+		const auto& settings = globals::features::upscaling.settings;
+		const std::weak_ptr<Impl> weak = a_impl;
+		a_impl->upscaleClient = DeclareClient<UpscaleKey>(
+			kClientId, DependsOn(Vars::DisplaySize(), Vars::UpscaleMethod(), settings.qualityMode),
+			[weak](const Inputs& a_in) -> std::optional<UpscaleKey> {
+				const auto impl = weak.lock();
+				if (!impl || impl->failed)
+					return std::nullopt;
+				// The depth upscale runs below native only, as Upscaling::IsUpscalingActive says.
+				const bool depth = SdkMethod(a_in.Get(Vars::UpscaleMethod())) && a_in.Get(globals::features::upscaling.settings.qualityMode) != 0;
+				return UpscaleKey{ DisplayOr(a_in.Get(Vars::DisplaySize()), impl->setupDisplay), depth, impl->inputsSerial };
+			},
+			[weak](const UpscaleKey& a_key, FrameAnchors::ClientDesc& a_client) {
+				const auto impl = weak.lock();
+				return impl && MakeUpscaleClient(impl, a_key, a_client);
+			});
+		a_impl->hudlessClient = DeclareClient<HudlessKey>(
+			kHudlessClientId, DependsOn(Vars::DisplaySize(), Vars::HdrEnabled(), Vars::PresenterFormat(), settings.frameGeneration),
+			[weak](const Inputs& a_in) -> std::optional<HudlessKey> {
+				const auto impl = weak.lock();
+				if (!impl || impl->failed)
+					return std::nullopt;
+				const auto index = HudlessIndexIn(a_in);
+				// The source comes from the last copy that named one. Before one did, the client waits for it.
+				if (!index || !impl->hudlessSource)
+					return std::nullopt;
+				return HudlessKey{ *index, DisplayOr(a_in.Get(Vars::DisplaySize()), impl->setupDisplay), impl->hudlessSourceSerial };
+			},
+			[weak](const HudlessKey& a_key, FrameAnchors::ClientDesc& a_client) {
+				const auto impl = weak.lock();
+				return impl && MakeHudlessClient(impl, a_key, a_client);
+			});
+		if (!a_impl->upscaleClient || !a_impl->hudlessClient) {
+			logger::error("[ORG] Upscaling: its clients could not be declared");
+			return false;
+		}
+		return true;
+	}
+
+	/** @brief The hudless texture of the adopted revision, as passes declare it. Empty while that revision has none. */
+	FrameAnchors::Texture AdoptedHudless(const Impl& a_impl)
+	{
+		const auto index = HudlessIndexIn(RenderGraph::Frame::Revision::Adopted());
+		return index ? SlotOf(a_impl.hudless[*index]) : FrameAnchors::Texture();
 	}
 
 	/** @brief Frame generation's inputs pass. Registering again replaces it. False, logged, on failure. */
 	bool RegisterFrameGenInputs(const std::shared_ptr<Impl>& a_impl)
 	{
 		auto& impl = *a_impl;
-		if (!impl.inputsShared || !impl.hudless || !impl.inputsDepth || !impl.inputsMotion) {
+		if (!impl.inputsShared || !impl.inputsHudless || !impl.inputsDepth || !impl.inputsMotion) {
 			FrameAnchors::Unregister(kFrameGenInputsClientId);
 			impl.inputsRegistered = false;
 			return false;
@@ -674,7 +834,7 @@ namespace
 		auto shared = impl.inputsShared;
 		auto depth = impl.inputsDepth;
 		auto motion = impl.inputsMotion;
-		auto hudless = impl.hudless->Graph();
+		auto hudless = impl.inputsHudless;
 		FrameAnchors::ClientDesc client{};
 		client.id = kFrameGenInputsClientId;
 		client.passes.push_back({ .name = kFrameGenInputsClientId,
@@ -704,21 +864,11 @@ namespace
 		return impl.inputsRegistered;
 	}
 
-	/** @brief Remakes the client after a new texture or engine target. */
-	void UpscaleChanged(const std::shared_ptr<Impl>& a_impl)
+	/** @brief The Upscale anchor's engine inputs changed: the Upscale client is registered again when the next revision starts. */
+	void UpscaleInputsChanged(Impl& a_impl)
 	{
-		if (a_impl->registered && !RegisterUpscale(a_impl, a_impl->depthRegistered))
-			MarkFailed(a_impl, "its Upscale client could not be registered again");
-	}
-
-	/** @brief Remakes the client after a new texture or source. */
-	void HudlessChanged(const std::shared_ptr<Impl>& a_impl)
-	{
-		if (a_impl->hudlessRegistered && !RegisterHudless(a_impl))
-			MarkFailed(a_impl, "its FrameGeneration client could not be registered again");
-		// The inputs pass reads the hudless, so a new one remakes it.
-		if (a_impl->inputsRegistered && !RegisterFrameGenInputs(a_impl))
-			MarkFailed(a_impl, "its frame generation inputs client could not be registered again");
+		++a_impl.inputsSerial;
+		a_impl.upscaleClient.Invalidate();
 	}
 }
 
@@ -783,6 +933,19 @@ bool ORGUpscaling::Setup()
 			logger::warn("[ORG] Upscaling stays on D3D11: its sampler, latch, gates, programs or engine targets could not be made");
 			return false;
 		}
+		// kMAIN's description and size, for the upscaled texture and as the display size before its first event.
+		auto* mainTexture = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture;
+		if (!mainTexture) {
+			logger::warn("[ORG] Upscaling stays on D3D11: kMAIN is missing");
+			return false;
+		}
+		D3D11_TEXTURE2D_DESC mainDesc{};
+		mainTexture->GetDesc(&mainDesc);
+		next->setupDisplay = { mainDesc.Width, mainDesc.Height };
+		if (!DeclareTextures(next, mainDesc) || !DeclareClients(next)) {
+			logger::warn("[ORG] Upscaling stays on D3D11: its textures or clients could not be declared");
+			return false;
+		}
 		impl = std::move(next);
 		setupFailed = false;
 		logger::info("[ORG] Upscaling's own passes run on the render graph ({}x{}); {}", impl->inputs.width, impl->inputs.height,
@@ -821,86 +984,39 @@ bool ORGUpscaling::ReleaseAfterFailure()
 {
 	if (!impl)
 		return false;
-	const bool heldUpscaled = impl->upscaled != nullptr;
+	const bool heldUpscaled = static_cast<bool>(impl->upscaled);
 	FrameAnchors::Unregister(kClientId);
 	FrameAnchors::Unregister(kEvaluateClientId);
 	FrameAnchors::Unregister(kHudlessClientId);
 	FrameAnchors::Unregister(kFrameGenInputsClientId);
-	impl->upscaled.reset();
-	impl->hudless.reset();
+	// The declarations go with impl, so no revision registers the clients again.
 	impl.reset();
 	logger::warn("[ORG] Upscaling: its own passes draw with D3D11 from now on");
 	return heldUpscaled;
 }
 
-bool ORGUpscaling::CreateTexture(Target a_target, const D3D11_TEXTURE2D_DESC& a_desc)
+bool ORGUpscaling::Holds(Target a_target) const
 {
 	if (!IsActive())
 		return false;
-	const bool upscaled = a_target == Target::Upscaled;
-	auto& slot = upscaled ? impl->upscaled : impl->hudless;
-	if (slot)
-		return true;
-	if (!upscaled && !CopyProgram(*impl, rhi::helpers::ToRHI(a_desc.Format))) {
-		logger::error("[ORG] Upscaling: the hudless copy could not be built for format {}; it stays a D3D11 texture", static_cast<int>(a_desc.Format));
-		return false;
-	}
-	// Streamline writes and reads these through their D3D11 images outside the graph, so they are exported and kept.
-	const UINT bindFlags = D3D11_BIND_SHADER_RESOURCE | (upscaled ? D3D11_BIND_UNORDERED_ACCESS : D3D11_BIND_RENDER_TARGET);
-	const auto exports = GraphResources::Export::SRV | (upscaled ? GraphResources::Export::UAV : GraphResources::Export::RTV);
-	auto texture = std::make_unique<GraphResources::Texture2D>(Sanitized(a_desc, bindFlags), upscaled ? kUpscaledName : kHudlessName,
-		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = exports });
-	if (!*texture || !texture->D3D11() || (upscaled && !texture->UAV())) {
-		logger::error("[ORG] Upscaling: the {} texture could not be made on the graph; it stays a D3D11 texture", upscaled ? "upscaled" : "hudless");
-		return false;
-	}
-	slot = std::move(texture);
-	if (upscaled)
-		UpscaleChanged(impl);
-	else
-		HudlessChanged(impl);
-	logger::info("[ORG] Upscaling: created the {} texture on the graph ({}x{}, format={})", upscaled ? "upscaled" : "hudless", a_desc.Width,
-		a_desc.Height, static_cast<int>(a_desc.Format));
-	return true;
-}
-
-void ORGUpscaling::DestroyTexture(Target a_target)
-{
-	if (!Holds(a_target))
-		return;
-	if (a_target == Target::Upscaled) {
-		impl->upscaled.reset();
-		UpscaleChanged(impl);
-	} else {
-		impl->hudless.reset();
-		HudlessChanged(impl);
-	}
-}
-
-bool ORGUpscaling::Holds(Target a_target) const
-{
-	return impl && (a_target == Target::Upscaled ? impl->upscaled : impl->hudless) != nullptr;
+	return a_target == Target::Hudless || static_cast<bool>(impl->upscaled);
 }
 
 ID3D11Texture2D* ORGUpscaling::Texture(Target a_target, ID3D11Texture2D* a_d3d11) const
 {
 	if (!Holds(a_target))
 		return a_d3d11;
-	return (a_target == Target::Upscaled ? impl->upscaled : impl->hudless)->D3D11();
-}
-
-const D3D11_TEXTURE2D_DESC* ORGUpscaling::Desc(Target a_target, const D3D11_TEXTURE2D_DESC* a_d3d11) const
-{
-	if (!Holds(a_target))
-		return a_d3d11;
-	return &(a_target == Target::Upscaled ? impl->upscaled : impl->hudless)->Desc();
+	if (a_target == Target::Upscaled)
+		return impl->upscaled->D3D11();
+	const auto index = HudlessIndexIn(RenderGraph::Frame::Revision::Adopted());
+	return index ? impl->hudless[*index]->D3D11() : nullptr;
 }
 
 bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
 {
 	if (!IsActive() || !impl->upscaled || !impl->evaluateShared)
 		return false;
-	// A resolution change remakes the client.
+	// New engine targets register the client again (an interim until engine imports are declared, plan step 9b).
 	DepthInputs current{};
 	CurrentMain(current);
 	if (!current.main || !current.mainDepth || !current.motion)
@@ -913,7 +1029,7 @@ bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
 		impl->inputs.mainFormat = current.mainFormat;
 		impl->inputs.mainDepth = std::move(current.mainDepth);
 		impl->inputs.motion = std::move(current.motion);
-		UpscaleChanged(impl);
+		UpscaleInputsChanged(*impl);
 	}
 	impl->evaluate = std::make_shared<const EvaluateWork>(EvaluateWork{ std::move(a_label), std::move(a_record) });
 	impl->queued |= kEvaluate;
@@ -922,7 +1038,7 @@ bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
 
 bool ORGUpscaling::RecordsFrameGenInputs() const
 {
-	return IsActive() && impl->hudless && impl->inputsShared;
+	return IsActive() && impl->inputsShared;
 }
 
 bool ORGUpscaling::QueueFrameGenInputs(std::string a_label, EvaluateRecord a_record, bool a_depthCopy)
@@ -937,12 +1053,15 @@ bool ORGUpscaling::QueueFrameGenInputs(std::string a_label, EvaluateRecord a_rec
 		return false;
 	auto depthTexture = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depthId));
 	auto motionTexture = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR));
-	if (!depthTexture || !motionTexture)
+	// The adopted revision's hudless texture. Its format follows HDR and the presenter.
+	auto hudlessTexture = AdoptedHudless(*impl);
+	if (!depthTexture || !motionTexture || !hudlessTexture)
 		return false;
-	// A new engine target or a switch between kMAIN's depth and its copy remakes the client.
-	if (!impl->inputsRegistered || depthTexture != impl->inputsDepth || motionTexture != impl->inputsMotion) {
+	// A new engine target, a switch between kMAIN's depth and its copy, or another hudless format remakes the client.
+	if (!impl->inputsRegistered || depthTexture != impl->inputsDepth || motionTexture != impl->inputsMotion || hudlessTexture != impl->inputsHudless) {
 		impl->inputsDepth = std::move(depthTexture);
 		impl->inputsMotion = std::move(motionTexture);
+		impl->inputsHudless = std::move(hudlessTexture);
 		if (!RegisterFrameGenInputs(impl)) {
 			MarkFailed(impl, "its frame generation inputs client could not be registered");
 			return false;
@@ -963,7 +1082,7 @@ bool ORGUpscaling::QueueCopyToMain()
 {
 	if (!IsActive() || !impl->upscaled)
 		return false;
-	// A resolution change remakes the client.
+	// New engine targets register the client again, as in QueueEvaluate.
 	DepthInputs current{};
 	CurrentMain(current);
 	if (current.main != impl->inputs.main || current.mainFormat != impl->inputs.mainFormat) {
@@ -971,7 +1090,7 @@ bool ORGUpscaling::QueueCopyToMain()
 			return false;
 		impl->inputs.main = std::move(current.main);
 		impl->inputs.mainFormat = current.mainFormat;
-		UpscaleChanged(impl);
+		UpscaleInputsChanged(*impl);
 	}
 	impl->queued |= kCopyToMain;
 	return true;
@@ -1005,7 +1124,7 @@ bool ORGUpscaling::QueueDepthUpscale(float2 a_jitter, float a_useWideKernel)
 			impl->formats = formats;
 		}
 		impl->inputs = std::move(inputs);
-		UpscaleChanged(impl);
+		UpscaleInputsChanged(*impl);
 	}
 	impl->jitter.jitter = a_jitter;
 	impl->jitter.useWideKernel = a_useWideKernel;
@@ -1022,13 +1141,8 @@ void ORGUpscaling::RunUpscale()
 		impl->queued = 0;
 		return;
 	}
-	// The copies have no per-run switch, so the client holds them exactly while the depth upscale runs and is remade when it starts or stops.
-	const bool depth = (impl->queued & kDepthUpscale) != 0;
-	if ((!impl->registered || depth != impl->depthRegistered) && !RegisterUpscale(impl, depth)) {
-		impl->queued = 0;
-		MarkFailed(impl, "its Upscale client could not be registered");
-		return;
-	}
+	// The copies have no per-run switch. The client's key holds the depth upscale exactly while the adopted method and quality
+	// run it, so the registration the frame's build holds matches what was queued.
 	(void)FrameAnchors::Run(FrameAnchors::Anchor::Upscale);
 	impl->queued = 0;
 	impl->evaluate.reset();
@@ -1036,7 +1150,7 @@ void ORGUpscaling::RunUpscale()
 
 bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 {
-	if (!IsActive() || !impl->hudless || !a_source)
+	if (!IsActive() || !a_source)
 		return false;
 	winrt::com_ptr<ID3D11Resource> resource;
 	a_source->GetResource(resource.put());
@@ -1052,14 +1166,15 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 		source = FrameAnchors::D3D11Texture("Upscaling::HudlessSource", texture.get(), a_source, nullptr);
 	if (!source)
 		return false;
+	// A new source registers the client again when the next revision starts (an interim until engine imports are declared).
 	if (source != impl->hudlessSource) {
 		impl->hudlessSource = std::move(source);
-		HudlessChanged(impl);
+		++impl->hudlessSourceSerial;
+		impl->hudlessClient.Invalidate();
 	}
-	if (!impl->hudlessRegistered && !RegisterHudless(impl)) {
-		MarkFailed(impl, "its FrameGeneration client could not be registered");
+	// The adopted revision has no hudless texture while frame generation is off or the presenter has no format for it.
+	if (!AdoptedHudless(*impl))
 		return false;
-	}
 	// A new registration copies once the UI stage's build holds it. Until then the frame has no hudless.
 	if (!FrameAnchors::Scheduled(kHudlessClientId, FrameAnchors::Anchor::FrameGeneration))
 		return false;
@@ -1092,11 +1207,8 @@ void ORGUpscaling::ClearShaderCache() {}
 bool ORGUpscaling::IsActive() const { return false; }
 bool ORGUpscaling::Failed() const { return false; }
 bool ORGUpscaling::ReleaseAfterFailure() { return false; }
-bool ORGUpscaling::CreateTexture(Target, const D3D11_TEXTURE2D_DESC&) { return false; }
-void ORGUpscaling::DestroyTexture(Target) {}
 bool ORGUpscaling::Holds(Target) const { return false; }
 ID3D11Texture2D* ORGUpscaling::Texture(Target, ID3D11Texture2D* a_d3d11) const { return a_d3d11; }
-const D3D11_TEXTURE2D_DESC* ORGUpscaling::Desc(Target, const D3D11_TEXTURE2D_DESC* a_d3d11) const { return a_d3d11; }
 bool ORGUpscaling::QueueEvaluate(std::string, EvaluateRecord) { return false; }
 bool ORGUpscaling::RecordsFrameGenInputs() const { return false; }
 bool ORGUpscaling::QueueFrameGenInputs(std::string, EvaluateRecord, bool) { return false; }

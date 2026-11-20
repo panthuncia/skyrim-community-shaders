@@ -509,6 +509,7 @@ headers), namespace `RenderGraph::Frame::Vars`:
 | `RenderSize`, `DynamicRatios` | `Extent2D`, `float2` (constants only) | `Upscaling.cpp:ConfigureUpscaling`, which writes `graphicsState` ratios each frame today: `Set` raises only on change |
 | `UpscaleMethod` | enum | `Upscaling` settings (`upscaleMethod`/`upscaleMethodNoDLSS` through `GetUpscaleMethod`) |
 | `HdrEnabled`, `HdrOutputTarget` | `bool`, identity | `HDRDisplay.cpp:BeginRenderFrame` (it latches `hdrEnabledForFrame` today), `HDRDisplay::PostChainTarget` |
+| `PresenterFormat` | DXGI format, HDR10 | `Upscaling.cpp:BeginRenderFrame`, from `FrameGen::ActivePresenter().Surface()` (added in 6.14) |
 | `EngineShadowMap` | size, format, slices | the engine shadow map's creation (find the creation point; open question Q6) |
 | `ReflectionCubemap` | size | engine target creation (`EngineTargets`) |
 
@@ -668,6 +669,37 @@ outside it. The light copy always moves the whole capacity. So no pass revision 
 `pending`, `BeginFrame` and the atomic shape are gone. `LightLimitFix::UpdateClusterParameters` takes the grid from
 `ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
 culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
+
+**As built (2026-11-19, 6.14, `org-native/rev-step6-14`).** Upscaling's textures and clients follow variables.
+- `upscaleMethod`, `upscaleMethodNoDLSS`, `qualityMode`, `frameGeneration`, `frameGenMethod`, `frameGenMultiplier` are
+  `CS::Setting`s, bound in the new `Upscaling::Upscaling()`. Upscaling's `ProjectSizeSettings` and its `SettingsWritten` calls are
+  gone. The test requests write the settings in `BeginRenderFrame` (the `AtNextBegin` calls are gone), and the revision that
+  carries them switches the method in.
+- The frame runs `Upscaling::FrameUpscaleMethod()` and `FrameQualityMode()`: the adopted `UpscaleMethod` and `qualityMode` with the
+  render graph, the live values in plain D3D11. `ConfigureUpscaling` (render size, ratios, jitter), `ConfigureTAA`, `Upscale`,
+  `IsUpscalingActive`, `Main_PostProcessing`, `PostChain.cpp`'s `post.upscaler` and `State.cpp`'s mip bias read them.
+  `UpscaleMethod` is still written from `GetUpscaleMethod()`, the live choice the next revision carries.
+- `ORGUpscaling::Setup` declares the upscaled texture on `DisplaySize`, `UpscaleMethod` and `frameGeneration`: display size while
+  an SDK upscaler (or guest DLSS-G's evaluate) writes it, one texel otherwise. So it now follows a size change. The hudless colour
+  has three textures, one per format of `ORGUpscaling::kHudlessFormats`, declared on `DisplaySize`, `HdrEnabled`, the new frame
+  variable `PresenterFormat` and `frameGeneration`. The one `HudlessFormatIndex` picks is display size, the others one texel. So
+  an HDR toggle changes extents only, never a format. `PresenterFormat` (`Vars::SurfaceFormat`, DXGI format and HDR10) is written
+  every frame from `Upscaling::BeginRenderFrame`, skipping frames with no committed format.
+- The Upscale client (copy into kMAIN and the depth upscale) is declared on `DisplaySize`, `UpscaleMethod` and `qualityMode`; its
+  key holds the copy's render area and whether the depth upscale runs (SDK method below native). Its make also registers the
+  evaluate client. The hudless client is declared on the hudless textures' variables; its key holds the format. Passes declare
+  the textures through their slots. `RegisterUpscale`, `RegisterHudless`, `UpscaleChanged`, `HudlessChanged`,
+  `CreateTexture`/`DestroyTexture`/`Desc` and RunUpscale's registration are gone.
+- `CheckResources`, `previousUpscaleMode`, `previousUpscalingWasActive`, `DestroyUpscaledTexture`, `CreateHudlessTexture` and
+  `DestroyHudlessTexture` are gone, and with them the two resize `DrainCommandRing` calls. Plain D3D11 makes its upscaled
+  texture and one hudless texture per format on first need and keeps them. The interop ring already holds every D3D11
+  resource its submissions use until their slot completes (`QueueResourcesForDeferredRelease`).
+- `Streamline::EvaluateDLSS/XeSS/FSR` set their SDK options where the evaluate records: inside the evaluate pass's record in graph
+  modes, just before the ring's evaluate in plain D3D11. The options carry the frame's quality, output size and pre-exposure
+  (native frame generation plan, decision 10a).
+- Interims left: engine imports (kMAIN, depth, the copies, the hudless source) are still found by the frame. A change bumps a
+  serial in the client's key and calls `DeclaredClient::Invalidate` (step 9b). The `FrameAnchors::Scheduled` gates stay on the
+  evaluate's copy, the hudless copy and the frame generation inputs. See "Decided by the agent (step 6.14)" in section 9.
 
 ---
 
@@ -1400,6 +1432,26 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Before the first adopted `DisplaySize`, the grid is the Setup grid.**
 - **Guest also copies the whole light capacity each run** (1024 lights, about 80 KB), as native did. Its recordings then stop
   changing as the light count grows.
+
+**Decided by the agent (step 6.14, 2026-11-19), to confirm:**
+- **The frame's method is the adopted `UpscaleMethod`, `None` before the first adoption.** `Revision::Adopted().Get` would read
+  the newest written value before then, which could ask for an evaluate whose client no build holds yet. A frame or two at
+  startup run without upscaling.
+- **The hudless colour is three textures, not one with a format change.** `DeclareTexture2D` allows extent changes only, and a
+  new slot needs staged builds of its readers that Declare.cpp does not do yet. Only the chosen one is display size.
+- **`PresenterFormat` is a new frame variable.** Nothing carried the presenter's format. It is written from the presenter's
+  surface each frame, as `HdrOutputTarget` is.
+- **The upscaled texture also depends on `frameGeneration`,** since guest DLSS-G evaluates into it without an upscaler. That
+  evaluate now skips while the adopted texture is smaller than the display.
+- **Scheduled gates kept.** The evaluate's copy gate covers the post stage's keyed build (the evaluate client's `declared`
+  follows `post.upscaler`), which ORG switches on its own, so a revision cannot promise it. The hudless and inputs gates cover
+  registrations made from observed engine imports. Both go with step 9b and 7a.
+- **The ORG failure path stays.** `ORGUpscaling::Failed` still drains the ring once and returns to D3D11 (`Upscaling.cpp`,
+  `BeginRenderFrame`). It is a fallback, against rule 2.2, and not a resize drain; making it fatal is a separate change.
+- **No `DeclareProgram` used.** The depth upscale reloads its programs on the render thread when the engine's target formats
+  change, as before. It needs `DeclareProgram` (6.4) on the engine target formats once those are variables (step 9).
+- **Builder failures in a client's make are fatal now** (Declare.cpp: "false is fatal"). They returned the feature to D3D11
+  before.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

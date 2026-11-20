@@ -12,6 +12,7 @@
 #include "Upscaling/DXVKInterop.h"
 #include "Upscaling/DxvkPresenter.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -125,6 +126,25 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 	return hr;
 }
 
+Upscaling::Upscaling()
+{
+	settings.upscaleMethod.Bind(CS::SettingRegistry::Declare("Upscaling.upscaleMethod"));
+	settings.upscaleMethodNoDLSS.Bind(CS::SettingRegistry::Declare("Upscaling.upscaleMethodNoDLSS"));
+	settings.qualityMode.Bind(CS::SettingRegistry::Declare("Upscaling.qualityMode"));
+	settings.frameGeneration.Bind(CS::SettingRegistry::Declare("Upscaling.frameGeneration"));
+	settings.frameGenMethod.Bind(CS::SettingRegistry::Declare("Upscaling.frameGenMethod"));
+	settings.frameGenMultiplier.Bind(CS::SettingRegistry::Declare("Upscaling.frameGenMultiplier"));
+}
+
+namespace
+{
+	/** @brief Whether the frame takes its upscaling values from the adopted frame revision: the render graph runs revisions. */
+	bool FollowsRevisions()
+	{
+		return RenderGraph::Frame::Driver::Installed() && RenderGraphRuntime::Get().IsActive();
+	}
+}
+
 static bool DrawStepper(const char* a_label, int* a_index, const std::vector<const char*>& a_options, bool a_disabled = false)
 {
 	const int count = static_cast<int>(a_options.size());
@@ -228,7 +248,7 @@ void Upscaling::DrawSettings()
 		if (streamline->IsUnavailable())
 			ImGui::TextDisabled("%s", T(TKEY("sl_unavailable_note"), "Streamline could not be loaded - upscalers and frame generation are unavailable"));
 
-		const UpscaleMethod cur = (UpscaleMethod)settings.upscaleMethod;
+		const UpscaleMethod cur = (UpscaleMethod)settings.upscaleMethod.Get();
 		const bool hasPreset = (cur == UpscaleMethod::kFSR || cur == UpscaleMethod::kXeSS || cur == UpscaleMethod::kDLSS);
 		if (hasPreset) {
 			const std::vector<const char*> presets = {
@@ -345,7 +365,7 @@ void Upscaling::LoadSettings(json& o_json)
 
 	constexpr auto enumCount = 5;
 	if (settings.upscaleMethod >= static_cast<uint>(enumCount)) {
-		logger::warn("[Upscaling] Loaded upscaleMethod {} out of range, clamping to {}", settings.upscaleMethod, enumCount - 1);
+		logger::warn("[Upscaling] Loaded upscaleMethod {} out of range, clamping to {}", settings.upscaleMethod.Get(), enumCount - 1);
 		settings.upscaleMethod = enumCount - 1;
 	}
 	if (settings.upscaleMethodNoDLSS >= static_cast<uint>(enumCount) ||
@@ -363,7 +383,7 @@ void Upscaling::LoadSettings(json& o_json)
 		settings.reflexLowLatencyBoost = false;
 	}
 	if (settings.qualityMode > 4) {
-		logger::warn("[Upscaling] Loaded qualityMode {} out of range, clamping to 4 (Ultra Performance)", settings.qualityMode);
+		logger::warn("[Upscaling] Loaded qualityMode {} out of range, clamping to 4 (Ultra Performance)", settings.qualityMode.Get());
 		settings.qualityMode = 4;
 	}
 	auto iniSettingCollection = globals::game::iniPrefSettingCollection;
@@ -560,10 +580,10 @@ void Upscaling::PostPostLoad()
 Upscaling::UpscaleMethod Upscaling::GetUpscaleMethod() const
 {
 	auto* streamline = Streamline::GetSingleton();
-	auto method = static_cast<UpscaleMethod>(settings.upscaleMethod);
+	auto method = static_cast<UpscaleMethod>(settings.upscaleMethod.Get());
 	for (uint32_t fallback = 0; fallback < 3; ++fallback) {
 		if (method == UpscaleMethod::kDLSS && !streamline->IsDLSSSupported()) {
-			method = static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS);
+			method = static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS.Get());
 			if (method == UpscaleMethod::kDLSS)
 				method = UpscaleMethod::kFSR;
 			continue;
@@ -602,7 +622,6 @@ void Upscaling::ApplyHardwareDefaults()
 			logger::info("[Upscaling] Hardware default: XeSS selected (Intel GPU detected via Streamline)");
 		}
 	}
-	SettingsWritten("Upscaling hardware defaults");
 
 	// The hardware defaults leave Reflex's low-latency mode off. Streamline::Initialize still loads the feature, for frame generation.
 }
@@ -610,12 +629,28 @@ void Upscaling::ApplyHardwareDefaults()
 Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const
 {
 	auto* sl = Streamline::GetSingleton();
-	const auto selected = static_cast<FrameGenMethod>(settings.frameGenMethod);
+	const auto selected = static_cast<FrameGenMethod>(settings.frameGenMethod.Get());
 	if (selected == FrameGenMethod::kDLSSG)
 		return sl->IsDLSSGSupported() ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR;
 	return sl->IsFSRFGSupported() ? FrameGenMethod::kFSR :
 	       sl->IsDLSSGSupported() ? FrameGenMethod::kDLSSG :
 	                                FrameGenMethod::kFSR;
+}
+
+Upscaling::UpscaleMethod Upscaling::FrameUpscaleMethod() const
+{
+	if (!FollowsRevisions())
+		return GetUpscaleMethod();
+	static_assert(static_cast<std::uint32_t>(UpscaleMethod::kXeSS) == static_cast<std::uint32_t>(RenderGraph::Frame::Vars::Upscaler::XeSS));
+	// None before the first adoption, so the first frames upscale nothing rather than evaluate into a texture not yet made.
+	return static_cast<UpscaleMethod>(RenderGraph::Frame::Vars::AdoptedUpscaleMethod());
+}
+
+uint Upscaling::FrameQualityMode() const
+{
+	if (!FollowsRevisions())
+		return settings.qualityMode.Get();
+	return RenderGraph::Frame::Revision::Adopted().Get(settings.qualityMode);
 }
 
 bool Upscaling::IsFrameGenerationActive() const
@@ -637,30 +672,26 @@ bool Upscaling::IsFrameGenerationSelected() const
 
 void Upscaling::BeginRenderFrame()
 {
-	// A test run's upscale method (RequestUpscaleTest), as the menu's stepper sets it. The menu writes between frames, so this
-	// waits for the frame boundary too.
-	if (const int request = s_upscaleTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0)
-		RenderGraph::Frame::Driver::AtNextBegin([this, request] {
-			settings.upscaleMethod = static_cast<uint>(request);
-			SettingsWritten("cs-test upscale");
-			logger::info("[UPTEST] upscale method {} (now {})", magic_enum::enum_name(static_cast<UpscaleMethod>(request)), magic_enum::enum_name(GetUpscaleMethod()));
-		});
-	// A test run's frame generation switch (RequestFrameGenTest), as the menu's stepper makes it, at the frame boundary as well.
-	if (const int request = s_frameGenTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0)
-		RenderGraph::Frame::Driver::AtNextBegin([this, request] {
-			settings.frameGeneration = request != 0;
-			if (request != 0)
-				settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
-			SettingsWritten("cs-test fg");
-			logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
-		});
+	// A test run's upscale method (RequestUpscaleTest), as the menu's stepper sets it. The setting raises its event, and the
+	// frame revision that carries it switches the method in with its textures and builds.
+	if (const int request = s_upscaleTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0) {
+		settings.upscaleMethod = static_cast<uint>(request);
+		logger::info("[UPTEST] upscale method {} (now {})", magic_enum::enum_name(static_cast<UpscaleMethod>(request)), magic_enum::enum_name(GetUpscaleMethod()));
+	}
+	// A test run's frame generation switch (RequestFrameGenTest), as the menu's stepper makes it, written the same way.
+	if (const int request = s_frameGenTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0) {
+		settings.frameGeneration = request != 0;
+		if (request != 0)
+			settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
+		logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
+	}
 	{  // The [FGTEST] line: frames rendered and FSR-FG's presents each second.
 		static uint64_t secondTick = 0, lastTick = 0, lastPresented = 0;
 		static uint32_t frames = 0, worst = 0, stalls = 0;
 		const auto now = GetTickCount64();
 		auto* ui = RE::UI::GetSingleton();
 		const auto describe = [&] {
-			return std::format("presented x{}, setting {}x, fg {}, active {}, unusable {}, csMenu {}, paused {}, loaded {}", Streamline::GetSingleton()->GetFrameGenerationMultiplier(), settings.dlssgDynamic ? 0 : settings.frameGenMultiplier, settings.frameGeneration, IsFrameGenerationActive(), IsWindowUnusable(), globals::menu && globals::menu->ShouldSwallowInput(), ui && ui->GameIsPaused(), Streamline::GetSingleton()->IsDLSSGLoaded());
+			return std::format("presented x{}, setting {}x, fg {}, active {}, unusable {}, csMenu {}, paused {}, loaded {}", Streamline::GetSingleton()->GetFrameGenerationMultiplier(), settings.dlssgDynamic ? 0u : settings.frameGenMultiplier.Get(), settings.frameGeneration.Get(), IsFrameGenerationActive(), IsWindowUnusable(), globals::menu && globals::menu->ShouldSwallowInput(), ui && ui->GameIsPaused(), Streamline::GetSingleton()->IsDLSSGLoaded());
 		};
 		if (lastTick) {
 			const auto frame = static_cast<uint32_t>(now - lastTick);
@@ -700,7 +731,7 @@ void Upscaling::BeginRenderFrame()
 
 	// CS_ORG_UPSCALING failed: once the ring no longer uses the graph textures, the D3D11 ones take over.
 	if (auto& orgUpscaling = ORGUpscaling::Get(); orgUpscaling.Failed() && dxvk->DrainCommandRing() && orgUpscaling.ReleaseAfterFailure()) {
-		const auto method = GetUpscaleMethod();
+		const auto method = FrameUpscaleMethod();
 		if (method == UpscaleMethod::kFSR || method == UpscaleMethod::kDLSS || method == UpscaleMethod::kXeSS)
 			CreateUpscaledTexture();
 	}
@@ -710,6 +741,19 @@ void Upscaling::BeginRenderFrame()
 		hdr.BeginRenderFrame();
 	else
 		FrameGen::DxvkPresenter::Get().BeginFrame();
+
+	// The presenter's committed format, for the hudless texture. Written every frame, so only a change is an event. Unknown means
+	// no format is committed yet (at startup, and during a colour space change), so the last one stays.
+	if (const auto surface = FrameGen::ActivePresenter().Surface(); surface.format != rhi::Format::Unknown) {
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		if (surface.format == rhi::Format::R8G8B8A8_UNorm)
+			format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		else if (surface.format == rhi::Format::B8G8R8A8_UNorm)
+			format = DXGI_FORMAT_B8G8R8A8_UNORM;
+		else if (surface.format == rhi::Format::R10G10B10A2_UNorm)
+			format = DXGI_FORMAT_R10G10B10A2_UNORM;
+		RenderGraph::Frame::Vars::SetPresenterFormat({ static_cast<std::uint32_t>(format), surface.hdr10 }, "Upscaling::BeginRenderFrame");
+	}
 }
 
 bool Upscaling::GetEffectiveReflex() const
@@ -950,7 +994,7 @@ double Upscaling::GetTargetFrameRate() const
 
 uint32_t Upscaling::GetFixedDLSSGMultiplier() const
 {
-	uint32_t multiplier = std::clamp(settings.frameGenMultiplier, 2u, 6u);
+	uint32_t multiplier = std::clamp(settings.frameGenMultiplier.Get(), 2u, 6u);
 	const uint32_t maxFrames = Streamline::GetSingleton()->GetDLSSGMaxFramesToGenerate();
 	if (maxFrames > 0u)
 		multiplier = std::min(multiplier, maxFrames + 1u);
@@ -1002,7 +1046,6 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	auto requestFaultTeardown = [&](const char* a_reason) -> HRESULT {
 		logger::error("[Upscaling] {} - disabling frame generation", a_reason);
 		settings.frameGeneration = false;
-		SettingsWritten("frame generation fault");
 		const uint32_t displayWidth = globals::game::graphicsState ? globals::game::graphicsState->screenWidth : 0;
 		const uint32_t displayHeight = globals::game::graphicsState ? globals::game::graphicsState->screenHeight : 0;
 		if (streamline->IsDLSSGLoaded() &&
@@ -1033,7 +1076,6 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	};
 	if (dxvk->HasCommandRingFault()) {
 		settings.frameGeneration = false;
-		SettingsWritten("frame generation fault");
 		if (streamline->IsDLSSGLoaded() || streamline->IsFSRFGLoaded())
 			return requestFaultTeardown("Vulkan frame-generation dispatch fault");
 		return a_present(a_swapChain, a_syncInterval, a_flags);
@@ -1066,6 +1108,7 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 
 void Upscaling::CreateUpscaledTexture()
 {
+	// The graph declares its own, which follows the display size and the method.
 	if (UpscaledResource())
 		return;
 
@@ -1077,9 +1120,7 @@ void Upscaling::CreateUpscaledTexture()
 
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-	if (ORGUpscaling::Get().CreateTexture(ORGUpscaling::Target::Upscaled, texDesc))
-		return;
-
+	// Kept once made: a method change destroys nothing, so nothing in flight can still use a released texture.
 	upscaledTexture = new Texture2D(texDesc);
 	Util::SetResourceName(upscaledTexture->resource.get(), "Upscaling::UpscaledTexture");
 
@@ -1100,131 +1141,74 @@ void Upscaling::CreateUpscaledTexture()
 		texDesc.Width, texDesc.Height, static_cast<int>(texDesc.Format));
 }
 
-void Upscaling::DestroyUpscaledTexture()
+Texture2D* Upscaling::SelectD3D11Hudless()
 {
-	ORGUpscaling::Get().DestroyTexture(ORGUpscaling::Target::Upscaled);
-	if (upscaledTexture) {
-		delete upscaledTexture;
-		upscaledTexture = nullptr;
-		logger::debug("[Upscaling] Destroyed upscaled texture");
-	}
-}
-
-void Upscaling::CreateHudlessTexture()
-{
-	D3D11_TEXTURE2D_DESC texDesc{};
+	hudlessTexture = nullptr;
 	auto& hdr = globals::features::hdrDisplay;
 	const bool hdrActive = hdr.loaded && hdr.IsHDREnabledForFrame();
 	const auto surface = FrameGen::ActivePresenter().Surface();
-	const bool nativeHDR = hdrActive && surface.hdr10;
+	DXGI_FORMAT presenterFormat = DXGI_FORMAT_UNKNOWN;
+	if (surface.format == rhi::Format::R8G8B8A8_UNorm)
+		presenterFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+	else if (surface.format == rhi::Format::B8G8R8A8_UNorm)
+		presenterFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+	else if (surface.format == rhi::Format::R10G10B10A2_UNorm)
+		presenterFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+	// The presenter publishes its format asynchronously and has none until it committed one, at startup and across each colour
+	// space change. That is "not yet", so the frame has no hudless colour. So is a surface still in the other encoding.
+	const auto index = ORGUpscaling::HudlessFormatIndex(hdrActive, presenterFormat, surface.hdr10);
+	if (!index) {
+		if (surface.format != rhi::Format::Unknown && !hdrActive && !surface.hdr10)
+			logger::error("[Upscaling] Unsupported HUD-less presenter format {} (HDR10 {})", static_cast<int>(surface.format), surface.hdr10);
+		return nullptr;
+	}
+	if (auto* made = hudlessTextures[*index])
+		return hudlessTexture = made;
+
+	// The display size: the composed HDR output's, or kFRAMEBUFFER's.
+	D3D11_TEXTURE2D_DESC texDesc{};
 	if (hdrActive) {
-		// Size from the composed HDR output; the blit in CaptureHudlessColor converts the
-		// format, so this no longer requires the presenter to be exactly HDR10.
 		if (!hdr.outputTexture || !hdr.outputTexture->resource)
-			return;
+			return nullptr;
 		hdr.outputTexture->resource->GetDesc(&texDesc);
-		if (nativeHDR && texDesc.Format != DXGI_FORMAT_R10G10B10A2_UNORM) {
-			logger::error("[Upscaling] Native HDR output texture is not R10G10B10A2_UNORM (format={})",
-				static_cast<int>(texDesc.Format));
-			return;
-		}
 	} else {
-		auto renderer = globals::game::renderer;
-		auto& fb = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		if (!fb.SRV)
-			return;
+			return nullptr;
 		winrt::com_ptr<ID3D11Resource> fbResource;
 		fb.SRV->GetResource(fbResource.put());
 		winrt::com_ptr<ID3D11Texture2D> fbTexture;
 		if (!fbResource || FAILED(fbResource->QueryInterface(IID_PPV_ARGS(fbTexture.put()))) || !fbTexture)
-			return;
+			return nullptr;
 		fbTexture->GetDesc(&texDesc);
 	}
 
-	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-	// HDR always lands in 10-bit: it is what the HDR10 backbuffer FFX subtracts against
-	// uses, and the blit converts into it regardless of the composed source format.
-	if (hdrActive) {
-		format = DXGI_FORMAT_R10G10B10A2_UNORM;
-	} else if (!hdrActive && !surface.hdr10) {
-		if (surface.format == rhi::Format::R8G8B8A8_UNorm)
-			format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		else if (surface.format == rhi::Format::B8G8R8A8_UNorm)
-			format = DXGI_FORMAT_B8G8R8A8_UNORM;
-		else if (surface.format == rhi::Format::R10G10B10A2_UNorm)
-			format = DXGI_FORMAT_R10G10B10A2_UNORM;
-	}
-	if (format == DXGI_FORMAT_UNKNOWN) {
-		// The presenter publishes its format asynchronously and reports kUnknown /
-		// VK_FORMAT_UNDEFINED until it has committed one -- at startup, and again across every
-		// colour-space transition. That is "not yet", not "unsupported": CaptureHudlessColor
-		// calls this every frame and copes with a null texture, so a later frame picks it up.
-		// Reporting it as an error put a spurious "Unsupported HUD-less presenter format 0 for
-		// encoding 0" in every session's log.
-		// So is a surface still in the other encoding in the frame HDR turns off: its replacement comes after this frame.
-		if (surface.format != rhi::Format::Unknown && surface.hdr10 == hdrActive) {
-			logger::error("[Upscaling] Unsupported HUD-less presenter format {} (HDR10 {})",
-				static_cast<int>(surface.format), surface.hdr10);
-		}
-		return;
-	}
-
-	const D3D11_TEXTURE2D_DESC* current = ORGUpscaling::Get().Desc(ORGUpscaling::Target::Hudless, hudlessTexture ? &hudlessTexture->desc : nullptr);
-	if (current &&
-		current->Width == texDesc.Width &&
-		current->Height == texDesc.Height &&
-		current->MipLevels == texDesc.MipLevels &&
-		current->ArraySize == texDesc.ArraySize &&
-		current->Format == format &&
-		current->SampleDesc.Count == texDesc.SampleDesc.Count &&
-		current->SampleDesc.Quality == texDesc.SampleDesc.Quality)
-		return;
-
-	if (!DestroyHudlessTexture())
-		return;
-
-	texDesc.Format = format;
-	// Always give the hudless target a render-target view. FFX derives the UI as
-	// (backbuffer - hudless), so the two must agree in format; blitting through an RTV
-	// converts, whereas CopyResource requires an exact match and silently drops hudless
-	// when it does not hold -- which leaves the UI to be interpolated, i.e. flashing.
+	texDesc.Format = ORGUpscaling::kHudlessFormats[*index];
+	texDesc.Usage = D3D11_USAGE_DEFAULT;
+	texDesc.CPUAccessFlags = 0;
+	texDesc.MiscFlags = 0;
+	// Always give the hudless target a render-target view. FFX derives the UI as (backbuffer - hudless), so the two must agree
+	// in format; blitting through an RTV converts, whereas CopyResource requires an exact match.
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 
-	if (ORGUpscaling::Get().CreateTexture(ORGUpscaling::Target::Hudless, texDesc))
-		return;
-
-	hudlessTexture = new Texture2D(texDesc);
-	Util::SetResourceName(hudlessTexture->resource.get(), "Upscaling::HudlessTexture");
+	auto* made = new Texture2D(texDesc);
+	Util::SetResourceName(made->resource.get(), "Upscaling::HudlessTexture");
 
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Format = texDesc.Format;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MostDetailedMip = 0;
 	srvDesc.Texture2D.MipLevels = 1;
-	hudlessTexture->CreateSRV(srvDesc);
+	made->CreateSRV(srvDesc);
 
 	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 	rtvDesc.Format = texDesc.Format;
 	rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-	hudlessTexture->CreateRTV(rtvDesc);
+	made->CreateRTV(rtvDesc);
 
-	logger::info("[Upscaling] Created hudless texture ({}x{}, format={})",
-		texDesc.Width, texDesc.Height, static_cast<int>(texDesc.Format));
-}
-
-bool Upscaling::DestroyHudlessTexture(bool a_commandRingDrained)
-{
-	if (HudlessResource()) {
-		if (!a_commandRingDrained && !DXVKInterop::GetSingleton()->DrainCommandRing()) {
-			logger::error("[Upscaling] hudless texture destruction deferred because command completion could not be proven");
-			return false;
-		}
-		ORGUpscaling::Get().DestroyTexture(ORGUpscaling::Target::Hudless);
-		delete hudlessTexture;
-		hudlessTexture = nullptr;
-		logger::debug("[Upscaling] Destroyed hudless texture");
-	}
-	return true;
+	logger::info("[Upscaling] Created hudless texture ({}x{}, format={})", texDesc.Width, texDesc.Height, static_cast<int>(texDesc.Format));
+	hudlessTextures[*index] = made;
+	return hudlessTexture = made;
 }
 
 ID3D11Texture2D* Upscaling::UpscaledResource() const
@@ -1285,8 +1269,8 @@ bool Upscaling::CopyHudlessColor(ID3D11ShaderResourceView* a_source)
 
 ID3D11Resource* Upscaling::CaptureHudlessColor()
 {
-	CreateHudlessTexture();
-	if (!HudlessResource())
+	// Graph modes: the adopted revision's hudless texture, which the copy pass writes. Its copy also notes the source it reads.
+	if (!ORGUpscaling::Get().Holds(ORGUpscaling::Target::Hudless) && !SelectD3D11Hudless())
 		return nullptr;
 
 	auto& hdr = globals::features::hdrDisplay;
@@ -1311,42 +1295,6 @@ ID3D11Resource* Upscaling::CaptureHudlessColor()
 		return nullptr;
 
 	return CopyHudlessColor(fb.SRV) ? HudlessResource() : nullptr;
-}
-
-void Upscaling::CheckResources(UpscaleMethod a_upscalemethod)
-{
-	static auto previousUpscaleMode = UpscaleMethod::kTAA;
-
-	if (previousUpscaleMode != a_upscalemethod) {
-		logger::debug("[Upscaling] Upscale method changed: {} ({}) -> {} ({})",
-			static_cast<int>(previousUpscaleMode), magic_enum::enum_name(previousUpscaleMode),
-			static_cast<int>(a_upscalemethod), magic_enum::enum_name(a_upscalemethod));
-
-		bool hadUpscale = (previousUpscaleMode == UpscaleMethod::kFSR ||
-		                   previousUpscaleMode == UpscaleMethod::kDLSS ||
-		                   previousUpscaleMode == UpscaleMethod::kXeSS) &&
-		                  previousUpscalingWasActive;
-		if (hadUpscale) {
-			// DXVK does not track resources referenced by foreign Vulkan submissions.
-			if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
-				logger::error("[Upscaling] method change deferred because command completion could not be proven");
-				return;
-			}
-			DestroyUpscaledTexture();
-			DestroyHudlessTexture(true);
-		}
-		if (a_upscalemethod == UpscaleMethod::kFSR ||
-		    a_upscalemethod == UpscaleMethod::kDLSS ||
-		    a_upscalemethod == UpscaleMethod::kXeSS) {
-			CreateUpscaledTexture();
-			CreateHudlessTexture();
-		}
-
-		previousUpscaleMode = a_upscalemethod;
-		previousUpscalingWasActive = IsUpscalingActive();
-	}
-
-	FrameGen::Controller::GetSingleton()->Reconcile();
 }
 
 ID3D11PixelShader* Upscaling::GetDepthRefractionUpscalePS()
@@ -1417,7 +1365,7 @@ void GetJitterOffset(float* outX, float* outY, int32_t index, int32_t phaseCount
 
 void Upscaling::ConfigureTAA()
 {
-	auto upscaleMethod = GetUpscaleMethod();
+	auto upscaleMethod = FrameUpscaleMethod();
 
 	// Force temporal AA on for every method except the explicit no-AA mode.
 	Util::SetTemporal(upscaleMethod != UpscaleMethod::kNONE);
@@ -1425,10 +1373,14 @@ void Upscaling::ConfigureTAA()
 
 void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 {
-	auto upscaleMethod = GetUpscaleMethod();
+	// The frame's method and quality: the adopted revision's, so the render size, the textures and the builds switch together.
+	const auto upscaleMethod = FrameUpscaleMethod();
+	const uint qualityMode = FrameQualityMode();
 
-	// Create or release method-specific resources as necessary.
-	CheckResources(upscaleMethod);
+	// Plain D3D11 makes its upscaled texture on first need. The graph's follows its declaration.
+	if (upscaleMethod == UpscaleMethod::kFSR || upscaleMethod == UpscaleMethod::kDLSS || upscaleMethod == UpscaleMethod::kXeSS)
+		CreateUpscaledTexture();
+	FrameGen::Controller::GetSingleton()->Reconcile();
 
 	projectionPosScaleX = a_viewport->projectionPosScaleX;
 	projectionPosScaleY = a_viewport->projectionPosScaleY;
@@ -1442,8 +1394,8 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 	RenderGraph::Frame::Vars::Extent2D renderSize{ static_cast<std::uint32_t>(screenWidth), static_cast<std::uint32_t>(screenHeight) };
 
 	if (upscaleMethod == UpscaleMethod::kFSR || upscaleMethod == UpscaleMethod::kXeSS || upscaleMethod == UpscaleMethod::kDLSS) {
-		auto getUpscaleRatio = [](uint qualityMode) -> float {
-			switch (qualityMode) {
+		auto getUpscaleRatio = [](uint a_quality) -> float {
+			switch (a_quality) {
 			case 0:
 				return 1.0f;  // Native (Quality)
 			case 1:
@@ -1458,7 +1410,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 				return 1.5f;
 			}
 		};
-		float resolutionScaleBase = 1.0f / getUpscaleRatio(settings.qualityMode);
+		float resolutionScaleBase = 1.0f / getUpscaleRatio(qualityMode);
 
 		auto renderWidth = static_cast<int>(screenWidth * resolutionScaleBase);
 		auto renderHeight = static_cast<int>(screenHeight * resolutionScaleBase);
@@ -1468,11 +1420,11 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 		{
 			static int s_lastW = 0, s_lastH = 0;
 			static uint s_lastQuality = UINT_MAX;
-			if (s_lastW != renderWidth || s_lastH != renderHeight || s_lastQuality != settings.qualityMode) {
-				s_lastW = renderWidth; s_lastH = renderHeight; s_lastQuality = settings.qualityMode;
+			if (s_lastW != renderWidth || s_lastH != renderHeight || s_lastQuality != qualityMode) {
+				s_lastW = renderWidth; s_lastH = renderHeight; s_lastQuality = qualityMode;
 				logger::info("[Upscaling] internal resolution {}x{} from {}x{} (quality {}, ratio {:.2f}x, method {})",
-					renderWidth, renderHeight, screenWidth, screenHeight, settings.qualityMode,
-					getUpscaleRatio(settings.qualityMode), static_cast<uint>(upscaleMethod));
+					renderWidth, renderHeight, screenWidth, screenHeight, qualityMode,
+					getUpscaleRatio(qualityMode), static_cast<uint>(upscaleMethod));
 			}
 		}
 		resolutionScale.x = static_cast<float>(renderWidth) / static_cast<float>(screenWidth);
@@ -1506,17 +1458,17 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 	runtimeData.dynamicResolutionLock = 1;
 
-	// Written every frame. Only a changed value is an event (plan, step 5b).
+	// Written every frame. Only a changed value is an event (plan, step 5b). The render size and ratios are this frame's. The
+	// method is the one the settings choose now, which the next revision carries.
 	{
 		namespace Vars = RenderGraph::Frame::Vars;
 		constexpr std::string_view writer = "Upscaling::ConfigureUpscaling";
-		static_assert(static_cast<std::uint32_t>(UpscaleMethod::kXeSS) == static_cast<std::uint32_t>(Vars::Upscaler::XeSS));
-		const auto method = static_cast<Vars::Upscaler>(upscaleMethod);
+		const auto method = static_cast<Vars::Upscaler>(GetUpscaleMethod());
 		const bool hdr = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.IsHDREnabledForFrame();
 		Vars::SetRenderSize(renderSize, writer);
 		Vars::SetDynamicRatios({ resolutionScale.x, resolutionScale.y }, writer);
 		Vars::SetUpscaleMethod(method, writer);
-		Vars::SetUpscalerOptions({ method, settings.qualityMode, { static_cast<std::uint32_t>(screenWidth), static_cast<std::uint32_t>(screenHeight) }, hdr }, writer);
+		Vars::SetUpscalerOptions({ method, settings.qualityMode.Get(), { static_cast<std::uint32_t>(screenWidth), static_cast<std::uint32_t>(screenHeight) }, hdr }, writer);
 	}
 
 	static float s_loggedScale = -1.0f;
@@ -1583,10 +1535,8 @@ void Upscaling::SetupResources()
 	DX::ThrowIfFailed(globals::d3d::device->CreateRasterizerState(&rasterizerDesc, upscaleRasterizerState.put()));
 	Util::SetResourceName(upscaleRasterizerState.get(), "Upscaling::DepthUpscaleRasterizerState");
 
-	// CS_ORG_UPSCALING: before the textures, which the graph path then makes.
+	// Graph modes declare their textures and clients here. Plain D3D11 makes its textures on first need.
 	(void)ORGUpscaling::Get().Setup();
-
-	CheckResources(GetUpscaleMethod());
 
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (dxvk->Initialize()) {
@@ -1710,7 +1660,7 @@ double Upscaling::GetRefreshRate(HWND a_window)
 
 bool Upscaling::IsUpscalingActive() const
 {
-	auto method = GetUpscaleMethod();
+	auto method = FrameUpscaleMethod();
 
 	if (method != UpscaleMethod::kFSR && method != UpscaleMethod::kXeSS && method != UpscaleMethod::kDLSS) {
 		return false;
@@ -1834,7 +1784,10 @@ void Upscaling::Upscale()
 	auto state = globals::state;
 	auto context = globals::d3d::context;
 	auto renderer = globals::game::renderer;
-	const auto method = GetUpscaleMethod();
+	const auto method = FrameUpscaleMethod();
+	// The SDK options are this frame's: the adopted quality, the display size and the pre-exposure (Streamline sets them when
+	// the evaluate records).
+	const uint qualityMode = FrameQualityMode();
 
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
@@ -1874,21 +1827,21 @@ void Upscaling::Upscale()
 					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
+					qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
 				break;
 			case UpscaleMethod::kDLSS:
 				result = Streamline::GetSingleton()->EvaluateDLSS(
 					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, jitter.x, jitter.y);
+					qualityMode, jitter.x, jitter.y);
 				break;
 			case UpscaleMethod::kXeSS:
 				result = Streamline::GetSingleton()->EvaluateXeSS(
 					mainTexture, upscaled, depthTexture, motionTexture,
 					(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 					(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-					settings.qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
+					qualityMode, settings.sharpnessFSR, jitter.x, jitter.y);
 				break;
 			default:
 				result = Streamline::EvaluationResult::kSkipped;
@@ -2112,7 +2065,13 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 			if (!IsUpscalingActive() && !RenderGraph::Engine::Native::Active()) {
 				CreateUpscaledTexture();
 				auto& mainColor = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-				if (auto* upscaled = UpscaledResource(); upscaled && mainColor.texture)
+				// The graph's upscaled texture is one texel until the revision that turns frame generation on is adopted.
+				const auto covers = [&](ID3D11Texture2D* a_texture) {
+					D3D11_TEXTURE2D_DESC desc{};
+					a_texture->GetDesc(&desc);
+					return desc.Width >= static_cast<UINT>(displaySize.x) && desc.Height >= static_cast<UINT>(displaySize.y);
+				};
+				if (auto* upscaled = UpscaledResource(); upscaled && mainColor.texture && covers(upscaled))
 					(void)Streamline::GetSingleton()->EvaluateFSR(
 						Unwrap(mainColor.texture), upscaled, fgDepth, motionTexture,
 						(uint32_t)displaySize.x, (uint32_t)displaySize.y, (uint32_t)displaySize.x, (uint32_t)displaySize.y,
@@ -2179,7 +2138,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	}
 
 	auto& upscaling = globals::features::upscaling;
-	auto upscaleMethod = upscaling.GetUpscaleMethod();
+	auto upscaleMethod = upscaling.FrameUpscaleMethod();
 
 	// Keep markers, evaluation, tagging, and present on the same usable-window frame.
 	const bool windowUsable = !Upscaling::IsWindowUnusable();
@@ -2243,16 +2202,4 @@ void Upscaling::BSFaceGenManager_UpdatePendingCustomizationTextures::thunk()
 	runtimeData.dynamicResolutionLock = 1;
 	func();
 	runtimeData.dynamicResolutionLock = 0;
-}
-
-Feature::SizeProjection Upscaling::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("upscaleMethod", settings.upscaleMethod)
-		.Add("upscaleMethodNoDLSS", settings.upscaleMethodNoDLSS)
-		.Add("qualityMode", settings.qualityMode)
-		.Add("frameGeneration", settings.frameGeneration)
-		.Add("frameGenMethod", settings.frameGenMethod)
-		.Add("frameGenMultiplier", settings.frameGenMultiplier);
-	return projection;
 }
