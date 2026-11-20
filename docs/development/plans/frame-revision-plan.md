@@ -1401,6 +1401,27 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Guest also copies the whole light capacity each run** (1024 lights, about 80 KB), as native did. Its recordings then stop
   changing as the light count grows.
 
+**Decided by the agent (step 6.12, Volumetric Lighting), to confirm:**
+- **`Interior` is a frame variable** (`Vars::Interior()`, `SetInterior`), not a feature setting, since other features may want it.
+  Its only writer is Volumetric Lighting's EarlyPrepass, every frame, so it is not written while that feature is off.
+- **The engine is given the adopted values.** EarlyPrepass gives the engine its VL on/off, quality and High-slot size from
+  `Adopted()` (live settings without the graph), so the engine's descriptor size is the bound version's. A mismatch at the VL
+  render is fatal. This assumes `SetVLQuality` changes the descriptor size at once; the old code's re-registration hints that
+  it does, but it is not checked. Until a revision is adopted the engine renders with the old values (a few frames of the
+  exterior's quality after entering an interior). Menu edits no longer call `SetupVL` at once, in D3D11 mode too (next frame).
+- **One persistent volume** at the adopted location's size replaces the two transient ones (exterior and interior sizes). A
+  non-exported transient cannot be versioned (`Resource::Aliasable`), so a transient's new size would be a structural rebuild.
+  It is one texel while the adopted location's VL is off (existence rule). The custom size's memory (up to 640^3 R16F) stays
+  allocated while that size is in use, as before.
+- **The feature off (native's engine VL)** declares the volume once at the engine's size, with no dependencies, at Setup or, when
+  the descriptor has no size yet, at the first VL render (a first version made mid-frame). A later size change is fatal.
+- **The client has no dependencies.** Its key is the sky's noise gradient view and Terrain and Cloud Shadows' published ids, which
+  the VL render finds and invalidates on a change (the 6.1 interim). The engine-target identity check is gone (Q4: a mid-session
+  `Create` is fatal elsewhere). Each registration keeps its own pass list and commit, so the old build draws until adoption.
+- **`ExteriorEnabled` and `InteriorEnabled` are ported too** (`Setting<bool>`), so `ProjectSizeSettings` is gone for the feature.
+- **A frame without VL after the first one ran logs a warning** (the first 16, "has no volumetric lighting after the first one
+  ran"), so a test can show none.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's

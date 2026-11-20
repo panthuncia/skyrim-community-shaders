@@ -54,6 +54,7 @@ namespace RenderGraph::Frame::Vars
 			Variable<HeightMapIdentity> heightMap = set.Declare("HeightMap", HeightMapIdentity{});
 			Variable<UpscalerOptions> upscalerOptions = set.Declare("UpscalerOptions", UpscalerOptions{});
 			Variable<FrameGen::PresentationConfig> presentationConfig = set.Declare("PresentationConfig", FrameGen::PresentationConfig{});
+			Variable<bool> interior = set.Declare("Interior", false);
 
 			std::mutex eventsMutex;
 			std::map<std::string, VariableEventCounts, std::less<>> events;
@@ -144,6 +145,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().reflectionCubemap, a_value, "ReflectionCubemap", a_writer); }
 	bool SetHeightMap(HeightMapIdentity a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().heightMap, a_value, "HeightMap", a_writer); }
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().upscalerOptions, a_value, "UpscalerOptions", a_writer); }
+	bool SetInterior(bool a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().interior, a_value, "Interior", a_writer); }
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view a_writer)
 	{
 		return SetFrameVariable(FrameVariableSet().presentationConfig, a_value, "PresentationConfig", a_writer);
@@ -339,6 +341,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetReflectionCubemap(CubemapShape, std::string_view) { return false; }
 	bool SetHeightMap(HeightMapIdentity, std::string_view) { return false; }
 	bool SetUpscalerOptions(UpscalerOptions, std::string_view) { return false; }
+	bool SetInterior(bool, std::string_view) { return false; }
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view)
 	{
 		const std::lock_guard lock(g_stubPresentationMutex);
