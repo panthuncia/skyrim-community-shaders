@@ -1,7 +1,12 @@
 # ORG integration: cleanup and refactor plan
 
-Status: draft for review, 2026-11-20. Based on a read-only survey of `integ/hard-ports` at
-`b1b39842d`, after the frame revision plan finished.
+Status: approved, 2026-11-20. The user answered decisions D-1 to D-5 on 2026-11-20 (see
+"Decisions" near the end); the sections below already follow those answers. No work has started.
+A new session should read "Handoff" at the end first.
+
+Based on a read-only survey of `integ/hard-ports` at `b1b39842d`, after the frame revision plan
+finished. The survey notes, with more file:line detail than this plan, are in
+[org-cleanup/surveys/](org-cleanup/surveys/).
 
 The survey had four parts: the frame and revision core, the feature ports, the engine-side
 ports, and the DCLF integration. This plan merges them. File and line references are from
@@ -81,7 +86,8 @@ resource.**
    hand-kept unbacked table (`Frame/EngineTargetUse.cpp`).
 7. In guest mode, the scene back buffer becomes a CS slot, as it already is in native mode.
    Present copies it into the DXVK swap chain image. HDR's UI texture becomes a declared
-   target (B17).
+   target (B17). The user accepted the cost of that copy (D-2), on condition that it is
+   investigated. See "Investigate: the present copy" below.
 8. HDR's and Deferred's target changes become plans for the declarations. Their
    `Recreate`/`Restore` branches leave graph mode.
 
@@ -96,6 +102,27 @@ Blockers to solve first:
 
 Interim fix (S), until this lands: in graph modes, also apply `SWP_NOSIZE` while the window
 frame is being dragged, so the drag is not fatal.
+
+**Investigate: the present copy (D-2).** Native mode already copies the CS back buffer slot into
+the swap chain image at present (`NativeDevice.cpp:1908-1980`), and step 7 adds the same copy
+in guest mode. The user wants to know why the copy is needed and whether it can go. Questions
+to answer, with measurements on the RX 6600 at 1080p and 4K:
+
+- What does the copy cost on the GPU, and does it add latency to present?
+- Why is a copy needed? Likely reasons to check:
+  - Swap chain images are acquired late, so the frame cannot name its image when it is
+    recorded.
+  - A recording that replays must not name a per-frame swap chain image.
+  - Formats and usage flags may differ (an sRGB view, storage usage, HDR formats).
+  - The DXVK swap chain owns its images, and frame generation (DLSS-G, FSR-FG) takes its own
+    copy of them.
+- Can the last pass that writes the back buffer write straight into the acquired image? For
+  example, it could be a separate late-bound step that is not part of the replayed recording,
+  or the slot's version could be bound to the acquired image at present.
+- Do the answers differ between guest, native Vulkan and native D3D12?
+
+Write the findings into this section. Remove the copy only if a mode can do it without
+breaking replayable recordings or frame generation.
 
 Once this lands, the `Observed` sites, DCLF's `SetTargetFormats`, `SetShadowInputs` and
 `RecreateShadowSet`, and `targetsGeneration` are deleted. Ports name targets by id.
@@ -216,8 +243,18 @@ Direction (L overall; the pieces are S to M):
 7. New tap errors: `EngineDraw` (a withheld engine draw) and the census.
 8. Engine constant-buffer pools become ORG buffers, as `EngineBuffers` did for vertex and
    index buffers. Then `KeptWrites` is deleted.
-9. `OutsideAdoption` and `LateChange` are fatal in every build. The cheap counters stay on
-   in every build. Each tap error kind gets its own message, naming the actual mode.
+9. Rule violations (D-5): `OutsideAdoption`, `LateChange` and the other tap errors stay
+   fatal in development builds only. In release builds (`CS_RELEASE_PROFILE`), the cheap
+   counters stay on, and the first violation of each kind:
+   - writes the full error to the log, with file:line and the frame;
+   - raises a warning that the DCLF menu shows until the game exits. The warning names the
+     error kind and tells the player to send their logs to the developers. It names the log
+     files and where they are (`CommunityShaders.log` and the DCLF log, in the SKSE log
+     folder);
+   - keeps the game running, as it does today. Whether the affected work is still skipped is
+     decided in the change; the menu warning is what matters.
+   Each tap error kind gets its own message, naming the actual mode (guest, native Vulkan or
+   native D3D12), not "native mode" for all of them. The warning text goes through i18n.
 10. A staged refusal at a scene adoption is fatal.
 
 Order matters here. Steps 1-2 and 9 can land first. The rest of the "draws on D3D11" frames
@@ -310,8 +347,13 @@ Direction (L, in this order):
 5. One per-epoch recording service in CS `RenderGraph` replaces both machines (B10). The
    scene becomes ordinary members of the frame revision. (L)
 
-Step 5 is what makes "DCLF off mid-session" and "graph mode without DCLF" possible. Whether
-to support either is the user's decision (D-3).
+Graph mode keeps requiring DCLF (D-3). So the aim of A5 is a clean structure, not making
+DCLF optional: the core no longer names DCLF, and DCLF uses the same interfaces as any other
+client.
+
+Turning DCLF off mid-session in graph mode stays unsupported; today it blanks the world. The
+director decided, to confirm: in graph mode the DCLF on/off control is locked in the menu, and a
+saved change applies at the next launch. That makes the blank world impossible to reach.
 
 ### A6. Mid-frame changes are not fully caught [new]
 
@@ -338,8 +380,9 @@ Direction (M):
 - The shared constants are made at setup, and the waiting-client path is deleted.
 - Epoch-failure handling moves to the adoption point.
 - One render-thread check, asserted in `Declare*` and `Evaluate`.
-- Either the adoption point becomes main-thread only, or `CS_ORG_LOADING_THREAD` is retired
-  (D-4).
+- Retire `CS_ORG_LOADING_THREAD` (D-4). Delete the switch, its registry entry and schema
+  key, and the loading-thread adoption path. Then the adoption point runs only on the main
+  render thread, and `Revision.cpp:1276`'s split goes.
 - The VL volume is declared at setup (A1, step 5). `Frame::Resources::Texture2D` becomes a
   declaration on `DisplaySize`.
 
@@ -486,9 +529,19 @@ Direction (S-M):
   not a revision member. Whether it binds the new buffers on the first frame after a resize
   was never checked. Direction (M): make it a stage client at an anchor.
 - **Light Limit Fix local shadows on the graph cannot run** [known: item 45].
-  `ORGLocalShadows` (645 lines) is blocked whenever DCLF is loaded, and graph modes require
-  DCLF. EHF's fallback for it is dead. Direction: delete it, or make the cache follow DCLF's
-  shadow views (D-1).
+  `ORGLocalShadows` (645 lines) is blocked whenever DCLF is loaded (`LightLimitFix.cpp:645`),
+  and graph modes require DCLF. EHF's fallback for it (`:1180`) is dead.
+  - Direction (M-L, D-1): rework the cache to follow DCLF's shadow views. Today the cache
+    takes over the engine's local shadow draws, which conflicts with DCLF owning them. Instead:
+    - DCLF's shadow epochs render the local lights' shadow views as they do now.
+    - The cache becomes a declared texture array that those views write into, or a reader of
+      DCLF's published shadow slots, keyed on DCLF's shadow-view set.
+    - Then remove the DCLF block at `LightLimitFix.cpp:645` and bring EHF's local-shadow
+      input back.
+  - The lead should first map how DCLF's shadow epochs (`ShadowEpochs.cpp`,
+    `ShadowEpochPasses.cpp`) name local lights' views, and what the cache needs per light:
+    slice, matrices and update rate.
+  - Test with the `llf-local-shadows` and `llf-parity` configs.
 - **The D3D12 path degrades DCLF through environment variables** (`Native.cpp:78-100`)
   [new]. Direction (S): use a device capability that DCLF reads at setup.
 - **Presentation branches on the mode** in four places (`PresentationRevision.cpp`). A DXVK
@@ -820,7 +873,8 @@ These need no design, only care, and can land as soon as the code they depend on
 - The `TEMP (CS_DCLF_SET_PARITY)` records and mirrors (17 markers).
 - `Vars::RaiseFeatureSettings`, `FeatureSettingsEvents` and the `FeatureSettings.*`
   variables, after the three remaining `Setting<T>` ports.
-- `ORGLocalShadows.{h,cpp}` and EHF's local-shadow fallback, if D-1 says so.
+- `CS_ORG_LOADING_THREAD` and its loading-thread adoption path (D-4).
+- `ORGLocalShadows` is not deleted. It is reworked (D-1, A13).
 
 **Test keys and stale text**
 
@@ -872,8 +926,10 @@ merges, builds and tests.
 - B23: `await = "adopted"` and `graph_frames` counters. Every later phase uses these to show
   that it did not add D3D11 frames.
 - B7: `PortFatal`, `ReasonLog` and the port skeleton.
-- A3 steps 1, 2 and 9: setup and runtime failures fatal, recovery paths deleted,
-  `OutsideAdoption`/`LateChange` fatal in every build.
+- A3 steps 1, 2 and 9: setup and runtime failures fatal, recovery paths deleted, tap errors
+  fatal in development builds, and the release-build DCLF menu warning (D-5).
+- A6: retire `CS_ORG_LOADING_THREAD` (D-4).
+- A5: lock the DCLF on/off control in graph mode (D-3, to confirm).
 - B13 and A7: the variable table, `OnAdopted`, `Setting::Adopted`, and the three
   `Setting<T>` ports.
 
@@ -888,6 +944,8 @@ merges, builds and tests.
 **Phase 3: CS owns the engine targets (B1, B4, B15, B17).** This is the largest single item.
 
 - It starts with the guest retarget design and with native wraps on the lane (Q2).
+- The present-copy investigation (A1, D-2) runs alongside. It is measurement and reading
+  only, so it can start in any phase.
 - When it lands, delete the `Observed` sites, `Invalidate`, and DCLF's format observation.
 - Window resize then works in both modes. Test with `native-vulkan+resize`, the guest resize
   config, and a window-drag test.
@@ -913,19 +971,133 @@ merges, builds and tests.
 - A13's separate cases: LLF culling as a stage client, the presenter contract, and the D3D12
   capability.
 
-Measurements that ride along, without code changes: the memory items in A13, and the
-local-shadow decision.
+- The local-shadow rework (A13, D-1) fits here, after phase 5 makes DCLF's shadow views
+  ordinary declared clients.
 
-## Decisions for the user
+Measurements that ride along without code changes: the memory items in A13, and the present
+copy (D-2).
 
-- **D-1.** Light Limit Fix local shadows on the graph: delete `ORGLocalShadows` (645 lines),
-  or rework the cache to follow DCLF's shadow views?
-- **D-2.** Guest back buffer as a CS slot (A1, step 7). This adds one full-screen copy at
-  present in guest mode, as native mode already does. Accept that copy for one model in both
-  modes?
-- **D-3.** After A5, should graph mode support running without DCLF, or turning DCLF off
-  mid-session? Supporting either is possible after A5 step 5. Today both are fatal or blank.
-- **D-4.** `CS_ORG_LOADING_THREAD`: retire it, or keep it and make the adoption point
-  main-thread only?
-- **D-5.** `OutsideAdoption` and `LateChange` fatal in release builds (A3, step 9). This
-  follows "errors are fatal", but it changes what players see if a bug ships.
+## Decisions
+
+The user answered these on 2026-11-20. They are also recorded as item 68 in
+`director-decisions-2026-11.md`.
+
+- **D-1. Light Limit Fix local shadows:** rework the cache to follow DCLF's shadow views. Do
+  not delete it. See A13.
+- **D-2. Guest back buffer as a CS slot:** the cost of the present copy is acceptable. Record
+  it as an area to investigate: why the copy is needed, and whether it can be removed. See A1.
+- **D-3. DCLF in graph mode:** graph mode can require DCLF. Running without DCLF, or turning
+  it off mid-session, is not a goal. The menu lock is the director's call, to confirm.
+- **D-4. `CS_ORG_LOADING_THREAD`:** retire it.
+- **D-5. Rule violations:** fatal in development builds only. In release builds, a detected
+  violation shows a warning in the DCLF menu with instructions to send the logs to the
+  developers. See A3, step 9.
+
+## Handoff
+
+This section is for a new director session picking up the plan.
+
+### State on 2026-11-20
+
+- **Branch:** `integ/hard-ports` in `C:\Users\matth\source\repos\SARP\external_refs\cs-org-dxvk`.
+  The frame revision plan (steps 1-10 and late changes) is merged and tested on it. Nothing is
+  pushed.
+- **Plans before this one:** the native framegen plan and the frame revision plan
+  (`frame-revision-plan.md`) are finished. Their open items are in
+  `director-decisions-2026-11.md` (items 1-67). The ones this plan absorbs are tagged
+  **[known]** above.
+- **Open items this plan does not cover**:
+  - Effects11 cannot be tested here: there is no preset on this machine.
+  - DLSS-G needs an NVIDIA GPU; this machine has an RX 6600.
+  - The glints refill after a shader reload logged only once (item 67).
+- **Submodules:** their commits are local only, on branches inside each submodule:
+  - ORG (`extern/OpenRenderGraph`) at `bfd13bb`, branch `rev-step4`;
+  - OMS (`extern/ORGModuleServices`) at `d48c924`, branch `rev-step5`;
+  - `extern/BasicRHI` on `org-native/fg-dlssg-native`;
+  - `extern/Streamline` on `org-native/fg-native-d3d12`;
+  - `extern/dxvk` on `org-port/view-trace`.
+
+  Before any push, push those submodule branches first. Restore any submodule URL that points
+  at the local main checkout (`git config -f .gitmodules --get-regexp url`).
+- **Worktrees:** the port worktrees under `..\org-port-worktrees` were removed on 2026-11-20.
+  Three folders stay on disk only for reference: `org-frame-slots`, `org-rebuild-race` (their
+  git data was lost) and `org-p0-pipelines` (its HEAD `c5bedf3` is not in the main repos).
+  Leave them alone unless the user says otherwise.
+
+### How the director works
+
+These are the user's standing orders:
+
+- The director runs one lead subagent per substantial part of the plan, up to six at once.
+- **Leads write code only and list their tests.** The director merges their branches into
+  `integ/hard-ports`, builds, stages, tests and fixes. This avoids parallel builds of about
+  7 GB each.
+  - Brief: [org-cleanup/director/lead-brief-codeonly.md](org-cleanup/director/lead-brief-codeonly.md).
+    Add the part's scope, a worktree under `..\org-port-worktrees`, and a branch name
+    (`org-native/cleanup-<part>`).
+  - [lead-brief-building.md](org-cleanup/director/lead-brief-building.md) is the older brief,
+    for leads that build and test themselves.
+- **Uncertain decisions go into `director-decisions-2026-11.md`.** Continue numbering from
+  item 68. Leads write theirs into this plan as "decided by the agent, to confirm".
+- **Only run the tests a change needs**, not the whole suite (user, 2026-11-20).
+- **Errors are fatal.** No waits, retries or fallbacks. The render thread never waits. Builds
+  are async. Changes publish at frame boundaries. Recordings must be replayable.
+- **Never resume an agent** that has been idle for an hour or more, or whose context is more
+  than half full. Hand off to a new agent with a summary.
+- **Cron check-ins** arrive about every 40 minutes. Reply in one line if nothing changed.
+
+### Build, stage, test
+
+All of this runs from the main checkout.
+
+- **Build:** run [org-cleanup/director/build-devfast.cmd](org-cleanup/director/build-devfast.cmd)
+  with `cmd /c`. It runs the Dev-Fast preset with `-k 0`.
+  - Never link while a test game runs.
+  - On LNK1140 or LNK1201, delete the build's `.pdb` and `.ilk` and link again.
+- **Stage:**
+
+  ```
+  python tools/cs-test/cs_test.py stage . --name nfg --preset Dev-Fast --base-aio "C:/Modding/MO2/mods/CS AB nfg"
+  ```
+
+- **Run:**
+
+  ```
+  CS_TEST_BACKGROUND=1 DXVK_DEBUG=hang python tools/cs-test/cs_test.py run <cfg> --stage nfg --wait 3600 --label <label>
+  ```
+
+  - Configs compose, e.g. `native-vulkan+resize` or `guest+dclf-toggles`.
+  - Results land in `C:\Modding\CS-AB\runs\<run>`.
+  - Read the exit report's tap-error and late-change counts and the DCLF wait count.
+- **Post-chain tests** (`post-effects`, `post-lens`, `post-programs`) need Post Processing
+  mode. Use [org-cleanup/director/ppbatch.sh](org-cleanup/director/ppbatch.sh):
+  1. Back up `SettingsUser.json` to `$PP_BACKUP` (default `~/SettingsUser.backup.json`).
+  2. The script sets the mode, runs the batch, and restores the backup on exit.
+- **Merges:** [keepboth.py](org-cleanup/director/keepboth.py) resolves conflicts where both
+  sides add lines. It keeps both sides and closes a struct that was split at a shared brace.
+  A function split across a conflict needs a hand fix. Read every result before building.
+- **Standard set** (pick what a change touches):
+  - mode smoke: `guest-quick`, `native-quick`, `native-d3d12-quick`, `menu`;
+  - `latch-census-short`;
+  - `resize` in guest and native Vulkan;
+  - `guest+fg`, `guest+dclf-toggles`, `native-vulkan+shader-reload`;
+  - a feature's own config, e.g. `ibl`, `terrain-shadows`, `dynamic-cubemaps`,
+    `screenshot-clean`, `hdr`, `upscalers`, `river`, `rain`, `flicker-taa`, `native-census`
+    or `native-tour`.
+- **Memory notes** (in the user's Claude memory, not the repo) cover the traps:
+  - shader cache warm-up after shader changes: one run per mode with `run.timeout_s=900`, and
+    never raise a timeout otherwise;
+  - closing MO2 before runs;
+  - the AMD equality-return miscompile;
+  - eye-adaptation variance between shots.
+
+### Where to start
+
+1. Phase 0 (section D) needs no design. Split section C and A11 into about four code-only
+   leads: core text, engine text, port text, DCLF dead code. Merge, build, and run the mode
+   smoke set.
+2. In parallel, start the phase 1 test support (B23). Every later phase uses
+   `graph_frames` to prove it did not add D3D11 frames.
+3. Then follow phases 1-6 in order. Phase 3 (CS owns the engine targets) needs a short design
+   step first. That step covers the guest handle retarget and native wraps on the lane, and
+   should be written into A1 before any lead starts.

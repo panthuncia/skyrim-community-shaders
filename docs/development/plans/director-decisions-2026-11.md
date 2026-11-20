@@ -384,3 +384,16 @@ final until the user confirms it.
 
     **The frame revision plan (steps 1–10 plus the late-changes follow-up) is merged and tested on integ/hard-ports.**
     Nothing is pushed. Local-only submodule commits: ORG `bfd13bb`, OMS `d48c924`, and those in item 13.
+68. **Cleanup and refactor plan: the user's answers (2026-11-20).** The plan is
+    `org-cleanup-refactor-plan.md`, with its survey notes and director helpers in `org-cleanup/`.
+    - **D-1:** Light Limit Fix local shadows are reworked so the cache follows DCLF's shadow views. They are
+      not deleted.
+    - **D-2:** the guest present copy (the back buffer becomes a CS slot) is accepted. Why the copy is
+      needed, and whether it can be removed, is an investigation item in the plan's A1.
+    - **D-3:** graph mode may require DCLF.
+      - **Decided by the director, to confirm:** the DCLF on/off control is locked in graph mode, and a
+        saved change applies at the next launch, so the blank world can't be reached.
+    - **D-4:** `CS_ORG_LOADING_THREAD` is retired. Adoption runs on the main render thread only.
+    - **D-5:** tap errors are fatal in development builds only. In release builds the first of each kind
+      is logged in full and raises a warning in the DCLF menu, which tells the player to send their logs
+      to the developers. The game keeps running.
