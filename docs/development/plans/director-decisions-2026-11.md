@@ -360,3 +360,14 @@ final until the user confirms it.
 
     Every run had zero DCLF waits and zero tap errors. Steps 1–10 of the frame revision plan are merged and tested. Only
     the late-changes follow-up (making in-frame build requests fatal) is still in flight.
+66. **Late changes are merged and build clean** (`f207e06e9`). In-frame registrations and build requests outside the
+    adoption point are now `TapError::LateChange`, keyed by file and line.
+    - **One-shot passes:** the `once`/`armed` machinery is deleted. Its users are first-run gates now
+      (`RenderGraph::FirstRun`).
+    - **Declared clients:** Scaleform, the screenshot capture, the deferred composite, FG inputs and the glints fill
+      register as declared clients.
+    - **Remaining per-frame D3D11 frames, to confirm:** skeleton copies fall back to D3D11 for a frame whose textures
+      changed inside it.
+    - **Failure paths now fatal:** paths that unregister mid-frame (Bink, ImGui, Upscaling release, Dynamic Cubemaps'
+      give-up) are now tap errors too.
+    - **Batch 9** runs the full set. Any guest source the census never named will stop with its file:line.
