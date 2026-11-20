@@ -114,6 +114,15 @@ namespace
 		std::uint64_t points = 0;
 		// Render thread. The source's twin when the graph owns it (the clean scene), for the client's graph.
 		const GraphResources::Texture2D* own = nullptr;
+		// Render thread. SetSource raises wanted for a new source; the registration made for it sets made.
+		std::uint64_t wanted = 0, made = 0;
+	};
+
+	/** @brief What the capture copy's registration depends on: the source SetSource last set. */
+	struct CaptureKey
+	{
+		std::uint64_t source = 0;
+		bool operator==(const CaptureKey&) const = default;
 	};
 
 	namespace Vars = RenderGraph::Frame::Vars;
@@ -223,6 +232,8 @@ struct ORGScreenshot::Impl
 	std::shared_ptr<Shared> shared = std::make_shared<Shared>();
 	bool registered = false;
 	bool importWarned = false;
+	// The capture copy, declared on the source SetSource observes (an interim until the source is a variable).
+	RenderGraph::Frame::DeclaredClient client;
 	std::uint64_t nextId = 0;
 	std::uint64_t points = 0;
 	std::vector<std::shared_ptr<Request>> outstanding;  // taken, not read back yet
@@ -245,21 +256,27 @@ namespace
 {
 	/**
 	* @brief Whether the run copies with the current registration. Without the stages the anchor runs whatever graph it built,
-	* so a capture taken before the new build switches in would read back an unwritten, black buffer.
+	* so a capture taken before the new build switches in would read back an unwritten, black buffer. A source set since the
+	* last registration waits for the registration the next revision makes.
 	*/
-	bool CopyBuilt()
+	bool CopyBuilt(const Shared& a_shared)
 	{
-		return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) || FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Capture);
+		return a_shared.made == a_shared.wanted &&
+		       (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) || FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Capture));
 	}
 
-	/** @brief In native mode with the UI stage the Capture anchor is its step after the overlay. Otherwise it runs its own epoch. */
-	bool RegisterClient(const std::shared_ptr<Shared>& a_shared)
+	/**
+	* @brief The capture copy's registration for the current source, made when a revision starts. In native mode with the UI
+	* stage the Capture anchor is its step after the overlay. Otherwise it runs its own epoch.
+	*/
+	bool MakeClient(const std::shared_ptr<Shared>& a_shared, const CaptureKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
+		a_shared->made = a_key.source;
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
 		builder.Add("copy", FrameAnchors::PassKind::Copy, [a_shared, source = a_shared->source, buffers = a_shared->buffers]() -> std::shared_ptr<org::RenderPass> {
 			return source ? std::make_shared<CapturePass>(a_shared, source, buffers) : nullptr;
 		});
-		FrameAnchors::ClientDesc client{};
+		auto& client = a_client;
 		client.id = kClientId;
 		client.passes = builder.Take();
 		for (auto& pass : client.passes)
@@ -276,7 +293,7 @@ namespace
 		};
 		client.commit = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
 			const auto owner = weak.lock();
-			if (!owner || !owner->armed || !CopyBuilt())
+			if (!owner || !owner->armed || !CopyBuilt(*owner))
 				return;
 			auto request = std::exchange(owner->armed, nullptr);
 			request->taken = true;
@@ -284,7 +301,25 @@ namespace
 			owner->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), request);
 		};
 		// No executed callback, since in a stage it would run before the commit submits. The next capture point takes the GPU point instead.
-		return FrameAnchors::Register(std::move(client));
+		return true;
+	}
+
+	/** @brief Setup. The capture copy follows the source SetSource sets. */
+	RenderGraph::Frame::DeclaredClient DeclareCaptureClient(const std::shared_ptr<Shared>& a_shared)
+	{
+		const std::weak_ptr<Shared> weak = a_shared;
+		return RenderGraph::Frame::DeclareClient<CaptureKey>(
+			kClientId, {},
+			[weak](const RenderGraph::Frame::Inputs&) -> std::optional<CaptureKey> {
+				const auto owner = weak.lock();
+				if (!owner)
+					return std::nullopt;
+				return CaptureKey{ owner->wanted };
+			},
+			[weak](const CaptureKey& a_key, FrameAnchors::ClientDesc& a_client) {
+				const auto owner = weak.lock();
+				return owner && MakeClient(owner, a_key, a_client);
+			});
 	}
 
 	/** @brief Defined with the clean scene's copy, below. */
@@ -302,9 +337,10 @@ bool ORGScreenshot::Setup()
 		return false;
 	}
 	impl = std::make_unique<Impl>();
-	// No pass until the first capture names a source.
-	if (!RegisterClient(impl->shared)) {
-		logger::warn("[ORG] Screenshot: the Capture anchor refused the client; captures use D3D11");
+	// No pass until the first capture names a source. The client registers at the first revision.
+	impl->client = DeclareCaptureClient(impl->shared);
+	if (!impl->client) {
+		logger::warn("[ORG] Screenshot: the capture copy's client could not be declared; captures use D3D11");
 		return false;
 	}
 	impl->registered = true;
@@ -354,10 +390,10 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 			return false;
 		shared.buffers[i]->SetName(fmt::format("cs.screenshot.readback{}", i));
 	}
-	// A capture waits for the client's next build.
-	if (!RegisterClient(state.shared))
-		return false;
-	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its build switches in before the next capture copies",
+	// A capture waits for the registration the next revision makes, and for its build.
+	++shared.wanted;
+	state.client.Invalidate();
+	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its registration and build switch in before the next capture copies",
 		clean ? "the clean scene" : (a_source.importName ? a_source.importName : "the source"), desc.Width, desc.Height, bytes);
 	return true;
 }
@@ -381,7 +417,9 @@ namespace
 	{
 		if (!a_shared.armed)
 			return;
-		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? !FrameAnchors::CanTap(kClientId) : !CopyBuilt())
+		if (a_shared.made != a_shared.wanted)
+			return;
+		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? !FrameAnchors::CanTap(kClientId) : !CopyBuilt(a_shared))
 			return;
 		(void)FrameAnchors::Run(FrameAnchors::Anchor::Capture);
 	}

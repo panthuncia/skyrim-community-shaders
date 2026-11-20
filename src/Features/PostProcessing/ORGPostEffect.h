@@ -178,7 +178,6 @@ namespace ORGPostChain
 
 	/**
 	* @brief Fixed group counts run every frame the chain runs. With gate it runs only on frames Commit opens.
-	* once is a one-shot pass that runs at the anchor's next run whether the chain runs or not, so it reads no latch.
 	*/
 	struct ComputeDispatch
 	{
@@ -187,7 +186,6 @@ namespace ORGPostChain
 		std::vector<Bind> bindings;
 		std::array<std::uint32_t, 3> groups{ 1, 1, 1 };
 		std::optional<GateEntry> gate;
-		bool once = false;
 	};
 
 	struct BuildState;

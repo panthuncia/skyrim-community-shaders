@@ -34,6 +34,7 @@ ORGDeferredComposite& ORGDeferredComposite::Get()
 #	include "Features/TerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -284,6 +285,9 @@ struct ORGDeferredComposite::Impl
 	DCLF::GpuTextures::Binding null;
 	bool registered = false;
 	bool failed = false;
+	// The targets SetFrame last imported, which the declared client's key reads.
+	std::optional<Targets> wanted;
+	RenderGraph::Frame::DeclaredClient client;
 
 	Frame frame{};
 	std::uint32_t normals = 0;
@@ -353,20 +357,20 @@ struct ORGDeferredComposite::Impl
 		return input;
 	}
 
-	bool Register(const Targets& a_targets)
+	/** @brief The registration for a_targets, made when a revision starts. The commit of the registration the frame holds sets shared. */
+	bool Make(const Targets& a_targets, FrameAnchors::ClientDesc& a_client)
 	{
 		if (!gate)
 			gate = RenderGraph::RunGate::Create(kClientId, 1);
 		if (!gate) {
 			logger::warn("[ORG] Deferred composite: no run gate; the composite stays on D3D11");
+			failed = true;
 			return false;
 		}
 		auto next = std::make_shared<Shared>();
 		next->targets = a_targets;
 		next->gate = gate;
-		auto previous = shared;
-		shared = next;
-		registered = FrameAnchors::Register({
+		a_client = FrameAnchors::ClientDesc{
 			.id = kClientId,
 			.passes = { { .name = "cs.deferred.composite",
 				.anchor = FrameAnchors::Anchor::DeferredComposite,
@@ -377,22 +381,35 @@ struct ORGDeferredComposite::Impl
 				},
 				// The commit chooses the execution, so record then.
 				.atExecution = true } },
-			.commit = [this](const FrameAnchors::Point&) {
+			.commit = [this, next](const FrameAnchors::Point&) {
+				// The registration that commits is the one the frame's graph holds.
+				if (shared != next) {
+					shared = next;
+					// Recordings that read the old executions keep them.
+					byNormals = {};
+				}
 				Commit();
-				if (shared)
-					if (auto* host = RenderGraphRuntime::Get().Host())
-						shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
 				if (composited)
 					gate->OpenDispatch(0, 1);
 			},
 			.active = [this] { return frameReady; },
 			.sharedConstants = true,
 			.gates = { gate },
-		});
-		// Recordings that read the old executions keep them.
-		if (previous)
-			byNormals = {};
-		return registered;
+		};
+		registered = true;
+		logger::info("[ORG] Deferred composite: a client for the next revision on the DeferredComposite anchor");
+		return true;
+	}
+
+	/** @brief Setup. The client follows the imported targets, observed at SetFrame (an interim until they are variables). */
+	bool Declare()
+	{
+		client = RenderGraph::Frame::DeclareClient<Targets>(
+			kClientId, {}, [this](const RenderGraph::Frame::Inputs&) { return wanted; },
+			[this](const Targets& a_targets, FrameAnchors::ClientDesc& a_client) { return Make(a_targets, a_client); });
+		return static_cast<bool>(client);
 	}
 
 	/** @brief Resolves a new execution only when the inputs changed. */
@@ -465,6 +482,10 @@ void ORGDeferredComposite::Setup()
 		logger::warn("[ORG] Deferred composite: the SPIR-V programs could not be built; the composite stays on D3D11");
 		return;
 	}
+	if (!state->Declare()) {
+		logger::warn("[ORG] Deferred composite: its client could not be declared; the composite stays on D3D11");
+		return;
+	}
 	impl = std::move(state);
 	logger::info("[ORG] Deferred composite runs on the render graph (CS_ORG_COMPOSITE=1)");
 }
@@ -495,12 +516,15 @@ void ORGDeferredComposite::SetFrame(const Frame& a_frame)
 	const auto targets = impl->ImportTargets(a_frame);
 	if (!targets)
 		return;
-	if (!impl->registered || !impl->shared || !(impl->shared->targets == *targets)) {
-		if (!impl->Register(*targets))
-			return;
-		logger::info("[ORG] Deferred composite: registered on the DeferredComposite anchor (main target {}, normals {} and {})", a_frame.main,
-			kNormalsTargets[0], kNormalsTargets[1]);
+	// New targets register the client again when the next revision starts. Until it switches in, the held one composites.
+	if (!impl->wanted || !(*impl->wanted == *targets)) {
+		impl->wanted = *targets;
+		impl->client.Invalidate();
+		logger::info("[ORG] Deferred composite: new targets (main target {}, normals {} and {}); the client is made again at the next revision",
+			a_frame.main, kNormalsTargets[0], kNormalsTargets[1]);
 	}
+	if (!impl->registered)
+		return;
 	impl->frame = a_frame;
 	impl->normals = static_cast<std::uint32_t>(normals - kNormalsTargets.begin());
 	impl->frameReady = true;

@@ -104,7 +104,7 @@ namespace ORGPostChain
 				const bool is3D = lutType == kLut3D;
 				if (is3D) {
 					a_builder.Register(*copy);
-					// The chain has no one-shot pass, so the copy of a few hundred KB runs every run.
+					// The chain has no first-run gate, so the copy of a few hundred KB runs every run.
 					a_builder.Add("upload", FrameAnchors::PassKind::Copy, [staged = staged]() { return GraphResources::MakeUploadPass({ staged }); });
 				}
 				// The shader reads only the LUT LutType names.

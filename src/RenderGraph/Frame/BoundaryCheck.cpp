@@ -14,7 +14,7 @@ namespace RenderGraph::Frame::Boundary
 
 	// The thread that opens the adoption point is the render thread the census counts.
 	void NoteScopeThread();
-	void NoteLateChange(std::string_view a_what, std::string_view a_caller);
+	void NoteLateChange(std::string_view a_what, std::string_view a_caller, const std::source_location& a_where);
 
 	bool InAdoptionPoint()
 	{
@@ -42,10 +42,11 @@ namespace RenderGraph::Frame::Boundary
 		t_boundaryCaller = outer;
 	}
 
-	Change::Change(std::string_view a_what, std::string_view a_caller)
+	Change::Change(std::string_view a_what, std::string_view a_caller, const std::source_location& a_where)
 	{
+		// Counted before the call, so a tap error that does not stop the game leaves the scope balanced.
 		if (t_boundaryChanges++ == 0)
-			NoteLateChange(a_what, a_caller);
+			NoteLateChange(a_what, a_caller, a_where);
 	}
 
 	Change::~Change()
@@ -53,10 +54,10 @@ namespace RenderGraph::Frame::Boundary
 		--t_boundaryChanges;
 	}
 
-	void NoteBuildRequest(std::string_view a_reason)
+	void NoteBuildRequest(std::string_view a_reason, const std::source_location& a_where)
 	{
 		if (t_boundaryChanges == 0)
-			NoteLateChange(a_reason, "build request");
+			NoteLateChange(a_reason, "build request", a_where);
 	}
 }
 
@@ -154,6 +155,18 @@ namespace RenderGraph::Frame::Boundary
 			return a_state.renderThread.load(std::memory_order_relaxed) == std::this_thread::get_id();
 		}
 
+		/** @brief "RenderGraph/FrameAnchors.cpp:1985": the path from src/ on, and the line. */
+		std::string SiteOf(const std::source_location& a_where)
+		{
+			std::string_view file = a_where.file_name();
+			for (const std::string_view root : { "src/", "src\\" })
+				if (const auto at = file.rfind(root); at != std::string_view::npos) {
+					file.remove_prefix(at + root.size());
+					break;
+				}
+			return fmt::format("{}:{}", file, a_where.line());
+		}
+
 		std::string_view CallerTag()
 		{
 			return t_boundaryCaller.empty() ? std::string_view("untagged") : t_boundaryCaller;
@@ -207,20 +220,33 @@ namespace RenderGraph::Frame::Boundary
 		org::VersionedResource::SetAdoptionObserver(&OnAdoption);
 		// The statistics window may never close in a short test run, so the run's exit logs the census too.
 		Testing::RegisterExitReport([] { LogStats(); });
-		logger::info("[ORG] boundary: versions adopted and builds attached outside the frame's adoption point are tap errors unless a named exception "
-					 "allows them; rebuild requests there are counted (rule R1)");
+		logger::info("[ORG] boundary: versions adopted, builds attached, clients registered and builds requested inside the frame, outside its "
+					 "adoption point, are tap errors (rule R1)");
 	}
 
-	void NoteLateChange(std::string_view a_what, std::string_view a_caller)
+	void NoteLateChange(std::string_view a_what, std::string_view a_caller, const std::source_location& a_where)
 	{
 		auto& state = GetBoundary();
 		if (t_inBoundaryScope || !OnRenderThread(state))
 			return;
-		const std::lock_guard lock(state.mutex);
-		const auto key = fmt::format("{} {}", a_caller, a_what);
-		state.changes.Add(key);
-		state.sessionChangeSites.Add(key);
-		++state.sessionChanges;
+		std::string key;
+		try {
+			const std::lock_guard lock(state.mutex);
+			key = fmt::format("{} {} at {}", a_caller, a_what, SiteOf(a_where));
+			state.changes.Add(key);
+			state.sessionChangeSites.Add(key);
+			++state.sessionChanges;
+		} catch (...) {
+			// A census that cannot allocate counts nothing.
+			return;
+		}
+		// Rule R1: registrations and build requests are made only inside the adoption point (plan step 10c's follow-up).
+		try {
+			Driver::NoteTapError(Driver::TapError::LateChange, SegmentId::Count,
+				fmt::format("{} came inside the frame, outside its adoption point; registrations and build requests are made only there", key));
+		} catch (...) {
+			// The census line still counts it.
+		}
 	}
 
 	void NoteAttach(std::string_view a_epoch)
@@ -258,7 +284,7 @@ namespace RenderGraph::Frame::Boundary
 			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
 			part(state.attaches), part(state.firstVersions), state.atBegin, part(state.refusals),
 			state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionFirst, state.sessionRefusals);
-		// Every site, so the sources left are listed by the run's last line (plan step 10c: late changes stay counted until they are moved).
+		// Every site, so a run's last line lists every late change with its source line.
 		if (state.sessionChangeSites.total)
 			logger::info("[ORG] boundary: session late changes by site: {}", state.sessionChangeSites.All());
 		state.versions = {};
@@ -281,7 +307,7 @@ namespace RenderGraph::Frame::Boundary
 namespace RenderGraph::Frame::Boundary
 {
 	void Install() {}
-	void NoteLateChange(std::string_view, std::string_view) {}
+	void NoteLateChange(std::string_view, std::string_view, const std::source_location&) {}
 	void NoteAttach(std::string_view) {}
 	void NoteRefusal(std::string_view, std::string_view) {}
 	void LogStats() {}

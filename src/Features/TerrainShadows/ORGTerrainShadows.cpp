@@ -211,10 +211,14 @@ namespace
 		return true;
 	}
 
-	/** @brief Runs only in a graph holding this heightmap's client, so a committed refresh covers the heightmap it uploads. */
-	void Commit(Heightmap& a_heightmap, org::LatchBlock& a_latch, RenderGraph::RunGate& a_gate)
+	/**
+	* @brief Runs only in a graph holding this heightmap's client, so a committed refresh covers the heightmap it uploads.
+	* The upload's entry opens until a run with it submits, so the first refresh's run uploads first.
+	*/
+	void Commit(Heightmap& a_heightmap, org::LatchBlock& a_latch, RenderGraph::RunGate& a_gate, RenderGraph::FirstRun& a_upload)
 	{
 		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
+		a_upload.Open(a_gate, a_heightmap.maxDispatches);
 		if (a_heightmap.pending.empty())
 			return;
 		a_latch.Write(run, 0, std::as_bytes(std::span(a_heightmap.pending)));
@@ -247,7 +251,8 @@ namespace
 			logger::error("[ORG] Terrain Shadows: its latch block could not be created ({})", e.what());
 			return false;
 		}
-		auto gate = RenderGraph::RunGate::Create("TerrainShadows::UpdateGate", maxDispatches);
+		// One entry per stripe, then the heightmap upload's.
+		auto gate = RenderGraph::RunGate::Create("TerrainShadows::UpdateGate", maxDispatches + 1);
 		if (!gate) {
 			logger::error("[ORG] Terrain Shadows: its run gate could not be created");
 			return false;
@@ -255,11 +260,15 @@ namespace
 		const auto spec = std::make_shared<const UpdateSpec>(
 			UpdateSpec{ a_impl.program, latch, gate, heightmap->texture->Graph(), a_impl.shadowHeights->Versioned(), maxDispatches });
 
-		// Key 99 is the one-shot heightmap copy, 100 the update that reads it.
+		// Key 99 is the gated heightmap copy, 100 the update that reads it. The copy skips at execution once a run with it submitted.
+		const auto upload = std::make_shared<RenderGraph::FirstRun>();
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
 		builder.Add(
 			"heightmap-upload", FrameAnchors::PassKind::Copy,
-			[staged = heightmap->staged]() -> std::shared_ptr<org::RenderPass> { return GraphResources::MakeUploadPass({ staged }); }, true);
+			[staged = heightmap->staged, gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate), maxDispatches]() -> std::shared_ptr<org::RenderPass> {
+				return GraphResources::MakeUploadPass({ staged }, { gateRef, maxDispatches });
+			},
+			true);
 		builder.Add(
 			"update", FrameAnchors::PassKind::Compute,
 			[spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); });
@@ -267,7 +276,7 @@ namespace
 		if (maxDispatches > 1)
 			builder.Add(
 				"refresh", FrameAnchors::PassKind::Compute,
-				[spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<true>>(spec); }, false, true);
+				[spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<true>>(spec); }, true);
 		if (builder.Failed()) {
 			logger::error("[ORG] Terrain Shadows: {}", builder.Failure());
 			return false;
@@ -280,8 +289,9 @@ namespace
 			heightmap->texture->Register(a_graph);
 			shadowHeights->Register(a_graph);
 		};
-		a_client.commit = [heightmap, latch, gate](const FrameAnchors::Point&) { Commit(*heightmap, *latch, *gate); };
-		a_client.active = [heightmap] { return !heightmap->pending.empty(); };
+		a_client.commit = [heightmap, latch, gate, upload](const FrameAnchors::Point&) { Commit(*heightmap, *latch, *gate, *upload); };
+		a_client.active = [heightmap, upload] { return !heightmap->pending.empty() || upload->Pending(); };
+		a_client.executed = [upload](const FrameAnchors::Point&) { upload->Executed(); };
 		a_client.gates = { gate };
 		logger::info("[ORG] Terrain Shadows: {}x{} heightmap #{} (format {}) made its client, up to {} stripes a refresh", heightmap->width, heightmap->height,
 			heightmap->id, heightmap->format, maxDispatches);

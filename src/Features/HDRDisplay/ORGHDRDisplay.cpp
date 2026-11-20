@@ -173,7 +173,7 @@ namespace
 		if (a_in.uiClearProgram)
 			builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "ui-clear", .program = a_in.uiClearProgram, .bindings = { Bind::Uav(a_in.ui) }, .gate = kUiClearEntry });
 		else
-			builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui }, false);
+			builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui });
 		return builder;
 	}
 

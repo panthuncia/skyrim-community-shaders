@@ -61,8 +61,8 @@ namespace DCLF::Draws
 	void UpdateGraphConditions(org::GraphHost& a_host);
 
 	/**
-	 * @brief Render thread, at DCLF's build point. The first one makes the first conditions, as the build point did before step 10c.
-	 * Later ones do nothing: the conditions change only at a Begin (UpdateGraphConditions).
+	 * @brief Render thread, at DCLF's build point. The first one makes the first conditions: at once inside the adoption point (native
+	 * mode's build point), else at the next Begin's UpdateGraphConditions (guest mode's, at Main::Draw). Later ones do nothing.
 	 */
 	void FirstGraphConditions(org::GraphHost& a_host);
 

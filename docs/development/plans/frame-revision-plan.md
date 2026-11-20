@@ -1617,6 +1617,37 @@ later `kScene` fragment.
   ("[ORG] boundary: session late changes by site: ..."), so the follow-up has the full list.
 - **Config.** `dclf-toggles` describes 10c and also fails on "is not covered by the snapshot".
 
+**As built (late changes, 2026-11-20, `org-native/rev-late-changes`).** Code only, not built or run here. The last item of the plan:
+in-frame build requests are fatal.
+- **The census names sites.** `Boundary::Change` and `NoteBuildRequest` take a `std::source_location`, and so do
+  `FrameAnchors::Register/Unregister/Refresh`, `Builds::Request/RequestAll/RequestFor/Change` and
+  `GraphResources::RequestStructuralRebuild` (defaulted, so callers are unchanged). A late change's key is
+  "caller what at file:line"; the session line lists them.
+- **Fatal.** A late change is `Driver::NoteTapError(TapError::LateChange)` ("late change"), after it is counted. Fatal in
+  development builds unless `CS_ORG_MISMATCH_FATAL=0`.
+- **One-shot passes are first-run gates.** `PassDesc::once`, `Client::armed`, `HasPendingOnce`, `SegmentHoldsPass` and the
+  "one-shot passes ran" rebuild are gone, with `AnchorPasses::Upload`, `Builder::Add`'s `a_once` and Post Processing's unused
+  `ComputeDispatch::once`. `RenderGraph::FirstRun` (`RunGate.h`) is per-registration state: the commit opens a gate entry while
+  the work is pending, the executed callback ends it. Users: Terrain Shadows' heightmap upload (an entry after the refresh
+  entries), Dynamic Cubemaps' zeros (`kZeroEntry`), TruePBR glints' fill (its own gate), ViewAtmosphere's medium first contents
+  (not in 7a's list) and ImageSpace's kept-texture clears (a gate per kept texture, state on the texture, since later versions are
+  born cleared). `GraphResources::MakeUploadPass` and `AnchorPasses::Clear` take a gate entry and skip closed runs at execution.
+- **Re-registrations are declared clients** on observed state, with `Invalidate` as the interim: Scaleform (surfaces and tracked
+  reads; idle reads are dropped in the make), the screenshot's capture copy (`wanted`/`made` serials so a capture waits for the
+  registration of its source), the deferred composite (its targets; the commit of the held registration sets `shared`), frame
+  generation's inputs (`inputsWanted`/`inputsMade`) and TruePBR glints (a program serial raised by a shader reload).
+- **Moved into the adoption point:** the engine skeleton's remade clear groups and copies register again in `Skeleton::BeginFrame`
+  (inside `OnBegin`), not at a clear or copy; a copy whose textures change inside a frame goes to D3D11 for that frame. DCLF's
+  first graph conditions are made at its first build point only inside the adoption point (native); guest's build point marks them
+  wanted and the next `UpdateGraphConditions` makes them.
+- **Requests that bind nothing new wait for the next Begin:** `Builds::RequestAtAdoption` keeps a request made inside a frame and
+  `IssueAdoptionRequests` (first thing in `OnBegin`) makes it. Used for an added import id, an added published resource (and the
+  skipped-build case), DCLF's test-harness switches and the GPA and NvPerf profilers.
+- **Left as late changes (fatal if reached):** failure paths that unregister inside a frame (Bink, ImGui fall-back, Upscaling's
+  release, Dynamic Cubemaps' give-up), the DCLF harness `dclf:refresh=<id>` (a stress tool), and any site the census had not
+  named; the tap error names its line.
+- **Config.** `native-census` fails on "session late changes by site" and on tap errors.
+
 **Test.** Everything in step 7's list plus `native-census`, `native-tour` (long), `river` with `native-vulkan`, `rain` with `guest`,
 `flicker-taa`. DCLF-specific: the DCLF settings menu toggles (cull mode, CPU/GPU pipeline) through `setting` steps in a new
 `dclf-toggles` config.
@@ -1938,7 +1969,7 @@ return nothing (or only the stated exception) at the end.
 | `FrameAnchors::Service` resize poll | 7a | `rg -n "ResizeGeneration\|resizeGeneration\|ResizeCauses" src` |
 | `ResizeGeneration`, `BumpResizeGeneration` | 7a | `rg -n "BumpResizeGeneration\|BumpGeneration" src` |
 | `PublishedResources::Refresh` | 7a | `rg -n "PublishedResources::Refresh\|void Refresh\(\)" src/RenderGraph/PublishedResources.*` |
-| `Rearm` for reset, one-shot `once`/`armed` passes | 6.6, 6.17, 7a | `rg -n "Rearm\(\|\.once\b\|armed" src/RenderGraph src/Features` |
+| `Rearm` for reset, one-shot `once`/`armed` passes | 6.6, 6.17, 7a, late changes (first-run gates) | `rg -n "Rearm\(\|\.once\b\|armed" src/RenderGraph src/Features` |
 | `ResetHistories`, `clearPending` | 6.1, 6.9 | `rg -n "ResetHistories\|clearPending" src` |
 | `Frame::Resources` `fresh` | 7a | `rg -n "\bfresh\b" src/RenderGraph/Frame src/RenderGraph/Engine/ImageSpace*` |
 | Per-stage staged switch (`SwitchStaged`, `stagedAsked*`, `kAskedAgainLimit` in `Schedule`) | 4e, 7b | `rg -n "SwitchStaged\|stagedAsked\|kAskedAgainLimit" src` |
@@ -1950,7 +1981,7 @@ return nothing (or only the stated exception) at the end.
 | DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat\|AdoptSnapshot\|AdoptAtBegin" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
 | `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
-| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes (10c moved DCLF's; the other sources are listed by the census, section 9) | 10a, 9, 7d (versions and attaches fatal) / after 10c | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` |
+| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes (late changes are `TapError::LateChange` since the late-changes item) | 10a, 9, 7d (versions and attaches fatal), late changes (after 10c) | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` empty; `rg -n "TapError::LateChange" src/RenderGraph/Frame/BoundaryCheck.cpp` one hit |
 | Writer shims: `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`, and the wrappers' event calls | 7a | `rg -n "SettingsWritten\|ProjectSizeSettings\|SizeProjection" src` |
 | The lane's `RequestSize` input and the coordinator's "wish" path | 7a | `rg -n "Wish\|wishes" src/RenderGraph/Frame/Revision.*` |
 | Structural rebuilds from publishing under an existing id (EHF, SSGI, LLF, adapt pair, flow map) | 6.x | `rg -n "RequestStructuralRebuild" src` shows only revision-driven shape-class changes; the census shows no `structural rebuild` after `resize` and the toggles |
@@ -2850,6 +2881,21 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   `forwardOnCpu`) run when a staged build is recorded, with no build scope, so they read the attached, old conditions. The first
   scene after a pipeline or cull change can then record without occlusion, or with an unused forward range, until it is recorded
   again. Fixing it needs the recording's build state in its host data.
+
+**Decided by the agent (late changes, 2026-11-20, `org-native/rev-late-changes`), to confirm:**
+- **A new tap error, `LateChange`,** not `OutsideAdoption`, so a run's error names which rule broke.
+- **Added ids and diagnostic switches are deferred, not moved.** `Builds::RequestAtAdoption` keeps them to the next Begin. An added
+  import or published id changes nothing a running recording binds; only graphs that looked it up are rebuilt, and those attach at a
+  boundary anyway.
+- **The first-run gate's state is per registration, ImageSpace's per texture.** A registration that never submits keeps its work
+  pending; only a submitted run whose commit opened the entry ends it.
+- **ImageSpace's clears open in the step client's commit, not by making the client active.** An active segment-only client would
+  tap at other stages' ImageSpace taps. The clear opens with the step's batch, before the first reads in the same run.
+- **The skeleton's copies go to D3D11 for a frame whose textures changed inside it,** and register again at the next Begin.
+- **Observed declared clients use serials** (`wanted`/`made`) where the frame must not use the old registration for new state
+  (screenshot, frame generation inputs, glints). Scaleform keeps its generation and `HeldNow` check, and `surfacesRegistration`
+  names the registration to come.
+- **Failure paths stay late changes.** An unregister on a failure inside a frame is now also a tap error; failures are fatal anyway.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

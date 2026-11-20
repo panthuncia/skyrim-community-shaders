@@ -168,10 +168,11 @@ namespace PublishedResources
 				std::scoped_lock lock(a_state.skippedMutex);
 				wasSkipped = std::erase(a_state.skipped, added) != 0;
 			}
+			// An added id changes nothing a running recording binds, so its requests wait for the next adoption point.
 			if (wasSkipped)
-				RenderGraph::Builds::RequestAll(fmt::format("published resource {} added, which a build skipped", a_what));
+				RenderGraph::Builds::RequestAtAdoption({}, fmt::format("published resource {} added, which a build skipped", a_what));
 			else if (a_change == Change::Added)
-				RenderGraph::Builds::RequestFor(added, fmt::format("published resource {} added", a_what));
+				RenderGraph::Builds::RequestAtAdoption(added, fmt::format("published resource {} added", a_what));
 			else
 				GraphResources::RequestStructuralRebuild(fmt::format("published resource {} replaced by a new resource", a_what));
 		}

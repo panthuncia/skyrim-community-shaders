@@ -194,6 +194,8 @@ struct ORGViewAtmosphere::Impl
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
+	// The medium's first contents: a first-run gate the medium client's commit opens.
+	std::shared_ptr<RenderGraph::RunGate> mediumGate;
 
 	// Declared or made at Setup and kept for the session. The atlas follows the size settings and the display size.
 	RenderGraph::Frame::DeclaredTexture3D luminance, transmittance;
@@ -328,7 +330,12 @@ struct ORGViewAtmosphere::Impl
 	bool MakeMediumClient(FrameAnchors::ClientDesc& a_client)
 	{
 		RenderGraph::AnchorPasses::Builder builder(Anchor::Prepass, kMediumClientId, kPrepassOrder);
-		builder.Add("first-contents", FrameAnchors::PassKind::Copy, [uploads = staged] { return GraphResources::MakeUploadPass(uploads); }, true);
+		// The first contents copy on runs whose commit opened them, until a run with them submits. The others skip at execution.
+		const auto firstContents = std::make_shared<RenderGraph::FirstRun>();
+		builder.Add(
+			"first-contents", FrameAnchors::PassKind::Copy,
+			[uploads = staged, gateRef = std::shared_ptr<const RenderGraph::RunGate>(mediumGate)] { return GraphResources::MakeUploadPass(uploads, { gateRef, 0 }); },
+			true);
 		builder.Add("parameters", FrameAnchors::PassKind::Copy, [buffer = parameters->Graph(), latch = std::shared_ptr<const org::LatchBlock>(latch)] {
 			return std::make_shared<ParametersPass>(buffer, latch);
 		});
@@ -344,10 +351,14 @@ struct ORGViewAtmosphere::Impl
 			noFog->Register(a_graph);
 			parameters->Register(a_graph);
 		};
-		a_client.commit = [this](const FrameAnchors::Point&) {
+		a_client.gates = { mediumGate };
+		// No active callback, so the commit runs every run.
+		a_client.commit = [this, firstContents](const FrameAnchors::Point&) {
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				latch->WriteValue(host->CurrentRun(), 0, frameParameters);
+			firstContents->Open(*mediumGate, 0);
 		};
+		a_client.executed = [firstContents](const FrameAnchors::Point&) { firstContents->Executed(); };
 		logger::info("[ORG] Atmosphere and Fog: the medium is on the render graph (no shared volume: Exponential Height Fog's volumes stay the fog)");
 		return true;
 	}
@@ -517,8 +528,9 @@ void ORGViewAtmosphere::Setup()
 	state->sampler = ShaderBindings::CreateSamplerFromD3D11(desc);
 	state->latch = std::make_shared<org::LatchBlock>("cs.view-atmosphere.latch", kParametersBytes);
 	state->gate = RenderGraph::RunGate::Create("cs.view-atmosphere.composite.gate", 1);
-	if (!state->sampler || !state->gate)
-		Fail("the sampler or the run gate could not be made");
+	state->mediumGate = RenderGraph::RunGate::Create("cs.view-atmosphere.medium.gate", 1);
+	if (!state->sampler || !state->gate || !state->mediumGate)
+		Fail("the sampler or a run gate could not be made");
 	// Before the first frame, since DCLF's draws read the exports from their first frame on.
 	state->MakeMedium();
 	// Both clients follow the frame revisions from the first one on.

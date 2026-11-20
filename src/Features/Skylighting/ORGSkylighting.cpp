@@ -427,7 +427,7 @@ struct ORGSkylighting::Impl
 				[resources = resources, index = static_cast<std::size_t>(a_volume), a_value, reset] {
 					return GraphPasses::MakeUavClear(*resources->volumes[index], a_value, reset);
 				},
-				false, true);
+				true);
 		};
 		const auto clearUint = [&](const char* a_name, ORGSkylighting::Volume a_volume, std::array<std::uint32_t, 4> a_value) {
 			builder.Add(
@@ -435,7 +435,7 @@ struct ORGSkylighting::Impl
 				[resources = resources, index = static_cast<std::size_t>(a_volume), a_value, reset] {
 					return GraphPasses::MakeUavClearUint(AnchorPasses::TextureOf(*resources->volumes[index]), a_value, reset);
 				},
-				false, true);
+				true);
 		};
 		const float unitSH = std::sqrt(4.0f * std::numbers::pi_v<float>);
 		constexpr std::uint32_t lit = 0xFFFFFFFFu;

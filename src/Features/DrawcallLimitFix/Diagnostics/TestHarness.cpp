@@ -193,7 +193,7 @@ namespace DCLF
 			}
 			if (command == "dclf:rebuild") {
 				if (RenderGraphRuntime::Get().Host())
-					RenderGraph::Builds::RequestAll("test harness command");
+					RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				else
 					logger::warn("[DCLF] test command: no render graph host to rebuild");
 				return true;
@@ -280,7 +280,7 @@ namespace DCLF
 			if (command.rfind("dclf:async-compute=", 0) == 0) {
 				const std::string value = command.substr(19);
 				DCLF::Draws::asyncComputeOverride.store(value == "default" ? -1 : value != "0", std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// Cost attribution. Use a frozen camera, since a cut build leaves draws reading an older frame's outputs. "dclf:cut=<prefixes>" drops
@@ -321,7 +321,7 @@ namespace DCLF
 			// "dclf:pass-queries=0|1" records the lists with or without pass timestamps and Tracy GPU zones.
 			if (command.rfind("dclf:pass-queries=", 0) == 0) {
 				org::diagnostics::DiagnosticSkipPassQueries().store(command.substr(18) == "0", std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// "dclf:drop-lists=0|1" makes DCLF's epochs submit only their signals.
@@ -359,7 +359,7 @@ namespace DCLF
 			// "dclf:heap-dedupe=0|1" makes BasicRHI skip rebinding heaps a list already bound, from a rebuild.
 			if (command.rfind("dclf:heap-dedupe=", 0) == 0) {
 				rhi::DiagnosticDedupeHeapBinds().store(command.substr(17) == "1", std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// "dclf:skip-epochs=<shadow,z,colour,forward,fp>" skips submitting those epochs only.
@@ -377,20 +377,20 @@ namespace DCLF
 			// "dclf:list-heaps=0|1" binds descriptor heaps at each list's start or not, from a rebuild. Off is unsafe, for empty-epoch timing only.
 			if (command.rfind("dclf:list-heaps=", 0) == 0) {
 				org::diagnostics::DiagnosticSkipListHeapBinds().store(command.substr(16) == "0", std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// "dclf:list-barriers=external|all|default" drops the entry and exit barriers or every barrier, from a rebuild. Unsafe, timing only.
 			if (command.rfind("dclf:list-barriers=", 0) == 0) {
 				const std::string value = command.substr(19);
 				org::diagnostics::DiagnosticSkipListBarriers().store(value == "external" ? 1 : value == "all" ? 2 : 0, std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// "dclf:rhi-globals=0|1" makes BasicRHI record global barriers or none, from a rebuild. Off is unsafe, timing only.
 			if (command.rfind("dclf:rhi-globals=", 0) == 0) {
 				rhi::DiagnosticSkipGlobalBarriers().store(command.substr(17) == "0", std::memory_order_relaxed);
-				RenderGraph::Builds::RequestAll("test harness command");
+				RenderGraph::Builds::RequestAtAdoption({}, "test harness command");
 				return true;
 			}
 			// "dclf:queue-boundary=0|1" toggles the graph's external entry and exit barriers, from a rebuild. Off is unsafe, timing only.

@@ -90,7 +90,6 @@ namespace ORGPostChain
 		std::uint32_t latchUsed = 0;
 		std::uint32_t gateUsed = kDrawEntry + 1;
 		std::vector<std::pair<std::array<std::uint32_t, 3>, std::uint32_t>> fixed;  // a fixed dispatch size and its gate entry
-		std::vector<std::string> once;
 		std::vector<std::unique_ptr<GraphResources::Texture2D>> images;
 		std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> registered;
 		std::vector<const GraphResources::Resource*> twins;  // declared, so alive for the session
@@ -349,13 +348,7 @@ namespace ORGPostChain
 			.program = std::move(a_dispatch.program),
 			.bindings = Bases(a_dispatch.bindings),
 			.groups = a_dispatch.groups };
-		if (a_dispatch.once) {
-			if (a_dispatch.gate) {
-				Fail(std::format("{}: a one-shot dispatch has fixed group counts, not a gate entry", a_dispatch.name));
-				return;
-			}
-			state.once.push_back(std::format("{}.{}", kClientId, dispatch.name));
-		} else if (a_dispatch.gate) {
+		if (a_dispatch.gate) {
 			dispatch.gate = a_dispatch.gate->index;
 		} else {
 			const auto entry = FixedEntry(a_dispatch.groups);
@@ -992,8 +985,6 @@ struct ORGPostProcessing::Impl
 			return nullptr;
 		}
 		next->descs = next->passes->Take();
-		for (auto& desc : next->descs)
-			desc.once = std::ranges::find(next->once, desc.name) != next->once.end();
 		// The post stage is recorded ahead and its recording is submitted again, so every pass must give a revision.
 		// A pass without one makes the stage's recording fatal at its first frame, so name it here.
 		for (const auto& desc : next->descs) {

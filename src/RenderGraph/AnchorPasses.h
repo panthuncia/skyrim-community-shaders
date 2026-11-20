@@ -37,7 +37,7 @@ namespace RenderGraph
 }
 
 /**
-* @brief Common passes for frame anchor clients, made from plain descriptions: fullscreen draw, dispatch, copy, UAV clear and upload.
+* @brief Common passes for frame anchor clients, made from plain descriptions: fullscreen draw, dispatch, copy and UAV clear.
 *
 * A port lists its steps instead of writing a pass class for each. Each pass is made from an immutable spec at its anchor's build,
 * and its revision is that spec, so its recording is kept. Per-frame values arrive through the client's latch and run gate.
@@ -165,13 +165,15 @@ namespace RenderGraph::AnchorPasses
 		std::uint32_t slices = 1;           // an array's or cube's slices (six for a cube), each copied in turn
 	};
 
-	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value. */
+	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value.
+	*  With a gate entry it clears only on runs whose commit opened it, and is recorded at execution. */
 	struct Clear
 	{
 		std::string name;
 		FrameAnchors::Texture target;
 		std::array<float, 4> value{};
 		std::optional<std::array<std::uint32_t, 4>> uintValue;  // set: a uint clear instead (integer formats)
+		std::optional<std::uint32_t> gate;                      // the builder's run gate entry
 	};
 
 	/** @brief A graph twin as a handle, its slot when versioned, else its graph resource. */
@@ -183,17 +185,6 @@ namespace RenderGraph::AnchorPasses
 	/** @brief A Copy between two graph twins, each declared as its slot when versioned. The size is baked in, so a resize needs a new registration. */
 	Copy CopyOf(std::string a_name, const GraphResources::Resource& a_source, const GraphResources::Resource& a_target, std::uint32_t a_width,
 		std::uint32_t a_height);
-
-	/** @brief A copy from a host-written staging buffer into one texture subresource. The pass keeps the buffer alive.
-	*  It is not a graph resource, so write it once before registering and never while a run may read it. */
-	struct Upload
-	{
-		std::string name;
-		std::shared_ptr<org::Buffer> staging;
-		FrameAnchors::Texture target;
-		rhi::CopyableFootprint footprint{};
-		std::uint32_t mip = 0, slice = 0;
-	};
 
 	/** @brief Collects one client's passes for one anchor, named "<prefix>.<step>" with rising order keys.
 	*  A step that cannot be made fails the builder. Take returns what was added. */
@@ -207,15 +198,11 @@ namespace RenderGraph::AnchorPasses
 		void Add(Dispatch a_dispatch);
 		void Add(Copy a_copy);
 
-		/** @brief A clear; a_once (the default) makes it a one-shot pass (PassDesc::once). */
-		void Add(Clear a_clear, bool a_once = true);
-
-		/** @brief An upload, always a one-shot pass: it runs at the anchor's next run. */
-		void Add(Upload a_upload);
+		/** @brief A clear on every run, or with a gate entry only on runs whose commit opened it. */
+		void Add(Clear a_clear);
 
 		/** @brief A custom pass, made at each graph build of the anchor. a_atExecution records it after the run's commit. */
-		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once = false,
-			bool a_atExecution = false);
+		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_atExecution = false);
 
 		/** @brief Marks the builder failed with a reason (the first one is kept). */
 		void Fail(std::string_view a_reason);
@@ -232,8 +219,7 @@ namespace RenderGraph::AnchorPasses
 	private:
 		bool Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate,
 			const std::vector<Bind>& a_table = {});
-		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-			bool a_atExecution = false);
+		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_atExecution = false);
 
 		FrameAnchors::Anchor anchor;
 		std::string prefix;

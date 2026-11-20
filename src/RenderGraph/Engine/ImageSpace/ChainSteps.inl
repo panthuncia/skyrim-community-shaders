@@ -1057,15 +1057,17 @@ void BuildChainSteps(const ChainKey& a_key)
 		client.batch.clear();
 		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
+		std::vector<KeptClear> clears;
 		// Clear the kept textures' first versions before any pass reads them. Later versions are born cleared.
+		// The pre-tonemap part writes bloom and the adapted pair before the tonemap reads them, so its commit opens their clears.
 		if (p == 1) {
-			ClearFirstVersion(chain.bloom, client.id, -5, "bloom.clear", passes);
+			ClearFirstVersion(chain.bloom, client.id, -5, "bloom.clear", passes, clears);
 			for (std::uint32_t h = 0; h < 2; ++h)
-				ClearFirstVersion(chain.adapt[h], client.id, -3 - static_cast<std::int32_t>(h), fmt::format("hdr.adapted{}.clear", h), passes);
+				ClearFirstVersion(chain.adapt[h], client.id, -3 - static_cast<std::int32_t>(h), fmt::format("hdr.adapted{}.clear", h), passes, clears);
 		}
 		if (p == 2)
 			for (std::uint32_t h = 0; h < 2; ++h)
-				ClearFirstVersion(chain.taaHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("taa.history{}.clear", h), passes);
+				ClearFirstVersion(chain.taaHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("taa.history{}.clear", h), passes, clears);
 		std::vector<std::uint32_t> finals;
 		for (auto& step : steps) {
 			if (step.part != p)
@@ -1182,6 +1184,8 @@ void BuildChainSteps(const ChainKey& a_key)
 		desc.passes = std::move(passes);
 		desc.sharedConstants = true;
 		desc.gates = { client.gate };
+		for (const auto& clear : clears)
+			desc.gates.push_back(clear.gate);
 		if (p == 2 && ReadbackOn() && levels > 1) {
 			auto& readback = Readback();
 			if (!readback.buffer) {
@@ -1223,16 +1227,20 @@ void BuildChainSteps(const ChainKey& a_key)
 						target->texture->Register(a_graph);
 			};
 		desc.active = [partIndex] { return !IS().post[partIndex].batch.empty(); };
-		desc.commit = [partIndex, p](const FrameAnchors::Point&) {
+		desc.commit = [partIndex, p, clears](const FrameAnchors::Point&) {
 			auto& current = IS().post[partIndex];
 			CommitBatch(current.batch, *current.latch, *current.gate);
+			OpenKeptClears(clears);
 			if (p == 2 && ReadbackOn() && Readback().buffer) {
 				const auto frame = Frame::Driver::Current().frame;
 				Readback().frames[frame % AdaptReadback::kSlots] = frame;
 				Readback().runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), std::make_shared<const std::uint64_t>(frame));
 			}
 		};
-		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
+		desc.executed = [clears](const FrameAnchors::Point&) {
+			IS().executed = true;
+			EndKeptClears(clears);
+		};
 		desc.declared = [] { return Frame::PostChain::On(); };
 		desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) { ChainRows(p, a_rows); };
 		desc.repeats = true;

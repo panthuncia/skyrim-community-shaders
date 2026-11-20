@@ -355,6 +355,9 @@ namespace
 	constexpr std::uint32_t kFilteredMipZeroEntry = 0;
 	constexpr std::uint32_t kBC6HEntry = 1;  // + the cubemap
 	constexpr std::uint32_t kCopyEntries = 3;
+	// The zeros' upload, a first-run gate: each registration's commit opens it until a run with it submits.
+	constexpr std::uint32_t kZeroEntry = kCopyEntries;
+	constexpr std::uint32_t kGateEntries = kCopyEntries + 1;
 
 	// Set by a commit when a pass writes the copy's source, cleared when the copy records.
 	using CopyDirty = std::array<std::atomic<bool>, kCopyEntries>;
@@ -484,7 +487,7 @@ struct ORGDynamicCubemaps::Impl
 	std::shared_ptr<const Programs> programs;
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
-	std::shared_ptr<RenderGraph::RunGate> copyGate;  // opened while their source is new
+	std::shared_ptr<RenderGraph::RunGate> copyGate;  // opened while their source is new, and for the zeros
 	// The filtered mip copy runs once before the first inference. The BC6H copies wait for their first encode.
 	std::shared_ptr<CopyDirty> copyDirty = [] {
 		auto dirty = std::make_shared<CopyDirty>();
@@ -504,7 +507,7 @@ struct ORGDynamicCubemaps::Impl
 	// Kept for the copy that follows every frame.
 	std::array<std::array<std::unique_ptr<GraphResources::Texture2D>, kMips>, 2> scratch;
 	std::array<std::unique_ptr<GraphResources::Texture2D>, 2> env, bc6h;
-	// Copied by a one-shot pass before the first capture.
+	// Copied by a gated upload before the first capture (kZeroEntry).
 	std::vector<std::shared_ptr<const GraphResources::StagedUpload>> zeros;
 
 	// A cubemap counts as valid from the run of its first encode, whose BC6H copy follows the encode in that run.
@@ -810,7 +813,7 @@ bool ORGDynamicCubemaps::Setup()
 				imports.depth != nullptr, imports.main != nullptr, imports.reflections != nullptr, imports.defaultCubemap != nullptr);
 			return false;
 		}
-		// Black until the first publish, like the D3D11 path's cubemaps. Zeros are copied by the client's one-shot pass.
+		// Black until the first publish, like the D3D11 path's cubemaps. Zeros are copied by the client's gated upload.
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			state->zeros.push_back(state->env[i]->StageZeros());
 			state->zeros.push_back(state->bc6h[i]->StageZeros());
@@ -819,7 +822,7 @@ bool ORGDynamicCubemaps::Setup()
 			logger::warn("[ORG] Dynamic Cubemaps: the cubemaps' zeros could not be staged; they stay on D3D11");
 			return false;
 		}
-		state->copyGate = RenderGraph::RunGate::Create("cs.dyncubemaps.copies", kCopyEntries);
+		state->copyGate = RenderGraph::RunGate::Create("cs.dyncubemaps.copies", kGateEntries);
 		if (!state->copyGate) {
 			logger::warn("[ORG] Dynamic Cubemaps: its copy gate could not be made; the cubemaps stay on D3D11");
 			return false;
@@ -921,13 +924,17 @@ bool ORGDynamicCubemaps::Impl::MakeClient(ORGDynamicCubemaps* a_self, const Clie
 	};
 	using Kind = FrameAnchors::PassKind;
 	// Black until the first publish, like the D3D11 path's cubemaps. A new registration zeroes them again: it happens only when
-	// the first update moves the capture's colour source, before the first publish.
+	// the first update moves the capture's colour source, before the first publish. The commit opens the upload until a run with
+	// it submits, and it skips the other runs at execution.
+	const auto zero = std::make_shared<RenderGraph::FirstRun>();
 	a_client.passes.push_back({ .name = "cs.dyncubemaps.zero",
 		.anchor = FrameAnchors::Anchor::DeferredPasses,
 		.order = kOrder - 1,
 		.kind = Kind::Copy,
-		.make = [self]() -> std::shared_ptr<org::RenderPass> { return self->impl ? GraphResources::MakeUploadPass(self->impl->zeros) : nullptr; },
-		.once = true });
+		.make = [self]() -> std::shared_ptr<org::RenderPass> {
+			return self->impl ? GraphResources::MakeUploadPass(self->impl->zeros, { self->impl->copyGate, kZeroEntry }) : nullptr;
+		},
+		.atExecution = true });
 	pass("cs.dyncubemaps.capture", 0, Kind::Compute, withImports(&Impl::CapturePlan));
 	pass("cs.dyncubemaps.capture-mips", 1, Kind::Compute, mips(false, 0));
 	pass("cs.dyncubemaps.capture-mips-reflections", 2, Kind::Compute, mips(false, 1));
@@ -945,10 +952,15 @@ bool ORGDynamicCubemaps::Impl::MakeClient(ORGDynamicCubemaps* a_self, const Clie
 		if (self->impl)
 			self->impl->Register(a_graph);
 	};
-	a_client.commit = [self](const FrameAnchors::Point&) {
-		if (self->impl)
-			self->impl->Commit();
+	// No active callback, so the commit runs every run and opens the zeros while they are pending.
+	a_client.commit = [self, zero](const FrameAnchors::Point&) {
+		if (!self->impl)
+			return;
+		self->impl->Commit();
+		if (self->impl->copyGate)
+			zero->Open(*self->impl->copyGate, kZeroEntry);
 	};
+	a_client.executed = [zero](const FrameAnchors::Point&) { zero->Executed(); };
 	logger::info("[ORG] Dynamic Cubemaps: a client for the next revision ({0}x{0}, main target {1})", a_key.size, a_key.imports.main.Id());
 	return true;
 }

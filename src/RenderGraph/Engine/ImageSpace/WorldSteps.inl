@@ -56,10 +56,33 @@ struct OwnedTarget
 	rhi::Format format = rhi::Format::Unknown;
 	// The extent of the registration being built, which the revision that switches the registration in binds.
 	std::uint32_t width = 0, height = 0;
-	// A kept texture's first version is not born cleared, so the first registration clears it once. Later versions are.
-	bool cleared = false;
+	// A kept texture's first version is not born cleared, so a gated clear clears it once. Later versions are.
+	// The clear's gate and its first-run state, made with the declaration and shared by every registration.
+	std::shared_ptr<RunGate> clearGate;
+	std::shared_ptr<FirstRun> firstClear;
 	explicit operator bool() const { return texture && *texture; }
 };
+
+/** @brief A kept texture's first clear, as a registration holds it: the client's commit opens it, its executed callback ends it. */
+struct KeptClear
+{
+	std::shared_ptr<RunGate> gate;
+	std::shared_ptr<FirstRun> state;
+};
+
+/** @brief In a step client's commit: opens each first clear still pending. */
+void OpenKeptClears(const std::vector<KeptClear>& a_clears)
+{
+	for (const auto& clear : a_clears)
+		clear.state->Open(*clear.gate, 0);
+}
+
+/** @brief In a step client's executed callback: a run that opened a first clear submitted, so that clear is done. */
+void EndKeptClears(const std::vector<KeptClear>& a_clears)
+{
+	for (const auto& clear : a_clears)
+		clear.state->Executed();
+}
 
 struct StepTexture
 {
@@ -323,6 +346,12 @@ bool DeclareKept(OwnedTarget& a_out, std::string_view a_name, Frame::Dependencie
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
 	if (!a_out.declared)
 		return false;
+	a_out.clearGate = RunGate::Create(fmt::format("{}::FirstClear", a_name));
+	if (!a_out.clearGate) {
+		logger::error("[ORG] ImageSpace: {}'s first clear has no run gate", a_name);
+		return false;
+	}
+	a_out.firstClear = std::make_shared<FirstRun>();
 	a_out.texture = a_out.declared.Get();
 	a_out.format = rhi::helpers::ToRHI(first.Format);
 	a_out.width = first.Width;
@@ -348,18 +377,25 @@ void KeptExtentLike(OwnedTarget& a_target, std::int32_t a_like)
 }
 
 /**
-* @brief A one-shot clear of a kept texture's first version, before any pass reads it. Later versions are born cleared.
-* Nothing when an earlier registration cleared it.
+* @brief A gated clear of a kept texture's first version. Later versions are born cleared. The client's commit opens it with the
+* steps' entries, so it clears in the first submitted run whose steps read the texture, before them. Nothing once a run cleared it.
 */
-void ClearFirstVersion(OwnedTarget& a_target, const char* a_client, std::int32_t a_order, std::string a_name, std::vector<FrameAnchors::PassDesc>& a_passes)
+void ClearFirstVersion(OwnedTarget& a_target, const char* a_client, std::int32_t a_order, std::string a_name, std::vector<FrameAnchors::PassDesc>& a_passes,
+	std::vector<KeptClear>& a_clears)
 {
-	if (a_target.cleared)
+	if (!a_target.firstClear || !a_target.firstClear->Pending())
 		return;
-	a_target.cleared = true;
-	AnchorPasses::Builder builder(Anchor::ImageSpace, a_client, a_order);
-	builder.Add(AnchorPasses::ClearOf(std::move(a_name), *a_target.texture), true);
+	AnchorPasses::Builder builder(Anchor::ImageSpace, a_client, a_order, {}, a_target.clearGate);
+	auto clear = AnchorPasses::ClearOf(std::move(a_name), *a_target.texture);
+	clear.gate = 0u;
+	builder.Add(std::move(clear));
+	if (builder.Failed()) {
+		logger::error("[ORG] ImageSpace: {}", builder.Failure());
+		return;
+	}
 	for (auto& pass : builder.Take())
 		a_passes.push_back(std::move(pass));
+	a_clears.push_back({ a_target.clearGate, a_target.firstClear });
 }
 
 /** @brief The covered effects and blend states the engine has made. Steps register once it has its ImageSpace manager. */
@@ -735,10 +771,11 @@ void BuildWorldSteps(const WorldKey& a_key)
 		auto& keys = water ? world.waterKey : world.scopesKey;
 		auto& count = water ? world.waterCount : world.scopesCount;
 		std::vector<FrameAnchors::PassDesc> passes;
+		std::vector<KeptClear> clears;
 		// Clear the history pair's first versions before any pass reads them.
 		if (!water)
 			for (std::uint32_t h = 0; h < 2; ++h)
-				ClearFirstVersion(world.saoHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("sao.history{}.clear", h), passes);
+				ClearFirstVersion(world.saoHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("sao.history{}.clear", h), passes, clears);
 		for (auto& step : steps) {
 			if (step.water != water)
 				continue;
@@ -777,6 +814,8 @@ void BuildWorldSteps(const WorldKey& a_key)
 		desc.passes = std::move(passes);
 		desc.sharedConstants = true;
 		desc.gates = { client.gate };
+		for (const auto& clear : clears)
+			desc.gates.push_back(clear.gate);
 		desc.registerResources = [water](org::RenderGraph& a_graph) {
 			if (water)
 				return;
@@ -788,11 +827,16 @@ void BuildWorldSteps(const WorldKey& a_key)
 		};
 		const auto part = static_cast<std::size_t>(water ? PostPart::WorldWater : PostPart::WorldScopes);
 		desc.active = [part] { return !IS().post[part].batch.empty(); };
-		desc.commit = [part](const FrameAnchors::Point&) {
+		// The first clears open with the steps, which are the history's only readers.
+		desc.commit = [part, clears](const FrameAnchors::Point&) {
 			auto& current = IS().post[part];
 			CommitBatch(current.batch, *current.latch, *current.gate);
+			OpenKeptClears(clears);
 		};
-		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
+		desc.executed = [clears](const FrameAnchors::Point&) {
+			IS().executed = true;
+			EndKeptClears(clears);
+		};
 		if (water)
 			desc.rows = WorldWaterRows;
 		else
