@@ -143,4 +143,8 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["start", "rays-on", "no-bloom", "no-adaptation", "fx-back", "resized", "restored", "shaders-cleared", "rays-off"]
-no_log = ["frame tap error", "a frame declaration failed", "Effects11 returns to FX11 for the session", "Effects11 rays: a program could not be built"]
+# No frame of the run may draw the rays or the chain on D3D11 after their first registration: no "Effects11 rays: this frame runs
+# on D3D11" line after the first "Effects11 rays: client", and no "Effects11 runs on FX11 this frame" line after the first
+# "FX chain N built" except "a tonemap after this frame's stage". A toggle may log "draws no rays (the client lags behind a revision)".
+no_log = ["frame tap error", "a frame declaration failed", "Effects11's FX chain failed on the render graph", "the FX chain could not be built",
+	"is not among the plan's programs", "Effects11 rays: a program could not be built", "which this driver no longer has"]

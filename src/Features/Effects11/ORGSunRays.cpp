@@ -202,6 +202,7 @@ namespace
 	{
 		Shape shape;
 		std::shared_ptr<const Fixed> fixed;
+		std::uint64_t generation = 0;  // its registration's, which HeldNow names
 	};
 
 	/** @brief A declared texture as passes declare it: its slot, so a new version needs no build. */
@@ -629,9 +630,13 @@ struct ORGSunRays::Impl
 	RF::DeclaredProgram<RaysPrograms> programs;
 	RF::DeclaredClient client;
 	Observed observed;
-	// The registration whose commit ran last, and the frame it ran in. The frame gives the graph only the effects it holds.
-	std::shared_ptr<const RaysState> held;
-	std::uint32_t heldFrame = UINT32_MAX;
+	// Registrations a schedule may still hold, newest last. The frame gives the graph only the effects its schedule's holds.
+	std::vector<std::shared_ptr<const RaysState>> builds;
+	std::uint64_t generation = 0;
+	// What this frame's schedule holds, found once per frame: its registration, or none while the rays' client lags.
+	std::shared_ptr<const RaysState> frameState;
+	bool noStage = false;  // this frame kind has no stage for the rays, so D3D11 draws them
+	bool lostLogged = false;
 	// Gathered by VolumetricRays and SunRays, latched by the commit of the registration the run holds.
 	LatchData pending{};
 	bool pendingVolumetric = false, pendingSun = false;
@@ -639,17 +644,35 @@ struct ORGSunRays::Impl
 	bool preparedOk = false;
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
 
-	/** @brief Whether the registration the last frame ran holds the effect. A frame whose graph does not yet runs on D3D11. */
-	bool Holds(bool Shape::*a_effect) const
+	/**
+	* @brief The registration this frame's schedule holds, as the post chain finds its build. With none, the frame draws no rays
+	* while the client lags behind a revision, and D3D11 draws them only in a frame kind with no stage for them.
+	*/
+	void FindHeld()
 	{
-		return held && held->shape.*a_effect && heldFrame + 1 >= globals::state->frameCount;
+		frameState.reset();
+		noStage = false;
+		const auto hold = FrameAnchors::HeldNow(kClientId, FrameAnchors::Anchor::PostComposite);
+		if (!hold.held) {
+			// Registered: no stage of this frame kind holds the rays. Not registered: the client comes with the next revision.
+			noStage = client.Registered();
+			return;
+		}
+		if (!hold.scheduled)
+			return;
+		const auto found = std::ranges::find_if(builds, [&](const auto& a_build) { return a_build->generation == hold.generation; });
+		if (found == builds.end()) {
+			if (!std::exchange(lostLogged, true))
+				logger::error("[ORG] Effects11 rays: the stage holds rays registration {}, which this driver no longer has; no rays are drawn", hold.generation);
+			return;
+		}
+		builds.erase(builds.begin(), found);
+		frameState = builds.front();
 	}
 
 	/** @brief The run's values, at the areas of the registration the run holds. */
 	void Commit(const std::shared_ptr<const RaysState>& a_state)
 	{
-		held = a_state;
-		heldFrame = globals::state->frameCount;
 		const auto& shape = a_state->shape;
 		const bool volumetric = pendingVolumetric && shape.volumetric;
 		const bool sun = pendingSun && shape.sun;
@@ -687,6 +710,7 @@ struct ORGSunRays::Impl
 		auto state = std::make_shared<RaysState>();
 		state->shape = a_shape;
 		state->fixed = fixed;
+		state->generation = ++generation;
 		const std::shared_ptr<const RaysState> shared = state;
 		const auto& f = *fixed;
 		const auto& programs = *a_shape.programs;
@@ -729,14 +753,18 @@ struct ORGSunRays::Impl
 				for (const auto* texture : { &fixedState.sunA, &fixedState.sunB })
 					(*texture)->Register(a_graph);
 		};
-		// Every run commits, so the frame knows which registration its graph holds. Effects the frame did not give stay closed.
+		// The commit of the registration the schedule holds runs, also while a newer one waits for its revision (matchesById).
+		// Effects the frame did not give stay closed.
 		a_client.commit = [this, shared](const FrameAnchors::Point&) { Commit(shared); };
 		a_client.sharedConstants = true;
 		a_client.gates = { f.gate };
+		a_client.matchesById = true;
+		a_client.generation = state->generation;
+		builds.push_back(shared);
 		const auto& sizes = a_shape.sizes;
-		logger::info("[ORG] Effects11 rays: a client for the next revision (volumetric {}, sun {}, half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud "
+		logger::info("[ORG] Effects11 rays: client {} for the next revision (volumetric {}, sun {}, half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud "
 					 "shadows {})",
-			a_shape.volumetric ? "on" : "off", a_shape.sun ? "on" : "off", sizes.halfTexWidth, sizes.halfTexHeight, static_cast<std::uint32_t>(programs.mainFormat),
+			state->generation, a_shape.volumetric ? "on" : "off", a_shape.sun ? "on" : "off", sizes.halfTexWidth, sizes.halfTexHeight, static_cast<std::uint32_t>(programs.mainFormat),
 			a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
 		return true;
 	}
@@ -750,7 +778,7 @@ struct ORGSunRays::Impl
 		shape.sun = (toggles & (Effects11::kSunRaysBit | Effects11::kMoonRaysBit)) != 0;
 		if (!shape.volumetric && !shape.sun)
 			return std::nullopt;
-		// The inputs come from the last frame that wanted rays. Before one could read them, the rays draw on D3D11.
+		// The inputs come from the last frame that wanted rays. Before one could read them, no rays are drawn.
 		if (observed.missing || !observed.main || !observed.depth)
 			return std::nullopt;
 		shape.programs = programs.For(a_in);
@@ -946,24 +974,45 @@ bool ORGSunRays::PrepareFrame()
 		}
 		return false;
 	}
-	impl->fallbackReason.clear();
-	return true;
+	impl->FindHeld();
+	const char* lag = impl->noStage ? "this frame kind has no stage for the rays" : (impl->frameState ? nullptr : "the rays' client lags behind a revision; no rays");
+	if (lag) {
+		if (impl->fallbackReason != lag) {
+			logger::info("[ORG] Effects11 rays: this frame {}", impl->noStage ? "runs on D3D11 (no stage holds the rays)" : "draws no rays (the client lags behind a revision)");
+			impl->fallbackReason = lag;
+		}
+	} else
+		impl->fallbackReason.clear();
+	// No stage: D3D11 draws them, as the post chain in a frame kind without a post stage.
+	impl->preparedOk = !impl->noStage;
+	return impl->preparedOk;
+}
+
+std::optional<std::uint32_t> ORGSunRays::AdoptedToggles() const
+{
+	if (!IsActive())
+		return std::nullopt;
+	return RenderGraph::Frame::Revision::Adopted().Get(globals::features::effects11.raysToggles);
 }
 
 bool ORGSunRays::VolumetricRays(const Sizes&)
 {
-	if (!PrepareFrame() || !impl->Holds(&Shape::volumetric))
+	if (!PrepareFrame())
 		return false;
-	impl->pendingVolumetric = true;
+	// The schedule's registration decides. One without the effect, or none while the client lags, draws nothing this frame.
+	if (impl->frameState && impl->frameState->shape.volumetric)
+		impl->pendingVolumetric = true;
 	return true;
 }
 
 bool ORGSunRays::SunRays(const Sizes&, const std::array<Effects11::SunRaysData, kSunRaysPasses>& a_passes)
 {
-	if (!PrepareFrame() || !impl->Holds(&Shape::sun))
+	if (!PrepareFrame())
 		return false;
-	impl->pending.sun = a_passes;
-	impl->pendingSun = true;
+	if (impl->frameState && impl->frameState->shape.sun) {
+		impl->pending.sun = a_passes;
+		impl->pendingSun = true;
+	}
 	return true;
 }
 
@@ -978,6 +1027,7 @@ void ORGSunRays::Reserve() {}
 bool ORGSunRays::Setup() { return false; }
 bool ORGSunRays::IsActive() const { return false; }
 bool ORGSunRays::PrepareFrame() { return false; }
+std::optional<std::uint32_t> ORGSunRays::AdoptedToggles() const { return std::nullopt; }
 bool ORGSunRays::VolumetricRays(const Sizes&) { return false; }
 bool ORGSunRays::SunRays(const Sizes&, const std::array<Effects11::SunRaysData, kSunRaysPasses>&) { return false; }
 

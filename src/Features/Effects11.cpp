@@ -1174,8 +1174,11 @@ void Effects11::DrawVolumetricRays()
 
 	// The apply pass lights the rays with SunColor, which is premultiplied by the sun's visibility,
 	// so with the sun faded out (overcast, rain, fog, night) the passes would only add black
+	// On the graph the adopted revision's toggle decides, so the rays switch with the revision that registers their passes.
 	auto& settingManager = SettingManager::GetSingleton();
-	if (!settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT") || Util::GetSunVisibility(sky->sun) <= 0.0f)
+	const auto adoptedToggles = ORGSunRays::Get().AdoptedToggles();
+	const bool volumetricRays = adoptedToggles ? (*adoptedToggles & kVolumetricRaysBit) != 0 : settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT");
+	if (!volumetricRays || Util::GetSunVisibility(sky->sun) <= 0.0f)
 		return;
 
 	auto& effectManager = EffectManager::GetSingleton();
@@ -1423,9 +1426,11 @@ void Effects11::DrawSunRays()
 	if (globals::state->IsFullScreenMenuOpen())
 		return;
 
+	// On the graph the adopted revision's toggles decide, so the rays switch with the revision that registers their passes.
 	auto& settingManager = SettingManager::GetSingleton();
-	const bool sunRays = settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
-	const bool moonRays = settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
+	const auto adoptedToggles = ORGSunRays::Get().AdoptedToggles();
+	const bool sunRays = adoptedToggles ? (*adoptedToggles & kSunRaysBit) != 0 : settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
+	const bool moonRays = adoptedToggles ? (*adoptedToggles & kMoonRaysBit) != 0 : settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
 	if (!sunRays && !moonRays)
 		return;
 

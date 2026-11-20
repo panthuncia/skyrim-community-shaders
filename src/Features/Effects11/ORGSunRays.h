@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "Features/Effects11.h"
 
@@ -14,7 +15,9 @@
 * frame does no work and the recordings are kept. Effects11's Draw* functions decide the frame, then hand it here.
 * The five half-size textures are declared on the display size and the rays' toggles, the programs on kMAIN's format and the
 * shader cache clears, and the client on its inputs (frame revision plan, 6.10). So a new size, toggle or program switches in
-* with a frame revision. A frame whose inputs the graph cannot read, or whose graph does not hold the effect yet, runs on D3D11.
+* with a frame revision. While the graph runs them, Effects11 reads the toggles of the adopted revision (AdoptedToggles), and the
+* effects drawn are those of the registration the frame's schedule holds (HeldNow), so a toggle never draws a frame on D3D11.
+* D3D11 still draws them in a frame whose inputs the graph cannot read and in a frame kind with no stage for them.
 * A failed setup returns to D3D11 for good.
 * Render thread throughout. Free of ORG/Vulkan includes.
 */
@@ -38,6 +41,12 @@ public:
 	/** @brief Set up, not failed, and the render graph still active. */
 	bool IsActive() const;
 
+	/**
+	* @brief While the graph runs the rays, the adopted revision's toggles (Effects11::kVolumetricRaysBit and the others), which
+	* Effects11 reads in place of its live settings so the rays switch with the revision. Empty when D3D11 draws them. Render thread.
+	*/
+	std::optional<std::uint32_t> AdoptedToggles() const;
+
 	/** @brief kMAIN's half-res texture size, and the half-res and full dynamic resolution areas. */
 	struct Sizes
 	{
@@ -51,8 +60,9 @@ public:
 	static constexpr std::uint32_t kSunRaysPasses = 5;
 
 	/**
-	* @brief @return False means the D3D11 path draws them. The graph draws at the sizes of the revision it adopted, which a_sizes
-	* only matches once that revision carries this frame's size.
+	* @brief @return False means the D3D11 path draws them. True means the graph takes them: it draws them when the registration
+	* the frame's schedule holds has them, else nothing this frame. The graph draws at the sizes of the revision it adopted, which
+	* a_sizes only matches once that revision carries this frame's size.
 	*/
 	bool VolumetricRays(const Sizes& a_sizes);
 
