@@ -747,6 +747,29 @@ of the client ran". Test: `skylighting-reset` (new).
   serial in the client's key and calls `DeclaredClient::Invalidate` (step 9b). The `FrameAnchors::Scheduled` gates stay on the
   evaluate's copy, the hudless copy and the frame generation inputs. See "Decided by the agent (step 6.14)" in section 9.
 
+**As built (2026-11-19, 6.11, `org-native/rev-step6-10`).** Effects11's ORG FX chain follows the revisions.
+- Every texture the chain plans with is declared on first use with `DeclareTexture2D` on `DisplaySize` (screen-size ones follow it,
+  the fixed ones keep their size) and kept for the session. Passes declare the slots (`AnchorPasses::TextureOf`), so a new display
+  size is a new version of each, with no build. The per-size `Resources` set is gone.
+- The client is `DeclareClient` on `DisplaySize` and `Effects11.fxShapeWrites`, a `CS::Setting<std::uint32_t>` count that
+  `Effects11::NoteShapeWrite` raises. Its writers: `SettingManager::SetValue`, `SetStoredValue` and `Load` (in place of their
+  `SettingsWritten` calls) and `Effect::UpdateUIVariables` (the editor's variable and technique edits, and loads). Its key is the plan:
+  the shape text `ShapeKey` built before (now with the effects' compiled pointers and the kMAIN copy flag), the planned `Frame` and its
+  `ClientDesc`. It is made when a revision starts, so a new plan, its stage builds and the textures' new versions switch in at one
+  Begin. A plan with the same text is not made again.
+- The tonemap's targets, kMAIN, its depth and FX11's compiled effects are not variables: `Prepare` observes them each tonemap and calls
+  `Invalidate` when they change (an interim until step 9b). `ORGFxRuntime::Invalidate` (before FX11 reloads) resets the parsed
+  effects and invalidates the key. The per-frame `ShapeKey` poll, `Register`, `running`/`frame` and the two-shape commit are gone: each
+  registration's commit writes its own plan, since the commit that runs is the held registration's.
+- The tonemap owner is the client's `declared` (`State::PeekTonemapOwner` at Begin): while Post Processing or the game owns the
+  tonemap (every loading screen and the main menu) the client stays registered and its passes record only barriers. It was
+  unregistered before.
+- One-shot clears are gone. A kept (History or Persistent) texture's clear is a render-target clear recorded at execution, skipped
+  unless the commit opened its row of a run gate (`cs.effects11.clears`, a row per `kTextures` entry). The commit opens it for each
+  kept texture whose bound version no submitted run has cleared yet (`executed` records it). That covers `FirstFrame` and the first,
+  not born-cleared, version made at declaration.
+- Effects11's `ProjectSizeSettings` is gone.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
