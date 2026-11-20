@@ -877,9 +877,9 @@ namespace DCLF
 		WakeSnapshotBuilder();
 	}
 
-	bool IndirectDraws::SceneRecorded() const
+	std::uint64_t IndirectDraws::SceneRecordedFrames() const
 	{
-		return impl && !failed && impl->adoptedSnapshot && impl->adoptedSnapshot->revision;
+		return impl ? impl->sceneRecordedFrames.load(std::memory_order_acquire) : 0;
 	}
 
 	void IndirectDraws::Impl::CheckSceneVersions(const SceneSnapshot& a_snapshot)
@@ -973,6 +973,12 @@ namespace DCLF
 		const std::uint64_t wait = ++s.shaderReloadWaits;
 		// The frame this Begin starts.
 		const std::uint32_t frame = Scene::FrameView::Get().GetFrame() + 1;
+		// A frame revision with DCLF epochs in preparation holds DCLF's scenes until it adopts at a later Begin, so this wait would
+		// get none (plan step 10b). It is superseded: its inputs are prepared again from the next Begin, on the rebuilt graphs, and
+		// the scenes this wait takes name the adopted versions. PostRevisionInputs below carries them to the builder.
+		const std::uint64_t superseded = RenderGraph::Frame::Revision::SupersedeForSceneWait(
+			fmt::format("shader-reload wait {} needs DCLF's scene on the adopted frame versions", wait));
+		s.shaderReloadSupersessions += superseded ? 1 : 0;
 		// Open the scene pass half of the publication gate, because this frame's pass only runs after its start.
 		s.frameWaiting.store(true, std::memory_order_seq_cst);
 		// The payload may wait on a backing the last frame read, so submit queued work now.
@@ -1071,8 +1077,10 @@ namespace DCLF
 		s.snapshotWaitMs += ms;
 		s.snapshotWaitMaxMs = std::max(s.snapshotWaitMaxMs, ms);
 		logger::info("[DCLF] shader-reload wait {}: frame {} waited {:.2f} ms at its Begin after the pipeline swap for a snapshot recorded on the rebuilt "
-					 "graphs (build generation {}, main resources generation {}): adopted serial {}",
-			wait, frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+					 "graphs (build generation {}, main resources generation {}): adopted serial {}; frame revision superseded for it: {} ({} in the "
+					 "session)",
+			wait, frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial,
+			superseded ? fmt::format("{}", superseded) : std::string("none"), s.shaderReloadSupersessions);
 		return ms;
 	}
 

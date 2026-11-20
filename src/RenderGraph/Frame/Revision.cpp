@@ -54,8 +54,9 @@ namespace DCLF
 	// Not adopted. DCLF keeps it to release it on its builder, and makes a new one.
 	void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
 		std::span<const std::uint32_t> a_epochs);
-	// Whether DCLF's epochs run recordings now, so a revision with DCLF epochs in its closure must adopt a scene recorded for it.
-	bool SceneRecorded();
+	// Any thread. The frames whose coverage ran a DCLF epoch, in the session. While it moves, a revision with DCLF epochs in its
+	// closure must adopt a scene recorded for it.
+	std::uint64_t SceneRecordedFrames();
 	// After the scene step of every Begin: the named shader-reload wait (plan step 10a).
 	void AfterSceneStep();
 }
@@ -82,6 +83,9 @@ namespace RenderGraph::Frame::Revision
 
 		// The starvation rule (plan 7.8): recordings dropped and asked for again this often with no new input is a schedule bug.
 		constexpr std::uint64_t kRevisionStarvedAfter = 4 * RenderGraphRuntime::kGameFramesInFlight;
+		// A revision with DCLF epochs in its closure waits for DCLF's scene only while DCLF's epochs ran in one of this many last
+		// Begins (plan 7.8). A menu without a scene pass, a load screen or an idle DCLF posts no scene, so then it adopts alone.
+		constexpr std::uint64_t kSceneIdleFrames = 4 * RenderGraphRuntime::kGameFramesInFlight;
 
 		/** @brief A declared texture's newest extent, held by its twin's Alive() token since the twin may go first. */
 		struct ExtentRequest
@@ -279,6 +283,11 @@ namespace RenderGraph::Frame::Revision
 			std::optional<Scene> heldScene;
 			// The last adopted revision that had DCLF epochs in its closure: the frame versions a scene adopted alone must name.
 			std::uint64_t adoptedSceneVersions = 0;
+			// DCLF's SceneRecordedFrames at the last Begin, and the Begin's frame when it last moved (plan 7.8).
+			std::uint64_t sceneRecordedSeen = 0, sceneRecordedFrame = 0;
+			// Scenes that could not serve a revision waiting for DCLF's scene, since the last new input: posted on other versions,
+			// or held and dropped for their builds. The starvation rule (plan 7.8) for the scene.
+			std::uint64_t sceneMissesSinceInput = 0;
 			std::map<GraphResources::Resource*, ExtentRequest> extents;
 			std::uint64_t extentSerial = 0;
 			std::uint64_t renewSerial = 0;
@@ -390,12 +399,34 @@ namespace RenderGraph::Frame::Revision
 				return std::nullopt;
 			DCLF::SceneTaken(scene->value);
 			const auto& preparing = a_coordinator.preparing;
-			if (scene->frameVersions == kAnySceneVersions || !preparing || !preparing->dclfMembers || scene->frameVersions != preparing->serial)
+			if (scene->frameVersions == kAnySceneVersions || !preparing || !preparing->dclfMembers || scene->frameVersions != preparing->serial) {
+				// A scene with recordings on other versions while a revision needs DCLF's scene is a miss for the starvation rule.
+				if (scene->frameVersions != kAnySceneVersions && preparing && preparing->dclfMembers)
+					++a_coordinator.sceneMissesSinceInput;
 				return scene;
+			}
 			if (a_coordinator.heldScene)
 				DropScene(a_coordinator, std::move(*a_coordinator.heldScene), SceneDrop::Superseded, "a newer scene was recorded for the same revision");
 			a_coordinator.heldScene = std::move(scene);
 			return std::nullopt;
+		}
+
+		/** @brief Notes whether DCLF's epochs ran since the last Begin. Render thread, every Begin. */
+		void NoteSceneRuns(Coordinator& a_coordinator, std::uint64_t a_frame)
+		{
+			if (const std::uint64_t runs = DCLF::SceneRecordedFrames(); runs != a_coordinator.sceneRecordedSeen) {
+				a_coordinator.sceneRecordedSeen = runs;
+				a_coordinator.sceneRecordedFrame = a_frame;
+			}
+		}
+
+		/**
+		* @brief Whether DCLF's epochs ran in one of the last kSceneIdleFrames Begins. Only then does a revision with DCLF epochs in its
+		* closure wait for DCLF's scene (plan 7.8): a DCLF that does not draw posts no scene. Render thread.
+		*/
+		bool DclfDraws(const Coordinator& a_coordinator, std::uint64_t a_frame)
+		{
+			return a_coordinator.sceneRecordedSeen != 0 && a_frame - a_coordinator.sceneRecordedFrame <= kSceneIdleFrames;
 		}
 
 		/**
@@ -650,6 +681,7 @@ namespace RenderGraph::Frame::Revision
 			++coordinator.extentSerial;
 			// A new event: drops asked again before it are not starvation.
 			coordinator.askedAgainSinceInput = 0;
+			coordinator.sceneMissesSinceInput = 0;
 			// A declared texture changes only its extent, so another shape class is a declaration error.
 			if (!a_twin.Preparable(a_extent))
 				FailRevision(fmt::format("{} has no version at {}: the extent changes its shape class (mips or slices)", a_twin.Name(), ExtentText(a_extent)));
@@ -834,6 +866,7 @@ namespace RenderGraph::Frame::Revision
 				DropScene(a_coordinator, std::move(*a_coordinator.heldScene), SceneDrop::Superseded, "its frame revision was superseded");
 				a_coordinator.heldScene.reset();
 			}
+			a_coordinator.sceneMissesSinceInput = 0;
 			for (auto& need : revision->needs)
 				a_coordinator.carriedNeeds.push_back(std::move(need));
 			a_coordinator.plannedSerial = 0;
@@ -872,6 +905,7 @@ namespace RenderGraph::Frame::Revision
 		void Adopt(Coordinator& a_coordinator, std::uint64_t a_frame, const Scene* a_scene)
 		{
 			auto revision = std::move(a_coordinator.preparing);
+			a_coordinator.sceneMissesSinceInput = 0;
 			auto& assembler = *a_coordinator.assembler;
 			const auto stagedEpochs = revision->recordings ? FrameAnchors::RevisionStagedEpochs(*revision->recordings) : std::vector<std::uint32_t>{};
 			// Sealed once complete, so it is selected in this Begin.
@@ -1027,7 +1061,7 @@ namespace RenderGraph::Frame::Revision
 					"members [{}]; DCLF scene {}",
 					revision->serial, a_frame, inputFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, waits, stagedEpochs.size(),
 					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others,
-					a_scene ? fmt::format("{} recorded with it", a_scene->serial) : std::string(revision->dclfMembers ? "none (DCLF records nothing)" : "kept"));
+					a_scene ? fmt::format("{} recorded with it", a_scene->serial) : std::string(revision->dclfMembers ? "none (DCLF's epochs did not run)" : "kept"));
 			}
 			a_coordinator.adopted = std::move(revision);
 		}
@@ -1157,16 +1191,28 @@ namespace RenderGraph::Frame::Revision
 			if (!progress.ready || !inputsReady)
 				return;
 			// With DCLF epochs in its closure, the revision takes DCLF's scene recorded against its versions, while DCLF's epochs run
-			// recordings. Until it comes, frames keep the adopted revision and scene. Its staged builds attach first: a refusal drops
-			// that scene, and the revision waits for the next one.
+			// (plan 7.8: they ran in one of the last kSceneIdleFrames Begins). Until it comes, frames keep the adopted revision and
+			// scene. Its staged builds attach first: a refusal drops that scene, and the revision waits for the next one. A DCLF that
+			// does not draw posts no scene, so then the revision adopts alone and DCLF's next scene is recorded on it.
 			std::optional<Scene> scene;
-			if (revision.dclfMembers && (a_coordinator.heldScene || DCLF::SceneRecorded())) {
-				if (!a_coordinator.heldScene)
+			if (revision.dclfMembers && (a_coordinator.heldScene || DclfDraws(a_coordinator, a_frame))) {
+				if (!a_coordinator.heldScene) {
+					// DCLF draws and keeps posting scenes that cannot serve this revision, with no new input: a schedule bug, not a wait.
+					if (a_coordinator.sceneMissesSinceInput > kRevisionStarvedAfter) {
+						Driver::NoteTapError(Driver::TapError::Starved, SegmentId::Count,
+							fmt::format("frame revision {} (inputs from frame {}) has not been adopted: DCLF's epochs draw, and {} of its scenes since the last "
+										"new input were recorded on other frame versions or dropped for their builds; none was recorded against revision {}",
+								revision.serial, revision.firstInput, a_coordinator.sceneMissesSinceInput, revision.serial));
+						a_coordinator.sceneMissesSinceInput = 0;
+					}
 					return;
+				}
 				scene = std::move(a_coordinator.heldScene);
 				a_coordinator.heldScene.reset();
-				if (!AttachSceneBuilds(a_coordinator, *scene))
+				if (!AttachSceneBuilds(a_coordinator, *scene)) {
+					++a_coordinator.sceneMissesSinceInput;
 					return;
+				}
 			}
 			revision.recordingCount = progress.recordings;
 			revision.buildCount = progress.builds;
@@ -1223,6 +1269,7 @@ namespace RenderGraph::Frame::Revision
 				coordinator.variablesFirstChange = frame;
 			// A new event: drops asked again before it are not starvation.
 			coordinator.askedAgainSinceInput = 0;
+			coordinator.sceneMissesSinceInput = 0;
 		}
 		// DCLF's newest scene (plan step 10b). One recorded against the revision in preparation is held for its adoption below. DCLF
 		// draws on the main thread only, so a loading screen's thread that owns rendering leaves its scenes to the main thread's Begin.
@@ -1230,6 +1277,8 @@ namespace RenderGraph::Frame::Revision
 		std::optional<Scene> scene;
 		if (mainThread)
 			scene = TakePostedScene(coordinator);
+		// Whether DCLF's epochs still run, so a revision with DCLF epochs knows whether to wait for its scene (plan 7.8).
+		NoteSceneRuns(coordinator, frame);
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
 		// A revision of builds alone needs no lane, so it is advanced in the Begin that starts it.
@@ -1311,6 +1360,19 @@ namespace RenderGraph::Frame::Revision
 		return AdoptSceneAlone(coordinator, scene);
 	}
 
+	std::uint64_t SupersedeForSceneWait(std::string_view a_why)
+	{
+		auto& coordinator = GetCoordinator();
+		if (!coordinator.installed || !FrameAnchors::IsRenderOwner() || !FrameAnchors::IsMainThread())
+			return 0;
+		// Only a revision whose closure has DCLF epochs holds DCLF's scenes. Its lane is done, since Advance marked it.
+		if (!coordinator.preparing || !coordinator.preparing->dclfMembers)
+			return 0;
+		const std::uint64_t serial = coordinator.preparing->serial;
+		Supersede(coordinator, a_why);
+		return serial;
+	}
+
 	void LogStats()
 	{
 		auto& coordinator = GetCoordinator();
@@ -1348,6 +1410,7 @@ namespace RenderGraph::Frame::Revision
 	SceneVersions SceneFrameVersions() { return {}; }
 	void PublishScene(Scene) {}
 	bool AdoptScene() { return false; }
+	std::uint64_t SupersedeForSceneWait(std::string_view) { return 0; }
 	void LogStats() {}
 }
 

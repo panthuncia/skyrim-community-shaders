@@ -259,8 +259,14 @@ namespace DCLF
 					Draws::CurrentGraphConditions().firstPersonForwardDirect && !Direct::ForwardBatches())
 					rv.covered[e] = false;
 			}
-		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e)
+		bool ran = false;
+		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e) {
 			rv.uncovered[e] += rv.covered[e] ? 0 : 1;
+			ran = ran || rv.covered[e];
+		}
+		// A frame revision with DCLF epochs in its closure waits for DCLF's scene only while DCLF's epochs run (plan 7.8).
+		if (ran)
+			sceneRecordedFrames.fetch_add(1, std::memory_order_release);
 		Diagnostics::Notify(Diagnostics::EpochCoverageDecided{ Scene::FrameView::Get().GetFrame(), std::span<const bool>(rv.covered.data(), EpochCount()),
 			adoptedSnapshot ? adoptedSnapshot->serial : 0, adoptedSnapshot && adoptedSnapshot->drawsComplete, snapshotStale, payload, versions != nullptr, current });
 	}

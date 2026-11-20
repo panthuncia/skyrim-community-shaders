@@ -191,8 +191,11 @@ namespace DCLF
 		/** @brief Render thread. The frame revision did not adopt a_scene. It is released on the builder, which makes a new one. */
 		void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
 			std::span<const std::uint32_t> a_epochs);
-		/** @brief Render thread. Whether DCLF's epochs run the adopted snapshot's recordings, so a frame revision with DCLF epochs needs a scene. */
-		bool SceneRecorded() const;
+		/**
+		 * @brief Any thread. The frames whose coverage ran at least one DCLF epoch, in the session. While it moves, a frame revision with
+		 * DCLF epochs needs a scene recorded for it. A failed graph's frames are not counted.
+		 */
+		std::uint64_t SceneRecordedFrames() const;
 		/**
 		 * @brief Render thread, after the frame revision's scene step at every main-thread Begin. Waits only after a shader reload's
 		 * pipeline swap rebuilt DCLF's graphs, while DCLF draws: a named, counted wait (plan step 10a), until recordings name their

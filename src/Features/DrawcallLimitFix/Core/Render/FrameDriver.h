@@ -36,7 +36,8 @@ namespace DCLF
 	void InstallScene(const std::shared_ptr<const void>& a_scene);
 	void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
 		std::span<const std::uint32_t> a_epochs);
-	bool SceneRecorded();
+	/** @brief The frames whose coverage ran a DCLF epoch, in the session. The frame revision waits for a scene only while it moves. */
+	std::uint64_t SceneRecordedFrames();
 	/** @brief After the scene step: the shader-reload wait (plan step 10a). */
 	void AfterSceneStep();
 

@@ -157,6 +157,14 @@ namespace RenderGraph::Frame::Revision
 	*/
 	bool AdoptScene();
 
+	/**
+	* @brief Render thread, main thread, inside the adoption point. For DCLF's shader-reload wait: supersedes a revision in preparation
+	* whose closure has DCLF epochs. Such a revision holds DCLF's scenes until it adopts at a later Begin, so the wait could get none.
+	* Its inputs are prepared again from the next Begin, on the rebuilt graphs, and DCLF's next scene names the adopted versions.
+	* Returns the superseded revision's serial, 0 when there was none.
+	*/
+	std::uint64_t SupersedeForSceneWait(std::string_view a_why);
+
 	/** @brief Logs the "[ORG] frame revision:" census line for the window and resets it. */
 	void LogStats();
 }

@@ -161,8 +161,13 @@ namespace DCLF
 		std::uint64_t restagesWithoutInput = 0, restageInputSerial = 0;
 		// Adopted scenes with a recording of a version the frame does not read, in the session (CheckSceneVersions).
 		std::uint64_t staleSceneVersions = 0;
+		// Frames whose coverage ran at least one DCLF epoch, in the session. The frame revision waits for DCLF's scene only while
+		// this moves (Frame::Revision, plan 7.8).
+		std::atomic<std::uint64_t> sceneRecordedFrames{ 0 };
 		// Begin waits after a shader reload's pipeline swap since the last report, and in the session.
 		std::uint64_t snapshotWaits = 0, shaderReloadWaits = 0;
+		// Frame revisions a shader-reload wait superseded, so that DCLF's scene could name the adopted versions, in the session.
+		std::uint64_t shaderReloadSupersessions = 0;
 		double snapshotWaitMs = 0.0, snapshotWaitMaxMs = 0.0;
 		// Snapshots adopted with staged builds, and their staged attaches ORG refused, since the last report.
 		std::uint64_t stagedAdoptions = 0, stagedRefusals = 0;

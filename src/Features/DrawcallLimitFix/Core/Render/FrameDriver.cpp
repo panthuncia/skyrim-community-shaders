@@ -90,9 +90,9 @@ namespace DCLF
 		IndirectDraws::Get().DropScene(a_scene, a_why, a_text, a_epochs);
 	}
 
-	bool SceneRecorded()
+	std::uint64_t SceneRecordedFrames()
 	{
-		return globals::features::drawcallLimitFix.HooksInstalled() && IndirectDraws::Get().SceneRecorded();
+		return globals::features::drawcallLimitFix.HooksInstalled() ? IndirectDraws::Get().SceneRecordedFrames() : 0;
 	}
 
 	void AfterSceneStep()
