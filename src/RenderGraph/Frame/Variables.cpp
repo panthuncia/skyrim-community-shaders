@@ -52,6 +52,7 @@ namespace RenderGraph::Frame::Vars
 			Variable<ShadowMapShape> engineShadowMap = set.Declare("EngineShadowMap", ShadowMapShape{});
 			Variable<CubemapShape> reflectionCubemap = set.Declare("ReflectionCubemap", CubemapShape{});
 			Variable<HeightMapIdentity> heightMap = set.Declare("HeightMap", HeightMapIdentity{});
+			Variable<SurfaceFormat> presenterFormat = set.Declare("PresenterFormat", SurfaceFormat{});
 			Variable<UpscalerOptions> upscalerOptions = set.Declare("UpscalerOptions", UpscalerOptions{});
 			Variable<ImageSpaceShape> engineImageSpace = set.Declare("EngineImageSpace", ImageSpaceShape{});
 			Variable<FrameGen::PresentationConfig> presentationConfig = set.Declare("PresentationConfig", FrameGen::PresentationConfig{});
@@ -145,6 +146,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().engineShadowMap, a_value, "EngineShadowMap", a_writer); }
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().reflectionCubemap, a_value, "ReflectionCubemap", a_writer); }
 	bool SetHeightMap(HeightMapIdentity a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().heightMap, a_value, "HeightMap", a_writer); }
+	bool SetPresenterFormat(SurfaceFormat a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().presenterFormat, a_value, "PresenterFormat", a_writer); }
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().upscalerOptions, a_value, "UpscalerOptions", a_writer); }
 	bool SetInterior(bool a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().interior, a_value, "Interior", a_writer); }
 	bool SetEngineImageSpace(const ImageSpaceShape& a_value, std::string_view a_writer)
@@ -166,6 +168,7 @@ namespace RenderGraph::Frame::Vars
 	ShadowMapShape AdoptedEngineShadowMap() { return AdoptedFrameValue(FrameVariableSet().engineShadowMap); }
 	CubemapShape AdoptedReflectionCubemap() { return AdoptedFrameValue(FrameVariableSet().reflectionCubemap); }
 	HeightMapIdentity AdoptedHeightMap() { return AdoptedFrameValue(FrameVariableSet().heightMap); }
+	SurfaceFormat AdoptedPresenterFormat() { return AdoptedFrameValue(FrameVariableSet().presenterFormat); }
 	UpscalerOptions AdoptedUpscalerOptions() { return AdoptedFrameValue(FrameVariableSet().upscalerOptions); }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return AdoptedFrameValue(FrameVariableSet().presentationConfig); }
 
@@ -345,6 +348,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape, std::string_view) { return false; }
 	bool SetReflectionCubemap(CubemapShape, std::string_view) { return false; }
 	bool SetHeightMap(HeightMapIdentity, std::string_view) { return false; }
+	bool SetPresenterFormat(SurfaceFormat, std::string_view) { return false; }
 	bool SetUpscalerOptions(UpscalerOptions, std::string_view) { return false; }
 	bool SetInterior(bool, std::string_view) { return false; }
 	bool SetEngineImageSpace(const ImageSpaceShape&, std::string_view) { return false; }
@@ -368,6 +372,7 @@ namespace RenderGraph::Frame::Vars
 	ShadowMapShape AdoptedEngineShadowMap() { return {}; }
 	CubemapShape AdoptedReflectionCubemap() { return {}; }
 	HeightMapIdentity AdoptedHeightMap() { return {}; }
+	SurfaceFormat AdoptedPresenterFormat() { return {}; }
 	UpscalerOptions AdoptedUpscalerOptions() { return {}; }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return WrittenPresentationConfig(); }
 

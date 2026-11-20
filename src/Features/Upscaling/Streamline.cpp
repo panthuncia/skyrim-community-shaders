@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <DirectXPackedVector.h>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <string_view>
 #include <unordered_set>
@@ -1563,6 +1564,12 @@ namespace InCbReadback
 	}
 }
 
+/**
+ * @brief Sets one evaluate's SDK options (mode, output size, pre-exposure), built from its frame's values. Called right before the
+ * evaluate records, so a later frame's options never replace this frame's first.
+ */
+using cs_SetOptions = std::function<sl::Result()>;
+
 #if defined(CS_HAS_RENDER_GRAPH)
 /**
  * @brief The evaluate as the post stage's pass (native mode, and guest mode since the post stage runs there): the frame's constants
@@ -1575,7 +1582,7 @@ namespace InCbReadback
 static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
 	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
-	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor, bool* a_outputReady, bool* a_skipped)
+	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor, bool* a_outputReady, bool* a_skipped, cs_SetOptions a_options)
 {
 	using RenderGraph::Engine::Native::ExternalImageInfo;
 	const auto skip = [&] {
@@ -1611,8 +1618,15 @@ static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::View
 	const sl::ViewportHandle viewport = a_viewport;
 	const char* label = a_feature == sl::kFeatureDLSS ? "Streamline DLSS" : a_feature == sl::kFeatureXeSS ? "Streamline XeSS" : "Streamline FSR";
 	// Runs later, in the evaluate pass's Record: everything it uses is captured by value. The token stays valid: Streamline keeps a
-	// ring of them, and the pass records within the frames in flight.
+	// ring of them, and the pass records within the frames in flight. The options too are this frame's, set where it records.
 	auto record = [=](void* a_list, std::span<const ExternalImageInfo> a_infos) {
+		if (a_options) {
+			if (const sl::Result optionsRes = a_options(); optionsRes != sl::Result::eOk) {
+				logger::error("[Streamline] the options of feature {} viewport {} failed (result {})", static_cast<uint32_t>(a_feature), static_cast<uint32_t>(viewport),
+					static_cast<int>(optionsRes));
+				return false;
+			}
+		}
 		std::array<sl::Resource, 4> resources{};
 		std::array<sl::SubresourceRange, 4> ranges{};
 		for (std::size_t i = 0; i < a_infos.size() && i < resources.size(); ++i) {
@@ -1847,7 +1861,7 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
 	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor = nullptr,
-	bool* a_outputReady = nullptr, bool* a_skipped = nullptr)
+	bool* a_outputReady = nullptr, bool* a_skipped = nullptr, const cs_SetOptions& a_options = {})
 {
 	if (a_outputReady)
 		*a_outputReady = false;
@@ -1857,8 +1871,16 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 	// The upscalers' evaluate is the post stage's pass wherever that stage runs (the recipe); frame generation's stays in the ring.
 	if (RenderGraph::Engine::Native::Active() || (a_feature != sl::kFeatureFSR_G && ORGUpscaling::Get().EvaluatesInStage()))
 		return cs_EvaluateFeatureAsPass(a_feature, a_viewport, a_colorIn, a_colorOut, a_depth, a_motionVectors, a_renderWidth, a_renderHeight, a_outputWidth,
-			a_outputHeight, a_jitterX, a_jitterY, a_hudlessColor, a_outputReady, a_skipped);
+			a_outputHeight, a_jitterX, a_jitterY, a_hudlessColor, a_outputReady, a_skipped, a_options);
 #endif
+	// The ring records now, so its options are set now.
+	if (a_options) {
+		if (const sl::Result optionsRes = a_options(); optionsRes != sl::Result::eOk) {
+			logger::error("[Streamline] the options of feature {} viewport {} failed (result {})", static_cast<uint32_t>(a_feature),
+				static_cast<uint32_t>(a_viewport), static_cast<int>(optionsRes));
+			return optionsRes;
+		}
+	}
 
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk)
@@ -2161,16 +2183,14 @@ Streamline::EvaluationResult Streamline::EvaluateDLSS(ID3D11Resource* a_colorIn,
 			isNvidiaGPU && !isRTXBelow40Series, isRTXBelow40Series);
 	}
 
-	const sl::Result optionsResult = g_sl.slDLSSSetOptions(g_sl.viewport, options);
-	if (optionsResult != sl::Result::eOk) {
-		logger::error("[Streamline] DLSS options failed (result {})", static_cast<int>(optionsResult));
-		return result;
-	}
+	// Set where the evaluate records, with this frame's values (the pre-exposure read above, the caller's mode and output size).
+	const sl::ViewportHandle viewport = g_sl.viewport;
+	const cs_SetOptions setOptions = [viewport, options] { return g_sl.slDLSSSetOptions(viewport, options); };
 
 	const sl::Result evalRes = cs_EvaluateFeatureCore(sl::kFeatureDLSS, g_sl.viewport,
 		a_colorIn, a_colorOut, a_depth, a_motionVectors,
 		a_renderWidth, a_renderHeight, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY,
-		nullptr, &outputReady, &evaluationSkipped);
+		nullptr, &outputReady, &evaluationSkipped, setOptions);
 	result = cs_ClassifyEvaluation(evalRes, outputReady, evaluationSkipped);
 
 	static sl::Result s_loggedRes = sl::Result::eErrorNotInitialized;
@@ -2231,16 +2251,14 @@ Streamline::EvaluationResult Streamline::EvaluateXeSS(ID3D11Resource* a_colorIn,
 	xessOpts.colorBuffersHDR = sl::Boolean::eTrue;
 	// The input color is pre-exposed. The plugin gives XeSS its inverse as the exposure multiplier, as Intel's guide asks.
 	xessOpts.preExposure = globals::state->preExposure;
-	const sl::Result optionsResult = g_sl.slXeSSSetOptions(g_sl.viewport, xessOpts);
-	if (optionsResult != sl::Result::eOk) {
-		logger::error("[Streamline] XeSS options failed (result {})", static_cast<int>(optionsResult));
-		return result;
-	}
+	// Set where the evaluate records, with this frame's values, as for DLSS.
+	const sl::ViewportHandle viewport = g_sl.viewport;
+	const cs_SetOptions setOptions = [viewport, xessOpts] { return g_sl.slXeSSSetOptions(viewport, xessOpts); };
 
 	const sl::Result evalRes = cs_EvaluateFeatureCore(sl::kFeatureXeSS, g_sl.viewport,
 		a_colorIn, a_colorOut, a_depth, a_motionVectors,
 		a_renderWidth, a_renderHeight, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY,
-		nullptr, &outputReady, &evaluationSkipped);
+		nullptr, &outputReady, &evaluationSkipped, setOptions);
 	result = cs_ClassifyEvaluation(evalRes, outputReady, evaluationSkipped);
 
 	static sl::Result s_loggedRes = sl::Result::eErrorNotInitialized;
@@ -2300,16 +2318,14 @@ Streamline::EvaluationResult Streamline::EvaluateFSR(ID3D11Resource* a_colorIn, 
 	fsrOpts.sharpness = a_sharpness;
 	fsrOpts.colorBuffersHDR = sl::Boolean::eTrue;
 	fsrOpts.preExposure = globals::state->preExposure;
-	const sl::Result optionsResult = g_sl.slFSRSetOptions(g_sl.viewport, fsrOpts);
-	if (optionsResult != sl::Result::eOk) {
-		logger::error("[Streamline] FSR options failed (result {})", static_cast<int>(optionsResult));
-		return result;
-	}
+	// Set where the evaluate records, with this frame's values, as for DLSS.
+	const sl::ViewportHandle viewport = g_sl.viewport;
+	const cs_SetOptions setOptions = [viewport, fsrOpts] { return g_sl.slFSRSetOptions(viewport, fsrOpts); };
 
 	const sl::Result evalRes = cs_EvaluateFeatureCore(sl::kFeatureFSR, g_sl.viewport,
 		a_colorIn, a_colorOut, a_depth, a_motionVectors,
 		a_renderWidth, a_renderHeight, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY,
-		nullptr, &outputReady, &evaluationSkipped);
+		nullptr, &outputReady, &evaluationSkipped, setOptions);
 	result = cs_ClassifyEvaluation(evalRes, outputReady, evaluationSkipped);
 
 	static sl::Result s_loggedRes = sl::Result::eErrorNotInitialized;

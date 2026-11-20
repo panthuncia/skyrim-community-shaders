@@ -262,7 +262,8 @@ namespace RenderGraph::Frame::PostChain
 		fields.screenshot = Member<bool>(base, kScreenshot);
 		// Upscaling turns the engine's TAA on just before the end-of-frame effects and off after, so the flag at Begin says nothing.
 		auto& upscaling = globals::features::upscaling;
-		const auto method = upscaling.GetUpscaleMethod();
+		// The adopted revision's method, so the evaluate switches in with its build and textures.
+		const auto method = upscaling.FrameUpscaleMethod();
 		if (upscaling.loaded)
 			fields.taa = !Upscaling::IsWindowUnusable() && method == Upscaling::UpscaleMethod::kTAA;
 		fields.upscaler = upscaling.loaded && !Upscaling::IsWindowUnusable() &&

@@ -2,10 +2,12 @@
 
 #include "RenderGraph/Engine/Native/Native.h"
 
+#include <array>
 #include <cstdint>
 #include <d3d11.h>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -14,9 +16,14 @@
 *
 * Streamline's evaluate is the Upscale anchor's first pass. It records the SDK's tags and evaluate on the pass's own command list.
 * The upscaled output is exported to D3D11, and a gated draw copies it into kMAIN. The depth upscale runs at the same anchor.
-* A copy has no per-run switch, so the client is rebuilt when the depth upscale starts or stops.
 * Frame generation's hudless colour is copied at the UI stage's FrameGeneration step, and its inputs (FSR-FG's prepare) are a pass
 * of the same step after the copy. Plain D3D11 mode keeps them in the DXVK interop command ring.
+*
+* Its textures and clients are declared on variables (frame revision plan 6.14), so they switch in with the revision that changes
+* them. The upscaled texture follows DisplaySize, UpscaleMethod and frame generation, and is one texel when nothing evaluates into
+* it. The hudless colour has one texture per format (kHudlessFormats): the one HdrEnabled and the presenter's format choose is at
+* the display size, the others one texel. The Upscale client follows the display size, the method and the quality (the depth
+* upscale runs only below native), the hudless client the chosen format.
 * On any failure the feature returns to D3D11 once the ring is drained. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGUpscaling
@@ -31,13 +38,32 @@ public:
 
 	static bool Requested();
 
+	/** @brief The hudless colour's formats, each with its own texture. */
+	static constexpr std::array<DXGI_FORMAT, 3> kHudlessFormats{ DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM };
+
+	/**
+	* @brief Which of kHudlessFormats the hudless colour takes. HDR always lands in 10 bits, the HDR10 back buffer FFX subtracts it
+	* from. SDR takes the presenter's format. None while the presenter is in the other encoding, or has no format FFX can use.
+	*/
+	static std::optional<std::uint32_t> HudlessFormatIndex(bool a_hdr, DXGI_FORMAT a_presenterFormat, bool a_presenterHdr10)
+	{
+		if (a_hdr)
+			return 2u;
+		if (a_presenterHdr10)
+			return std::nullopt;
+		for (std::uint32_t i = 0; i < kHudlessFormats.size(); ++i)
+			if (kHudlessFormats[i] == a_presenterFormat)
+				return i;
+		return std::nullopt;
+	}
+
 	static ORGUpscaling& Get();
 
 	/** @brief PostPostLoad, when requested. */
 	static void Reserve();
 
 	/**
-	* @brief SetupResources, with the runtime active. Clients register at the first frame that queues their work.
+	* @brief SetupResources, with the runtime active. Declares the textures and clients: the first frame revision registers them.
 	* @return False keeps D3D11, logged.
 	*/
 	bool Setup();
@@ -60,19 +86,14 @@ public:
 	*/
 	bool ReleaseAfterFailure();
 
-	/** @brief False means the caller makes the D3D11 texture. */
-	bool CreateTexture(Target a_target, const D3D11_TEXTURE2D_DESC& a_desc);
-
-	/** @brief The caller must have drained the command ring. */
-	void DestroyTexture(Target a_target);
-
+	/** @brief Whether the graph holds the target, so the caller makes no D3D11 texture for it. */
 	bool Holds(Target a_target) const;
 
-	/** @brief The graph's D3D11 export while the graph holds it, else a_d3d11. */
+	/**
+	* @brief The graph's D3D11 export while the graph holds the target, else a_d3d11. The hudless colour is the adopted revision's
+	* format's texture, null while that revision has none.
+	*/
 	ID3D11Texture2D* Texture(Target a_target, ID3D11Texture2D* a_d3d11) const;
-
-	/** @brief Chosen as Texture chooses. */
-	const D3D11_TEXTURE2D_DESC* Desc(Target a_target, const D3D11_TEXTURE2D_DESC* a_d3d11) const;
 
 	/**
 	* @brief Records the SDK's commands on the native list, a VkCommandBuffer or ID3D12GraphicsCommandList.
