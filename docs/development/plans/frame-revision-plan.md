@@ -1509,6 +1509,56 @@ payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembl
     a record from reading a region the adopted version does not hold yet. If the redesign keeps the CPU copy path, its pool jobs
     stay DCLF's scene-lane work, never revision work.
 
+**As built (10b, 2026-11-19, `org-native/rev-step10b`).** Code only, not built or run here. One commit for the scene fragment,
+one for the per-epoch views and the configs.
+- **The scene is a fragment of the frame revision.** `Frame::Revision` has two more slots, `kRevisionScene` and
+  `kRevisionSceneBuffers` (DCLF's buffer set, by serial). DCLF's builder posts each snapshot with `Revision::PublishScene` (latest
+  wins, a replaced one is released on the builder). `snapshotSlot` is gone. The fragments name the scene; DCLF owns it, so nothing
+  of a snapshot is released on the render thread. DCLF's own `RevisionAssembler` stays: it is the builder's assembly of shapes and
+  recordings, and decides when a scene is complete. What moved is the adoption.
+- **Frame versions in DCLF's recordings.** `Revision::SceneFrameVersions()` is the revision in preparation's `versionSet` once its
+  closure has DCLF epochs (`dclfMembers`, from `others`), else null with the serial of the last adopted such revision.
+  `PostRevisionInputs` carries it in `RevisionInputs::frameVersions`/`frameVersionsSerial`. A new serial makes a new versions
+  fragment (`SceneRevisions::frameVersions`), so every epoch records again, and `EpochRevisionData::composed` is
+  `ComposedVersions{DCLF's NamedVersions, frame versions}`. The snapshot carries the serial (`SceneSnapshot::frameVersions`).
+- **Adoption rules** (`AdoptLatest`, main thread). The newest posted scene is taken first. One tagged with the revision in
+  preparation is held for it. Then the revision advances. A revision with DCLF epochs in its closure adopts only with its held
+  scene, while DCLF's epochs run recordings (`DCLF::SceneRecorded`); without that it adopts alone. After it, a scene tagged with
+  the adopted serial (or with none: no recordings) is adopted alone, as a seal of the two scene slots. Any other is dropped
+  (`SceneDrop::Stale`) and DCLF makes a new one. So a resize does not wait for the scene cadence beyond DCLF's re-record, and a
+  scene alone seals as soon as its recordings are ready.
+- **Builds requirement.** A scene lists `(epoch, build)` for every DCLF segment. At adoption each must be attached or staged
+  (`SceneBuildsReady`); the staged ones attach first (`AttachSceneBuilds`), before the revision's own adoption. A replaced build
+  drops the scene (`BuildReplaced`); a refusal drops it (`Refused`), and DCLF builds the refused epochs again. The revision waits
+  for the next scene.
+- **Deleted:** `snapshotSlot`, `AdoptSnapshot`, `AdoptAtBegin`, `AdoptSnapshotAtBegin`, `StaleKindOf` and the `kStale*` kinds, the
+  snapshot's `buildSerial`, `targetsGeneration` and `shadowFormat`, and the shader-reload wait's catalog branch. `AdoptSnapshot`'s
+  body is `IndirectDraws::InstallScene`, the scene fragment's install. `AdoptedCurrent` is now a currency check: complete draws
+  for the main resources the frame runs, and every epoch's recordings of its attached build.
+- **Shader-reload wait kept** (`AfterSceneStep`, after the scene step of every main-thread Begin). It adopts scenes through
+  `Revision::AdoptScene`.
+- **Re-staging tap error** (10a's open item): `TapError::Starved` once more than `4 x kGameFramesInFlight` scenes in a row are
+  dropped for their builds with no new DCLF build state. Reset by any install.
+- **Declared view mismatch.** `DeclarePublishedRead` latches no build-time index for a versioned slot (`PublishedResources::
+  IsVersioned`), so `CheckDeclaredReads` no longer compares those. The lines after a resize came from that compare (DCLF families'
+  CS stage clients: water, precipitation, shadow mask, menu scenes), which a correct pending-version recording also fails. The
+  version check that replaces it: each installed scene's epoch recordings must be version-current
+  (`Impl::CheckSceneVersions`, "binds a version the frame does not read", a counted warning). CS stages keep the anchors'
+  `StaleRecording` check.
+- **Ports.** Physical Sky's and ViewAtmosphere's frame textures needed no code: they are versioned published ids, so their epochs
+  are in the closure and record through `composed`. Per-epoch views: `Api::FrameTexture::facesGraphResources`, read by the faces
+  by id (`Extensions::DeclaredTextureIndex`), declared by the faces' graphs (`FacesGraphTextureIds`), never through the view
+  callback. ViewAtmosphere does not set it yet: its reflection medium is not on the graph (view-atmosphere-port.md 3.7). Advanced
+  Skin: nothing. Tree Wind: not landed.
+- **Census.** "[DCLF] scene snapshots" says "not adopted by the frame revision: stale frame versions N, replaced build N, refused N,
+  superseded N". New line "[ORG] frame revision scenes:". The adopted line ends with "DCLF scene N recorded with it", "kept" or
+  "none (DCLF records nothing)". Each dropped scene logs "[DCLF] scene N not adopted (...)" (16 lines, then every 100th).
+- **Open.** (1) A shader-reload wait while a revision with DCLF epochs prepares cannot finish: the scene it needs is held for that
+  revision, which adopts only at a later Begin. The wait then fails after its idle timeout. (2) A revision waiting for DCLF's scene
+  has no starvation rule; if DCLF's builder posts nothing (a frame kind without a scene pass), it waits for as long. `menu-resize`
+  shows whether that happens. (3) Whether `EpochRecordingVersionsCurrent` lists late-bound slots, which would make the new warning
+  fire every scene.
+
 **10c. Toggles and conditions as variables.** `Toggles` (`ToggleSet` fields) and `GraphConditions` become variables in `kInputs`.
 Delete `Toggles::BeginFrame`/`Adopt` and `RefreshGraphConditions`' polling at the build point. Then make in-frame build requests
 (step 1's late changes) fatal too. Tree Wind's `TreeModSupport` (when its port lands) changes the classification of DCLF members,
@@ -1845,7 +1895,7 @@ return nothing (or only the stated exception) at the end.
 | `EngineTargets` `Settle` builds and generation bump | 9a | `rg -n "Settle\(\|heldReplaced\|heldResized" src/RenderGraph/Engine/Targets` |
 | DCLF frame-start wait (the shader-reload wait stays, director item 57) | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|at its start for a snapshot current" src` |
 | `RenderGraphRuntime::AttachDclfBuilds`, `BuildOwnerEpochsNow`, frame-end `Attach::All` for DCLF (its epochs stay `external`, and are `staged` too) | 10a | `rg -n "AttachDclfBuilds\|BuildOwnerEpochsNow\|Attach::All" src` |
-| DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat" src` |
+| DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat\|AdoptSnapshot\|AdoptAtBegin" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
 | `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
 | Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes | 10a, 9, 7d (versions and attaches fatal) / 10c | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` |
@@ -2676,6 +2726,40 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   still waited for, unless a current snapshot is adopted first.
 - **Section 8's 10a rows change:** `.external` stays (decision: `external` and `staged`), and `kCatalogTimeout` stays inside
   the shader-reload wait. The rows grep for the deleted names instead.
+
+**Decided by the agent (step 10b, 2026-11-19, `org-native/rev-step10b`), to confirm:**
+- **DCLF's own assembler stays.** It assembles shapes and recordings on the builder and says when a scene is complete. Moving its
+  2 x 12 epoch slots into the frame assembler would change the builder's flow for no gain; what joins the frame revision is the
+  adoption: two scene slots, sealed with the revision or alone.
+- **The scene fragments name the scene, DCLF owns it.** A frame assembler slot holding the snapshot could release it on the render
+  thread when a later seal replaces the slot. DCLF's rule is that snapshots are released on the builder.
+- **Scenes are tagged with a frame versions serial,** not checked with `EpochRecordingVersionsCurrent` before adoption: that check
+  can only run after the versions are adopted. A scene recorded with null frame versions is tagged with the adopted serial; if a
+  DCLF-member revision is adopted before it, the tag no longer matches and it is dropped. A scene re-posted on an older versions
+  fragment is tagged unknown and dropped.
+- **While a revision with DCLF epochs prepares, new scenes wait for it.** They are recorded against its pending versions, so they
+  cannot run before it. Frames keep the adopted scene meanwhile (no wait). Scenes posted before the revision's versions reached
+  DCLF are still adopted alone.
+- **A revision waits for DCLF's scene only while DCLF's epochs run recordings** (`SceneRecorded`: an adopted snapshot with a
+  revision, DCLF not failed). Otherwise it adopts alone, and DCLF's next scene is recorded on it.
+- **The builds check moved, not deleted.** "Recorded on the attached or the staged build" is the scene fragment's requirement,
+  checked by the coordinator at selection. The built-serial check is deleted: `MakeRevision` already makes no revision before its
+  state's builds are staged.
+- **Targets and shadow format checks deleted; the main resources one became currency.** Since 10a-0 none changes after DCLF draws.
+  Before that, a main-resources remake could leave a scene for the old ones, so `AdoptedCurrent` requires the scene's main
+  payloads to be for the resources the frame runs. The catalog check (`targetsGeneration` of ~0) is gone with the rest.
+- **A staged refusal at adoption stays non-fatal** (10a's call): the scene is dropped, the epochs are built again, and a revision
+  waiting for that scene waits for the next one. The refusal comes before anything of the revision is adopted.
+- **The mismatch check skips versioned slots.** Its build-time index cannot tell a correct pending-version recording from a stale
+  one. Version currency is checked once per installed scene with ORG's `EpochRecordingVersionsCurrent` on copy 0 of each epoch's
+  first recording, as a counted warning, not a tap error: whether a recording's version list holds late-bound slots (which change
+  per frame) was not checked.
+- **Per-epoch views are a second id list on the frame texture** (`facesGraphResources`), not per-epoch view callbacks: an id is
+  declared by the faces' graphs and read by id, so it is bound. Faces with their own ids read the null texture until one is
+  published. ViewAtmosphere sets them with its reflection medium port, not here, so the faces keep reading the main medium today.
+- **The re-staging rule counts scenes dropped for their builds**, reset by a new DCLF build state serial or any install. A rebuild
+  asked from outside DCLF's conditions (a structural rebuild) is not a new build state, so a burst of those could fire it.
+- **`stagedAdoptions` now counts scenes adopted on other builds than the previous scene's**: the coordinator does the attach.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
