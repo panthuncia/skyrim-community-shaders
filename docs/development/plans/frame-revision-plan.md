@@ -883,6 +883,11 @@ mid-frame (`FrameDriver.cpp:OnBegin` comment; cleanup plan piece A7). Make them 
 lands first; check `docs/development/org-native-frame-graph.md` for A7's state). Then delete `Builds::SwitchStaged` and
 `BuildManager::SwitchStaged`.
 
+**As built (2026-11-19, 7b, `org-native/rev-step7b`).** Nothing was left to move. A7 made HDR output, the hudless copy and the
+clean scene copy UI-stage steps, so they are ordinary revision members, and 4e removed `SwitchStaged` (no caller, and none in ORG
+or OMS). 7b rewrote `FrameDriver.cpp:OnBegin`'s comment: guest keeps DCLF's build point at Main::Draw because DCLF's epochs are
+external until 10a, not because of own epochs. The section 8 greps for 7b are empty. HDR's and the clean scene's `Scheduled` gates go with 6.15 and 6.23, the hudless copy's with 9b.
+
 **7c. Shader reload.** `RenderGraphRuntime::RequestShaderReload` → `ServicePipelineReload` → `Builds::RequestAllSynchronous` becomes an
 event (`Vars::ShaderGeneration`) whose revision has every epoch as a member, built async and staged. The pipeline swap that needs the host
 thread held happens inside `AdoptLatest` **(not investigated; open question Q5)**. If the swap cannot be made safe that way, keep
