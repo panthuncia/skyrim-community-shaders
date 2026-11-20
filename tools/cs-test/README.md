@@ -57,7 +57,7 @@ The shipped configs:
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `resize` | Exponential Height Fog turned on, its grid settings changed (`setting` steps) and upscale method switches: graph textures that take a new size mid-session; compose it, `native-vulkan+resize` |
-| `llf-local-shadows` | Light Limit Fix's local light shadows on (`cs.llf_local_shadows`, DCLF off) in Dragonsreach, then the cache's resolution, slot count and toggle changed mid-session, a shot after each; compose it, `guest+llf-local-shadows`, `d3d11+llf-local-shadows` |
+| `llf-local-shadows` | Light Limit Fix's local light shadows on (`cs.llf_local_shadows`, DCLF off) in Dragonsreach, then the cache's resolution, slot count and toggle changed mid-session, a shot after each; D3D11 only, compose it as `d3d11+llf-local-shadows` (guest and native need DCLF and stop at startup without it) |
 | `llf-parity` | Light Limit Fix's graph culling compared with D3D11's every 300 frames (`[ORG] LLF parity` lines); guest only; compose it, `guest+upscalers+llf-parity` |
 | `view-atmosphere` | Exponential Height Fog turned on, then Atmosphere and Fog's toggle and distant grid changed, then the fog off and on again: the atlas and the post-water composite follow frame revisions, a shot after each; compose it, `native-vulkan+view-atmosphere` |
 | `shadows-blend` | Terrain Blending and Screen Space Shadows toggled, and the shadows' sample count changed, mid-session: clients, a program and a depth source that switch with frame revisions; compose it, `native-vulkan+shadows-blend` |
