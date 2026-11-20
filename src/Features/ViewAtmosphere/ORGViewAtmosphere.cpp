@@ -28,6 +28,7 @@ ORGViewAtmosphere& ORGViewAtmosphere::Get()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ProgramCache.h"
@@ -141,7 +142,7 @@ namespace
 		std::shared_ptr<const org::LatchBlock> latch;
 	};
 
-	/** @brief What the composite reads besides its own resources. A change registers the client again. */
+	/** @brief What the composite reads besides its own resources. */
 	struct CompositeInputs
 	{
 		bool fogNear = false, fogFar = false;  // the fog's published volumes, else the no-fog volume
@@ -149,6 +150,16 @@ namespace
 		bool cubemap = false;
 
 		bool operator==(const CompositeInputs&) const = default;
+	};
+
+	/** @brief What a composite registration is made from: the key of its declared client. A new one registers it again. */
+	struct CompositeKey
+	{
+		std::shared_ptr<const ComputeProgram> program;
+		FrameAnchors::Texture main, depth;
+		CompositeInputs inputs;
+
+		bool operator==(const CompositeKey&) const = default;
 	};
 
 	/** @brief The composite's debug view, 1 to 13, from CS_ORG_VIEW_ATMOSPHERE_DEBUG (Composite.cs.hlsl lists them). 0 when off. */
@@ -178,20 +189,27 @@ struct ORGViewAtmosphere::Impl
 {
 	RenderGraph::ProgramCache<ComputeProgram, std::uint32_t> programs{ "Atmosphere and Fog" };
 	std::uint32_t programGeneration = 0;
-	std::shared_ptr<const ComputeProgram> program;  // the one the registered composite uses
+	std::shared_ptr<const ComputeProgram> program;  // the newest built
 
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 
-	// Made at Setup and kept for the session.
-	std::unique_ptr<GraphResources::Texture3D> luminance, transmittance, noFog;
+	// Declared or made at Setup and kept for the session. The atlas follows the size settings and the display size.
+	RenderGraph::Frame::DeclaredTexture3D luminance, transmittance;
+	std::unique_ptr<GraphResources::Texture3D> noFog;
 	std::unique_ptr<GraphResources::StructuredBuffer> parameters;
 	std::vector<std::shared_ptr<const GraphResources::StagedUpload>> staged;
-	bool mediumRegistered = false;
+	RenderGraph::Frame::DeclaredClient medium, composite;
+	// Whether the shared volume's inject and integrate passes are on the graph. They wait on Physical Sky's media
+	// (view-atmosphere-port.md 3.6). Until then the atlas is one texel, as for a feature that is off.
+	bool sharedVolumePasses = false;
 
-	std::optional<CompositeInputs> compositeInputs;  // set while the composite is registered with these inputs
-	bool compositeWanted = false;                    // this frame's settings ask for the composite
+	// What the last Prepass found the composite can read. Empty while it cannot run. The composite's key reads it.
+	std::optional<CompositeKey> observed;
+	// A registration after none starts a new count. The frame composes once an adopted revision holds that count's registration.
+	// A registration for new inputs keeps the count: the older one composes until the new one switches in (matchesById).
+	std::uint64_t compositeCount = 0, heldCount = 0;
 	std::optional<CompositeRun> pendingRun;
 	std::uint32_t compositeFrame = UINT32_MAX;
 	bool reportedRun = false;  // the first run's inputs are logged once
@@ -252,12 +270,33 @@ struct ORGViewAtmosphere::Impl
 			expected.fogDensity, expected.startDistance, camera.z, opacity(20000.0f), opacity(100000.0f));
 	}
 
+	/** @brief The atlas for a revision's values. One texel while the shared volume is off (the existence rule). */
+	D3D11_TEXTURE3D_DESC AtlasDesc(const RenderGraph::Frame::Inputs& a_in) const
+	{
+		auto desc = VolumeDesc(D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		const auto& s = globals::features::viewAtmosphere.settings;
+		if (!sharedVolumePasses || !a_in.Get(s.enabled))
+			return desc;
+		// Sized for the display (decision 6a). The shaders map the dynamic-resolution region.
+		const auto display = a_in.Get(RenderGraph::Frame::Vars::DisplaySize());
+		const auto layout = ViewAtmosphere::LayoutFor(float2{ static_cast<float>(display.width), static_cast<float>(display.height) }, a_in.Get(s.nearPixelSize),
+			a_in.Get(s.middlePixelSize), a_in.Get(s.distantPixelSize), a_in.Get(s.nearSlices), a_in.Get(s.middleSlices), a_in.Get(s.distantSlices));
+		desc.Width = layout.atlas.x;
+		desc.Height = layout.atlas.y;
+		desc.Depth = layout.atlas.z;
+		return desc;
+	}
+
 	void MakeMedium()
 	{
+		using namespace RenderGraph::Frame;
+		const auto& s = globals::features::viewAtmosphere.settings;
+		const auto dependencies = DependsOn(Vars::DisplaySize(), s.enabled, s.nearPixelSize, s.nearSlices, s.middlePixelSize, s.middleSlices, s.distantPixelSize,
+			s.distantSlices);
 		const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV, .versioned = true };
-		const UINT volumeBind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		luminance = std::make_unique<GraphResources::Texture3D>(VolumeDesc(volumeBind), std::string(kLuminanceId), exported);
-		transmittance = std::make_unique<GraphResources::Texture3D>(VolumeDesc(volumeBind), std::string(kTransmittanceId), exported);
+		const auto atlas = [this](const Inputs& a_in) { return AtlasDesc(a_in); };
+		luminance = DeclareTexture3D(std::string(kLuminanceId), dependencies, atlas, exported);
+		transmittance = DeclareTexture3D(std::string(kTransmittanceId), dependencies, atlas, exported);
 		noFog = std::make_unique<GraphResources::Texture3D>(VolumeDesc(D3D11_BIND_SHADER_RESOURCE), "ViewAtmosphere::NoFog",
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 		D3D11_BUFFER_DESC bufferDesc{};
@@ -268,47 +307,47 @@ struct ORGViewAtmosphere::Impl
 		bufferDesc.ByteWidth = kParametersBytes;
 		parameters = std::make_unique<GraphResources::StructuredBuffer>(bufferDesc, 1, std::string(kParametersId),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
-		if (!*luminance || !*transmittance || !*noFog || !*parameters || !luminance->SRV() || !transmittance->SRV() || !parameters->SRV())
+		if (!luminance || !transmittance || !*luminance || !*transmittance || !*noFog || !*parameters || !luminance->SRV() || !transmittance->SRV() ||
+			!parameters->SRV())
 			Fail("the medium's textures could not be made");
 		// No medium: nothing scattered, everything transmitted. The no-fog volume matches ImageSpace's, for a fog that is off.
+		// The atlas is one texel while the shared volume is off, so these contents cover it.
 		staged = { StageTexel(*luminance, Texel(false, false, false, false)), StageTexel(*transmittance, Texel(true, true, true, true)),
 			StageTexel(*noFog, Texel(false, false, false, true)) };
 		for (const auto& upload : staged)
 			if (!upload)
 				Fail("the medium's first contents could not be staged");
+		// Published once, for the session. Readers follow the versions.
 		if (!PublishedResources::Publish(*luminance) || !PublishedResources::Publish(*transmittance) || !PublishedResources::Publish(*parameters))
 			Fail("the medium could not be published");
 	}
 
-	void RegisterMedium()
+	/** @brief The medium's registration. Its client has no dependencies, so it is registered once, at the first revision. */
+	bool MakeMediumClient(FrameAnchors::ClientDesc& a_client)
 	{
 		RenderGraph::AnchorPasses::Builder builder(Anchor::Prepass, kMediumClientId, kPrepassOrder);
 		builder.Add("first-contents", FrameAnchors::PassKind::Copy, [uploads = staged] { return GraphResources::MakeUploadPass(uploads); }, true);
 		builder.Add("parameters", FrameAnchors::PassKind::Copy, [buffer = parameters->Graph(), latch = std::shared_ptr<const org::LatchBlock>(latch)] {
 			return std::make_shared<ParametersPass>(buffer, latch);
 		});
-		if (builder.Failed())
-			Fail(builder.Failure());
-		const bool registered = FrameAnchors::Register({
-			.id = kMediumClientId,
-			.passes = builder.Take(),
-			.registerResources =
-				[this](org::RenderGraph& a_graph) {
-					luminance->Register(a_graph);
-					transmittance->Register(a_graph);
-					noFog->Register(a_graph);
-					parameters->Register(a_graph);
-				},
-			.commit =
-				[this](const FrameAnchors::Point&) {
-					if (auto* host = RenderGraphRuntime::Get().Host())
-						latch->WriteValue(host->CurrentRun(), 0, frameParameters);
-				},
-		});
-		if (!registered)
-			Fail("the medium's client could not be registered at the Prepass anchor");
-		mediumRegistered = true;
+		if (builder.Failed()) {
+			logger::error("[ORG] Atmosphere and Fog: the medium's passes: {}", builder.Failure());
+			return false;
+		}
+		a_client.id = kMediumClientId;
+		a_client.passes = builder.Take();
+		a_client.registerResources = [this](org::RenderGraph& a_graph) {
+			luminance->Register(a_graph);
+			transmittance->Register(a_graph);
+			noFog->Register(a_graph);
+			parameters->Register(a_graph);
+		};
+		a_client.commit = [this](const FrameAnchors::Point&) {
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				latch->WriteValue(host->CurrentRun(), 0, frameParameters);
+		};
 		logger::info("[ORG] Atmosphere and Fog: the medium is on the render graph (no shared volume: Exponential Height Fog's volumes stay the fog)");
+		return true;
 	}
 
 	/** @brief What the composite reads now. Empty while an input it needs is not on the graph yet. */
@@ -348,71 +387,99 @@ struct ORGViewAtmosphere::Impl
 		return { .source = kCompositeShader, .constantWords = kCompositeWords, .defines = RenderGraph::AnchorPasses::Defines(defines) };
 	}
 
-	void RegisterComposite(const std::shared_ptr<const ComputeProgram>& a_program, const CompositeInputs& a_inputs)
-	{
-		const auto main = FrameAnchors::EngineTarget(RE::RENDER_TARGETS::kMAIN);
-		const auto depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-		if (!main || !depth)
-			Fail("kMAIN or its depth could not be imported for the post-water composite");
-		const auto fogVolume = [&](bool a_published, std::string_view a_id) { return a_published ? Bind::Published(a_id) : Bind::Srv(*noFog); };
-		RenderGraph::AnchorPasses::Builder builder(Anchor::EngineDraws, kCompositeClientId, 0, nullptr, gate);
-		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "dispatch",
-			.program = a_program,
-			.bindings = { Bind::Shared(), Bind::Handle(sampler.Index()), Bind::Srv(depth), Bind::Uav(main), Bind::Published(kLuminanceId),
-				Bind::Published(kTransmittanceId), Bind::Published(kParametersId), fogVolume(a_inputs.fogNear, ORGExponentialHeightFog::kNearIntegratedId),
-				fogVolume(a_inputs.fogFar, ORGExponentialHeightFog::kFarIntegratedId), a_inputs.ibl ? Bind::Published(ORGIBL::kEnvId) : Bind::Unused(),
-				a_inputs.ibl ? Bind::Published(ORGIBL::kSkyId) : Bind::Unused(), a_inputs.cubemap ? Bind::Published(ORGDynamicCubemaps::kEnvBC6HId) : Bind::Unused() },
-			.gate = 0u });
-		if (builder.Failed())
-			Fail(builder.Failure());
-		const bool shared = builder.ReadsSharedConstants();
-		const bool registered = FrameAnchors::Register({
-			.id = kCompositeClientId,
-			.passes = builder.Take(),
-			.commit =
-				[this](const FrameAnchors::Point&) {
-					if (pendingRun)
-						gate->OpenDispatch(0, pendingRun->groupsX, pendingRun->groupsY, 1);
-				},
-			.active = [this] { return pendingRun.has_value(); },
-			.sharedConstants = shared,
-			.gates = { gate },
-		});
-		if (!registered)
-			Fail("the post-water composite could not be registered at the EngineDraws anchor");
-		program = a_program;
-		compositeInputs = a_inputs;
-		logger::info("[ORG] Atmosphere and Fog: the post-water composite runs on the render graph (fog {}/{}, IBL {}, cubemap {})",
-			a_inputs.fogNear ? "near" : "-", a_inputs.fogFar ? "far" : "-", a_inputs.ibl, a_inputs.cubemap);
-	}
-
-	/** @brief As ViewAtmosphere::CompositeEnabled asks on D3D11, for the media the graph composite has. */
-	static bool CompositeWanted()
+	/**
+	* @brief What the composite can read this frame, for its key. Empty while Physical Sky is on (its media are not on the graph,
+	* so its shaders keep their own aerial perspective and clouds), while no program is built, or while an input is missing.
+	* These are not variables yet, so a change invalidates the client (Prepass).
+	*/
+	std::optional<CompositeKey> Observe()
 	{
 		const auto& sky = globals::features::physicalSky;
-		const auto& fog = globals::features::exponentialHeightFog;
-		// Physical Sky's media are not on the graph. Its shaders keep their own aerial perspective and clouds meanwhile.
-		if (sky.loaded && sky.cbData.enabled)
-			return false;
-		return fog.loaded && fog.settings.enabled;
-	}
-
-	void UpdateComposite()
-	{
-		compositeWanted = CompositeWanted();
-		if (!compositeWanted)
-			return;
-		auto built = programs.Get(programGeneration, [this] { return CompositeDesc(); });
-		if (!built) {
-			if (programs.StatusOf(programGeneration) == RenderGraph::ProgramStatus::Failed)
-				Fail("the post-water composite's program could not be built");
-			return;
-		}
+		if ((sky.loaded && sky.cbData.enabled) || !globals::features::exponentialHeightFog.loaded)
+			return std::nullopt;
+		// The program builds off the render thread. A new build replaces the one in use once it is done.
+		if (auto built = programs.Get(programGeneration, [this] { return CompositeDesc(); }))
+			program = std::move(built);
+		else if (programs.StatusOf(programGeneration) == RenderGraph::ProgramStatus::Failed)
+			Fail("the post-water composite's program could not be built");
+		if (!program)
+			return std::nullopt;
 		const auto inputs = InputsNow();
 		if (!inputs)
-			return;
-		if (built != program || !compositeInputs || !(*compositeInputs == *inputs))
-			RegisterComposite(built, *inputs);
+			return std::nullopt;
+		CompositeKey key{ program, FrameAnchors::EngineTarget(RE::RENDER_TARGETS::kMAIN), FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN),
+			*inputs };
+		if (!key.main || !key.depth)
+			Fail("kMAIN or its depth could not be imported for the post-water composite");
+		return key;
+	}
+
+	/** @brief The composite's registration for a key, when a revision starts. */
+	bool MakeComposite(const CompositeKey& a_key, FrameAnchors::ClientDesc& a_client)
+	{
+		const auto fogVolume = [&](bool a_published, std::string_view a_id) { return a_published ? Bind::Published(a_id) : Bind::Srv(*noFog); };
+		const auto& inputs = a_key.inputs;
+		RenderGraph::AnchorPasses::Builder builder(Anchor::EngineDraws, kCompositeClientId, 0, nullptr, gate);
+		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "dispatch",
+			.program = a_key.program,
+			.bindings = { Bind::Shared(), Bind::Handle(sampler.Index()), Bind::Srv(a_key.depth), Bind::Uav(a_key.main), Bind::Published(kLuminanceId),
+				Bind::Published(kTransmittanceId), Bind::Published(kParametersId), fogVolume(inputs.fogNear, ORGExponentialHeightFog::kNearIntegratedId),
+				fogVolume(inputs.fogFar, ORGExponentialHeightFog::kFarIntegratedId), inputs.ibl ? Bind::Published(ORGIBL::kEnvId) : Bind::Unused(),
+				inputs.ibl ? Bind::Published(ORGIBL::kSkyId) : Bind::Unused(), inputs.cubemap ? Bind::Published(ORGDynamicCubemaps::kEnvBC6HId) : Bind::Unused() },
+			.gate = 0u });
+		if (builder.Failed()) {
+			logger::error("[ORG] Atmosphere and Fog: the post-water composite's pass: {}", builder.Failure());
+			return false;
+		}
+		const bool shared = builder.ReadsSharedConstants();
+		a_client.id = kCompositeClientId;
+		a_client.passes = builder.Take();
+		a_client.commit = [this](const FrameAnchors::Point&) {
+			if (pendingRun)
+				gate->OpenDispatch(0, pendingRun->groupsX, pendingRun->groupsY, 1);
+		};
+		a_client.active = [this] { return pendingRun.has_value(); };
+		a_client.sharedConstants = shared;
+		a_client.gates = { gate };
+		// Every registration keeps the gate and commits the same run, so a registration for new inputs lets the older one
+		// compose until the revision that holds the new one is adopted. No frame goes without it.
+		a_client.matchesById = true;
+		if (!composite.Registered())
+			++compositeCount;
+		logger::info("[ORG] Atmosphere and Fog: a post-water composite for the next revision (fog {}/{}, IBL {}, cubemap {})", inputs.fogNear ? "near" : "-",
+			inputs.fogFar ? "far" : "-", inputs.ibl, inputs.cubemap);
+		return true;
+	}
+
+	/** @brief Inside the adoption point of the first Begin whose revision holds the registration. */
+	void CompositeAdopted()
+	{
+		if (heldCount != compositeCount)
+			logger::info("[ORG] Atmosphere and Fog: the post-water composite switches in with the revision adopted at frame {}; PostWaterComposite is on",
+				globals::state->frameCount);
+		heldCount = compositeCount;
+	}
+
+	/** @brief The two clients, declared on the settings their keys read. */
+	void DeclareClients()
+	{
+		using namespace RenderGraph::Frame;
+		medium = RenderGraph::Frame::DeclareClient<bool>(
+			kMediumClientId, Dependencies{}, [](const Inputs&) -> std::optional<bool> { return true; },
+			[this](const bool&, FrameAnchors::ClientDesc& a_client) { return MakeMediumClient(a_client); });
+		// On while the adopted revision has the fog on and the last Prepass found what the composite reads.
+		const auto& fog = globals::features::exponentialHeightFog.settings;
+		composite = RenderGraph::Frame::DeclareClient<CompositeKey>(
+			kCompositeClientId, DependsOn(fog.enabled),
+			[this](const Inputs& a_in) -> std::optional<CompositeKey> {
+				if (!a_in.Get(globals::features::exponentialHeightFog.settings.enabled))
+					return std::nullopt;
+				return observed;
+			},
+			[this](const CompositeKey& a_key, FrameAnchors::ClientDesc& a_client) { return MakeComposite(a_key, a_client); },
+			[this](const CompositeKey&) { CompositeAdopted(); });
+		if (!medium || !composite)
+			Fail("the medium's or the post-water composite's client could not be declared");
 	}
 };
 
@@ -448,6 +515,8 @@ void ORGViewAtmosphere::Setup()
 		Fail("the sampler or the run gate could not be made");
 	// Before the first frame, since DCLF's draws read the exports from their first frame on.
 	state->MakeMedium();
+	// Both clients follow the frame revisions from the first one on.
+	state->DeclareClients();
 	impl = std::move(state);
 }
 
@@ -455,20 +524,21 @@ void ORGViewAtmosphere::Prepass()
 {
 	if (!impl)
 		return;
-	if (!impl->mediumRegistered)
-		impl->RegisterMedium();
 	// No shared volume yet, so every frame stages the parameters of no medium.
 	impl->frameParameters = {};
-	impl->UpdateComposite();
+	// What the composite reads is not a variable yet. A change makes its key again when the next revision starts.
+	if (auto seen = impl->Observe(); seen != impl->observed) {
+		impl->observed = std::move(seen);
+		impl->composite.Invalidate();
+	}
 }
 
 bool ORGViewAtmosphere::CompositeActive() const
 {
-	// On only in frames whose schedule draws the composite, so PostWaterComposite and the composite agree. The schedules are taken at
-	// Renderer::Begin, before anything reads the flag, and do not change during the frame. Before this, the flag followed the
-	// registration and frames whose build lagged had no fog at all. Migration 6.21 deletes this.
-	return impl && impl->compositeWanted && impl->compositeInputs.has_value() && RenderGraphRuntime::Get().IsActive() &&
-	       FrameAnchors::ScheduledThisFrame(kCompositeClientId, Anchor::EngineDraws);
+	// The registration the adopted revision holds. A new one switches in with its revision, so PostWaterComposite and the
+	// composite agree in every frame. A removed one stops at once: its gate closes, and the shaders do their own fog again.
+	return impl && impl->composite.Registered() && impl->compositeCount != 0 && impl->heldCount == impl->compositeCount &&
+	       RenderGraphRuntime::Get().IsActive();
 }
 
 void ORGViewAtmosphere::CompositeAfterWater()
@@ -481,13 +551,6 @@ void ORGViewAtmosphere::CompositeAfterWater()
 		impl->compositeFrame == frame)
 		return;
 	impl->compositeFrame = frame;
-	// CompositeActive already asked ScheduledThisFrame, the answer PostWaterComposite took for this frame. The open stage must take
-	// the tap now, else the frame applies no fog: a disagreement, logged.
-	if (!FrameAnchors::Scheduled(kCompositeClientId, Anchor::EngineDraws)) {
-		static Util::ReasonLog s_lag("[ORG] Atmosphere and Fog: the post-water composite's stage does not take its tap, though the frame's schedule holds it");
-		s_lag.Report("not scheduled");
-		return;
-	}
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	if (!main.texture)
 		return;
@@ -501,9 +564,10 @@ void ORGViewAtmosphere::CompositeAfterWater()
 	impl->pendingRun.reset();
 	if (result && !std::exchange(impl->reportedRun, true))
 		impl->ReportFirstRun(desc, width, height);
+	// PostWaterComposite is on for this frame, so the frame has no fog where this did not run.
 	if (!result) {
-		static Util::ReasonLog s_missed("[ORG] Atmosphere and Fog: the post-water composite did not run this frame");
-		s_missed.Report(result.status == FrameAnchors::RunStatus::Idle ? "idle (the schedule does not hold it yet)" :
+		static Util::ReasonLog s_missed("[ORG] Atmosphere and Fog: the post-water composite did not run this frame, though PostWaterComposite is on");
+		s_missed.Report(result.status == FrameAnchors::RunStatus::Idle ? "idle (the schedule does not hold it)" :
 		                result.status == FrameAnchors::RunStatus::Refused ? "refused" :
 		                                                                     "its epoch failed");
 	}
@@ -526,7 +590,7 @@ ID3D11ShaderResourceView* ORGViewAtmosphere::ParametersSRV() const
 
 void ORGViewAtmosphere::ClearShaderCache()
 {
-	// A new key builds the program again. The registered one keeps compositing until it is built.
+	// A new key builds the program again. The registered composite keeps composing until the new one is built and adopted.
 	if (impl)
 		++impl->programGeneration;
 }

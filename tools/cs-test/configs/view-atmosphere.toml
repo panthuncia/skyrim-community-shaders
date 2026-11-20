@@ -1,0 +1,99 @@
+# Atmosphere and Fog's settings changed mid-session (frame revision plan 6.21). The fog is turned on, so the post-water composite
+# switches in with a revision. Then ViewAtmosphere's toggle and its distant grid change: the atlas follows them, one texel while
+# the shared volume is not on the graph, so no new version and no build. Then the fog goes off and on again: the composite is
+# removed and comes back with a revision, and PostWaterComposite follows it. A shot after each change.
+# Compose it: native-vulkan+view-atmosphere, native-d3d12+view-atmosphere, guest+view-atmosphere.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fog"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.enabled=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "atmosphere-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.distantPixelSize=48"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "ViewAtmosphere.distantSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "distant"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.enabled=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fog-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fog-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fog", "atmosphere-off", "distant", "fog-off", "fog-back"]

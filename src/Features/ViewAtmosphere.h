@@ -8,7 +8,7 @@
 class ViewAtmosphere : public Feature
 {
 public:
-	/** @brief Binds the grid settings to their frame variables. The global is the only instance. */
+	/** @brief Binds the toggle and the grid settings to their frame variables. The global is the only instance. */
 	ViewAtmosphere();
 
 	std::string GetName() override { return "Atmosphere and Fog"; }
@@ -26,8 +26,6 @@ public:
 	void DrawDebugSection() override;
 	/** @brief Loads global volume quality settings. */
 	void LoadSettings(json& value) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	SizeProjection ProjectSizeSettings() const override;
 	/** @brief Saves global volume quality settings. */
 	void SaveSettings(json& value) override;
 	/** @brief Restores shared volume quality defaults. */
@@ -59,16 +57,16 @@ public:
 	STATIC_ASSERT_ALIGNAS_16(GpuSettings);
 	static_assert(sizeof(GpuSettings) == 64);
 
-	/** @brief The CPU settings. The grid sizes change the frame's shape, so they are CS::Setting. */
+	/** @brief The CPU settings. The toggle and the grid sizes change the frame's shape, so they are CS::Setting. */
 	struct Settings
 	{
-		uint enabled = 1;
+		CS::Setting<std::uint32_t> enabled = 1;
 		CS::Setting<std::uint32_t> nearPixelSize = 16;
 		CS::Setting<std::uint32_t> nearSlices = 64;
 		CS::Setting<std::uint32_t> middlePixelSize = 64;
 		CS::Setting<std::uint32_t> middleSlices = 32;
-		uint distantPixelSize = 32;
-		uint distantSlices = 64;
+		CS::Setting<std::uint32_t> distantPixelSize = 32;
+		CS::Setting<std::uint32_t> distantSlices = 64;
 		uint historyMissSamples = 4;
 		float nearRange = 8000.0f;
 		float localRange = 60000.0f;
@@ -81,6 +79,21 @@ public:
 
 	/** @brief The GPU block built from the settings. */
 	GpuSettings GetCommonBufferData() const;
+
+	/** @brief Where the three grids sit in the atlas. */
+	struct AtlasLayout
+	{
+		DirectX::XMUINT4 size[3];    // per grid: width, height, slices
+		DirectX::XMUINT4 offset[3];  // per grid: its corner in the atlas
+		DirectX::XMUINT4 atlas;      // the atlas extent
+	};
+
+	/**
+	* @brief The grids and the atlas for a screen size and the grid settings, at most 8 M texels. Clamps the settings as
+	* Prepare does. D3D11 passes the dynamic size, the graph the display size.
+	*/
+	static AtlasLayout LayoutFor(float2 a_screen, std::uint32_t a_nearPixels, std::uint32_t a_middlePixels, std::uint32_t a_distantPixels,
+		std::uint32_t a_nearSlices, std::uint32_t a_middleSlices, std::uint32_t a_distantSlices);
 
 	/** @brief Prepares the shared volume before standalone fog selects its path. */
 	bool Prepare();

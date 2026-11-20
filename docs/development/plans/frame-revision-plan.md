@@ -182,7 +182,7 @@ A compact map. Mechanisms are described in the investigation; this lists where t
 | Engine targets | `src/RenderGraph/Engine/Targets/EngineTargets.cpp:BeginSet/EndSet/Settle/Move`, called around the engine's `BSShaderRenderTargets::Create` in `src/Hooks.cpp` (the thunk with `Targets::BeginSet`). `Enabled()` = `Native::GraphMode()`. |
 | Frame transients | `src/RenderGraph/Frame/Transients.cpp:Place` (callers: `Engine/Native/NativeDevice.cpp` engine target groups, `Engine/Scaleform/Passes.cpp` scratch). |
 | Previous-frame reads | `src/RenderGraph/Frame/RecipeTable.h:kPreviousFrame` (15 ids; checked by `Recipe.cpp`): a stage reads a resource before the stage that writes it, so it gets last frame's contents. New: Physical Sky's `TransmittanceLut`, `SkyViewLut`, `ApLut`, `DiskPhaseLut`, read by the sky's reflection faces in the start stage before the pre-depth stage writes them (`4e219be6c`). |
-| Schedule gate | `FrameAnchors.h:Scheduled(id, anchor)`. A client registered inside the frame runs nothing until a build that holds it switches in. Users: ViewAtmosphere's post-water composite (`ORGViewAtmosphere.cpp:CompositeAfterWater`, `5511e835b`), the screenshot's clean scene (`ORGScreenshot.cpp`). |
+| Schedule gate | `FrameAnchors.h:Scheduled(id, anchor)`. A client registered inside the frame runs nothing until a build that holds it switches in. Users: the screenshot's clean scene (`ORGScreenshot.cpp`). ViewAtmosphere's post-water composite used it until 6.21. |
 | Staged buffers | `ORGPhysicalLens.cpp` `StagedBuffer::Poll`: a new ghost paths version uploads on the uploader's worker path (`WorkerOwnedDestination::PendingVersion`), the render thread polls the ticket each frame, then `AtNextBegin` adopts it and calls `NoteNewVersions`. |
 | Readbacks | `org::runtime::IReadbackService` through readback passes: `ORGPhysicalLens.cpp:FocusReadbackPass` (new), `ORGHistogramAutoExposure.cpp:ReadbackPass` (now feeds the pre-exposure metering, `eb71d2e7f`), the screenshot's readback buffers (Capture anchor), and Physical Sky's lightning ring (planned, `physical-sky-port.md` section 6). |
 
@@ -747,6 +747,30 @@ of the client ran". Test: `skylighting-reset` (new).
   serial in the client's key and calls `DeclaredClient::Invalidate` (step 9b). The `FrameAnchors::Scheduled` gates stay on the
   evaluate's copy, the hudless copy and the frame generation inputs. See "Decided by the agent (step 6.14)" in section 9.
 
+**As built (2026-11-19, 6.21, `org-native/rev-step6-21`).** Atmosphere and Fog's medium and post-water composite follow the
+revisions.
+- `enabled`, `distantPixelSize` and `distantSlices` are `CS::Setting`s too, so all seven size and toggle fields are. ViewAtmosphere's
+  `ProjectSizeSettings` is gone. The atlas layout is one function, `ViewAtmosphere::LayoutFor`, which D3D11's `Prepare` and the
+  graph's declaration share.
+- The luminance and transmittance atlases are `DeclareTexture3D` on `DisplaySize` and the seven fields (at most 8 M texels),
+  published once at Setup. While the shared volume is off they are one texel (the existence rule). It is always off on the graph,
+  since its inject and integrate passes wait on Physical Sky's media (`view-atmosphere-port.md` 3.6), so no setting change makes
+  a version yet.
+- Both clients are declared at Setup. The medium has no dependencies and registers at the first revision, no longer from the first
+  Prepass. The composite is `DeclareClient` on EHF's `enabled`. Its key is what the last Prepass observed: Physical Sky off, the
+  program built (the newest build of `ProgramCache`), the inputs published, and kMAIN and its depth. These are not variables yet,
+  so a change calls `Invalidate()`, as EHF does with its inputs.
+- `CompositeActive()`, and so `PostWaterComposite`, is the registration the adopted revision holds: the client's `adopted` call
+  sets it, so the composite and the flag switch in at one Begin. A removal (fog off, Physical Sky on) stops both at once: the gate
+  closes when the client is unregistered, and the shaders do their own fog from that frame on.
+- Every composite registration sets `matchesById`, keeps the gate and commits the same run, so a registration for new inputs lets
+  the older one compose until its revision is adopted. No frame has the flag on without the composite.
+- Gone: the `FrameAnchors::Scheduled` gate in `CompositeAfterWater`, `CompositeActive()`'s `ScheduledThisFrame` (Q12's point fix),
+  the in-frame registration of both clients (`UpdateComposite`, `RegisterComposite`, `RegisterMedium`, `compositeWanted`).
+- The shared volume's switch (`SharedVolumeActive`, still false) uses the existence rule when it lands: the fog's volumes go one
+  texel through their declaration, and their ids stay published. `view-atmosphere-port.md` 3.3 says so now.
+- The config is `view-atmosphere`.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1171,7 +1195,7 @@ Each mechanism the ports added, what event drives it, what it carries and what r
 | Previous-frame reads | Physical Sky (faces) | none | last frame's LUT contents | yes | yes, with 7.5's first-frame note. |
 | Per-draw latch handles | Physical Sky (sky, water families) | none | heap indices per draw | yes (late-bound) | yes. |
 | Medium client with latched parameters | ViewAtmosphere | `enabled`, atlas sizes (6.21) | versioned Texture3D medium, parameters copied from the latch each run | yes | yes, once the atlas is declared on its settings. |
-| Post-water composite with a lagging registration | ViewAtmosphere | `CompositeActive()` inputs | a client at EngineDraws, `PostWaterComposite` | yes | not today: the registration and `PostWaterComposite` switch before the build that holds the client (`Scheduled` gate). Fixed by 6.21. |
+| Post-water composite with a lagging registration | ViewAtmosphere | `CompositeActive()` inputs | a client at EngineDraws, `PostWaterComposite` | yes | yes (6.21): `PostWaterComposite` is the registration the adopted revision holds, and the `Scheduled` gate is gone. |
 | Skin material pool | Advanced Skin in DCLF | per-slot resolve each frame; `GpuTextures` replies and generation | table rows at t38, descriptor owners | n/a (FrameValues) | yes: late-bound. |
 | Staged ghost paths | Physical Lens | a new lens model (CPU) | a `VersionedBuffer` version and the model fields it was built for | the post stage's recording binds the slot: the version must be adopted at a boundary | yes, as a `kBuffers` fragment (4e). Today: `AtNextBegin` (intermediate). |
 | Lens caches (mapping, diffraction, ghost wave, planning) | Physical Lens | inputs compared at commit | Persistent textures and buffers | yes: gates, and the indirect argument seeds are copied from the latch every run, zeros when idle | yes. |
@@ -1645,6 +1669,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   change, as before. It needs `DeclareProgram` (6.4) on the engine target formats once those are variables (step 9).
 - **Builder failures in a client's make are fatal now** (Declare.cpp: "false is fatal"). They returned the feature to D3D11
   before.
+
+**Decided by the agent (step 6.21, Atmosphere and Fog, 2026-11-19), to confirm:**
+- **The composite does not follow ViewAtmosphere's `enabled`.** On D3D11 `CompositeEnabled` never reads it, and section 6.4 lists it
+  for the composite. Only the atlas depends on it, through the shared volume. Changing this would change D3D11 parity.
+- **The atlas is one texel while the shared volume is off**, and it is always off on the graph today (`Impl::sharedVolumePasses`,
+  set once the inject and integrate passes exist). Sizing it from the settings with no writer would cost up to 128 MB for nothing.
+- **A removal switches `PostWaterComposite` off at the revision's start, not at its adoption.** `Declarations::Evaluate`
+  unregisters at once, which closes the gate, so the composite stops then. The flag follows it in the same frame. A deferred
+  removal would need the declaration API to keep an empty key's registration until adoption.
+- **`matchesById` on the composite.** Without it, a registration for new inputs leaves the stage running the old one without its
+  commit, so frames between registration and adoption would have the flag on and no fog. Scaleform uses it for the same reason.
+- **The composite's program stays on `ProgramCache`**, not `DeclareProgram`: its defines are fixed for the session, and only
+  `ClearShaderCache` builds it again. The key carries the program, so a rebuild is a new registration with the next revision.
+- **Physical Sky's `enabled` is observed, not a variable**, until 6.22 ports it. Then it joins the composite's dependencies.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
