@@ -878,6 +878,21 @@ revisions.
   the cascades and the volumetric copy when a revision carries the change, with the width from the variable. `Observe`, the
   EarlyPrepass compare and `Invalidate` are gone. `UpdateImports` only checks that the cascades' view is still there (fatal if
   not), without importing.
+- **Section 8 greps after the follow-ups** (over `src/`, `e9674777b` plus this branch):
+  - `ResetHistories`, `RegisterAgain`: none.
+  - `clearPending`: only `DrawcallLimitFix/Diagnostics/PlayerParity.cpp`, a diagnostic's own flag, not a history reset (no owner).
+  - `Rearm`: only the definition (`FrameAnchors.{h,cpp}`) and `AnchorPasses.h`'s one-shot comments. No caller is left; step 7a
+    deletes it with the one-shot passes (Terrain Shadows' heightmap upload, 6.3).
+  - `AtNextBegin`: the hook (`FrameDriver.{h,cpp}`), `GraphResources.cpp`'s `ApplySizeRequests` and `GraphResourcesSelfTest.cpp`.
+    Step 7a.
+  - `RequestSize`: only `GraphResources.{h,cpp}`'s definitions and `Revision.{h,cpp}`'s wish hook comments. No feature calls it.
+    Step 7a.
+  - `Refresh(`, the frame-revision ones: `FrameAnchors::Refresh` in DCLF's Sky, DecalOcclusion, BloodSplatter and ShadowMask
+    clients and its test harness, and in `BinkGraph.cpp` (6.19); in `Menu/ImGuiRenderer.cpp` when the overlay's target import
+    changes (no migration owns it: an engine import, step 9b, or 6.15 if the HDR toggle is what moves it); in
+    `GraphResourcesSelfTest.cpp`, and `PublishedResources::Refresh` from the anchors' resize poll (step 7a). The other matches
+    (`BaselineManager`, `GoToIndex`, `FormEditSources`, `LightEditor`, Terrain Shadows' `NeedsRefresh`, DCLF's
+    `RequestAccumulatedRefresh`) are other mechanisms.
 
 ---
 
