@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <string>
 #include <string_view>
@@ -359,37 +360,49 @@ namespace FrameAnchors
 	void LatchMainThread();
 
 	/**
+	* @brief How imports change (frame revision plan, step 9b). The first import of an id makes its slot, with every view the texture's
+	* bind flags allow in its format plus the views the caller names. Later calls with the same texture return the slot. A new texture
+	* under the id, or a view the slot lacks, is a change: inside the frame's adoption point (a declared client's key, make or adopted
+	* call) it becomes a pending version of the revision being prepared, adopted with it. Anywhere else it is TapError::OutsideAdoption,
+	* naming the id and a_caller, and the slot keeps its version. So import what can change in a declared client's key, never mid-frame.
+	*/
+
+	/**
 	* @brief An engine render target as a graph slot, registered as "cs.engine.target.<index>". Null if it cannot be imported.
 	* Render thread. Each image has one graph resource, so this may return an existing slot or ORG's own resource instead.
 	*/
-	Texture EngineTarget(std::uint32_t a_target);
+	Texture EngineTarget(std::uint32_t a_target, const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
-	Texture EngineDepth(std::uint32_t a_depthStencil);
+	Texture EngineDepth(std::uint32_t a_depthStencil, const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief EngineTarget for a cubemap target, with cube views and its faces' RTVs: "cs.engine.cubemap.<index>". */
-	Texture EngineCubemap(std::uint32_t a_cubemap);
+	Texture EngineCubemap(std::uint32_t a_cubemap, const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief Imports a texture a feature still owns in D3D11 as "cs.d3d11.<name>". Any view may be null.
 	*  The first import of a name decides its views, so import it the same way everywhere. */
 	Texture D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
-		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr);
+		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr, const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief Imports a texture loaded once from a file and only read after, such as a noise or LUT texture.
 	*  Native mode makes it one untracked graph resource that passes may only read. Elsewhere it imports as D3D11Texture does. */
-	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
+	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
+		const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief EngineDepth for a depth texture outside the engine's table. Registered as a_id and kept while the texture stays the same. */
-	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id,
+		const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief Imports any other D3D11 texture with the views a_views names, registered as a_id. For targets like Scaleform's and ImGui's. */
-	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views);
+	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views,
+		const std::source_location& a_caller = std::source_location::current());
 
 	/**
 	* @brief The one graph resource of an image used by a graph outside the anchors, such as DCLF's epochs. Render thread.
 	* The slot keeps a_texture alive so the handle is never reused. A later id import of the same image takes the slot over.
 	*/
-	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name);
+	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name,
+		const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief Whether a CS stage holds uncommitted staged values. D3D11 work reaching DXVK now runs ahead of it. Any thread, no lock. */
 	bool StagesHoldValues();
