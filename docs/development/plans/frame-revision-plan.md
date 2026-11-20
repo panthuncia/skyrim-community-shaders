@@ -1203,6 +1203,54 @@ constants), no key build, shots match.
 
 **Size.** Medium. One agent.
 
+**As built (2026-11-19, `org-native/rev-step8`).** Code only; not built or run by the agent.
+- **ImageSpace render-size steps take their viewport from the latch.** `StepArea::Render` steps (SSR, SAO, the snow copy, the
+  water blend, the VL composite) record the whole output as their render area. Their program uses a new vertex stage,
+  `RenderGraph/FullscreenLatchViewportVS.hlsl`, which draws a quad (six vertices, two triangles) in the viewport the draw's latch
+  holds. `ConstantsAt` (and `OrgEngineConstantsAt`) gained `viewport` (scale and offset as fractions of the render area); it is
+  48 bytes, `kLatchStride` 112. `StageStep` writes it at each draw from the engine's dynamic-resolution ratios
+  (`RenderViewportOf`, snapped as `OriginViewport` snaps), and opens the draw with six vertices. The program key carries
+  `latchViewport`; `DescribeRaster` passes the latch's push word as `ORG_VIEWPORT_LATCH_WORD`.
+- **No ratios in the step keys.** `WorldKey::ratios`, `ChainKey::ratios`, `BuildRatiosScope`, `g_buildRatios` and
+  `DynamicRatios()` are gone, and the world and chain clients no longer depend on `DynamicRatios`.
+- **`post.dynres` is gone** from `PostChain::Read`, `PostFields` and `DiffPost`. The engine's dynamic-resolution upsample group
+  is always on, gated like the screenshot, so a ratio changes no rows and no build key.
+- **Upscaling: the quality mode builds nothing.** The Upscale client depends on `DisplaySize` and `UpscaleMethod` only. Its key
+  holds the depth upscale for any SDK method; the depth, refraction and underwater copies are gated on the depth entry with the
+  depth upscale, so a native-quality frame skips them as D3D11 does. The copy into kMAIN and the evaluate were already per run.
+- **Enforcement.** `Frame::DeclareTexture2D/3D` and `DeclareBuffer` fail (`FailDeclaration`) when a dependency is a
+  constants-only variable (`Vars::Lane::ConstantsOnly`: `RenderSize`, `DynamicRatios`, `ShaderGeneration`). No declaration did.
+- **Left as they are:** Screen Space Shadows' sample count (6.4) and Effects11's rays areas (6.10) still read
+  `Util::ConvertToDynamic` at the revision's start and depend on `DynamicRatios`. Upscaling holds the dynamic-resolution lock then,
+  so their keys compare equal and nothing registers again. The post chain's `DynamicViewport()` stays the whole of kMAIN. See
+  "Decided by the agent (step 8)" in section 9.
+- **What a ratio change is now:** a quality mode write raises `Setting.Upscaling.qualityMode`; the next frame's
+  `ConfigureUpscaling` raises `DynamicRatios`, `RenderSize` and `UpscalerOptions`. Each is a variables-only revision: twins `[]`,
+  staged builds 0, member stages none.
+
+**Measurement (for the director to run).** The VRAM cost of decision 6a, at a 3840x2160 display:
+1. `python tools/cs-test/cs_test.py run native-vulkan+dynres-vram`. It sets FSR, quality 4 (a third per axis), takes two
+   `vram-json` dumps, then quality 0 and two more. `cs.vram_debug` and `org.vram_source = "org"` are on. If FSR does not run on the
+   device, change the config's upscale step to the method that does.
+2. Read the second dump of each pair (the first writes the previous snapshot). The device-local totals at quality 4 and at
+   quality 0 must be equal within a few MB: no allocation follows the ratio.
+3. The cost: sum the bytes of the CS rows (owners under `CS/` and `ORG/`, not `Game/`) whose extent is 3840x2160 or half of it and
+   that hold render-size content (SSGI's histories and working textures, SSS, Screen Space Shadows, the ImageSpace kept textures,
+   the upscaler's inputs, Effects11's rays). The saving that render-size textures would give at quality 4 is that sum times 8/9.
+   Record the totals, the sum and the saving here, under this step, with the build's hash.
+
+**Tests (for the director to run).**
+- `python tools/cs-test/cs_test.py run native-vulkan+upscalers`, `native-d3d12+upscalers`, `guest+upscalers`: every method's
+  shot matches the pre-step-8 build's; no tap error, no "has no CS pass" line.
+- `python tools/cs-test/cs_test.py run native-vulkan+flicker-taa`: no new flicker against the pre-step-8 build (TAA history at
+  display size).
+- `python tools/cs-test/cs_test.py run native-vulkan+dynres` (and `native-d3d12+dynres`, `guest+dynres`): each quality change's
+  `[ORG] frame revision N: adopted` lines show twins `[]`, `staged builds 0` and `member stages [none]`; no `[ORG] frame
+  declaration: client ... registered` and no `[ORG] ImageSpace: ... are CS passes` line follows a quality change (only the
+  `upscale` steps). The shots of one quality match the pre-step-8 build's, and `-q1-back` matches `-q1` of the same method.
+- `python tools/cs-test/cs_test.py run d3d11+dynres` once, as the reference: at quality 4 SSR, SAO and the water blend cover only
+  the render-size part, and the graph modes' `-q4` shots match it.
+
 ---
 
 ### Step 9. Engine imports through events
@@ -2335,6 +2383,32 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The self-test's prepared part was deleted, not ported.** It adopted versions by hand at `AtNextBegin`, the pattern step 7
   removes; the lane does the same work in every `resize` run.
 - **The coordinator's wish names were renamed**, not only the `RequestSize` input removed, so the section 8 grep holds.
+
+**Decided by the agent (step 8, 2026-11-19), to confirm:**
+- **The latched viewport is the engine's live ratio of the draw, not the adopted `DynamicRatios`.** The engine renders the world,
+  and computes the steps' constants, at the ratio `ConfigureUpscaling` sets that frame, while the adopted value is one revision
+  behind. The hook writes it at each draw, so it is late-bound (R1). It applies whatever the lock, as the baked viewports did.
+- **A quad drawn by the vertex stage, not a recorded viewport.** A viewport or scissor is recorded state, so it cannot come from a
+  latch. Six vertices cover exactly the viewport's pixels, with TEXCOORD0 across it, as the engine's viewport does. The vertex
+  stage finds the latch by push word, which `DescribeRaster` computes from the bindings `MakePass` makes (the words before the
+  sources' latch); a new binding before the latch must keep that formula.
+- **The viewport's area comes from the newest registration's spec** (`SpecOfEntry`), as the hooks already take the newest entries
+  (6.7's "layout switches when the registration is built"). Only a display size change moves it, so the window is the same.
+- **The engine's upsample group is always on, gated.** It runs only with the engine's own dynamic resolution unlocked, which CS's
+  Upscaling never leaves at the post chain; keeping it on costs a closed gate.
+- **Upscaling's depth upscale is in the registration for every SDK method,** gated, with its copies. The first time a session goes
+  below native the depth inputs are found then, which still registers the client once (`UpscaleInputsChanged`).
+- **Screen Space Shadows and Effects11's rays keep their `DynamicRatios` dependency.** SSS's program does depend on the render
+  size (its scaled sample count is a define), so it stays a program key. Effects11's areas are baked viewports of its own shaders;
+  putting them in a latch needs the same vertex-stage change in Effects11's programs. Both read `Util::ConvertToDynamic` at the
+  revision's start, which returns the display size while Upscaling holds the lock (it sets it in `ConfigureUpscaling` and at the
+  upscale; only the precipitation and face-gen hooks clear it, until the next set). If `dynres` shows `client cs.e11.rays
+  registered` or a `ScreenSpaceShadows::Raymarch` build after a quality change, make both read the display size, or move
+  Effects11's areas to a latch.
+- **The post chain's viewport stays the whole of kMAIN.** It runs after the upscale, where the dynamic part is the whole image.
+  Its constants keep `CommitContext::DynamicSize`.
+- **The enforcement lists the constants-only variables in CS** (`Vars::Lane::ConstantsOnly`), since OMS's `VariableSet` gives no
+  traits without a snapshot, and taking one at declaration would race the lane. It also covers `DeclareBuffer`.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
