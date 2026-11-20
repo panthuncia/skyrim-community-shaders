@@ -314,3 +314,9 @@ final until the user confirms it.
     - **Open:** nothing flags a DCLF epoch that keeps re-staging and never switches in. A `Starved`-like tap error is
       wanted.
     - **10b:** written code-only in parallel, merged only after 10a's full runs pass.
+59. **Batch 5 passed 38 of 38** (7d, 8, 9a, 9b and the fixes), including `ibl` and `post-effects` in three modes each,
+    and `dynres` in three modes. The `hdr-2`/`sdr-2` shots, two frames after each switch, are not black in any of the
+    four modes (mean luma 109 to 174), so 9a's black-frame acceptance holds. `dynres` showed no Screen Space Shadows
+    program build and no Effects11 rays re-registration on a quality change.
+60. **10a builds clean.** Its full set (the step 7 list plus `river`, `rain`, `flicker-taa`, `shader-reload`,
+    `dclf-toggles`, `native-census` and `native-tour`) runs as batch 6.
