@@ -374,9 +374,10 @@ namespace RenderGraph::Frame::Recipes::Table
 	// Physical Sky's LUTs, AP shadow, sky tail and cloud outputs: the sky's reflection faces draw in the start stage, before the pre-depth
 	// and pre-main stages make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their
 	// contents across frames (History/Persistent).
-	inline constexpr std::array<std::string_view, 27> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// IBL's two SH textures: the sky faces (start) read last frame's, since the projection runs at Prepass (pre-main). Both are History.
+	inline constexpr std::array<std::string_view, 28> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
-		"Engine::kMAIN_COPY", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
+		"Engine::kMAIN_COPY", "IBL::EnvIBL", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
 		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow",
 		"PhysicalSky::SkyTail", "PhysicalSky::ShadowVolume", "PhysicalSky::CloudShadowMean", "PhysicalSky::VolTr", "PhysicalSky::VolLum",
 		"PhysicalSky::VolAux", "PhysicalSky::VolCubeTr", "PhysicalSky::VolCubeLum", "PhysicalSky::VolCubeDepth", "PhysicalSky::LightningChannels",

@@ -54,6 +54,9 @@ namespace PublishedResources
 				std::shared_ptr<org::Resource> resource;
 				std::shared_ptr<org::VersionedTexture> slot;  // registered as the id's resolver in place of resource
 				std::shared_ptr<org::VersionedBuffer> bufferSlot;  // the same for a buffer
+				// Read by a build's ShaderResourceVariant and ShaderResourceIndex, which may run off the render thread.
+				std::optional<org::SRVViewType> view;
+				bool published = false;
 			};
 			std::vector<Registered> resources;
 		};
@@ -141,12 +144,18 @@ namespace PublishedResources
 		};
 
 		/** @brief Stores the entries for the next builds. A new id rebuilds only the graphs that looked it up, a replaced one rebuilds all. */
-		void Store(State& a_state, org::GraphHost& a_host, Change a_change, std::string_view a_what)
+		/** @brief Stores the entries for the next builds, and requests none. */
+		void StoreSnapshot(State& a_state)
 		{
 			auto snapshot = std::make_shared<Snapshot>();
 			for (const auto& entry : a_state.entries)
-				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot, entry.bufferSlot });
+				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot, entry.bufferSlot, entry.view, entry.published });
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
+		}
+
+		void Store(State& a_state, org::GraphHost& a_host, Change a_change, std::string_view a_what)
+		{
+			StoreSnapshot(a_state);
 			if (!a_host.HasExtension(kExtensionId)) {
 				a_host.AddExtension(kExtensionId, [&a_state]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
 					return std::make_unique<PublishedExtension>(a_state.snapshot.load(std::memory_order_acquire));
@@ -220,8 +229,10 @@ namespace PublishedResources
 				entry->srv = a_source.srv;
 				entry->twin = a_source.twin;
 				entry->alive = a_source.alive;
-				if (!std::exchange(entry->published, true))
+				if (!std::exchange(entry->published, true)) {
+					StoreSnapshot(state);
 					logger::info("[ORG] '{}' published again", a_id);
+				}
 				return true;
 			}
 			const auto change = entry ? Change::Replaced : Change::Added;
@@ -346,12 +357,15 @@ namespace PublishedResources
 
 	void Withdraw(std::string_view a_id)
 	{
-		auto* entry = Find(Published(), a_id);
+		auto& state = Published();
+		auto* entry = Find(state, a_id);
 		if (!entry)
 			return;
 		entry->srv = nullptr;
-		if (std::exchange(entry->published, false))
+		if (std::exchange(entry->published, false)) {
+			StoreSnapshot(state);
 			logger::info("[ORG] '{}' withdrawn: its readers return to D3D11", a_id);
+		}
 	}
 
 	namespace
@@ -363,6 +377,30 @@ namespace PublishedResources
 			if (!snapshot)
 				return std::nullopt;
 			return std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; });
+		}
+
+		/** @brief What ShaderResourceIndex and ShaderResourceVariant read for one id. */
+		struct IndexSource
+		{
+			std::shared_ptr<org::Resource> current;
+			std::optional<org::SRVViewType> view;
+			bool found = false;
+			bool published = false;
+		};
+
+		/** @brief During a build, from the snapshot that graph registers. Otherwise from the live entries, on the render thread. */
+		IndexSource IndexSourceOf(std::string_view a_id)
+		{
+			if (const auto snapshot = t_building.lock()) {
+				const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
+				if (found == snapshot->resources.end())
+					return {};
+				return { found->slot ? found->slot->CurrentResource() : found->resource, found->view, true, found->published };
+			}
+			const auto* entry = Find(Published(), a_id);
+			if (!entry)
+				return {};
+			return { CurrentOf(*entry), entry->view, true, entry->published };
 		}
 	}
 
@@ -407,20 +445,20 @@ namespace PublishedResources
 
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where)
 	{
-		const auto* entry = Find(Published(), a_id);
-		if (!entry || !entry->published || !RenderGraphRuntime::Get().IsActive())
+		// A pass's Declare reads it during a build, which may run on the build thread.
+		const auto source = IndexSourceOf(a_id);
+		if (!source.published || !RenderGraphRuntime::Get().IsActive())
 			return false;
 		if (RenderGraph::UndeclaredAccess::On())
 			RenderGraph::UndeclaredAccess::NotePublished(a_id, a_where);
-		const auto current = CurrentOf(*entry);
-		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(current.get());
+		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(source.current.get());
 		if (!indexed)
 			return false;
 		try {
-			if (entry->view) {
-				if (indexed->GetNumSRVSlices(*entry->view) == 0 || indexed->GetNumSRVMipLevels(*entry->view) == 0)
+			if (source.view) {
+				if (indexed->GetNumSRVSlices(*source.view) == 0 || indexed->GetNumSRVMipLevels(*source.view) == 0)
 					return false;
-				a_index = indexed->GetSRVInfo(*entry->view, 0, 0).slot.index;
+				a_index = indexed->GetSRVInfo(*source.view, 0, 0).slot.index;
 			} else {
 				// Throws for a resource without a primary view.
 				if (indexed->GetNumSRVSlices() == 0 || indexed->GetNumSRVMipLevels() == 0)
@@ -435,8 +473,8 @@ namespace PublishedResources
 
 	std::uint32_t ShaderResourceVariant(std::string_view a_id)
 	{
-		const auto* entry = Find(Published(), a_id);
-		return entry && entry->view ? static_cast<std::uint32_t>(*entry->view) : UINT32_MAX;
+		const auto source = IndexSourceOf(a_id);
+		return source.found && source.view ? static_cast<std::uint32_t>(*source.view) : UINT32_MAX;
 	}
 
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view)
