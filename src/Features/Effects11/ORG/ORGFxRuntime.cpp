@@ -27,17 +27,20 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include "FxLower.h"
 #	include "FxParser.h"
 
+#	include "Features/Effects11.h"
 #	include "Features/Effects11/EffectManager.h"
 #	include "Features/Effects11/SettingManager.h"
 #	include "Features/Effects11/TextureManager.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/Engine/TonemapAnchor.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/TonemapAnchor.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "State.h"
 
@@ -74,6 +77,7 @@ namespace
 	using Res = FrameAnchors::Texture;
 	using Lifetime = GraphResources::Lifetime;
 	namespace AP = RenderGraph::AnchorPasses;
+	namespace RF = RenderGraph::Frame;
 
 	/** @brief In the order ExecuteEffects runs them. */
 	enum class Fx : std::uint8_t
@@ -185,39 +189,63 @@ namespace
 		return {};
 	}
 
-	/** @brief Kept while the screen size stays the same. */
-	struct Resources
+	/** @brief The display size of a revision's values. Before the first display size, the engine's screen. */
+	RF::Vars::Extent2D DisplayOf(const RF::Inputs& a_in)
 	{
-		std::uint32_t width = 0;
-		std::uint32_t height = 0;
-		std::map<std::string, std::unique_ptr<GraphResources::Texture2D>, std::less<>> textures;
-		// Kept textures a run has cleared to zero, as DXVK's D3D11 textures start.
-		// A plan adds a one-shot clear for each kept texture not in here.
-		std::set<std::string, std::less<>> cleared;
+		auto display = a_in.Get(RF::Vars::DisplaySize());
+		if (!display.width || !display.height) {
+			const auto* graphics = globals::game::graphicsState;
+			display = { static_cast<std::uint32_t>(graphics->screenWidth), static_cast<std::uint32_t>(graphics->screenHeight) };
+		}
+		return display;
+	}
 
-		/** @brief Created on first use. Null when the name is unknown or the texture cannot be made. */
-		GraphResources::Texture2D* Get(std::string_view a_name)
+	/** @brief A texture's row in kTextures. */
+	std::uint32_t RowOf(const TextureSpec& a_spec)
+	{
+		return static_cast<std::uint32_t>(&a_spec - kTextures);
+	}
+
+	constexpr std::uint32_t kTextureRows = static_cast<std::uint32_t>(std::size(kTextures));
+
+	/**
+	* @brief The graph textures, declared on first use and kept for the session (frame revision plan, 6.11).
+	* A screen-size one is declared on DisplaySize: a new display size is a new version of it, adopted with a frame revision.
+	*/
+	struct Textures
+	{
+		std::array<RF::DeclaredTexture2D, kTextureRows> declared{};
+
+		/** @brief Render thread. Null when the texture cannot be made. */
+		GraphResources::Texture2D* Get(const TextureSpec& a_spec)
 		{
-			if (const auto it = textures.find(a_name); it != textures.end())
-				return it->second.get();
-			const auto* spec = FindSpec(a_name);
-			if (!spec)
-				return nullptr;
-			const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | (spec->uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
-			const D3D11_TEXTURE2D_DESC desc{ .Width = spec->size ? spec->size : width,
-				.Height = spec->size ? spec->size : height,
+			auto& texture = declared[RowOf(a_spec)];
+			if (texture)
+				return texture.Get();
+			const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | (a_spec.uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
+			const D3D11_TEXTURE2D_DESC base{ .Width = 1,
+				.Height = 1,
 				.MipLevels = 1,
 				.ArraySize = 1,
-				.Format = spec->format,
+				.Format = a_spec.format,
 				.SampleDesc = { .Count = 1 },
 				.Usage = D3D11_USAGE_DEFAULT,
 				.BindFlags = bind };
-			auto texture = std::make_unique<GraphResources::Texture2D>(desc, fmt::format("Effects11::{}", a_name), GraphResources::Options{ .lifetime = spec->lifetime });
-			if (!*texture)
+			texture = RF::DeclareTexture2D(
+				fmt::format("Effects11::{}", a_spec.name), RF::DependsOn(RF::Vars::DisplaySize()),
+				[base, size = a_spec.size](const RF::Inputs& a_in) {
+					const auto display = DisplayOf(a_in);
+					auto desc = base;
+					desc.Width = size ? size : display.width;
+					desc.Height = size ? size : display.height;
+					return desc;
+				},
+				GraphResources::Options{ .lifetime = a_spec.lifetime });
+			if (!texture || !*texture) {
+				texture = {};
 				return nullptr;
-			auto* raw = texture.get();
-			textures.emplace(std::string(a_name), std::move(texture));
-			return raw;
+			}
+			return texture.Get();
 		}
 	};
 
@@ -351,13 +379,17 @@ namespace
 		}
 	};
 
-	/** @brief Cleared through a render target, since these textures have no UAV for AnchorPasses::Clear. */
+	/**
+	* @brief Cleared through a render target, since these textures have no UAV for AnchorPasses::Clear. Recorded at execution,
+	* it clears only on runs whose commit opened its row of the clear gate.
+	*/
 	struct ClearSpec
 	{
 		std::string name;
 		Res texture;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
+		std::uint32_t row = 0;  // the texture's row in kTextures, its entry in the clear gate
 	};
 
 	using Step = std::variant<std::shared_ptr<const DrawSpec>, AP::Draw, AP::Dispatch, AP::Copy, ClearSpec>;
@@ -400,8 +432,11 @@ namespace
 		std::array<EffectValues, kEffects> effects{};
 		Res input;
 		Res output;
-		std::shared_ptr<Resources> resources;
-		std::vector<std::string> clears;  // cleared once, first
+		std::uint32_t width = 0;   // the display size planned for
+		std::uint32_t height = 0;
+		// Every texture the steps use, by kTextures row. The kept ones are cleared on the first run of each new version.
+		std::vector<std::pair<std::uint32_t, GraphResources::Texture2D*>> textures;
+		std::vector<std::pair<std::uint32_t, GraphResources::Texture2D*>> clears;
 		std::uint32_t fxPasses = 0;
 	};
 
@@ -491,15 +526,41 @@ namespace
 		std::uint32_t height = 0;
 	};
 
-	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, org::EmptyPassFrameData, ClearBindings>
+	struct ClearFrame
+	{
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t row = 0;
+	};
+
+	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		explicit ClearPass(ClearSpec a_spec) :
-			spec(std::move(a_spec)) {}
+		ClearPass(ClearSpec a_spec, std::shared_ptr<const RenderGraph::RunGate> a_gate) :
+			spec(std::move(a_spec)), gate(std::move(a_gate)) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(spec.texture).View(), spec.width, spec.height }; }
 
-		static void Record(const ClearBindings& a_bindings, const org::EmptyPassFrameData&, org::PassRecordContext& a_recording)
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.texture.Key()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
+			a_out.push_back(spec.row);
+			a_out.push_back(spec.width);
+			a_out.push_back(spec.height);
+		}
+
+		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { gate, spec.row }; }
+
+		// Its commands depend on the run only through SkipsAtExecution.
+		static constexpr bool kRecordKeyedBySkip = true;
+
+		/** @brief A clear whose row the run's commit left closed is not recorded. */
+		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), a_frame.row);
+		}
+
+		static void Record(const ClearBindings& a_bindings, const ClearFrame&, org::PassRecordContext& a_recording)
 		{
 			rhi::ColorAttachment attachment{};
 			attachment.rtv = a_recording.View(a_bindings.target);
@@ -519,6 +580,7 @@ namespace
 
 	private:
 		ClearSpec spec;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
 
 	// ---- helpers ----
@@ -770,26 +832,60 @@ namespace
 			return {};
 		return desc.Name;
 	}
+
+	/**
+	* @brief What the last tonemap found that is not a variable yet: its targets, kMAIN, the depth and FX11's compiled effects.
+	* A change invalidates the client's key, so the next frame revision plans again (an interim, as Exponential Height Fog's
+	* inputs, until the engine's targets are variables).
+	*/
+	struct Observed
+	{
+		Res input, output, main, depth;
+		rhi::Format inputFormat = rhi::Format::Unknown;
+		rhi::Format outputFormat = rhi::Format::Unknown;
+		rhi::Format mainFormat = rhi::Format::Unknown;  // kMAIN's RTV
+		std::uint32_t inputWidth = 0, inputHeight = 0;
+		std::uint32_t outputWidth = 0, outputHeight = 0;
+		std::uint32_t mainWidth = 0, mainHeight = 0;
+		bool mainCopyable = false;  // kMAIN is R16G16B16A16_FLOAT with one sample, so Original copies into it
+		std::array<const void*, kEffects> compiled{};  // each effect's ID3DX11Effect, null while it is not compiled
+		bool ready = false;                            // the manager is initialized with a preset loaded
+
+		bool operator==(const Observed&) const = default;
+	};
+
+	/** @brief What the client is made for: the chain's shape as text, its plan and its registration. Equal when the text is. */
+	struct Shape
+	{
+		std::string text;
+		std::shared_ptr<Frame> frame;
+		std::shared_ptr<const FrameAnchors::ClientDesc> client;
+
+		bool operator==(const Shape& a_other) const { return text == a_other.text; }
+	};
 }
 
 struct ORGFxRuntime::Impl
 {
 	std::array<FxEffect, kEffects> effects{};
 	CsPrograms cs;
-	std::shared_ptr<Resources> resources;
-	std::shared_ptr<Frame> frame;
-	std::shared_ptr<Frame> running;  // the newest shape a run's graph held, null before the first
-	std::string shapeKey;
+	Textures textures;
+	// A row per kTextures entry. A commit opens the rows of the kept textures whose bound version no run cleared yet.
+	std::shared_ptr<RenderGraph::RunGate> clearGate;
+	std::array<const void*, kTextureRows> clearedVersions{};
+	std::vector<std::pair<std::uint32_t, const void*>> openedClears;  // by the last commit, cleared once its run is submitted
+	// Declared at the first tonemap the graph can take, on the display size and Effects11's shape writes.
+	RF::DeclaredClient client;
+	Observed observed;
+	std::optional<Shape> planned;  // the last plan, so a key with the same text does not plan again
 	std::string lastReason;
-	bool registered = false;
 	bool activeNow = false;
-	bool failed = false;  // FX11 for the session
+	bool declaredOwner = false;  // what the client's declared gave at the last Begin
+	bool failed = false;         // FX11 for the session
 	std::uint32_t ranFrame = UINT32_MAX;
 	Res frameInput;
 	Res frameOutput;
 	std::vector<std::vector<std::uint8_t>> images = std::vector<std::vector<std::uint8_t>>(kEffects);
-	bool wroteRunning = false;
-	bool wroteFrame = false;
 	std::array<std::uint32_t, kEffects> updatedFrame = [] {
 		std::array<std::uint32_t, kEffects> frames{};
 		frames.fill(UINT32_MAX);
@@ -798,20 +894,13 @@ struct ORGFxRuntime::Impl
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
 
-	/** @brief Leaves the frame to FX11. A new reason is logged once. */
-	void Inactive(const std::string& a_reason)
+	/** @brief No client for this key: FX11 runs the frame. A new reason is logged once. */
+	std::optional<Shape> Inactive(const std::string& a_reason)
 	{
-		activeNow = false;
-		if (registered) {
-			FrameAnchors::Unregister(kClientId);
-			registered = false;
-			frame.reset();
-			running.reset();
-			shapeKey.clear();
-		}
 		if (!a_reason.empty() && a_reason != lastReason)
 			logger::warn("[ORG] Effects11 runs on FX11: {}", a_reason);
 		lastReason = a_reason;
+		return std::nullopt;
 	}
 
 	bool BuildCsPrograms(rhi::Device a_device)
@@ -983,7 +1072,7 @@ struct ORGFxRuntime::Impl
 		return remember(std::move(program));
 	}
 
-	struct Inputs
+	struct ChainInputs
 	{
 		Res input, main, depth, output;  // main is kMAIN, when it has an RTV for FX11's result
 		bool inputCopies = false;        // same format and size as Original, so a plain copy
@@ -1001,10 +1090,11 @@ struct ORGFxRuntime::Impl
 	class Planner
 	{
 	public:
-		Planner(Impl& a_impl, const Inputs& a_inputs) :
+		Planner(Impl& a_impl, const ChainInputs& a_inputs, RF::Vars::Extent2D a_display) :
 			impl(a_impl), inputs(a_inputs), frame(std::make_shared<Frame>())
 		{
-			frame->resources = impl.resources;
+			frame->width = a_display.width;
+			frame->height = a_display.height;
 			frame->runs = inputs.runs;
 			frame->input = inputs.input;
 			frame->output = inputs.output;
@@ -1020,12 +1110,17 @@ struct ORGFxRuntime::Impl
 
 		Res Tex(std::string_view a_name)
 		{
-			auto* texture = impl.resources->Get(a_name);
+			const auto* spec = FindSpec(a_name);
+			auto* texture = spec ? impl.textures.Get(*spec) : nullptr;
 			if (!texture) {
 				Fail(fmt::format("the texture Effects11::{} could not be created", a_name));
 				return nullptr;
 			}
-			return texture->Graph();
+			const std::pair<std::uint32_t, GraphResources::Texture2D*> used{ RowOf(*spec), texture };
+			if (std::ranges::find(frame->textures, used) == frame->textures.end())
+				frame->textures.push_back(used);
+			// Passes declare the slot, so a new version needs no build.
+			return AP::TextureOf(*texture);
 		}
 
 		Res Black() { return Tex("Black"); }
@@ -1123,8 +1218,8 @@ struct ORGFxRuntime::Impl
 			const Res target = Tex(a_targetName);
 			if (!spec || !target)
 				return;
-			const std::uint32_t width = spec->size ? spec->size : impl.resources->width;
-			const std::uint32_t height = spec->size ? spec->size : impl.resources->height;
+			const std::uint32_t width = spec->size ? spec->size : frame->width;
+			const std::uint32_t height = spec->size ? spec->size : frame->height;
 			const rhi::Format format = rhi::helpers::ToRHI(spec->format);
 			const auto& technique = e.desc.techniques[a_technique];
 			for (std::uint32_t p = 0; p < technique.passes.size(); ++p) {
@@ -1282,8 +1377,8 @@ struct ORGFxRuntime::Impl
 		{
 			const auto& runs = inputs.runs;
 			auto run = [&](Fx a_fx) { return runs[static_cast<std::size_t>(a_fx)]; };
-			const std::uint32_t width = impl.resources->width;
-			const std::uint32_t height = impl.resources->height;
+			const std::uint32_t width = frame->width;
+			const std::uint32_t height = frame->height;
 
 			Black();
 
@@ -1408,16 +1503,19 @@ struct ORGFxRuntime::Impl
 
 			if (!error.empty())
 				return nullptr;
-			// One-shot clears of kept textures, before anything reads them.
+			// Kept textures are cleared before anything reads them, on the first run of each version, as DXVK's D3D11 textures
+			// start at zero. A version made by a revision is born cleared as well, and its first frame clears it again.
 			std::vector<Step> clears;
 			std::vector<std::string> clearNames;
-			for (const auto& [name, texture] : impl.resources->textures) {
-				if (texture->GetLifetime() == Lifetime::Transient || impl.resources->cleared.contains(name))
+			for (const auto& [row, texture] : frame->textures) {
+				const auto& spec = kTextures[row];
+				if (spec.lifetime == Lifetime::Transient)
 					continue;
-				const auto& desc = texture->Desc();
-				clears.push_back(ClearSpec{ fmt::format("Effects11::Clear {}", name), texture->Graph(), desc.Width, desc.Height });
-				clearNames.push_back(fmt::format("clear-{}", name));
-				frame->clears.push_back(name);
+				const std::uint32_t clearWidth = spec.size ? spec.size : width;
+				const std::uint32_t clearHeight = spec.size ? spec.size : height;
+				clears.push_back(ClearSpec{ fmt::format("Effects11::Clear {}", spec.name), AP::TextureOf(*texture), clearWidth, clearHeight, row });
+				clearNames.push_back(fmt::format("clear-{}", spec.name));
+				frame->clears.emplace_back(row, texture);
 			}
 			frame->steps.insert(frame->steps.begin(), std::make_move_iterator(clears.begin()), std::make_move_iterator(clears.end()));
 			frame->stepNames.insert(frame->stepNames.begin(), std::make_move_iterator(clearNames.begin()), std::make_move_iterator(clearNames.end()));
@@ -1427,19 +1525,19 @@ struct ORGFxRuntime::Impl
 
 	private:
 		Impl& impl;
-		const Inputs& inputs;
+		const ChainInputs& inputs;
 		std::shared_ptr<Frame> frame;
 		PassState state;  // what FX11's context holds for the next .fx pass
 		Res aperture;     // null means black, when DoF wrote none
 	};
 
-	/** @brief A change registers a new plan. */
-	std::string ShapeKey(const Inputs& a_inputs)
+	/** @brief The client's key: a change registers a new plan. */
+	std::string ShapeKey(const ChainInputs& a_inputs, RF::Vars::Extent2D a_display)
 	{
-		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.Key()),
+		std::string key = fmt::format("{}x{} {} {}{} {} {}", a_display.width, a_display.height, reinterpret_cast<std::uintptr_t>(a_inputs.input.Key()),
 			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.Key()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
-		key += fmt::format(" {} {} {} {}", reinterpret_cast<std::uintptr_t>(a_inputs.depth.Key()), reinterpret_cast<std::uintptr_t>(a_inputs.output.Key()),
-			static_cast<std::uint32_t>(a_inputs.outputFormat), a_inputs.outputWidth);
+		key += fmt::format(" {} {} {} {} {}", a_inputs.mainCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.depth.Key()),
+			reinterpret_cast<std::uintptr_t>(a_inputs.output.Key()), static_cast<std::uint32_t>(a_inputs.outputFormat), a_inputs.outputWidth);
 		for (std::size_t i = 0; i < kEffects; ++i) {
 			if (!a_inputs.runs[i]) {
 				key += " -";
@@ -1447,7 +1545,8 @@ struct ORGFxRuntime::Impl
 			}
 			auto& fx11 = *effects[i].fx11;
 			const auto chain = ChainOf(static_cast<Fx>(i));
-			key += " " + chain + ":";
+			// A reloaded effect is a new plan even with the same techniques, since the plan reads its variables.
+			key += fmt::format(" {:x} ", reinterpret_cast<std::uintptr_t>(effects[i].compiled.get())) + chain + ":";
 			if (const auto it = fx11.techniques.find(chain); it != fx11.techniques.end())
 				for (auto& info : it->second)
 					key += fx11.IsTechniqueEnabled(info) ? '1' : '0';
@@ -1455,12 +1554,13 @@ struct ORGFxRuntime::Impl
 		return key;
 	}
 
-	/** @brief On failure the client is gone and registered is false. */
-	void Register(const std::shared_ptr<Frame>& a_frame)
+	/** @brief The registration for a plan. Null, with the reason logged, when the builder refuses a step. */
+	std::shared_ptr<const FrameAnchors::ClientDesc> MakeClient(const std::shared_ptr<Frame>& a_frame)
 	{
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
+		auto client = std::make_shared<FrameAnchors::ClientDesc>();
+		client->id = kClientId;
 		const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
+		const std::shared_ptr<const RenderGraph::RunGate> gate = clearGate;
 		AP::Builder builder(FrameAnchors::Anchor::Tonemap, kClientId, kFirstOrder, latch);
 		for (std::size_t i = 0; i < a_frame->steps.size(); ++i) {
 			// The number keeps names unique and in plan order.
@@ -1472,9 +1572,10 @@ struct ORGFxRuntime::Impl
 						builder.Add(name, FrameAnchors::PassKind::Render,
 							[a_step, latch]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DrawPass>(a_step, latch); });
 					} else if constexpr (std::is_same_v<T, ClearSpec>) {
-						// One-shot, in the graph until a run with it was submitted.
-						builder.Add(name, FrameAnchors::PassKind::Render, [a_step]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step); },
-							true);
+						// Recorded at execution: it clears only on runs whose commit opened its row.
+						builder.Add(
+							name, FrameAnchors::PassKind::Render,
+							[a_step, gate]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ClearPass>(a_step, gate); }, false, true);
 					} else {
 						auto step = a_step;
 						step.name = name;
@@ -1484,108 +1585,239 @@ struct ORGFxRuntime::Impl
 				a_frame->steps[i]);
 		}
 		if (builder.Failed()) {
-			logger::warn("[ORG] Effects11: {}", builder.Failure());
-			FrameAnchors::Unregister(kClientId);
-			registered = false;
-			frame.reset();
-			running.reset();
-			return;
+			Inactive(builder.Failure());
+			return nullptr;
 		}
-		client.passes = builder.Take();
-		auto heldResources = a_frame->resources;
-		client.registerResources = [heldResources](org::RenderGraph& a_graph) {
-			for (const auto& [name, texture] : heldResources->textures)
+		client->passes = builder.Take();
+		client->registerResources = [a_frame](org::RenderGraph& a_graph) {
+			for (const auto& [row, texture] : a_frame->textures)
 				texture->Register(a_graph);
 		};
-		client.active = [] {
+		// Read at each Begin: while Post Processing or the game owns the tonemap, the passes record only their barriers.
+		client->declared = [] {
+			const bool owner = globals::state && globals::state->PeekTonemapOwner() == State::TonemapOwner::kEffects11;
+			if (auto& self = ORGFxRuntime::Get(); self.impl)
+				self.impl->declaredOwner = owner;
+			return owner;
+		};
+		client->active = [] {
 			const auto& self = ORGFxRuntime::Get();
 			return self.impl && self.impl->activeNow;
 		};
-		client.commit = [](const FrameAnchors::Point&) {
+		// The commit that runs is the one of the registration the run's graph holds, so it writes its own plan.
+		client->commit = [a_frame](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
-				self.impl->SafeCommit();
+				self.impl->SafeCommit(*a_frame);
 		};
-		client.executed = [weak = std::weak_ptr<Frame>(a_frame)](const FrameAnchors::Point&) {
+		client->executed = [](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
-				if (const auto shape = weak.lock())
-					self.impl->Executed(shape);
+				self.impl->Executed();
 		};
-		if (!FrameAnchors::Register(std::move(client))) {
-			// The old client must not run with a latch nothing fills.
-			FrameAnchors::Unregister(kClientId);
-			registered = false;
-			frame.reset();
-			running.reset();
-			return;
+		client->gates = { clearGate };
+		return client;
+	}
+
+	/** @brief The client's key for a revision's values: the plan of the chain the current settings and targets give. */
+	std::optional<Shape> KeyFor(const RF::Inputs& a_in)
+	{
+		if (failed)
+			return std::nullopt;
+		// Nothing may escape a revision's start. An error returns Effects11 to FX11 for the session.
+		try {
+			return Plan(a_in);
+		} catch (const std::exception& e) {
+			Fail(e.what());
+		} catch (...) {
+			Fail("an unknown exception");
 		}
-		registered = true;
-		frame = a_frame;
+		return std::nullopt;
+	}
+
+	std::optional<Shape> Plan(const RF::Inputs& a_in)
+	{
+		// Same conditions as Effects11::RenderTonemap and ExecuteEffects. The tonemap owner is the client's declared.
+		auto& manager = EffectManager::GetSingleton();
+		if (!observed.ready || !manager.IsInitialized() || !manager.IsPresetLoaded())
+			return std::nullopt;
+		if (!observed.input || !observed.output)
+			return Inactive("the tonemap's input or output could not be imported");
+		if (!observed.depth)
+			return Inactive("kMAIN's depth could not be imported");
+		if (observed.outputFormat == rhi::Format::Unknown || !observed.outputWidth || !observed.outputHeight)
+			return Inactive("the tonemap output's format or size is not known");
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host)
+			return Inactive("the render graph is not available");
+
+		ChainInputs inputs{};
+		for (std::size_t i = 0; i < kEffects; ++i) {
+			const auto fx = static_cast<Fx>(i);
+			inputs.runs[i] = Runs(fx);
+			if (!inputs.runs[i])
+				continue;
+			auto& effect = EffectOf(fx);
+			if (!effect.built)
+				BuildEffect(fx);
+			if (!effect.ok)
+				return Inactive(effect.reason);
+		}
+		if (!BuildCsPrograms(host->Device()))
+			return Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
+
+		// The textures follow the display size, as TextureManager's follow the screen.
+		const auto display = DisplayOf(a_in);
+		inputs.input = observed.input;
+		inputs.depth = observed.depth;
+		inputs.output = observed.output;
+		// kMAIN also gets FX11's corrected image when it can be drawn to.
+		if (observed.main && observed.mainFormat != rhi::Format::Unknown) {
+			inputs.main = observed.main;
+			inputs.mainFormat = observed.mainFormat;
+			inputs.mainWidth = observed.mainWidth;
+			inputs.mainHeight = observed.mainHeight;
+		}
+		inputs.outputFormat = observed.outputFormat;
+		inputs.outputWidth = observed.outputWidth;
+		inputs.outputHeight = observed.outputHeight;
+		// Where CopyResource would apply: same format and size as Original, mip 0 of one slice.
+		inputs.inputCopies = observed.inputWidth == display.width && observed.inputHeight == display.height && observed.inputFormat == rhi::Format::R16G16B16A16_Float;
+		inputs.mainCopies = inputs.main && observed.mainCopyable && observed.mainWidth == display.width && observed.mainHeight == display.height;
+
+		auto text = ShapeKey(inputs, display);
+		if (planned && planned->text == text)
+			return planned;
+		const auto started = std::chrono::steady_clock::now();
+		Planner planner(*this, inputs, display);
+		auto frame = planner.Build();
+		// The effect fails until the next reload, and FX11 runs it meanwhile.
+		if (!frame)
+			return Inactive(planner.error);
+		auto client = MakeClient(frame);
+		if (!client)
+			return std::nullopt;
+		planned = Shape{ std::move(text), frame, std::move(client) };
+		lastReason.clear();
 		std::string effectsList;
 		for (std::size_t i = 0; i < kEffects; ++i)
-			if (a_frame->runs[i])
+			if (frame->runs[i])
 				effectsList += fmt::format("{}{}", effectsList.empty() ? "" : ", ", effects[i].Name());
-		logger::info("[ORG] Effects11 runs on the render graph: {} passes ({} from .fx: {}), {} latch bytes, {}x{}", a_frame->steps.size(), a_frame->fxPasses, effectsList,
-			a_frame->latchBytes, resources->width, resources->height);
+		const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+		logger::info("[ORG] Effects11 runs on the render graph from the next revision: {} passes ({} from .fx: {}), {} latch bytes, {}x{}, planned in {:.0f} ms",
+			frame->steps.size(), frame->fxPasses, effectsList, frame->latchBytes, frame->width, frame->height, ms);
+		return planned;
+	}
+
+	/** @brief What this tonemap's targets and FX11's effects are. */
+	static Observed Observe(const RenderGraph::Engine::TonemapTargets& a_targets)
+	{
+		Observed now;
+		auto& manager = EffectManager::GetSingleton();
+		now.ready = manager.IsInitialized() && manager.IsPresetLoaded();
+		for (std::size_t i = 0; i < kEffects; ++i) {
+			auto* fx11 = Fx11Of(static_cast<Fx>(i));
+			now.compiled[i] = fx11 && fx11->IsCompiled() ? static_cast<const void*>(fx11->GetEffect()) : nullptr;
+		}
+		now.input = a_targets.input;
+		now.output = a_targets.output;
+		now.inputFormat = a_targets.inputFormat;
+		now.outputFormat = a_targets.outputFormat;
+		if (now.input) {
+			now.inputWidth = now.input.Width();
+			now.inputHeight = now.input.Height();
+		}
+		if (now.output) {
+			now.outputWidth = now.output.Width();
+			now.outputHeight = now.output.Height();
+		}
+		now.depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
+		const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+		if (main.texture && main.RTV) {
+			now.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+			D3D11_RENDER_TARGET_VIEW_DESC mainView{};
+			main.RTV->GetDesc(&mainView);
+			D3D11_TEXTURE2D_DESC mainDesc{};
+			main.texture->GetDesc(&mainDesc);
+			now.mainFormat = rhi::helpers::ToRHI(mainView.Format);
+			now.mainWidth = mainDesc.Width;
+			now.mainHeight = mainDesc.Height;
+			now.mainCopyable = mainDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && mainDesc.SampleDesc.Count == 1;
+		}
+		return now;
+	}
+
+	/** @brief At the first tonemap the graph can take. False, the runtime failed, when the client cannot be declared. */
+	bool Declare()
+	{
+		clearGate = RenderGraph::RunGate::Create("cs.effects11.clears", kTextureRows);
+		if (!clearGate) {
+			Fail("its clear gate could not be made");
+			return false;
+		}
+		// The key reads Effects11's settings, its effects' techniques and the observed targets. Effects11's writers raise
+		// fxShapeWrites, a new observation invalidates the key, and a new display size is in the values.
+		client = RF::DeclareClient<Shape>(
+			kClientId, RF::DependsOn(RF::Vars::DisplaySize(), globals::features::effects11.fxShapeWrites),
+			[this](const RF::Inputs& a_in) { return KeyFor(a_in); },
+			[](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) {
+				a_client = *a_shape.client;
+				return true;
+			});
+		if (!client) {
+			Fail("its client could not be declared");
+			return false;
+		}
+		logger::info("[ORG] Effects11: the FX chain's client follows the frame revisions");
+		return true;
 	}
 
 	/** @brief Prepare catches what it throws. */
 	void PrepareFrame(const RenderGraph::Engine::TonemapTargets& a_targets);
 
-	/** @brief FX11 for the rest of the session. */
-	void Fail(const char* a_what)
+	/** @brief FX11 for the rest of the session. The next revision removes the client. */
+	void Fail(std::string_view a_what)
 	{
 		logger::error("[ORG] Effects11 returns to FX11 for the session: {}", a_what);
 		failed = true;
 		activeNow = false;
 		ranFrame = UINT32_MAX;
-		if (registered)
-			FrameAnchors::Unregister(kClientId);
-		registered = false;
-		frame.reset();
-		running.reset();
-		shapeKey.clear();
+		planned.reset();
+		client.Invalidate();
 	}
 
 	/** @brief Keeps what Commit throws inside the epoch's callback. */
-	void SafeCommit()
+	void SafeCommit(Frame& a_frame)
 	{
 		try {
-			Commit();
+			Commit(a_frame);
 		} catch (const std::exception& e) {
 			// Passes already in this epoch run with the latch as it is. Later frames go to FX11.
-			failed = true;
-			activeNow = false;
-			ranFrame = UINT32_MAX;
-			logger::error("[ORG] Effects11 returns to FX11 for the session: the commit failed: {}", e.what());
+			Fail(fmt::format("the commit failed: {}", e.what()));
 		}
 	}
 
-	/** @brief Which shape the run's graph holds is only known after the run, so write the values for both candidates. */
-	void Commit()
+	/** @brief The run's values for a_frame, the plan the run's graph holds. Opens the clears of kept textures' new versions. */
+	void Commit(Frame& a_frame)
 	{
-		wroteRunning = running && running->latch && Write(*running);
-		wroteFrame = frame && frame != running && frame->latch && Write(*frame);
-		// Only a shape planned for this frame's targets replaces FX11.
-		if (wroteRunning && running->input == frameInput && running->output == frameOutput)
+		const bool wrote = a_frame.latch && Write(a_frame);
+		openedClears.clear();
+		for (const auto& [row, texture] : a_frame.clears) {
+			const void* version = texture->Graph().get();
+			if (clearedVersions[row] == version)
+				continue;
+			clearGate->OpenDraw(row);
+			openedClears.emplace_back(row, version);
+		}
+		// Only a plan for this frame's targets replaces FX11.
+		if (wrote && a_frame.input == frameInput && a_frame.output == frameOutput)
 			ranFrame = globals::state->frameCount;
 	}
 
-	/** @brief From now on the epoch runs this shape. */
-	void Executed(const std::shared_ptr<Frame>& a_shape)
+	/** @brief The run was submitted, so its clears ran. */
+	void Executed()
 	{
-		const bool wrote = a_shape == running ? wroteRunning : (a_shape == frame && wroteFrame);
-		if (running != a_shape) {
-			running = a_shape;
-			logger::info("[ORG] Effects11: the graph runs the shape registered last ({} passes)", running->steps.size());
-		}
-		// Its one-shot clears ran, so later plans leave them out.
-		for (const auto& name : a_shape->clears)
-			a_shape->resources->cleared.insert(name);
-		const std::uint32_t frameCount = globals::state->frameCount;
-		if (wrote && a_shape->input == frameInput && a_shape->output == frameOutput)
-			ranFrame = frameCount;
-		else if (ranFrame == frameCount)
-			ranFrame = UINT32_MAX;
+		for (const auto& [row, version] : openedClears)
+			clearedVersions[row] = version;
+		openedClears.clear();
 	}
 
 	/** @brief As EffectManager::UpdateEffectValues sets FX11's variables. */
@@ -1667,15 +1899,12 @@ void ORGFxRuntime::Invalidate()
 {
 	if (!impl)
 		return;
-	if (impl->registered)
-		FrameAnchors::Unregister(kClientId);
-	impl->registered = false;
+	// The current registration keeps its own copy of the variables it reads, and its commit leaves a reloaded effect to FX11.
 	impl->activeNow = false;
-	impl->frame.reset();
-	impl->running.reset();
-	impl->shapeKey.clear();
+	impl->planned.reset();
 	for (auto& effect : impl->effects)
 		effect = FxEffect{};
+	impl->client.Invalidate();
 }
 
 void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets& a_targets)
@@ -1685,17 +1914,8 @@ void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets& a_targets)
 	if (!impl)
 		impl = std::make_unique<Impl>();
 	impl->activeNow = false;
-	if (impl->failed) {
-		// A failed commit leaves the client registered, and its passes must not run on.
-		if (impl->registered) {
-			FrameAnchors::Unregister(kClientId);
-			impl->registered = false;
-			impl->frame.reset();
-			impl->running.reset();
-			impl->shapeKey.clear();
-		}
+	if (impl->failed)
 		return;
-	}
 	// Nothing may escape the engine's tonemap call. An error returns Effects11 to FX11 for the session.
 	try {
 		impl->PrepareFrame(a_targets);
@@ -1708,101 +1928,24 @@ void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets& a_targets)
 
 void ORGFxRuntime::Impl::PrepareFrame(const RenderGraph::Engine::TonemapTargets& a_targets)
 {
-	auto& self = *this;
-
 	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Tonemap))
-		return self.Inactive("the render graph or its Tonemap anchor is not available");
-	// Same conditions as Effects11::RenderTonemap and ExecuteEffects.
-	auto& manager = EffectManager::GetSingleton();
-	if (globals::state->GetTonemapOwner() != State::TonemapOwner::kEffects11 || !manager.IsInitialized() || !manager.IsPresetLoaded())
-		return self.Inactive({});
-
-	auto* renderer = globals::game::renderer;
-	auto& targets = renderer->GetRuntimeData().renderTargets;
-	const auto& main = targets[RE::RENDER_TARGETS::kMAIN];
-	if (!a_targets.input || !a_targets.output)
-		return self.Inactive("the tonemap's input or output could not be imported");
-
-	Impl::Inputs inputs{};
-	for (std::size_t i = 0; i < kEffects; ++i) {
-		const auto fx = static_cast<Fx>(i);
-		inputs.runs[i] = Runs(fx);
-		if (!inputs.runs[i])
-			continue;
-		auto& effect = self.EffectOf(fx);
-		if (!effect.built)
-			self.BuildEffect(fx);
-		if (!effect.ok)
-			return self.Inactive(effect.reason);
+	if (!runtime.Host() || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Tonemap)) {
+		Inactive("the render graph or its Tonemap anchor is not available");
+		return;
 	}
-	if (!self.BuildCsPrograms(host->Device()))
-		return self.Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
-
-	inputs.input = a_targets.input;
-	inputs.depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
-	inputs.output = a_targets.output;
-	if (!inputs.depth)
-		return self.Inactive("kMAIN's depth could not be imported");
-	// kMAIN also gets FX11's corrected image when it can be drawn to.
-	if (main.texture && main.RTV) {
-		inputs.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
-		D3D11_RENDER_TARGET_VIEW_DESC mainView{};
-		main.RTV->GetDesc(&mainView);
-		D3D11_TEXTURE2D_DESC mainDesc{};
-		main.texture->GetDesc(&mainDesc);
-		inputs.mainFormat = rhi::helpers::ToRHI(mainView.Format);
-		inputs.mainWidth = mainDesc.Width;
-		inputs.mainHeight = mainDesc.Height;
-		if (inputs.mainFormat == rhi::Format::Unknown)
-			inputs.main = nullptr;
+	if (!client && !Declare())
+		return;
+	// Not variables yet: a change of the targets or of FX11's compiled effects plans again at the next revision.
+	if (auto now = Observe(a_targets); !(now == observed)) {
+		observed = std::move(now);
+		client.Invalidate();
 	}
-	inputs.outputFormat = a_targets.outputFormat;
-	inputs.outputWidth = a_targets.output.Width();
-	inputs.outputHeight = a_targets.output.Height();
-	if (inputs.outputFormat == rhi::Format::Unknown || !inputs.outputWidth || !inputs.outputHeight)
-		return self.Inactive("the tonemap output's format or size is not known");
-
-	// The textures follow the screen, as TextureManager's do.
-	const std::uint32_t width = globals::game::graphicsState->screenWidth;
-	const std::uint32_t height = globals::game::graphicsState->screenHeight;
-	if (!self.resources || self.resources->width != width || self.resources->height != height) {
-		self.resources = std::make_shared<Resources>();
-		self.resources->width = width;
-		self.resources->height = height;
-	}
-	// Where CopyResource would apply: same format and size as Original, mip 0 of one slice.
-	auto copies = [&](ID3D11Texture2D* a_texture) {
-		D3D11_TEXTURE2D_DESC desc{};
-		a_texture->GetDesc(&desc);
-		return desc.Width == width && desc.Height == height && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && desc.SampleDesc.Count == 1;
-	};
-	inputs.inputCopies = a_targets.input.Width() == width && a_targets.input.Height() == height && a_targets.inputFormat == rhi::Format::R16G16B16A16_Float;
-	inputs.mainCopies = inputs.main && copies(main.texture);
-
-	auto key = self.ShapeKey(inputs);
-	if (!self.registered || key != self.shapeKey) {
-		const auto started = std::chrono::steady_clock::now();
-		Impl::Planner planner(self, inputs);
-		auto planned = planner.Build();
-		if (!planned) {
-			// The effect fails until the next reload, and FX11 runs it meanwhile.
-			return self.Inactive(planner.error);
-		}
-		self.Register(planned);
-		if (!self.registered)
-			return self.Inactive("the render graph refused the passes");
-		self.shapeKey = std::move(key);
-		const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-		if (ms > 50.0)
-			logger::info("[ORG] Effects11: the plan took {:.0f} ms (pass compiles included)", ms);
-	}
-	if (!self.lastReason.empty())
-		self.lastReason.clear();
-	self.frameInput = inputs.input;
-	self.frameOutput = inputs.output;
-	self.activeNow = true;
+	frameInput = a_targets.input;
+	frameOutput = a_targets.output;
+	// Same conditions as Effects11::RenderTonemap and ExecuteEffects. A frame whose Begin left the passes off has no commit either.
+	if (globals::state->GetTonemapOwner() != State::TonemapOwner::kEffects11 || !observed.ready || !declaredOwner)
+		return;
+	activeNow = client.Registered();
 }
 
 bool ORGFxRuntime::RanThisFrame() const

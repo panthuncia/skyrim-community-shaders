@@ -28,6 +28,33 @@
 #include "Utils/Game.h"
 #include "Utils/Moon.h"
 
+#include <mutex>
+
+Effects11::Effects11()
+{
+	raysToggles.Bind(CS::SettingRegistry::Declare("Effects11.raysToggles"));
+	raysTargetFormat.Bind(CS::SettingRegistry::Declare("Effects11.raysTargetFormat"));
+	shaderCacheClears.Bind(CS::SettingRegistry::Declare("Effects11.shaderCacheClears"));
+	fxShapeWrites.Bind(CS::SettingRegistry::Declare("Effects11.fxShapeWrites"));
+}
+
+void Effects11::NoteShapeWrite()
+{
+	// Writers come from the render, menu and cs-test threads, and the count is read, then written.
+	static std::mutex s_mutex;
+	const std::lock_guard lock(s_mutex);
+	auto& settingManager = SettingManager::GetSingleton();
+	std::uint32_t toggles = 0;
+	if (settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT"))
+		toggles |= kVolumetricRaysBit;
+	if (settingManager.GetValue<bool>("EnableSunRays", "EFFECT"))
+		toggles |= kSunRaysBit;
+	if (settingManager.GetValue<bool>("EnableMoonRays", "EFFECT"))
+		toggles |= kMoonRaysBit;
+	raysToggles = toggles;
+	fxShapeWrites = fxShapeWrites.Get() + 1u;
+}
+
 bool Effects11::HasShaderDefine(RE::BSShader::Type)
 {
 	return IsActive();
@@ -532,7 +559,8 @@ void Effects11::ClearShaderCache()
 			*shader = nullptr;
 		}
 	}
-	ORGSunRays::Get().Release();
+	// The rays' graph programs are a function of this count: the next revision builds them again off the render thread.
+	shaderCacheClears = shaderCacheClears.Get() + 1u;
 
 	auto& effectManager = EffectManager::GetSingleton();
 	effectManager.enbAdaptation.ClearShaderCache();
@@ -1522,12 +1550,4 @@ void Effects11::DrawSunRays()
 
 	stateBackup.Restore(context);
 	stateBackup.Release();
-}
-
-Feature::SizeProjection Effects11::ProjectSizeSettings() const
-{
-	// Not weather-blended, so it changes only through the setting manager's writes.
-	SizeProjection projection;
-	projection.Add("EnableSunRays", SettingManager::GetSingleton().GetValue<bool>("EnableSunRays", "EFFECT"));
-	return projection;
 }

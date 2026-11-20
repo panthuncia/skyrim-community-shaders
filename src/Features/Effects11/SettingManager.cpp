@@ -69,10 +69,13 @@ static bool TryParseWeatherID(const std::string& a_key, uint32_t& a_out)
 
 namespace
 {
-	/** @brief Tells Effects11 its settings were written. Call it with the manager's lock released, since the projection reads them. */
-	void NoteEffects11SettingsWrite(std::string_view a_writer)
+	/**
+	* @brief Tells Effects11 its settings were written, which raises the variables the render graph's declarations follow
+	* (frame revision plan, 6.10 and 6.11). Call it with the manager's lock released, since it reads settings.
+	*/
+	void NoteEffects11SettingsWrite()
 	{
-		globals::features::effects11.SettingsWritten(a_writer);
+		globals::features::effects11.NoteShapeWrite();
 	}
 }
 
@@ -256,7 +259,7 @@ void SettingManager::SetStoredValue(uint32_t id, uint32_t weatherID, const Store
 			WeatherDefinedFor(linkedID)[id] = stored.definedMask;
 		}
 	}();
-	NoteEffects11SettingsWrite("Effects11 overlay");
+	NoteEffects11SettingsWrite();
 }
 
 /** @brief A bool setting ready for RegisterSettingInternal. */
@@ -418,7 +421,7 @@ void SettingManager::SetValue(uint32_t id, const T& value)
 		std::unique_lock lock(mutex);
 		SetValueInternal<T>(id, value);
 	}
-	NoteEffects11SettingsWrite("Effects11 setting");
+	NoteEffects11SettingsWrite();
 }
 
 template <typename T>
@@ -1266,7 +1269,7 @@ void SettingManager::Load()
 	Overlays::Manager::GetSingleton().RestoreBeforeReload();
 	LoadFromFile(PresetManager::GetSingleton().GetENBSeriesIniPath().string());
 	ReloadAllWeatherSettings();
-	NoteEffects11SettingsWrite("Effects11 reload");
+	NoteEffects11SettingsWrite();
 }
 
 bool SettingManager::Save()

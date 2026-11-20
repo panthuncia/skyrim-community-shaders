@@ -867,6 +867,45 @@ revisions.
   engine's path for the session, as before.
 - Tests: `dclf-family` and `bink` (new). See "Decided by the agent (step 6.19)" in section 9.
 
+**As built (2026-11-19, 6.11, `org-native/rev-step6-10`).** Effects11's ORG FX chain follows the revisions.
+- Every texture the chain plans with is declared on first use with `DeclareTexture2D` on `DisplaySize` (screen-size ones follow it,
+  the fixed ones keep their size) and kept for the session. Passes declare the slots (`AnchorPasses::TextureOf`), so a new display
+  size is a new version of each, with no build. The per-size `Resources` set is gone.
+- The client is `DeclareClient` on `DisplaySize` and `Effects11.fxShapeWrites`, a `CS::Setting<std::uint32_t>` count that
+  `Effects11::NoteShapeWrite` raises. Its writers: `SettingManager::SetValue`, `SetStoredValue` and `Load` (in place of their
+  `SettingsWritten` calls) and `Effect::UpdateUIVariables` (the editor's variable and technique edits, and loads). Its key is the plan:
+  the shape text `ShapeKey` built before (now with the effects' compiled pointers and the kMAIN copy flag), the planned `Frame` and its
+  `ClientDesc`. It is made when a revision starts, so a new plan, its stage builds and the textures' new versions switch in at one
+  Begin. A plan with the same text is not made again.
+- The tonemap's targets, kMAIN, its depth and FX11's compiled effects are not variables: `Prepare` observes them each tonemap and calls
+  `Invalidate` when they change (an interim until step 9b). `ORGFxRuntime::Invalidate` (before FX11 reloads) resets the parsed
+  effects and invalidates the key. The per-frame `ShapeKey` poll, `Register`, `running`/`frame` and the two-shape commit are gone: each
+  registration's commit writes its own plan, since the commit that runs is the held registration's.
+- The tonemap owner is the client's `declared` (`State::PeekTonemapOwner` at Begin): while Post Processing or the game owns the
+  tonemap (every loading screen and the main menu) the client stays registered and its passes record only barriers. It was
+  unregistered before.
+- One-shot clears are gone. A kept (History or Persistent) texture's clear is a render-target clear recorded at execution, skipped
+  unless the commit opened its row of a run gate (`cs.effects11.clears`, a row per `kTextures` entry). The commit opens it for each
+  kept texture whose bound version no submitted run has cleared yet (`executed` records it). That covers `FirstFrame` and the first,
+  not born-cleared, version made at declaration.
+- Effects11's `ProjectSizeSettings` is gone.
+
+**As built (2026-11-19, 6.10, `org-native/rev-step6-10`).** Effects11's rays follow the revisions.
+- The five half-size textures are declared at `ORGSunRays::Setup` on `DisplaySize` and `Effects11.raysToggles` (a bit each for
+  `EnableVolumetricRays`, `EnableSunRays` and `EnableMoonRays`, set by `NoteShapeWrite`): half the display size while their effect
+  is on, one texel while it is off.
+- The seven programs are `DeclareProgram("Effects11::Rays")` on `Effects11.raysTargetFormat` (kMAIN's format, written each frame the
+  rays are drawn) and `Effects11.shaderCacheClears` (raised by `Effects11::ClearShaderCache`). Their defines are resolved at setup,
+  so the builds on the programs lane read no State. `ORGSunRays::Release` and the per-shape program maps are gone.
+- The client is `DeclareClient` on `DisplaySize`, `DynamicRatios`, the toggles and the programs' two settings. Its key holds the
+  areas (`Util::ConvertToDynamic` of the display size at the revision's start, as 6.4), the programs, which effects' passes it has
+  and the observed sources (kMAIN, the depth at t17, Terrain Shadows' heights, Cloud Shadows' cubemap; `Invalidate` on a change,
+  an interim). No client while both effects are off.
+- The commit runs every run and writes the run's latch at the held registration's areas: the VL size and the sun passes' `uvScale`,
+  `uvMax` and `invScreenWidth`. An Effects11 `Draw*` call gives the graph its effect only when the registration whose commit ran last
+  frame has it, else the frame draws on D3D11. `PrepareFrame`'s per-frame `Shape` compare and `Build` are gone.
+- Test: `effects11` (new), with a new cs-test step `e11` (`<CATEGORY>.<Key>=<value>`, `clear-shader-cache`).
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1866,6 +1905,28 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   imported the framebuffer every tick. Other importers of kFRAMEBUFFER (HDR's compose) still join it. Step 9b makes it an event.
 - **HDR's UI texture made again while HDR is off raises no event**, since `HdrOutputTarget` is none then. Bink keeps the old
   import until HDR turns on, which raises it. Bink draws onto that texture only with HDR on.
+
+**Decided by the agent (steps 6.10 and 6.11, Effects11, 2026-11-19), to confirm:**
+- **The FX shape variable is a write count, and the key reads FX11's live state.** The chain's shape is spread over FX11's
+  objects (the `use*` settings, each technique's enable bindings on UI variables, the selected technique), so no value of it fits a
+  variable. Every write raises the count; a revision whose plan text is unchanged registers nothing.
+- **The tonemap owner is `declared`, not part of the key.** It flips at every loading screen and the main menu, which would remove
+  and register the client each time. Off, the passes record only barriers. The kept textures stay allocated meanwhile.
+- **Planning stays on the render thread, now at a revision's start.** Parsing, lowering and each pass's DXC compile ran at the
+  tonemap hook before and run in the key function now. Moving the pass compiles to `DeclareProgram` needs a program per pass and
+  state key; left for later. A plan that fails is no client (FX11 runs), not a fatal make.
+- **Kept textures clear on each new version's first submitted run, not on `FirstFrame`.** The client can register frames after a
+  version's first frame, and the version made at declaration is not born cleared. A revision's History version is born cleared and
+  cleared once more: harmless.
+- **Textures are declared lazily, from inside the key function.** Declaring all 36 at setup would allocate every display-size
+  history while Effects11 is unused. A texture declared there joins the next revision's evaluation.
+- **The rays' kMAIN format and shader cache clears are `CS::Setting`s on Effects11**, as Skylighting's reset count (6.17), to keep
+  `Frame/Variables.{h,cpp}` out of this migration. Every program key built is kept, so each shader cache clear keeps one more set
+  of seven programs for the session.
+- **"The graph holds the rays' effect" is a commit of a registration with it having run last frame**, as 6.17. So the rays'
+  client is always active and commits every run. A toggle shows one frame on D3D11.
+- **No variable for Effects11's ownership of Exponential Height Fog.** EHF's key does not read it: `IsSuppressed` is read by EHF's
+  Prepass and `GetCommonBufferData` each frame. None fell out of these migrations.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

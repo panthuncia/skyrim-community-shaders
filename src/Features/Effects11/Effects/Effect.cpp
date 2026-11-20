@@ -10,6 +10,7 @@
 #include "../Overlays/PresetOverlays.h"
 #include "../PresetManager.h"
 #include "../TextureManager.h"
+#include "Features/Effects11.h"
 #include "Features/Effects11/SettingsPatches.h"
 #include "Features/Effects11/ShaderPatches.h"
 #include "Globals.h"
@@ -1061,6 +1062,8 @@ void Effect::UpdateUIVariables()
 			break;
 		}
 	}
+	// A technique's enable bindings and the selected technique are part of the ORG FX chain's shape (frame revision plan, 6.11).
+	globals::features::effects11.NoteShapeWrite();
 }
 
 void Effect::RenderImGui()

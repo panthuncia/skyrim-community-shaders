@@ -28,8 +28,9 @@ ORGSunRays& ORGSunRays::Get()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
+#	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -38,7 +39,11 @@ ORGSunRays& ORGSunRays::Get()
 #	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
 #	include "Utils/D3D.h"
+#	include "Utils/Game.h"
 #	include "VanillaBinding.h"
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#		include "RenderGraph/ProgramBuild.h"
+#	endif
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -47,11 +52,12 @@ ORGSunRays& ORGSunRays::Get()
 #	include <Resources/ExternalTextureResource.h>
 #	include <rhi_helpers.h>
 
+#	include <algorithm>
 #	include <cstddef>
 #	include <functional>
-#	include <map>
 #	include <optional>
 #	include <string>
+#	include <utility>
 #	include <vector>
 
 namespace
@@ -71,6 +77,8 @@ namespace
 
 	using ShaderBindings::Handle;
 	using RenderGraph::AnchorPasses::Bind;
+	namespace RF = RenderGraph::Frame;
+	namespace AP = RenderGraph::AnchorPasses;
 
 	// BlurVolumetricRaysCS's TG_DIM - WINDOW * 2.
 	constexpr std::uint32_t kBlurGroupPixels = 256 - 12 * 2;
@@ -146,36 +154,61 @@ namespace
 		return a_builder.ShaderResource(org::ResourceIdentifier(a_source.name)).View();
 	}
 
-	/** @brief A change makes a new client. The areas are part of it, since a kept recording fixes its viewports. */
+	/** @brief The seven programs for one kMAIN format. Built at setup for the first key, then on the programs lane. */
+	struct RaysPrograms
+	{
+		std::shared_ptr<const RasterProgram> raymarch, apply, sunMask, sunBlur, sunComposite;
+		std::shared_ptr<const ComputeProgram> blurH, blurV;
+		rhi::Format mainFormat = rhi::Format::Unknown;
+	};
+
+	/** @brief What the programs are built from: kMAIN's format, and the shader cache clears so far. */
+	struct ProgramKey
+	{
+		std::uint32_t format = 0;
+		std::uint32_t clears = 0;
+
+		bool operator==(const ProgramKey&) const = default;
+	};
+
+	/** @brief Made at setup and kept: the latch, the gate, the sampler and the five declared textures. */
+	struct Fixed
+	{
+		std::shared_ptr<org::LatchBlock> latch;
+		std::shared_ptr<RenderGraph::RunGate> gate;
+		org::OwnedDescriptorBinding linearSampler;
+		// Volumetric scattering, the blur's other half and the raymarch depth, then the sun rays' ping-pong pair.
+		RF::DeclaredTexture2D vlScattering, vlBlur, vlDepth, sunA, sunB;
+	};
+
+	/**
+	* @brief What the client is made for. The areas are part of it, since a kept recording fixes its viewports. The sources
+	* are observed by Effects11's Draw* calls, not variables yet.
+	*/
 	struct Shape
 	{
 		ORGSunRays::Sizes sizes;
-		rhi::Format mainFormat = rhi::Format::Unknown;
 		FrameAnchors::Texture main;
 		Source depth, shadowHeights, cloudShadows;
+		std::shared_ptr<const RaysPrograms> programs;
+		bool volumetric = false;  // the volumetric rays' passes are in the client
+		bool sun = false;         // the sun rays' passes are
 
-		bool operator==(const Shape& a_other) const
-		{
-			const auto& a = sizes;
-			const auto& b = a_other.sizes;
-			return a.halfTexWidth == b.halfTexWidth && a.halfTexHeight == b.halfTexHeight && a.halfWidth == b.halfWidth && a.halfHeight == b.halfHeight &&
-			       a.width == b.width && a.height == b.height && mainFormat == a_other.mainFormat && main == a_other.main && depth == a_other.depth &&
-			       shadowHeights == a_other.shadowHeights && cloudShadows == a_other.cloudShadows;
-		}
+		bool operator==(const Shape&) const = default;
 	};
 
 	/** @brief Immutable once registered. */
 	struct RaysState
 	{
 		Shape shape;
-		std::shared_ptr<const RasterProgram> raymarch, apply, sunMask, sunBlur, sunComposite;
-		std::shared_ptr<const ComputeProgram> blurH, blurV;
-		// Volumetric scattering, the blur's other half and the raymarch depth, then the sun rays' ping-pong pair.
-		std::unique_ptr<GraphResources::Texture2D> vlScattering, vlBlur, vlDepth, sunA, sunB;
-		std::shared_ptr<const org::LatchBlock> latch;
-		std::shared_ptr<const RenderGraph::RunGate> gate;
-		std::uint32_t linearSampler = 0;
+		std::shared_ptr<const Fixed> fixed;
 	};
+
+	/** @brief A declared texture as passes declare it: its slot, so a new version needs no build. */
+	FrameAnchors::Texture Slot(const RF::DeclaredTexture2D& a_texture)
+	{
+		return AP::TextureOf(*a_texture);
+	}
 
 	/** @brief Its revision never changes, so its recording is kept. */
 	struct RaysFrame
@@ -188,8 +221,8 @@ namespace
 	void GatedDraw(const RaysState& a_state, std::uint32_t a_entry, const RasterProgram& a_program, RasterProgram::DrawDesc a_desc,
 		org::PassRecordContext& a_recording)
 	{
-		a_desc.indirect = &a_state.gate->Latch();
-		a_desc.indirectOffset = a_state.gate->Offset(a_entry);
+		a_desc.indirect = &a_state.fixed->gate->Latch();
+		a_desc.indirectOffset = a_state.fixed->gate->Offset(a_entry);
 		a_program.Draw(a_recording, a_desc);
 	}
 
@@ -214,8 +247,8 @@ namespace
 			const auto& s = *state;
 			RaymarchBindings b{};
 			b.shared = SharedConstants::Declare(a_builder);
-			b.scattering = a_builder.RenderTarget(s.vlScattering->Graph()).View();
-			b.depthOut = a_builder.RenderTarget(s.vlDepth->Graph()).View();
+			b.scattering = a_builder.RenderTarget(Slot(s.fixed->vlScattering)).View();
+			b.depthOut = a_builder.RenderTarget(Slot(s.fixed->vlDepth)).View();
 			b.depth = Read(a_builder, s.shape.depth);
 			if (s.shape.shadowHeights) {
 				b.shadowHeights = Read(a_builder, s.shape.shadowHeights);
@@ -237,7 +270,7 @@ namespace
 			const auto& s = *a_frame.state;
 			RaymarchBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			block.sampler = s.linearSampler;
+			block.sampler = s.fixed->linearSampler.Index();
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.shadowHeights = a_bindings.hasShadowHeights ? a_recording.Index(a_bindings.shadowHeights) : 0;
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
@@ -245,7 +278,7 @@ namespace
 			const std::array<RasterProgram::Colour, 2> colours{ { { .view = &a_bindings.scattering, .load = rhi::LoadOp::DontCare },
 				{ .view = &a_bindings.depthOut, .load = rhi::LoadOp::DontCare } } };
 			const auto& sizes = s.shape.sizes;
-			GatedDraw(s, kVolumetricDraws, *s.raymarch,
+			GatedDraw(s, kVolumetricDraws, *s.shape.programs->raymarch,
 				{ .colours = colours,
 					.viewport = { .width = sizes.halfWidth, .height = sizes.halfHeight },
 					.constants = ShaderBindings::Data(block),
@@ -276,8 +309,8 @@ namespace
 			ApplyBindings b{};
 			b.shared = SharedConstants::Declare(a_builder);
 			b.main = a_builder.RenderTarget(s.shape.main).View();
-			b.scattering = a_builder.ShaderResource(s.vlScattering->Graph()).View();
-			b.raymarchDepth = a_builder.ShaderResource(s.vlDepth->Graph()).View();
+			b.scattering = a_builder.ShaderResource(Slot(s.fixed->vlScattering)).View();
+			b.raymarchDepth = a_builder.ShaderResource(Slot(s.fixed->vlDepth)).View();
 			b.depth = Read(a_builder, s.shape.depth);
 			return b;
 		}
@@ -293,11 +326,11 @@ namespace
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 			block.scattering = a_recording.Index(a_bindings.scattering);
 			block.raymarchDepth = a_recording.Index(a_bindings.raymarchDepth);
-			block.vl = ShaderBindings::LatchOf(*s.latch, a_recording.Run(), kVLOffset);
+			block.vl = ShaderBindings::LatchOf(*s.fixed->latch, a_recording.Run(), kVLOffset);
 			block.depth = a_recording.Index(a_bindings.depth);
 			const RasterProgram::Colour colour{ .view = &a_bindings.main, .load = rhi::LoadOp::Load };
 			const auto& sizes = s.shape.sizes;
-			GatedDraw(s, kVolumetricDraws, *s.apply,
+			GatedDraw(s, kVolumetricDraws, *s.shape.programs->apply,
 				{ .colours = { &colour, 1 },
 					.viewport = { .width = sizes.width, .height = sizes.height },
 					.constants = ShaderBindings::Data(block),
@@ -330,13 +363,13 @@ namespace
 			const auto& s = *state;
 			const bool composite = pass == ORGSunRays::kSunRaysPasses - 1;
 			// The mask and the second blur write A, the other blurs write B.
-			const auto& written = pass % 2 == 0 ? s.sunA : s.sunB;
-			const auto& read = pass % 2 == 0 ? s.sunB : s.sunA;
+			const auto& written = pass % 2 == 0 ? s.fixed->sunA : s.fixed->sunB;
+			const auto& read = pass % 2 == 0 ? s.fixed->sunB : s.fixed->sunA;
 			SunRaysBindings b{};
 			b.shared = SharedConstants::Declare(a_builder);
-			b.target = composite ? a_builder.RenderTarget(s.shape.main).View() : a_builder.RenderTarget(written->Graph()).View();
+			b.target = composite ? a_builder.RenderTarget(s.shape.main).View() : a_builder.RenderTarget(Slot(written)).View();
 			if (pass != 0) {
-				b.rays = a_builder.ShaderResource(read->Graph()).View();
+				b.rays = a_builder.ShaderResource(Slot(read)).View();
 				b.hasRays = true;
 			}
 			b.depth = Read(a_builder, s.shape.depth);
@@ -358,18 +391,19 @@ namespace
 		static void Record(const SunRaysBindings& a_bindings, const RaysFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto& s = *a_frame.state;
+			const auto& programs = *s.shape.programs;
 			const std::uint32_t pass = a_frame.index;
 			const bool composite = pass == ORGSunRays::kSunRaysPasses - 1;
 			SunRaysBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
-			block.sampler = s.linearSampler;
+			block.sampler = s.fixed->linearSampler.Index();
 			block.rays = a_bindings.hasRays ? a_recording.Index(a_bindings.rays) : 0;
-			block.data = ShaderBindings::LatchOf(*s.latch, a_recording.Run(), SunOffset(pass));
+			block.data = ShaderBindings::LatchOf(*s.fixed->latch, a_recording.Run(), SunOffset(pass));
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
 			// The half-res passes write every texel. The composite adds to kMAIN.
 			const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = composite ? rhi::LoadOp::Load : rhi::LoadOp::DontCare };
-			const auto& program = pass == 0 ? s.sunMask : (composite ? s.sunComposite : s.sunBlur);
+			const auto& program = pass == 0 ? programs.sunMask : (composite ? programs.sunComposite : programs.sunBlur);
 			static constexpr std::array<const char*, ORGSunRays::kSunRaysPasses> kNames{ "Effects11::SunRays Mask", "Effects11::SunRays Blur 1",
 				"Effects11::SunRays Blur 2", "Effects11::SunRays Blur 3", "Effects11::SunRays Composite" };
 			const auto& sizes = s.shape.sizes;
@@ -408,8 +442,10 @@ namespace
 		return {};
 	}
 
+	using DefineList = std::vector<std::pair<std::wstring, std::wstring>>;
+
 	/** @brief The programs add the D3D11 build's common defines themselves. */
-	std::vector<std::pair<std::wstring, std::wstring>> Defines(const std::vector<std::string>& a_names)
+	DefineList Defines(const std::vector<std::string>& a_names)
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
 		for (const auto& name : a_names)
@@ -417,17 +453,38 @@ namespace
 		return RenderGraph::AnchorPasses::Defines(defines);
 	}
 
-	D3D11_TEXTURE2D_DESC HalfDesc(const Shape& a_shape, DXGI_FORMAT a_format, UINT a_bindFlags)
+	/**
+	* @brief The programs' descriptions, their defines resolved at setup: CS's common defines read State, which the programs lane
+	* must not. The two additive programs get kMAIN's format at each build.
+	*/
+	struct ProgramDescs
 	{
-		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = a_shape.sizes.halfTexWidth;
-		desc.Height = a_shape.sizes.halfTexHeight;
-		desc.MipLevels = 1;
-		desc.ArraySize = 1;
-		desc.Format = a_format;
-		desc.SampleDesc.Count = 1;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = a_bindFlags;
+		RasterProgram::Desc raymarch, apply, sunMask, sunBlur, sunComposite;
+		ComputeProgram::Desc blurH, blurV;
+	};
+
+	RasterProgram::Desc RasterDesc(const char* a_source, const std::vector<std::string>& a_defines, std::vector<RasterProgram::Target> a_targets, std::uint32_t a_words)
+	{
+		RasterProgram::Desc desc{};
+		desc.pixelSource = std::string(kShaderDir) + a_source;
+		desc.constantWords = a_words;
+		desc.defines = Defines(a_defines);
+		desc.targets = std::move(a_targets);
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+		desc.vertexStageDefines = RenderGraph::ProgramBuild::WithCommonDefines(desc.defines, L"vs_6_6");
+		desc.pixelStageDefines = RenderGraph::ProgramBuild::WithCommonDefines(desc.defines, L"ps_6_6");
+		desc.commonDefines = false;
+#	endif
+		return desc;
+	}
+
+	ComputeProgram::Desc ComputeDesc(const char* a_source, const std::vector<std::string>& a_defines, std::uint32_t a_words)
+	{
+		ComputeProgram::Desc desc{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(a_defines) };
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+		desc.defines = RenderGraph::ProgramBuild::WithCommonDefines(desc.defines, L"cs_6_6");
+		desc.commonDefines = false;
+#	endif
 		return desc;
 	}
 
@@ -446,78 +503,9 @@ namespace
 		return blend;
 	}
 
-	/** @brief As the D3D11 dispatches give them. */
-	std::array<std::uint32_t, 3> BlurGroups(const ORGSunRays::Sizes& a_sizes, bool a_horizontal)
+	/** @brief Render thread, at setup. As Effects11::DrawVolumetricRays and EnsureSunRaysResources define them. */
+	ProgramDescs ResolveDescs()
 	{
-		if (a_horizontal)
-			return { (a_sizes.halfWidth + kBlurGroupPixels - 1) / kBlurGroupPixels, a_sizes.halfHeight, 1 };
-		return { a_sizes.halfWidth, (a_sizes.halfHeight + kBlurGroupPixels - 1) / kBlurGroupPixels, 1 };
-	}
-}
-
-struct ORGSunRays::Impl
-{
-	// Made at Setup and shared by every build.
-	std::shared_ptr<org::LatchBlock> latch;
-	std::shared_ptr<RenderGraph::RunGate> gate;
-	org::OwnedDescriptorBinding linearSampler;
-
-	// Null until the first frame the graph takes.
-	std::shared_ptr<const RaysState> state;
-	// Kept across shapes, so a resize does not recompile.
-	std::map<std::string, std::shared_ptr<const RasterProgram>> rasterPrograms;
-	std::map<std::string, std::shared_ptr<const ComputeProgram>> computePrograms;
-	// After this, a newly built program is logged as a format setup did not know.
-	bool prebuilt = false;
-	// Gathered by VolumetricRays and SunRays, handed to the run at the hook, latched by the commit.
-	LatchData pending{};
-	bool pendingVolumetric = false, pendingSun = false;
-	std::optional<LatchData> committed;
-	bool committedVolumetric = false, committedSun = false;
-	std::uint32_t preparedFrame = UINT32_MAX;
-	bool preparedOk = false;
-	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
-
-	std::shared_ptr<const RasterProgram> Raster(const char* a_source, std::vector<std::string> a_defines, std::vector<RasterProgram::Target> a_targets,
-		std::uint32_t a_words)
-	{
-		std::string key = a_source;
-		for (const auto& define : a_defines)
-			key += ";" + define;
-		for (const auto& target : a_targets)
-			key += ";" + std::to_string(static_cast<std::uint32_t>(target.format)) + (target.blend.enable ? "+" : "");
-		auto& program = rasterPrograms[key];
-		if (!program) {
-			if (prebuilt)
-				logger::info("[ORG] Effects11 rays: {} for this target was not built at setup; building it now", a_source);
-			RasterProgram::Desc desc{};
-			desc.pixelSource = std::string(kShaderDir) + a_source;
-			desc.constantWords = a_words;
-			desc.defines = Defines(a_defines);
-			desc.targets = std::move(a_targets);
-			program = RasterProgram::Load(RenderGraphRuntime::Get().Host()->Device(), desc);
-		}
-		return program;
-	}
-
-	std::shared_ptr<const ComputeProgram> Compute(const char* a_source, std::vector<std::string> a_defines, std::uint32_t a_words)
-	{
-		std::string key = a_source;
-		for (const auto& define : a_defines)
-			key += ";" + define;
-		auto& program = computePrograms[key];
-		if (!program && prebuilt)
-			logger::info("[ORG] Effects11 rays: {} was not built at setup; building it now", a_source);
-		if (!program)
-			program = ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
-				{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = Defines(a_defines) });
-		return program;
-	}
-
-	/** @brief False, logged, when one fails. */
-	bool LoadPrograms(RaysState& a_state, rhi::Format a_mainFormat)
-	{
-		// As Effects11::DrawVolumetricRays and EnsureSunRaysResources define them.
 		std::vector<std::string> raymarchDefines;
 		if (globals::features::cloudShadows.loaded)
 			raymarchDefines.emplace_back("CLOUD_SHADOWS");
@@ -526,118 +514,304 @@ struct ORGSunRays::Impl
 		std::vector<std::string> maskDefines{ "MASK" };
 		if (globals::features::cloudShadows.loaded)
 			maskDefines.emplace_back("CLOUD_SHADOWS");
-		const RasterProgram::Target additive{ .format = a_mainFormat, .blend = AdditiveBlend() };
 		const RasterProgram::Target half{ .format = rhi::Format::R16_Float };
 		const RasterProgram::Target halfDepth{ .format = rhi::Format::R32_Float };
-		a_state.raymarch = Raster("RaymarchVolumetricRaysPS.hlsl", raymarchDefines, { half, halfDepth }, ShaderBindings::Words<RaymarchBlock>());
-		a_state.apply = Raster("ApplyVolumetricRaysPS.hlsl", {}, { additive }, ShaderBindings::Words<ApplyBlock>());
-		a_state.blurH = Compute("BlurVolumetricRaysCS.hlsl", { "HORIZONTAL" }, ShaderBindings::Words<BlurBlock>());
-		a_state.blurV = Compute("BlurVolumetricRaysCS.hlsl", {}, ShaderBindings::Words<BlurBlock>());
-		a_state.sunMask = Raster("SunRaysPS.hlsl", maskDefines, { half }, ShaderBindings::Words<SunRaysBlock>());
-		a_state.sunBlur = Raster("SunRaysPS.hlsl", { "BLUR" }, { half }, ShaderBindings::Words<SunRaysBlock>());
-		a_state.sunComposite = Raster("SunRaysPS.hlsl", { "COMPOSITE" }, { additive }, ShaderBindings::Words<SunRaysBlock>());
-		if (!a_state.raymarch || !a_state.apply || !a_state.blurH || !a_state.blurV || !a_state.sunMask || !a_state.sunBlur || !a_state.sunComposite) {
-			logger::error("[ORG] Effects11 rays: a program could not be built");
-			return false;
-		}
-		return true;
+		// The additive targets' format is set at each build.
+		const RasterProgram::Target additive{ .blend = AdditiveBlend() };
+		ProgramDescs descs;
+		descs.raymarch = RasterDesc("RaymarchVolumetricRaysPS.hlsl", raymarchDefines, { half, halfDepth }, ShaderBindings::Words<RaymarchBlock>());
+		descs.apply = RasterDesc("ApplyVolumetricRaysPS.hlsl", {}, { additive }, ShaderBindings::Words<ApplyBlock>());
+		descs.blurH = ComputeDesc("BlurVolumetricRaysCS.hlsl", { "HORIZONTAL" }, ShaderBindings::Words<BlurBlock>());
+		descs.blurV = ComputeDesc("BlurVolumetricRaysCS.hlsl", {}, ShaderBindings::Words<BlurBlock>());
+		descs.sunMask = RasterDesc("SunRaysPS.hlsl", maskDefines, { half }, ShaderBindings::Words<SunRaysBlock>());
+		descs.sunBlur = RasterDesc("SunRaysPS.hlsl", { "BLUR" }, { half }, ShaderBindings::Words<SunRaysBlock>());
+		descs.sunComposite = RasterDesc("SunRaysPS.hlsl", { "COMPOSITE" }, { additive }, ShaderBindings::Words<SunRaysBlock>());
+		return descs;
 	}
 
-	/** @brief False, logged, on failure. */
-	bool Build(const Shape& a_shape)
+	/** @brief Any thread: setup or the programs lane. Null, logged, when one fails. */
+	std::shared_ptr<const RaysPrograms> BuildPrograms(rhi::Device a_device, const ProgramDescs& a_descs, const ProgramKey& a_key)
 	{
-		auto built = std::make_shared<RaysState>();
-		built->shape = a_shape;
-		built->latch = latch;
-		built->gate = gate;
-		built->linearSampler = linearSampler.Index();
-		if (!LoadPrograms(*built, a_shape.mainFormat))
-			return false;
-
-		// Written and read within the frame, so transient.
-		const GraphResources::Options transient{ .lifetime = GraphResources::Lifetime::Transient };
-		constexpr UINT kTarget = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-		constexpr UINT kStorage = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		built->vlScattering = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kTarget | kStorage), "Effects11::VLTexA", transient);
-		built->vlBlur = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kStorage), "Effects11::VLTexB", transient);
-		built->vlDepth = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R32_FLOAT, kTarget), "Effects11::VLDepthHalf", transient);
-		built->sunA = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kTarget), "Effects11::SunRaysTexA", transient);
-		built->sunB = std::make_unique<GraphResources::Texture2D>(HalfDesc(a_shape, DXGI_FORMAT_R16_FLOAT, kTarget), "Effects11::SunRaysTexB", transient);
-		if (!*built->vlScattering || !*built->vlBlur || !*built->vlDepth || !*built->sunA || !*built->sunB) {
-			logger::error("[ORG] Effects11 rays: the half-res textures could not be made");
-			return false;
+		auto programs = std::make_shared<RaysPrograms>();
+		programs->mainFormat = static_cast<rhi::Format>(a_key.format);
+		auto apply = a_descs.apply;
+		auto composite = a_descs.sunComposite;
+		apply.targets[0].format = programs->mainFormat;
+		composite.targets[0].format = programs->mainFormat;
+		programs->raymarch = RasterProgram::Load(a_device, a_descs.raymarch);
+		programs->apply = RasterProgram::Load(a_device, apply);
+		programs->blurH = ComputeProgram::Load(a_device, a_descs.blurH);
+		programs->blurV = ComputeProgram::Load(a_device, a_descs.blurV);
+		programs->sunMask = RasterProgram::Load(a_device, a_descs.sunMask);
+		programs->sunBlur = RasterProgram::Load(a_device, a_descs.sunBlur);
+		programs->sunComposite = RasterProgram::Load(a_device, composite);
+		if (!programs->raymarch || !programs->apply || !programs->blurH || !programs->blurV || !programs->sunMask || !programs->sunBlur || !programs->sunComposite) {
+			logger::error("[ORG] Effects11 rays: a program could not be built for kMAIN format {}", a_key.format);
+			return nullptr;
 		}
+		return programs;
+	}
 
+	/** @brief The display size of a revision's values. Before the first display size, the engine's screen. */
+	RF::Vars::Extent2D DisplayOf(const RF::Inputs& a_in)
+	{
+		auto display = a_in.Get(RF::Vars::DisplaySize());
+		if (!display.width || !display.height) {
+			const auto* graphics = globals::game::graphicsState;
+			display = { static_cast<std::uint32_t>(graphics->screenWidth), static_cast<std::uint32_t>(graphics->screenHeight) };
+		}
+		return display;
+	}
+
+	/**
+	* @brief The areas a revision's values give, as Effects11's Draw* calls compute them from kMAIN. The dynamic area reads the
+	* engine's ratio and lock at the revision's start, as Util::ConvertToDynamic does on D3D11 (Upscaling sets the lock).
+	*/
+	ORGSunRays::Sizes SizesFor(const RF::Inputs& a_in)
+	{
+		const auto display = DisplayOf(a_in);
+		const float2 dynamic = Util::ConvertToDynamic(float2{ static_cast<float>(display.width), static_cast<float>(display.height) });
+		ORGSunRays::Sizes sizes;
+		sizes.halfTexWidth = (display.width + 1) / 2;
+		sizes.halfTexHeight = (display.height + 1) / 2;
+		sizes.width = static_cast<std::uint32_t>(dynamic.x);
+		sizes.height = static_cast<std::uint32_t>(dynamic.y);
+		sizes.halfWidth = (sizes.width + 1) / 2;
+		sizes.halfHeight = (sizes.height + 1) / 2;
+		return sizes;
+	}
+
+	/** @brief A half-size texture's description: half the display while its effect is on, one texel while it is off. */
+	D3D11_TEXTURE2D_DESC HalfDesc(const RF::Inputs& a_in, std::uint32_t a_toggleBits, DXGI_FORMAT a_format, UINT a_bindFlags)
+	{
+		const bool on = (a_in.Get(globals::features::effects11.raysToggles) & a_toggleBits) != 0;
+		const auto display = DisplayOf(a_in);
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = on ? (display.width + 1) / 2 : 1;
+		desc.Height = on ? (display.height + 1) / 2 : 1;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = a_format;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = a_bindFlags;
+		return desc;
+	}
+
+	/** @brief As the D3D11 dispatches give them. */
+	std::array<std::uint32_t, 3> BlurGroups(const ORGSunRays::Sizes& a_sizes, bool a_horizontal)
+	{
+		if (a_horizontal)
+			return { (a_sizes.halfWidth + kBlurGroupPixels - 1) / kBlurGroupPixels, a_sizes.halfHeight, 1 };
+		return { a_sizes.halfWidth, (a_sizes.halfHeight + kBlurGroupPixels - 1) / kBlurGroupPixels, 1 };
+	}
+
+	/** @brief What the last frame that wanted rays found. Not variables yet: a change invalidates the client's key. */
+	struct Observed
+	{
+		FrameAnchors::Texture main;
+		rhi::Format mainFormat = rhi::Format::Unknown;
+		Source depth, shadowHeights, cloudShadows;
+		const char* missing = nullptr;  // why the graph cannot draw this frame, null when it can
+
+		bool operator==(const Observed& a_other) const
+		{
+			return main == a_other.main && mainFormat == a_other.mainFormat && depth == a_other.depth && shadowHeights == a_other.shadowHeights &&
+			       cloudShadows == a_other.cloudShadows && (missing == nullptr) == (a_other.missing == nullptr);
+		}
+	};
+}
+
+struct ORGSunRays::Impl
+{
+	std::shared_ptr<Fixed> fixed;
+	// Declared at setup and kept. A new kMAIN format or shader cache clear is a program built off the render thread.
+	RF::DeclaredProgram<RaysPrograms> programs;
+	RF::DeclaredClient client;
+	Observed observed;
+	// The registration whose commit ran last, and the frame it ran in. The frame gives the graph only the effects it holds.
+	std::shared_ptr<const RaysState> held;
+	std::uint32_t heldFrame = UINT32_MAX;
+	// Gathered by VolumetricRays and SunRays, latched by the commit of the registration the run holds.
+	LatchData pending{};
+	bool pendingVolumetric = false, pendingSun = false;
+	std::uint32_t preparedFrame = UINT32_MAX;
+	bool preparedOk = false;
+	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
+
+	/** @brief Whether the registration the last frame ran holds the effect. A frame whose graph does not yet runs on D3D11. */
+	bool Holds(bool Shape::*a_effect) const
+	{
+		return held && held->shape.*a_effect && heldFrame + 1 >= globals::state->frameCount;
+	}
+
+	/** @brief The run's values, at the areas of the registration the run holds. */
+	void Commit(const std::shared_ptr<const RaysState>& a_state)
+	{
+		held = a_state;
+		heldFrame = globals::state->frameCount;
+		const auto& shape = a_state->shape;
+		const bool volumetric = pendingVolumetric && shape.volumetric;
+		const bool sun = pendingSun && shape.sun;
+		pendingVolumetric = pendingSun = false;
+		if (!volumetric && !sun)
+			return;
+		const auto& sizes = shape.sizes;
+		LatchData data = pending;
+		data.vl = { static_cast<std::int32_t>(sizes.halfWidth), static_cast<std::int32_t>(sizes.halfHeight), static_cast<std::int32_t>(sizes.halfWidth) - 1,
+			static_cast<std::int32_t>(sizes.halfHeight) - 1 };
+		// The passes draw these areas, which can be a revision behind the frame's.
+		for (auto& pass : data.sun) {
+			pass.uvScale = { static_cast<float>(sizes.halfWidth) / static_cast<float>(sizes.halfTexWidth),
+				static_cast<float>(sizes.halfHeight) / static_cast<float>(sizes.halfTexHeight) };
+			pass.uvMax = { (static_cast<float>(sizes.halfWidth) - 0.5f) / static_cast<float>(sizes.halfTexWidth),
+				(static_cast<float>(sizes.halfHeight) - 0.5f) / static_cast<float>(sizes.halfTexHeight) };
+			pass.invScreenWidth = 1.0f / (std::max)(static_cast<float>(sizes.width), 1.0f);
+		}
+		const auto& gate = *a_state->fixed->gate;
+		a_state->fixed->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
+		if (volumetric) {
+			const auto h = BlurGroups(sizes, true);
+			const auto v = BlurGroups(sizes, false);
+			gate.OpenDraw(kVolumetricDraws);
+			gate.OpenDispatch(kBlurH, h[0], h[1], h[2]);
+			gate.OpenDispatch(kBlurV, v[0], v[1], v[2]);
+		}
+		if (sun)
+			gate.OpenDraw(kSunDraws);
+	}
+
+	/** @brief The registration for a key, when a revision starts. False, logged, when a builder refuses a pass. */
+	bool MakeClient(const Shape& a_shape, FrameAnchors::ClientDesc& a_client)
+	{
+		auto state = std::make_shared<RaysState>();
+		state->shape = a_shape;
+		state->fixed = fixed;
+		const std::shared_ptr<const RaysState> shared = state;
+		const auto& f = *fixed;
+		const auto& programs = *a_shape.programs;
 		// The raster passes stay their own passes, since they read other clients' textures by name and the raymarch has two targets.
-		const std::shared_ptr<const RaysState> shared = built;
-		namespace AP = RenderGraph::AnchorPasses;
-		AP::Builder volumetric(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".volumetric", kVolumetricOrder, latch, gate);
-		volumetric.Add("raymarch", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<RaymarchPass>(shared); });
-		volumetric.Add(AP::Dispatch{ .name = "blur-h",
-			.program = built->blurH,
-			.bindings = { Bind::Srv(built->vlScattering->Graph()), Bind::Srv(built->vlDepth->Graph()), Bind::Uav(built->vlBlur->Graph()), Bind::Latch(kVLOffset) },
-			.gate = kBlurH });
-		volumetric.Add(AP::Dispatch{ .name = "blur-v",
-			.program = built->blurV,
-			.bindings = { Bind::Srv(built->vlBlur->Graph()), Bind::Srv(built->vlDepth->Graph()), Bind::Uav(built->vlScattering->Graph()), Bind::Latch(kVLOffset) },
-			.gate = kBlurV });
-		volumetric.Add("apply", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<ApplyPass>(shared); });
-
-		AP::Builder sun(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".sun", kSunRaysOrder, latch, gate);
-		static constexpr std::array<const char*, kSunRaysPasses> kSunSteps{ "mask", "blur-1", "blur-2", "blur-3", "composite" };
-		for (std::uint32_t pass = 0; pass < kSunRaysPasses; ++pass)
-			sun.Add(kSunSteps[pass], FrameAnchors::PassKind::Render, [shared, pass] { return std::make_shared<SunRaysPass>(shared, pass); });
-
+		AP::Builder volumetric(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".volumetric", kVolumetricOrder, f.latch, f.gate);
+		if (a_shape.volumetric) {
+			volumetric.Add("raymarch", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<RaymarchPass>(shared); });
+			volumetric.Add(AP::Dispatch{ .name = "blur-h",
+				.program = programs.blurH,
+				.bindings = { Bind::Srv(Slot(f.vlScattering)), Bind::Srv(Slot(f.vlDepth)), Bind::Uav(Slot(f.vlBlur)), Bind::Latch(kVLOffset) },
+				.gate = kBlurH });
+			volumetric.Add(AP::Dispatch{ .name = "blur-v",
+				.program = programs.blurV,
+				.bindings = { Bind::Srv(Slot(f.vlBlur)), Bind::Srv(Slot(f.vlDepth)), Bind::Uav(Slot(f.vlScattering)), Bind::Latch(kVLOffset) },
+				.gate = kBlurV });
+			volumetric.Add("apply", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<ApplyPass>(shared); });
+		}
+		AP::Builder sun(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".sun", kSunRaysOrder, f.latch, f.gate);
+		if (a_shape.sun) {
+			static constexpr std::array<const char*, kSunRaysPasses> kSunSteps{ "mask", "blur-1", "blur-2", "blur-3", "composite" };
+			for (std::uint32_t pass = 0; pass < kSunRaysPasses; ++pass)
+				sun.Add(kSunSteps[pass], FrameAnchors::PassKind::Render, [shared, pass] { return std::make_shared<SunRaysPass>(shared, pass); });
+		}
 		for (const auto* builder : { &volumetric, &sun }) {
 			if (builder->Failed()) {
 				logger::error("[ORG] Effects11 rays: {}", builder->Failure());
 				return false;
 			}
 		}
-
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
-		client.passes = volumetric.Take();
+		a_client.id = kClientId;
+		a_client.passes = volumetric.Take();
 		for (auto& pass : sun.Take())
-			client.passes.push_back(std::move(pass));
-		client.registerResources = [shared](org::RenderGraph& a_graph) {
-			for (const auto* texture : { shared->vlScattering.get(), shared->vlBlur.get(), shared->vlDepth.get(), shared->sunA.get(), shared->sunB.get() })
-				texture->Register(a_graph);
+			a_client.passes.push_back(std::move(pass));
+		a_client.registerResources = [shared](org::RenderGraph& a_graph) {
+			const auto& fixedState = *shared->fixed;
+			if (shared->shape.volumetric)
+				for (const auto* texture : { &fixedState.vlScattering, &fixedState.vlBlur, &fixedState.vlDepth })
+					(*texture)->Register(a_graph);
+			if (shared->shape.sun)
+				for (const auto* texture : { &fixedState.sunA, &fixedState.sunB })
+					(*texture)->Register(a_graph);
 		};
-		client.commit = [this, shared](const FrameAnchors::Point&) {
-			if (committed) {
-				latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *committed);
-				if (committedVolumetric) {
-					const auto h = BlurGroups(shared->shape.sizes, true);
-					const auto v = BlurGroups(shared->shape.sizes, false);
-					gate->OpenDraw(kVolumetricDraws);
-					gate->OpenDispatch(kBlurH, h[0], h[1], h[2]);
-					gate->OpenDispatch(kBlurV, v[0], v[1], v[2]);
-				}
-				if (committedSun)
-					gate->OpenDraw(kSunDraws);
-			}
-			committed.reset();
-		};
-		// The run has work only for the effects the frame gave the graph.
-		client.active = [this] {
-			committedVolumetric = pendingVolumetric;
-			committedSun = pendingSun;
-			const bool live = pendingVolumetric || pendingSun;
-			if (live)
-				committed = pending;
-			pendingVolumetric = pendingSun = false;
-			return live;
-		};
-		client.sharedConstants = true;
-		client.gates = { gate };
-		if (!FrameAnchors::Register(std::move(client)))
-			return false;
-		state = std::move(built);
+		// Every run commits, so the frame knows which registration its graph holds. Effects the frame did not give stay closed.
+		a_client.commit = [this, shared](const FrameAnchors::Point&) { Commit(shared); };
+		a_client.sharedConstants = true;
+		a_client.gates = { f.gate };
 		const auto& sizes = a_shape.sizes;
-		logger::info("[ORG] Effects11 rays run on the render graph (half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud shadows {})", sizes.halfTexWidth,
-			sizes.halfTexHeight, static_cast<std::uint32_t>(a_shape.mainFormat), a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
+		logger::info("[ORG] Effects11 rays: a client for the next revision (volumetric {}, sun {}, half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud "
+					 "shadows {})",
+			a_shape.volumetric ? "on" : "off", a_shape.sun ? "on" : "off", sizes.halfTexWidth, sizes.halfTexHeight, static_cast<std::uint32_t>(programs.mainFormat),
+			a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
 		return true;
+	}
+
+	/** @brief The client's key for a revision's values. No client while both effects are off or the inputs are missing. */
+	std::optional<Shape> KeyFor(const RF::Inputs& a_in) const
+	{
+		const auto toggles = a_in.Get(globals::features::effects11.raysToggles);
+		Shape shape;
+		shape.volumetric = (toggles & Effects11::kVolumetricRaysBit) != 0;
+		shape.sun = (toggles & (Effects11::kSunRaysBit | Effects11::kMoonRaysBit)) != 0;
+		if (!shape.volumetric && !shape.sun)
+			return std::nullopt;
+		// The inputs come from the last frame that wanted rays. Before one could read them, the rays draw on D3D11.
+		if (observed.missing || !observed.main || !observed.depth)
+			return std::nullopt;
+		shape.programs = programs.For(a_in);
+		// The programs follow raysTargetFormat, which the observation writes: the next revision has both.
+		if (!shape.programs || shape.programs->mainFormat != observed.mainFormat)
+			return std::nullopt;
+		shape.sizes = SizesFor(a_in);
+		shape.main = observed.main;
+		shape.depth = observed.depth;
+		shape.shadowHeights = observed.shadowHeights;
+		shape.cloudShadows = observed.cloudShadows;
+		return shape;
+	}
+
+	/** @brief This frame's inputs, as Effects11 binds them for its D3D11 passes. */
+	static Observed Observe()
+	{
+		Observed now;
+		const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+		if (!main.texture || !main.RTV) {
+			now.missing = "kMAIN is missing";
+			return now;
+		}
+		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+		main.RTV->GetDesc(&rtvDesc);
+		now.mainFormat = rhi::helpers::ToRHI(rtvDesc.Format);
+		now.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+		if (!now.main || now.mainFormat == rhi::Format::Unknown) {
+			now.missing = "kMAIN cannot be imported";
+			return now;
+		}
+		// What CS bound at t17, resolved here rather than read back from the context.
+		now.depth = SceneDepth(VanillaBinding::LastSceneDepth());
+		if (!now.depth) {
+			now.missing = "the scene depth at t17 is missing or cannot be imported";
+			return now;
+		}
+		auto& terrainShadows = globals::features::terrainShadows;
+		if (terrainShadows.loaded) {
+			auto* view = terrainShadows.GetShadowHeightSRV();
+			const auto& graphTerrain = ORGTerrainShadows::Get();
+			if (view && graphTerrain.IsActive() && view == graphTerrain.ShadowHeightSRV())
+				now.shadowHeights = { nullptr, std::string(ORGTerrainShadows::kShadowHeightId) };
+			// The raymarch reads the heights whenever terrain shadows are on.
+			if (!now.shadowHeights) {
+				now.missing = "Terrain Shadows' heights are missing";
+				return now;
+			}
+		}
+		if (globals::features::cloudShadows.loaded) {
+			// The cubemap Cloud Shadows binds at t25 for the frame. Use the graph's own when it is that one.
+			auto* view = globals::features::cloudShadows.OcclusionSRV();
+			const auto& graphClouds = ORGCloudShadows::Get();
+			if (view && graphClouds.IsActive() && view == graphClouds.OcclusionSRV())
+				now.cloudShadows = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
+			if (!now.cloudShadows) {
+				now.missing = "Cloud Shadows' texture is missing";
+				return now;
+			}
+		}
+		return now;
 	}
 };
 
@@ -656,35 +830,89 @@ bool ORGSunRays::Setup()
 	if (impl)
 		return true;
 	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::PostComposite)) {
+	auto* host = runtime.Host();
+	if (!runtime.IsActive() || !host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::PostComposite)) {
 		logger::warn("[ORG] Effects11 rays: CS_ORG_E11_RAYS=1 but the render graph or its PostComposite anchor is not available; the rays stay on D3D11");
 		return false;
 	}
+	auto& effects11 = globals::features::effects11;
 	auto state = std::make_unique<Impl>();
-	state->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
-	state->gate = RenderGraph::RunGate::Create("cs.e11-rays.gate", kGateEntries);
+	auto fixed = std::make_shared<Fixed>();
+	fixed->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
+	fixed->gate = RenderGraph::RunGate::Create("cs.e11-rays.gate", kGateEntries);
 	// As Deferred::linearSampler.
-	state->linearSampler = ShaderBindings::CreateSampler({});
-	if (!state->gate || !state->linearSampler) {
+	fixed->linearSampler = ShaderBindings::CreateSampler({});
+	if (!fixed->gate || !fixed->linearSampler) {
 		logger::error("[ORG] Effects11 rays: the run gate or the sampler could not be made; the rays stay on D3D11");
 		failed = true;
 		return false;
 	}
-	// Build kMAIN's programs now so the first frame compiles nothing.
-	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	if (main.RTV) {
+
+	// Written and read within the frame, so transient. Declared on the display size and the toggles (decision 6a): a new size,
+	// or an effect turned on or off, is a new version of the same slot, with no build.
+	{
+		const GraphResources::Options transient{ .lifetime = GraphResources::Lifetime::Transient };
+		constexpr UINT kTarget = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		constexpr UINT kStorage = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		constexpr std::uint32_t kVolumetric = Effects11::kVolumetricRaysBit;
+		constexpr std::uint32_t kSun = Effects11::kSunRaysBit | Effects11::kMoonRaysBit;
+		const auto dependencies = RF::DependsOn(RF::Vars::DisplaySize(), effects11.raysToggles);
+		const auto declare = [&](const char* a_name, std::uint32_t a_bits, DXGI_FORMAT a_format, UINT a_bind) {
+			return RF::DeclareTexture2D(
+				a_name, dependencies, [a_bits, a_format, a_bind](const RF::Inputs& a_in) { return HalfDesc(a_in, a_bits, a_format, a_bind); }, transient);
+		};
+		fixed->vlScattering = declare("Effects11::VLTexA", kVolumetric, DXGI_FORMAT_R16_FLOAT, kTarget | kStorage);
+		fixed->vlBlur = declare("Effects11::VLTexB", kVolumetric, DXGI_FORMAT_R16_FLOAT, kStorage);
+		fixed->vlDepth = declare("Effects11::VLDepthHalf", kVolumetric, DXGI_FORMAT_R32_FLOAT, kTarget);
+		fixed->sunA = declare("Effects11::SunRaysTexA", kSun, DXGI_FORMAT_R16_FLOAT, kTarget);
+		fixed->sunB = declare("Effects11::SunRaysTexB", kSun, DXGI_FORMAT_R16_FLOAT, kTarget);
+		for (const auto* texture : { &fixed->vlScattering, &fixed->vlBlur, &fixed->vlDepth, &fixed->sunA, &fixed->sunB }) {
+			if (!*texture || !**texture) {
+				logger::error("[ORG] Effects11 rays: the half-res textures could not be made; the rays stay on D3D11");
+				failed = true;
+				return false;
+			}
+		}
+	}
+
+	// kMAIN's format as setup finds it, so the first programs, built here, are the ones the first frame needs.
+	if (const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN]; main.RTV) {
 		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 		main.RTV->GetDesc(&rtvDesc);
-		RaysState programs;
-		if (const auto format = rhi::helpers::ToRHI(rtvDesc.Format); format == rhi::Format::Unknown || !state->LoadPrograms(programs, format)) {
-			logger::error("[ORG] Effects11 rays: the programs for kMAIN could not be built; the rays stay on D3D11");
-			failed = true;
-			return false;
-		}
-		state->prebuilt = true;
+		if (const auto format = rhi::helpers::ToRHI(rtvDesc.Format); format != rhi::Format::Unknown)
+			effects11.raysTargetFormat = static_cast<std::uint32_t>(format);
 	} else
-		logger::warn("[ORG] Effects11 rays: kMAIN does not exist at setup; the programs are built at the first frame");
+		logger::warn("[ORG] Effects11 rays: kMAIN does not exist at setup; the programs are built for R16G16B16A16_FLOAT first");
+
+	// A new kMAIN format or a shader cache clear builds the programs on the programs lane. The revision that needs them starts
+	// once they are built.
+	state->programs = RF::DeclareProgram("Effects11::Rays", RF::DependsOn(effects11.raysTargetFormat, effects11.shaderCacheClears),
+		[](const RF::Inputs& a_in) {
+			const auto& e11 = globals::features::effects11;
+			const auto format = a_in.Get(e11.raysTargetFormat);
+			return ProgramKey{ format ? format : static_cast<std::uint32_t>(rhi::Format::R16G16B16A16_Float), a_in.Get(e11.shaderCacheClears) };
+		},
+		[device = host->Device(), descs = ResolveDescs()](const ProgramKey& a_key) { return BuildPrograms(device, descs, a_key); });
+	if (!state->programs) {
+		logger::error("[ORG] Effects11 rays: the programs could not be built; the rays stay on D3D11");
+		failed = true;
+		return false;
+	}
+	state->fixed = fixed;
+
+	// The client follows the size, the ratios (its areas), the toggles and the programs' inputs. Its sources are observed.
+	auto* self = state.get();
+	state->client = RF::DeclareClient<Shape>(kClientId,
+		RF::DependsOn(RF::Vars::DisplaySize(), RF::Vars::DynamicRatios(), effects11.raysToggles, effects11.raysTargetFormat, effects11.shaderCacheClears),
+		[self](const RF::Inputs& a_in) { return self->KeyFor(a_in); },
+		[self](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return self->MakeClient(a_shape, a_client); });
+	if (!state->client) {
+		logger::error("[ORG] Effects11 rays: the client could not be declared; the rays stay on D3D11");
+		failed = true;
+		return false;
+	}
 	impl = std::move(state);
+	logger::info("[ORG] Effects11 rays run on the render graph; their textures, programs and client follow the frame revisions");
 	return true;
 }
 
@@ -693,7 +921,7 @@ bool ORGSunRays::IsActive() const
 	return impl && !failed && RenderGraphRuntime::Get().IsActive();
 }
 
-bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
+bool ORGSunRays::PrepareFrame()
 {
 	if (!IsActive())
 		return false;
@@ -701,99 +929,42 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	if (impl->preparedFrame == frame)
 		return impl->preparedOk;
 	impl->preparedFrame = frame;
-	impl->preparedOk = false;
+	impl->pendingVolumetric = impl->pendingSun = false;
 
-	const auto fallback = [&](const char* a_reason) {
-		if (impl->fallbackReason != a_reason) {
-			logger::info("[ORG] Effects11 rays: this frame runs on D3D11 ({})", a_reason);
-			impl->fallbackReason = a_reason;
+	// Not variables yet: a change of the inputs registers the client again at the next revision.
+	auto now = Impl::Observe();
+	if (now.mainFormat != rhi::Format::Unknown)
+		globals::features::effects11.raysTargetFormat = static_cast<std::uint32_t>(now.mainFormat);
+	if (!(now == impl->observed))
+		impl->client.Invalidate();
+	impl->observed = std::move(now);
+	impl->preparedOk = !impl->observed.missing;
+	if (impl->observed.missing) {
+		if (impl->fallbackReason != impl->observed.missing) {
+			logger::info("[ORG] Effects11 rays: this frame runs on D3D11 ({})", impl->observed.missing);
+			impl->fallbackReason = impl->observed.missing;
 		}
 		return false;
-	};
-
-	Shape shape;
-	shape.sizes = a_sizes;
-	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	if (!main.texture || !main.RTV)
-		return fallback("kMAIN is missing");
-	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
-	main.RTV->GetDesc(&rtvDesc);
-	shape.mainFormat = rhi::helpers::ToRHI(rtvDesc.Format);
-	shape.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
-	if (!shape.main || shape.mainFormat == rhi::Format::Unknown)
-		return fallback("kMAIN cannot be imported");
-
-	// What CS bound at t17, resolved here rather than read back from the context.
-	shape.depth = SceneDepth(VanillaBinding::LastSceneDepth());
-	if (!shape.depth)
-		return fallback("the scene depth at t17 is missing or cannot be imported");
-
-	auto& terrainShadows = globals::features::terrainShadows;
-	if (terrainShadows.loaded) {
-		auto* view = terrainShadows.GetShadowHeightSRV();
-		const auto& graphTerrain = ORGTerrainShadows::Get();
-		if (view && graphTerrain.IsActive() && view == graphTerrain.ShadowHeightSRV())
-			shape.shadowHeights = { nullptr, std::string(ORGTerrainShadows::kShadowHeightId) };
-		// The raymarch reads the heights whenever terrain shadows are on.
-		if (!shape.shadowHeights)
-			return fallback("Terrain Shadows' heights are missing");
 	}
-
-	if (globals::features::cloudShadows.loaded) {
-		// The cubemap Cloud Shadows binds at t25 for the frame. Use the graph's own when it is that one.
-		auto* view = globals::features::cloudShadows.OcclusionSRV();
-		const auto& graphClouds = ORGCloudShadows::Get();
-		if (view && graphClouds.IsActive() && view == graphClouds.OcclusionSRV())
-			shape.cloudShadows = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
-		if (!shape.cloudShadows)
-			return fallback("Cloud Shadows' texture is missing");
-	}
-
-	if (!impl->state || !(impl->state->shape == shape)) {
-		if (!impl->Build(shape)) {
-			logger::error("[ORG] Effects11 rays return to D3D11 for good");
-			FrameAnchors::Unregister(kClientId);
-			failed = true;
-			impl.reset();
-			return false;
-		}
-	}
-
-	impl->pending.vl = { static_cast<std::int32_t>(a_sizes.halfWidth), static_cast<std::int32_t>(a_sizes.halfHeight),
-		static_cast<std::int32_t>(a_sizes.halfWidth) - 1, static_cast<std::int32_t>(a_sizes.halfHeight) - 1 };
 	impl->fallbackReason.clear();
-	impl->preparedOk = true;
 	return true;
 }
 
-bool ORGSunRays::VolumetricRays(const Sizes& a_sizes)
+bool ORGSunRays::VolumetricRays(const Sizes&)
 {
-	if (!PrepareFrame(a_sizes))
+	if (!PrepareFrame() || !impl->Holds(&Shape::volumetric))
 		return false;
 	impl->pendingVolumetric = true;
 	return true;
 }
 
-bool ORGSunRays::SunRays(const Sizes& a_sizes, const std::array<Effects11::SunRaysData, kSunRaysPasses>& a_passes)
+bool ORGSunRays::SunRays(const Sizes&, const std::array<Effects11::SunRaysData, kSunRaysPasses>& a_passes)
 {
-	if (!PrepareFrame(a_sizes))
+	if (!PrepareFrame() || !impl->Holds(&Shape::sun))
 		return false;
 	impl->pending.sun = a_passes;
 	impl->pendingSun = true;
 	return true;
-}
-
-void ORGSunRays::Release()
-{
-	if (!impl)
-		return;
-	// The latch, gate and sampler stay. The next frame builds again.
-	FrameAnchors::Unregister(kClientId);
-	impl->state.reset();
-	impl->rasterPrograms.clear();
-	impl->computePrograms.clear();
-	impl->preparedFrame = UINT32_MAX;
-	impl->pendingVolumetric = impl->pendingSun = false;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -806,9 +977,8 @@ ORGSunRays::~ORGSunRays() = default;
 void ORGSunRays::Reserve() {}
 bool ORGSunRays::Setup() { return false; }
 bool ORGSunRays::IsActive() const { return false; }
-bool ORGSunRays::PrepareFrame(const Sizes&) { return false; }
+bool ORGSunRays::PrepareFrame() { return false; }
 bool ORGSunRays::VolumetricRays(const Sizes&) { return false; }
 bool ORGSunRays::SunRays(const Sizes&, const std::array<Effects11::SunRaysData, kSunRaysPasses>&) { return false; }
-void ORGSunRays::Release() {}
 
 #endif
