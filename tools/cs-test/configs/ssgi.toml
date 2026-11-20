@@ -1,0 +1,223 @@
+# Screen Space GI's shape settings changed mid-session (frame revision plan, 6.6). Each change is a frame revision: Enabled
+# switches the textures between one texel and the display size and the client between the chain and the history clears;
+# GI, specular GI and the temporal denoiser are programs built off the render thread before their revision starts (specular and
+# temporal also switch the specular textures); the blur and the resolution mode switch the client (the resolution mode swaps
+# which texture of each pair is the history). Option changes while SSGI is off change nothing. A preset button writes several
+# settings at once (the ssgi-preset step). Shots after each change settles. Compose it: native-vulkan+ssgi, native-d3d12+ssgi,
+# guest+ssgi, d3d11+ssgi.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+ScreenSpaceGI = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "ssgi-preset"
+arg = "standard"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=1"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "off-options"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=false"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "gi-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableExperimentalSpecularGI=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "specular"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableExperimentalSpecularGI=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableTemporalDenoiser=false"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "temporal-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableTemporalDenoiser=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableBlur=false"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "blur-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableBlur=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=0"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "full-res"
+
+[[steps]]
+# Two modes two frames apart: the latest wins.
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=1"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=2"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "quarter-res"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "ssgi-preset"
+arg = "extreme"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "preset-extreme"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "ssgi-preset"
+arg = "standard"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "off", "off-options", "on", "gi-off", "specular", "temporal-off", "blur-off", "full-res", "quarter-res", "preset-extreme", "end"]
+no_log = ["frame tap error", "a frame declaration failed", "could not be built", "Screen Space GI on the render graph failed", "could not be made"]

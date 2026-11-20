@@ -424,7 +424,7 @@ void Deferred::DeferredPasses()
 	if (ssgi.loaded)
 		ssgi.DrawSSGI();
 	auto [ssgi_ao, ssgi_y, ssgi_cocg, ssgi_gi_spec] = ssgi.GetOutputTextures();
-	bool ssgi_hq_spec = ssgi.settings.EnableExperimentalSpecularGI;
+	bool ssgi_hq_spec = ssgi.FrameSpecularGI();
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
 
