@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "OverlayFeature.h"
+#include "Utils/Setting.h"
 
 struct LightLimitFix : OverlayFeature
 {
@@ -50,6 +51,8 @@ struct LightLimitFix : OverlayFeature
 	[[msvc::noinline]] bool CheckParticleLightPass(RE::BSRenderPass* a_pass);
 
 public:
+	LightLimitFix();
+
 	virtual inline std::string GetName() override { return "Light Limit Fix"; }
 	virtual std::string GetDisplayName() override { return T("feature.light_limit_fix.name", "Light Limit Fix"); }
 	virtual inline std::string GetShortName() override { return "LightLimitFix"; }
@@ -326,8 +329,6 @@ public:
 
 	virtual void SaveSettings(json& o_json) override;
 	virtual void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void RestoreDefaultSettings() override;
 
 	/** @brief Draws the ImGui settings UI for light limit fix configuration and debug visualization. */
@@ -403,13 +404,12 @@ public:
 	uint32_t localShadowEngineMipLevels = 1;
 	uint32_t localShadowEngineSlices = 0;
 	bool localShadowDirectCopy = false;
-	// The cache lives on the render graph (ORGLocalShadows, CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1) rather than in localShadowCache/localShadowBuffer.
+	// The cache lives on the render graph (ORGLocalShadows) rather than in localShadowCache/localShadowBuffer, for the session.
+	// Its shape then follows the adopted frame revision (FollowLocalShadowGraph).
 	bool localShadowOnGraph = false;
 	// The frame's description, the same for both paths: the slices to copy and every slot's data.
 	eastl::vector<LocalShadowCopy> localShadowFrameCopies;
 	eastl::vector<LocalShadowData> localShadowFrameData;
-	// The graph could not hold the cache, or lost it: D3D11 holds it for the rest of the session.
-	bool localShadowGraphFailed = false;
 	uint32_t localShadowAllocFailedFrame = 0;
 	RE::Setting* poissonRadiusScaleSetting = nullptr;
 	bool poissonRadiusScaleLookedUp = false;
@@ -438,8 +438,18 @@ public:
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
 	/** @brief This frame's light grid, from the same source as GetLightIndexListSRV. */
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
-	/** @brief True when local shadows are enabled and the cache texture exists. */
-	bool IsLocalShadowCacheActive() const { return IsLocalShadowsEnabled() && (localShadowCache || localShadowOnGraph); }
+	/**
+	 * @brief True when the frame has a cache: on the render graph, the adopted revision's (its slots), else the D3D11 texture
+	 * while local shadows are enabled.
+	 */
+	bool IsLocalShadowCacheActive() const { return localShadowOnGraph ? localShadowHooksInstalled && localShadowCacheSlots != 0 : IsLocalShadowsEnabled() && localShadowCache; }
+	/** @brief The cache's slots for the slots setting, clamped to MIN_LOCAL_SHADOW_SLOTS and MAX_LOCAL_SHADOW_SLOTS. */
+	static uint32_t LocalShadowSlotsFor(uint32_t a_setting);
+	/**
+	 * @brief The cache's resolution for the resolution setting (0 matches the engine) and the engine's shadow map resolution.
+	 * The engine's resolution over it is a power of two, since LocalShadowCopyCS tree-reduces.
+	 */
+	static uint32_t LocalShadowResolutionFor(uint32_t a_setting, uint32_t a_engineResolution);
 	/** @brief The cache's slot data (t102): the render graph's export or the D3D11 buffer; null without a cache. */
 	ID3D11ShaderResourceView* GetLocalShadowDataSRV() const;
 	/** @brief The cache's shadow maps (t103), from the same source as GetLocalShadowDataSRV. */
@@ -479,8 +489,13 @@ public:
 
 	/** @brief Binds the local shadow cache and projection buffer for pixel shaders. */
 	void BindLocalShadowResources();
-	/** @brief Creates or recreates the cache texture and projection buffer to match the settings and the engine shadow map. */
+	/** @brief D3D11 only: creates or recreates the cache texture and projection buffer to match the settings and the engine shadow map. */
 	void EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMaps);
+	/**
+	 * @brief Render graph only: takes the adopted revision's cache shape. A new shape holds none of the old slices, so every slice
+	 * assignment is forgotten. Nothing is made or released here.
+	 */
+	void FollowLocalShadowGraph();
 	/** @brief Releases the cache resources and forgets every slice assignment. */
 	void ReleaseLocalShadowResources();
 	/** @brief Finds a free cache slice or reclaims the least recently rendered reclaimable one; an actor-lit caster may take the least important static caster's slice. */
@@ -522,9 +537,10 @@ public:
 		bool EnableParticleLightsCulling = true;
 		bool EnableLightsVisualisation = false;
 		uint LightsVisualisationMode = 0;
-		bool EnableLocalShadows = false;
-		uint LocalShadowSlots = 16;
-		uint LocalShadowResolution = 0;
+		// The cache's shape follows these (frame revision plan, 6.13).
+		CS::Setting<bool> EnableLocalShadows = false;
+		CS::Setting<std::uint32_t> LocalShadowSlots = 16;
+		CS::Setting<std::uint32_t> LocalShadowResolution = 0;
 		uint LocalShadowSamples = 8;
 		float LocalShadowFilterScale = 1.0f;
 

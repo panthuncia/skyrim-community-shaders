@@ -182,6 +182,7 @@ namespace RenderGraph::Frame
 			std::function<ErasedKey(const Inputs&)> key;                       // null: no client
 			std::function<bool(const void*, const void*)> equal;               // two non-null keys
 			std::function<bool(const void*, FrameAnchors::ClientDesc&)> make;  // the registration for a key
+			std::function<void(const void*)> adopted;                          // may be empty
 		};
 		DeclaredClient DeclareClient(std::string a_id, Dependencies a_dependencies, ClientFunctions a_functions);
 	}
@@ -191,10 +192,15 @@ namespace RenderGraph::Frame
 	* on, or nothing for no client, and a_make fills the registration for a key (false is fatal). A new key registers the client
 	* again when a revision starts, and the revision waits for the stage builds that hold it. An equal key does nothing, so a
 	* key may quantise a float (density > 0). The first evaluation is at the first revision after this call.
+	*
+	* a_adopted, if given, is called inside the adoption point of the first Begin whose adopted values give the registered key,
+	* once per registration. The frame runs that registration from then on. Use it to switch in what the frame binds outside the
+	* graph, such as a new resource published under an old id. It needs a key of variables only: a key that reads other state may
+	* never match the adopted values.
 	*/
 	template <class Key>
 	DeclaredClient DeclareClient(std::string a_id, Dependencies a_dependencies, std::function<std::optional<Key>(const Inputs&)> a_key,
-		std::function<bool(const Key&, FrameAnchors::ClientDesc&)> a_make)
+		std::function<bool(const Key&, FrameAnchors::ClientDesc&)> a_make, std::function<void(const Key&)> a_adopted = {})
 	{
 		Detail::ClientFunctions functions;
 		functions.key = [key = std::move(a_key)](const Inputs& a_inputs) -> Detail::ErasedKey {
@@ -205,6 +211,8 @@ namespace RenderGraph::Frame
 		};
 		functions.equal = [](const void* a_left, const void* a_right) { return *static_cast<const Key*>(a_left) == *static_cast<const Key*>(a_right); };
 		functions.make = [make = std::move(a_make)](const void* a_keyValue, FrameAnchors::ClientDesc& a_out) { return make(*static_cast<const Key*>(a_keyValue), a_out); };
+		if (a_adopted)
+			functions.adopted = [adopted = std::move(a_adopted)](const void* a_keyValue) { adopted(*static_cast<const Key*>(a_keyValue)); };
 		return Detail::DeclareClient(std::move(a_id), std::move(a_dependencies), std::move(functions));
 	}
 

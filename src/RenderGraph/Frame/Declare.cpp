@@ -107,7 +107,8 @@ namespace RenderGraph::Frame
 			ClientFunctions functions;
 			ErasedKey key;  // the registered client's, null while none is registered
 			bool registered = false;
-			bool invalid = true;  // evaluated at the next revision. A new declaration is.
+			bool invalid = true;         // evaluated at the next revision. A new declaration is.
+			bool adoptPending = false;  // the registration's adopted call has not run yet
 		};
 	}
 
@@ -205,6 +206,7 @@ namespace RenderGraph::Frame
 			if (!key) {
 				FrameAnchors::Unregister(a_client.id);
 				a_client.registered = false;
+				a_client.adoptPending = false;
 				a_client.key.reset();
 				logger::info("[ORG] frame declaration: client {} removed for the next revision", a_client.id);
 				return FrameAnchors::StageBuildNeed{ before, FrameAnchors::ClientsSerial(), fmt::format("the removal of client '{}'", a_client.id) };
@@ -216,6 +218,7 @@ namespace RenderGraph::Frame
 			if (!FrameAnchors::Register(std::move(desc)))
 				FailDeclaration(fmt::format("client {} was refused by the frame anchors", a_client.id));
 			a_client.registered = true;
+			a_client.adoptPending = static_cast<bool>(a_client.functions.adopted);
 			a_client.key = std::move(key);
 			logger::info("[ORG] frame declaration: client {} registered for the next revision", a_client.id);
 			return FrameAnchors::StageBuildNeed{ before | FrameAnchors::ClientSegments(a_client.id), FrameAnchors::ClientsSerial(),
@@ -355,7 +358,8 @@ namespace RenderGraph::Frame
 
 		void NoteBegin(std::uint64_t a_frame)
 		{
-			for (const auto& weak : DeclarationsOf().textures)
+			auto& registry = DeclarationsOf();
+			for (const auto& weak : registry.textures)
 				if (const auto texture = weak.lock()) {
 					const void* version = texture->twin->Graph().get();
 					if (version != texture->lastVersion) {
@@ -363,6 +367,23 @@ namespace RenderGraph::Frame
 						texture->firstFrame = a_frame;
 					}
 				}
+			// A registration is the frame's once the adopted values give its key: the revision that carried them waited for its builds.
+			const auto& adopted = Vars::Lane::Adopted();
+			if (!adopted)
+				return;
+			const Inputs values(adopted.get());
+			// Copied, since an adopted call may declare.
+			const auto clients = registry.clients;
+			for (const auto& weak : clients) {
+				const auto client = weak.lock();
+				if (!client || !client->adoptPending || !client->registered)
+					continue;
+				const auto key = client->functions.key(values);
+				if (!key || !client->functions.equal(key.get(), client->key.get()))
+					continue;
+				client->adoptPending = false;
+				client->functions.adopted(client->key.get());
+			}
 		}
 	}
 
