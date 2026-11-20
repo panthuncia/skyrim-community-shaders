@@ -205,3 +205,12 @@ final until the user confirms it.
     - toggling the rays shows one frame on D3D11.
 
     These go to a follow-up after 6.20 lands, using the pattern 6.20 sets for the post chain.
+42. **7c is merged.** Q5's answer: a plain pipeline swap at adoption is not safe. Programs read their live pipeline slot
+    when they record, and a kept recording can replay after the old pipeline is freed. So a shader reload still builds
+    every graph on the render thread, now inside the adoption of the `ShaderGeneration` revision. That is the plan's
+    allowed fallback. The real fix is revision-named pipelines:
+    - OMS staged sets passed as host data;
+    - an ORG `RecordingContext` that holds its pipelines.
+
+    This is listed for after step 10. A shader reload is a development action, so the render-thread build only affects
+    developers.
