@@ -91,6 +91,7 @@ The shipped configs:
 | `effects11-programs` | Bloom off and on and a shader cache clear: the FX chain's programs are built on the programs lane before their revision starts, never on the render thread; needs an Effects11 preset with "Post Processing Mode": "Effects11"; compose it, `native-vulkan+effects11-programs` |
 
 | `shader-reload` | a forced reload of every live pipeline (`dclf:reload-shaders=all`), then an unchanged one-file reload, a shot before and after each (`wait = "reload"`): the swap is a `ShaderGeneration` event, swapped in by the revision that carries it; compose it, `native-vulkan+shader-reload` |
+| `shader-reload-resize` | a forced reload of every live pipeline with a fog grid resize every 15 frames while it compiles, so the shader-reload wait lands while a resize revision with DCLF epochs prepares; the wait supersedes it (plan step 10b fix); compose it, `native-vulkan+shader-reload-resize` |
 | `dclf-toggles` | DCLF's cull mode (frustum, off, occlusion) and then its pipeline (CPU, GPU) changed during play, a shot after each (`wait = "settled"`): each change rebuilds DCLF's epochs, staged and attached with the snapshot recorded on them at a Begin, with no frame-start wait (plan step 10a); compose it, `native-vulkan+dclf-toggles` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |

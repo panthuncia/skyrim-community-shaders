@@ -1559,6 +1559,23 @@ one for the per-epoch views and the configs.
   shows whether that happens. (3) Whether `EpochRecordingVersionsCurrent` lists late-bound slots, which would make the new warning
   fire every scene.
 
+**As built (10b fix, 2026-11-19, `org-native/rev-step10b-fix`).** Code only, not built or run here. Closes the three open items.
+- **(1) Shader reload during a DCLF revision.** At its start the shader-reload wait calls `Revision::SupersedeForSceneWait`. A
+  revision in preparation whose closure has DCLF epochs is superseded (the usual supersession: its held scene is dropped as
+  superseded, its inputs are prepared again from the next Begin). `SceneFrameVersions` then names the adopted versions, so the
+  scenes the wait takes are adopted alone. The wait stays the one named, counted wait: its line ends with "frame revision
+  superseded for it: N (M in the session)". New config `shader-reload-resize`.
+- **(2) The starvation rule for the scene** (7.8). DCLF counts the frames whose coverage ran at least one of its epochs
+  (`SceneRecordedFrames`, replacing `SceneRecorded`). The coordinator notes at each Begin when that count last moved. A revision with
+  DCLF epochs in its closure waits for its scene only while DCLF's epochs ran in one of the last `kSceneIdleFrames`
+  (4 x `kGameFramesInFlight`) Begins; otherwise it adopts alone ("DCLF scene none (DCLF's epochs did not run)"). While DCLF draws,
+  each scene posted on other frame versions, or held and dropped for its builds, is a miss; more than `kRevisionStarvedAfter`
+  misses with no new input is `TapError::Starved` naming the revision. Supersession, adoption and any new input reset the count.
+- **(3) Late-bound slots.** `EpochRecordingVersionsCurrent` does not list them. ORG stamps a recording's versions from the graph's
+  versioned entries (`RenderGraphPersistent.cpp`, `versionStamps`), and lowering gives a late-bound resource no versioned entry
+  (`PersistentLowering.cpp:PreparedVersions` skips `LateBound()`). The swapchain is listed, but its versions are always number 0.
+  So the warning cannot fire for them, and nothing changed.
+
 **10c. Toggles and conditions as variables.** `Toggles` (`ToggleSet` fields) and `GraphConditions` become variables in `kInputs`.
 Delete `Toggles::BeginFrame`/`Adopt` and `RefreshGraphConditions`' polling at the build point. Then make in-frame build requests
 (step 1's late changes) fatal too. Tree Wind's `TreeModSupport` (when its port lands) changes the classification of DCLF members,
@@ -2760,6 +2777,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The re-staging rule counts scenes dropped for their builds**, reset by a new DCLF build state serial or any install. A rebuild
   asked from outside DCLF's conditions (a structural rebuild) is not a new build state, so a burst of those could fire it.
 - **`stagedAdoptions` now counts scenes adopted on other builds than the previous scene's**: the coordinator does the attach.
+
+**Decided by the agent (step 10b fix, 2026-11-19, `org-native/rev-step10b-fix`), to confirm:**
+- **The shader-reload wait supersedes a preparing DCLF revision,** rather than adopting it inside the wait or accepting its held
+  scene. That scene binds versions the frame does not run yet, and adopting a revision mid-wait would need its CS recordings ready
+  in the same Begin. Shader reload is development only, so preparing the resize again is cheap enough.
+- **"DCLF's epochs ran" is a frame whose coverage covered at least one DCLF epoch,** counted in `DecideEpochCoverage`. It moves
+  only while DCLF's frame start runs, so a menu without a scene pass, a load screen or a failed DCLF stop it.
+- **`kSceneIdleFrames` is 4 x `kGameFramesInFlight` Begins,** the same size as the starvation threshold. It is a frame count only
+  for "is DCLF drawing", not a limit on the revision; a revision never fails for waiting.
+- **After a revision adopted alone while DCLF was idle, DCLF's first frames back run its old scene** on the old versions until a
+  scene recorded on the new ones is adopted alone (one scene cadence). The recordings hold their versions' backings, so nothing
+  freed is read; the shots may show the old size for those frames. Treating it as uncovered would be fatal by DCLF's rule.
+- **Scene misses count scenes, not frames.** A scene posted on other frame versions while the revision waits, or a held scene
+  dropped for its builds, is a drop asked again. A builder that posts nothing while DCLF draws is not caught by it.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

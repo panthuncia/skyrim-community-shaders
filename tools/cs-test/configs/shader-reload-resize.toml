@@ -1,0 +1,200 @@
+# A shader reload while fog grid resizes keep frame revisions with DCLF epochs in preparation (frame revision plan, step 10b
+# fix). A forced reload of every live pipeline, then a resize every 15 frames while it compiles, so the reload's pipeline swap
+# and its shader-reload wait land while a resize revision holds DCLF's scene. The wait supersedes that revision ("frame revision
+# superseded for it" in the "[DCLF] shader-reload wait" line), and the resize is prepared again on the rebuilt graphs.
+# Compose it: native-vulkan+shader-reload-resize, guest+shader-reload-resize.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:reload-shaders"
+arg = "all"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 15
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+# The wait holds the shot until the reload finished and its pipelines are swapped in.
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after"
+wait = "reload"
+wait_s = 120
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "after"]
+no_log = ["frame tap error", "a frame revision failed", "shader reload: every graph asked for", "graph failed to prepare",
+	"binds a version the frame does not read"]
