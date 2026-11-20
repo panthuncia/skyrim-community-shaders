@@ -713,17 +713,17 @@ struct ORGSunRays::Impl
 		state->generation = ++generation;
 		const std::shared_ptr<const RaysState> shared = state;
 		const auto& f = *fixed;
-		const auto& programs = *a_shape.programs;
+		const auto& shapePrograms = *a_shape.programs;
 		// The raster passes stay their own passes, since they read other clients' textures by name and the raymarch has two targets.
 		AP::Builder volumetric(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".volumetric", kVolumetricOrder, f.latch, f.gate);
 		if (a_shape.volumetric) {
 			volumetric.Add("raymarch", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<RaymarchPass>(shared); });
 			volumetric.Add(AP::Dispatch{ .name = "blur-h",
-				.program = programs.blurH,
+				.program = shapePrograms.blurH,
 				.bindings = { Bind::Srv(Slot(f.vlScattering)), Bind::Srv(Slot(f.vlDepth)), Bind::Uav(Slot(f.vlBlur)), Bind::Latch(kVLOffset) },
 				.gate = kBlurH });
 			volumetric.Add(AP::Dispatch{ .name = "blur-v",
-				.program = programs.blurV,
+				.program = shapePrograms.blurV,
 				.bindings = { Bind::Srv(Slot(f.vlBlur)), Bind::Srv(Slot(f.vlDepth)), Bind::Uav(Slot(f.vlScattering)), Bind::Latch(kVLOffset) },
 				.gate = kBlurV });
 			volumetric.Add("apply", FrameAnchors::PassKind::Render, [shared] { return std::make_shared<ApplyPass>(shared); });
@@ -764,7 +764,7 @@ struct ORGSunRays::Impl
 		const auto& sizes = a_shape.sizes;
 		logger::info("[ORG] Effects11 rays: client {} for the next revision (volumetric {}, sun {}, half-res {}x{}, kMAIN format {}, terrain shadows {}, cloud "
 					 "shadows {})",
-			state->generation, a_shape.volumetric ? "on" : "off", a_shape.sun ? "on" : "off", sizes.halfTexWidth, sizes.halfTexHeight, static_cast<std::uint32_t>(programs.mainFormat),
+			state->generation, a_shape.volumetric ? "on" : "off", a_shape.sun ? "on" : "off", sizes.halfTexWidth, sizes.halfTexHeight, static_cast<std::uint32_t>(shapePrograms.mainFormat),
 			a_shape.shadowHeights ? "on" : "off", a_shape.cloudShadows ? "on" : "off");
 		return true;
 	}

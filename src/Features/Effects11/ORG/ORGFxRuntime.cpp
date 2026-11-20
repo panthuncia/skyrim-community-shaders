@@ -1649,8 +1649,8 @@ struct ORGFxRuntime::Impl
 	/** @brief The registration for a plan, in a_client. False, with a_failure, when the builder refuses a step. */
 	bool MakeClient(const std::shared_ptr<Frame>& a_frame, FrameAnchors::ClientDesc& a_client, std::string& a_failure)
 	{
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
+		FrameAnchors::ClientDesc desc{};
+		desc.id = kClientId;
 		const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
 		const std::shared_ptr<const RenderGraph::RunGate> gate = clearGate;
 		AP::Builder builder(FrameAnchors::Anchor::Tonemap, kClientId, kFirstOrder, latch);
@@ -1680,36 +1680,36 @@ struct ORGFxRuntime::Impl
 			a_failure = builder.Failure();
 			return false;
 		}
-		client.passes = builder.Take();
-		client.registerResources = [a_frame](org::RenderGraph& a_graph) {
+		desc.passes = builder.Take();
+		desc.registerResources = [a_frame](org::RenderGraph& a_graph) {
 			for (const auto& [row, texture] : a_frame->textures)
 				texture->Register(a_graph);
 		};
 		// Read at each Begin: while Post Processing or the game owns the tonemap, the passes record only their barriers.
-		client.declared = [] {
+		desc.declared = [] {
 			const bool owner = globals::state && globals::state->PeekTonemapOwner() == State::TonemapOwner::kEffects11;
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->declaredOwner = owner;
 			return owner;
 		};
-		client.active = [] {
+		desc.active = [] {
 			const auto& self = ORGFxRuntime::Get();
 			return self.impl && self.impl->activeNow;
 		};
 		// The commit that runs is the one of the registration the run's graph holds, so it writes its own plan.
-		client.commit = [a_frame](const FrameAnchors::Point&) {
+		desc.commit = [a_frame](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->SafeCommit(*a_frame);
 		};
-		client.executed = [](const FrameAnchors::Point&) {
+		desc.executed = [](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->Executed();
 		};
-		client.gates = { clearGate };
+		desc.gates = { clearGate };
 		// A schedule that still holds an older plan taps as it, and that plan's commit runs, so a new plan never drops a frame to FX11.
-		client.matchesById = true;
-		client.generation = ++buildGeneration;
-		a_client = std::move(client);
+		desc.matchesById = true;
+		desc.generation = ++buildGeneration;
+		a_client = std::move(desc);
 		return true;
 	}
 
