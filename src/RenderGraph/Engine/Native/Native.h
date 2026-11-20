@@ -67,6 +67,13 @@ namespace RenderGraph::Engine::Native
 	/** @brief Whether the frame runs on the render graph, in native or guest mode. Any thread. */
 	bool GraphMode();
 
+	/**
+	 * @brief In native or guest mode, logs why Drawcall Limit Fix will not run, then ends the process with a message box. Outside
+	 * them it returns. Both modes withhold the engine's draws (the flush latch) and DCLF draws the world, so without it the world
+	 * would be empty.
+	 */
+	void RequireDclf(std::string_view a_cause);
+
 	/** @brief On D3D12, the DCLF switches ApplySwitches turned off for lack of a D3D12 port, for DCLF's log line. */
 	std::string D3D12DclfOff();
 

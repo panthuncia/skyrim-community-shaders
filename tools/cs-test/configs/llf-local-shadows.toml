@@ -3,8 +3,9 @@
 # resolution changes (a new version), its slot count twice in a row (a new slice count is a new texture, published again under the
 # same id when its revision is adopted; the second change supersedes or follows the first), the cache goes off and on again
 # (one texel while off), and every setting goes back. A shot after each.
-# Compose it: guest+llf-local-shadows (the graph's cache), d3d11+llf-local-shadows (the D3D11 cache, unchanged). The native modes
-# need DCLF, which blocks the cache: native-vulkan+llf-local-shadows --set dclf.enabled=true only shows the changes break nothing.
+# Compose it as d3d11+llf-local-shadows (the D3D11 cache). It is D3D11 only: guest and native mode draw the world through DCLF and
+# stop at startup without it (Native::RequireDclf), and DCLF blocks the cache. guest+llf-local-shadows only checks that startup
+# error. native-vulkan+llf-local-shadows --set dclf.enabled=true only shows the setting changes break nothing.
 extends = ["base"]
 
 [run]

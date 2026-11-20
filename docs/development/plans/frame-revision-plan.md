@@ -2097,6 +2097,16 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **LUT, Lens Flare and Physical Glare read the values Update observed** (LUT type, kernel groups and blur passes, tear film)
   in `BuildRun` and `Programs`, no longer the live settings, so the plan and the build agree.
 
+**Decided by the agent (guest without DCLF, 2026-11-19), to confirm:**
+- **Guest and native need DCLF; without it they stop at startup.** Both run the flush latch (`Flush::LatchRequested()` is
+  `GraphMode()`), which drops every engine draw no port vouches for, and DCLF is the port for the world's geometry. With DCLF off
+  the world was empty (`guest+llf-local-shadows`: sky colour and HUD only, `flush latch` lines for DrawTriShape). Native already
+  failed on `CS_DCLF=0`; `Native::RequireDclf` now does it in both modes, also when DCLF's feature did not load or its
+  PostPostLoad leaves it off (unsupported game, missing or conflicting hook sites).
+- **`llf-local-shadows` is D3D11 only.** LLF's local shadows need DCLF off and the graph modes need it on, so 6.13's graph cache
+  (`ORGLocalShadows`, on when `GraphMode()`) has no supported configuration today. It is left in place for a later decision:
+  delete it, or let the cache follow DCLF's shadow views.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's
