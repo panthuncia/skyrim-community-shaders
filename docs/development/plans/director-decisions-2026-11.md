@@ -191,3 +191,7 @@ final until the user confirms it.
 37. **A step 6 follow-ups lead:** `DeclareBuffer` (the LLF cluster buffers, the HistogramAutoExposure buffers),
     ImageSpace depending on `EnabledSSR`, the Volumetric Shadows cascades variable, and the section 8 grep review.
     6.15 (HDR) and 6.23 (Screenshot) wait for step 7b.
+38. **6.19 is merged** (the DCLF family clients and Bink). Its calls are in section 9.
+39. **7b and 7c start before 7a.** The plan orders them after 7a, but 7a only deletes code that step 6 frees up, and 7b
+    and 7c don't depend on those deletions. 4e already replaced `SwitchStaged` with `AttachStaged`. The 7b lead also
+    does 6.15 (HDR) and 6.23 (Screenshot), which wait on 7b. 7a and 7d follow once step 6 is fully merged.
