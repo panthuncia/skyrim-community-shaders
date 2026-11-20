@@ -320,3 +320,11 @@ final until the user confirms it.
     program build and no Effects11 rays re-registration on a quality change.
 60. **10a builds clean.** Its full set (the step 7 list plus `river`, `rain`, `flicker-taa`, `shader-reload`,
     `dclf-toggles`, `native-census` and `native-tour`) runs as batch 6.
+61. **10b is written** (`org-native/rev-step10b`, two commits). It merges after 10a's batch 6 passes. Risks to watch in
+    its tests:
+    - a shader reload while a revision with DCLF epochs prepares can't finish its wait;
+    - a revision waiting on DCLF's scene has no starvation rule (a menu with no scene pass would wait forever);
+    - the new "binds a version the frame does not read" warning may fire on every scene if late-bound slots are
+      listed.
+
+    If any of these shows, a fix lead goes before 10c.
