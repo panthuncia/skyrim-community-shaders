@@ -252,3 +252,12 @@ final until the user confirms it.
     - **7a kept, with owners:** the one-shot passes (5 users), the settings shims for fields that aren't `Setting<T>`
       (strings and a few toggles), and two `FrameAnchors::Refresh` calls (ImGuiRenderer for step 9b, and a DCLF stress
       command).
+49. **7d is merged.** Late versions and late attaches are now fatal (`TapError::OutsideAdoption`), with two named,
+    counted exceptions:
+    - `Dclf`, until step 10a;
+    - `EngineImports`, until step 9.
+
+    In 6b3 and 6b4 the only late versions were guest's VL accumulation pair, which comes in through engine imports.
+50. **The `ibl` config still stopped in 6b4.** The recipe check stops at its first finding. The second was IBL's env SH
+    (pre-main) reading `DynamicCubemaps::Env`, which is written in deferred+water. The director added it to
+    `kPreviousFrame`: it is Persistent, and D3D11 also reads last frame's.
