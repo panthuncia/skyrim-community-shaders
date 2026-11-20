@@ -79,13 +79,12 @@ namespace ORGPostChain
 		/**
 		* @brief ColorGrading::Draw on the graph: a gated LUT bake when the constants changed, then the grading draw. The LUT is
 		* declared on the effect's on/off, one texel while off. The curve preview and image export read back through D3D11, so the
-		* chain stays on D3D11 while either runs. The tonemapper is a define, so it is observed (a program choice: DeclareProgram later).
+		* chain stays on D3D11 while either runs. The tonemapper is a define, so it is observed. Its programs are listed in Programs
+		* and built on the programs lane.
 		*/
 		class ColorGradingEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
 			{
 				using namespace RenderGraph::Frame;
@@ -118,6 +117,11 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
+			void Programs(ProgramSource& a_programs, PostProcessFeature& a_feature, std::span<const std::uint64_t>) override
+			{
+				LoadPrograms(a_programs, static_cast<ColorGrading&>(a_feature));
+			}
+
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t>) override
 			{
 				auto& grading = static_cast<ColorGrading&>(a_feature);
@@ -131,10 +135,7 @@ namespace ORGPostChain
 				}
 				a_builder.Register(*lut);
 
-				// Observed in the key (Update), so the build and its key agree.
-				const std::vector<std::pair<std::string, std::string>> defines{ { "TONEMAP_FUNC", std::string(grading.TonemapFunctionName()) } };
-				auto bake = a_builder.Compute(kShader, ShaderBindings::Words<ColorBlock>(), defines, L"CSLUTGen");
-				auto grade = a_builder.Raster(kShader, ShaderBindings::Words<ColorBlock>(), { kFormat }, defines, L"PSColorGrading");
+				auto [bake, grade] = LoadPrograms(a_builder, grading);
 				auto image = a_builder.CreateImage("PostProcessing::ColorGrading::Output", kFormat, D3D11_BIND_RENDER_TARGET);
 				const auto constants = a_builder.Latch<ColorGrading::ColorCB>();
 				const auto bakeGate = a_builder.Gate();
@@ -152,6 +153,20 @@ namespace ORGPostChain
 			}
 
 		private:
+			struct GradingPrograms
+			{
+				std::shared_ptr<const ComputeProgram> bake;
+				std::shared_ptr<const RasterProgram> grade;
+			};
+
+			/** @brief Listed in Programs and built on the programs lane. The tonemapper is observed in the key (Update), so the build and its key agree. */
+			static GradingPrograms LoadPrograms(ProgramSource& a_programs, ColorGrading& a_grading)
+			{
+				const std::vector<std::pair<std::string, std::string>> defines{ { "TONEMAP_FUNC", std::string(a_grading.TonemapFunctionName()) } };
+				return { .bake = a_programs.Compute(kShader, ShaderBindings::Words<ColorBlock>(), defines, L"CSLUTGen"),
+					.grade = a_programs.Raster(kShader, ShaderBindings::Words<ColorBlock>(), { kFormat }, defines, L"PSColorGrading") };
+			}
+
 			RenderGraph::Frame::DeclaredTexture3D lut;
 			org::OwnedDescriptorBinding sampler;
 		};

@@ -8,6 +8,7 @@
 #include "PhysicalLensPresets.h"
 #include "PhysicalLensZoom.h"
 #include "PostProcessFeature.h"
+#include "Utils/Setting.h"
 
 struct PhysicalLens : PostProcessFeature
 {
@@ -16,7 +17,9 @@ struct PhysicalLens : PostProcessFeature
 	{
 		int LensPreset = 0;
 		int MaxSources = 8;
-		float Intensity = 1.f;
+		// Intensity (ghosts on while above zero), ImageEffects and Diffraction set the render graph's pass list, so they are
+		// frame variables (CS::Setting).
+		CS::Setting<float> Intensity = 1.f;
 		float ThresholdEV = 3.f;
 		float FNumber = 5.6f;
 		int ApertureBlades = 0;  // Zero follows the lens preset; existing manual values remain explicit.
@@ -24,8 +27,8 @@ struct PhysicalLens : PostProcessFeature
 		float Coating = 1.f;
 		float FocusDistanceM = 0.f;  // Zero denotes infinity.
 		float ZoomPosition = 0.f;
-		bool ImageEffects = true;
-		bool Diffraction = true;
+		CS::Setting<bool> ImageEffects = true;
+		CS::Setting<bool> Diffraction = true;
 		float StarburstSize = 10.f;
 		float StarburstIntensity = .02f;
 		float DirtOpacity = 1.f;
@@ -37,6 +40,8 @@ struct PhysicalLens : PostProcessFeature
 		float GhostDiffraction = .6f;
 		float AlignmentVariation = .2f;
 	} settings;
+
+	PhysicalLens();
 
 	std::string GetType() const override { return "Physical Lens"; }
 	std::string GetDisplayName() const override { return T("feature.post_processing.physical_lens.name", "Physical Lens"); }

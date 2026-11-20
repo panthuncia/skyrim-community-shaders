@@ -607,15 +607,174 @@ namespace ORGPostChain
 
 		using MipGroups = std::array<GraphPasses::DispatchGroups, kAtlasMips - 1>;
 
+		using Defines = std::vector<std::pair<std::string, std::string>>;
+
+		const Defines& AreaDefines()
+		{
+			static const Defines s_defines{ { "PHYSICAL_LENS_AREA_LAYERS", "1" } };
+			return s_defines;
+		}
+
+		const Defines& PlanningDefines()
+		{
+			static const Defines s_defines{ { "PHYSICAL_LENS_PLANNING", "1" } };
+			return s_defines;
+		}
+
+		/** @brief A lens compute program: its words follow from the layout and the push words. Builds and plans ask the same. */
+		std::shared_ptr<const ComputeProgram> LensCompute(ProgramSource& a_programs, const char* a_source, std::wstring a_entry, const Defines& a_defines,
+			const Layout& a_layout, uint32_t a_pushWords = 0)
+		{
+			return a_programs.Compute(a_source, WordsOf(a_layout, a_pushWords), a_defines, std::move(a_entry));
+		}
+
+		/** @brief The beam raster programs: two bands, the packed blue and violet, and the area layers. */
+		struct BeamPrograms
+		{
+			std::shared_ptr<const RasterProgram> fine, violet, broad;
+		};
+
+		BeamPrograms LoadBeamPrograms(ProgramSource& a_programs)
+		{
+			const auto additive = [](DXGI_FORMAT a_format) {
+				return RasterProgram::Target{ .format = rhi::helpers::ToRHI(a_format),
+					.blend = { .enable = true,
+						.srcColor = rhi::BlendFactor::One,
+						.dstColor = rhi::BlendFactor::One,
+						.colorOp = rhi::BlendOp::Add,
+						.srcAlpha = rhi::BlendFactor::One,
+						.dstAlpha = rhi::BlendFactor::One,
+						.alphaOp = rhi::BlendOp::Add } };
+			};
+			const uint32_t words = WordsOf(kBeamLayout, 4);
+			const auto program = [&](const wchar_t* a_entry, DXGI_FORMAT a_format) {
+				return a_programs.RasterTargets(kBeamShader, words, { additive(a_format) }, AreaDefines(), a_entry, kBeamShader, L"VSMain");
+			};
+			return { program(L"PSMain", DXGI_FORMAT_R32_FLOAT), program(L"PSPackedViolet", DXGI_FORMAT_R32G32_FLOAT),
+				program(L"PSArea", DXGI_FORMAT_R32G32B32A32_FLOAT) };
+		}
+
 		/**
-		* @brief PhysicalLens::Draw on the graph. The caches (mapping, diffraction, ghost wave, planning status) are persistent
-		* resources remade through gated passes only when their inputs change; a request repeats until a frame with it reached
-		* the GPU with this build. The camera focus is DoF's published focus or this effect's own, read back without a wait.
-		* The ghost paths are a revised buffer: a new lens model shows with the frame revision that adopts its upload.
+		* @brief Every program the lens's builds use, whichever parts are on. A fixed list, so a part that turns on needs no
+		* compile: the first chain plan builds them all on the programs lane.
+		*/
+		void ListLensPrograms(ProgramSource& a_programs)
+		{
+			const Defines none;
+			a_programs.Compute(kFocusShader, ShaderBindings::Words<FocusBlock>(), {}, L"UpdateFocus");
+			LensCompute(a_programs, kTraceShader, L"BuildCameraMaps", none, kTraceLayout);
+			for (const auto* entry : { L"Extract", L"PrepareRegions", L"ExtractLayers", L"SelectSources" })
+				LensCompute(a_programs, kFlareShader, entry, none, kFlareLayout);
+			for (const auto* entry : { L"BuildDetailedPupil", L"TransformDetailed", L"NormalizeDetailed", L"PrefixDetailed" })
+				LensCompute(a_programs, kDetailShader, entry, none, kWaveLayout);
+			LensCompute(a_programs, kAmplitudeShader, L"FilterAmplitudeSpectrum", none, kWaveLayout);
+			for (const auto* entry : { L"PrefixTail", L"BuildCoreKernel", L"BuildWaveMax", L"ReduceWaveMax" })
+				LensCompute(a_programs, kWaveShader, entry, none, kWaveLayout);
+			LensCompute(a_programs, kSourcesShader, L"BuildWaveSources", none, kSourcesLayout);
+			LensCompute(a_programs, kSourcesShader, L"BuildWaveTiles", none, kSourcesLayout);
+			LensCompute(a_programs, kTailShader, L"BuildWaveTail", none, kTailLayout);
+			for (const auto* entry : { L"BuildMaterial", L"BuildField", L"Transform", L"Accumulate" })
+				LensCompute(a_programs, kGhostWaveShader, entry, none, kGhostWaveLayout, 4);
+			LensCompute(a_programs, kFlareShader, L"BuildJobs", AreaDefines(), kFlareLayout);
+			for (const auto* entry : { L"ClearPlanStatus", L"RequestPlans", L"BakeRequestedPlans", L"ExpandCachedJobs" })
+				LensCompute(a_programs, kPlanningShader, entry, none, kFlareLayout);
+			LensCompute(a_programs, kBeamTraceShader, L"TraceBeams", PlanningDefines(), kFlareLayout);
+			LensCompute(a_programs, kBeamTraceShader, L"ShadeBeams", AreaDefines(), kFlareLayout);
+			LensCompute(a_programs, kFlareShader, L"ReduceGhosts", PlanningDefines(), kFlareLayout);
+			LensCompute(a_programs, kResolveShader, L"ResolveArea", none, kResolveLayout);
+			LoadBeamPrograms(a_programs);
+		}
+
+		/** @brief The resources sized by the chain's input. Each build holds the set it was built with. */
+		struct LensSized
+		{
+			uint32_t width = 0, height = 0;
+			std::array<uint32_t, 2> ghostSize{ 1, 1 };
+			std::shared_ptr<org::Buffer> waveTiles, waveWorkTiles;
+			std::unique_ptr<GraphResources::Texture2D> waveRadiance, ghosts, blueViolet;
+			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> areaLayers;
+		};
+
+		class PhysicalLensEffect;
+
+		/** @brief What one build's commits use: the parts it was built with, its regions and gate entries, and its sized resources. */
+		class LensRun final : public Run
+		{
+		public:
+			explicit LensRun(PhysicalLensEffect& a_effect) :
+				effect(a_effect) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override;
+			void Executed(PostProcessFeature& a_feature) override;
+
+			PhysicalLensEffect& effect;
+			std::shared_ptr<const LensSized> sized;
+			std::shared_ptr<const RenderGraph::RunGate> gate;   // the build's, while it builds
+			std::shared_ptr<const org::LatchBlock> chainLatch;  // the build's, while it builds
+			// The parts the build holds, from its key: the image mapping, the starburst and the ghosts.
+			bool imageEffects = false, waveOn = false, ghostsOn = false;
+			bool publishes = false;  // any part is on, so Composite draws the lens
+			bool hasExposure = false, ownFocus = true;
+			uint32_t focusReset = 0;
+			LatchRegion<RenderGraph::RunReadback::Stamp> stamp;
+			LatchRegion<PhysicalLens::FocusInputs> focusConstants;
+			LatchRegion<PhysicalLensImaging::DiffractionParameters> diffraction;
+			LatchRegion<GhostWaveLatch> ghostWaveLatch;
+			LatchRegion<MipGroups> mipGroups;
+			GateEntry focusGate, mappingGate, imagingEntry, lensEntry, extractEntry, extractOneEntry, waveOneEntry, waveTilesEntry, waveTailEntry;
+			GateEntry ghostEntry, jobsEntry, planClearEntry, resolveEntry, ghostMaterialEntry, ghostFieldEntry, ghostTransformEntry;
+			std::vector<std::pair<GateEntry, std::array<uint32_t, 3>>> cacheEntries;
+		};
+
+		/** @brief The key words: the image mapping, the starburst and the ghosts (Intensity above zero). */
+		struct LensParts
+		{
+			bool imageEffects = false, diffraction = false, ghosts = false;
+
+			bool Any() const { return imageEffects || diffraction || ghosts; }
+
+			static std::optional<LensParts> Of(std::span<const std::uint64_t> a_key)
+			{
+				if (a_key.size() < 3)
+					return std::nullopt;
+				return LensParts{ a_key[0] != 0, a_key[1] != 0, a_key[2] != 0 };
+			}
+		};
+
+		/**
+		* @brief PhysicalLens::Draw on the graph. The chain declares it on ImageEffects, Diffraction and the ghosts being on (a
+		* variable derived from Intensity above zero), so each build holds the passes of its parts. The lens model (preset,
+		* f-number, focus, zoom, coating) is CPU input: it reaches the latch and the caches, never a build. The caches (mapping,
+		* diffraction, ghost wave, planning status) are persistent resources remade through gated passes only when their inputs
+		* change; a request repeats until a frame with it reached the GPU. The camera focus is DoF's published focus or this
+		* effect's own, read back without a wait. The ghost paths are a revised buffer: the ghosts use the model of the version the
+		* adopted revision holds.
 		*/
 		class PhysicalLensEffect final : public Effect
 		{
 		public:
+			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
+			{
+				namespace RF = RenderGraph::Frame;
+				auto& settings = static_cast<PhysicalLens&>(a_feature).settings;
+				ghostsVariable = RF::DeriveFromSetting<float>("PostProcessing.PhysicalLens.ghosts", settings.Intensity,
+					[](const float& a_intensity) { return a_intensity > 0.f ? 1u : 0u; });
+				for (const auto& dependency : RF::DependsOn(settings.ImageEffects, settings.Diffraction, ghostsVariable))
+					a_dependencies.push_back(dependency);
+				// The atlas's mip program has no inputs, so it is built once, here.
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					generateMips = RF::DeclareProgram("PostProcessing::PhysicalLens::GenerateMips", RF::Dependencies{},
+						[](const RF::Inputs&) { return 0u; }, [device = host->Device()](const unsigned&) { return GraphPasses::LoadGenerateMips(device, false); });
+			}
+
+			void Key(const RenderGraph::Frame::Inputs& a_values, PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
+			{
+				const auto& settings = static_cast<PhysicalLens&>(a_feature).settings;
+				a_key.push_back(a_values.Get(settings.ImageEffects) ? 1u : 0u);
+				a_key.push_back(a_values.Get(settings.Diffraction) ? 1u : 0u);
+				a_key.push_back(a_values.Get(ghostsVariable) != 0 ? 1u : 0u);
+			}
+
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& lens = static_cast<PhysicalLens&>(a_feature);
@@ -631,26 +790,49 @@ namespace ORGPostChain
 				main->GetDesc(&mainDesc);
 				aspect = static_cast<float>(mainDesc.Width) / static_cast<float>((std::max)(mainDesc.Height, 1u));
 				a_key.push_back(reinterpret_cast<std::uintptr_t>(depth.Key()));
-				// The starburst's and the ghosts' passes are in the build only while they are on.
-				a_key.push_back((lens.settings.Diffraction ? 1u : 0u) | (lens.settings.Intensity > 0.f ? 2u : 0u));
 				return nullptr;
 			}
 
-			void Build(Builder& a_builder, PostProcessFeature& a_feature) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
 			{
-				auto& lens = static_cast<PhysicalLens&>(a_feature);
-				const auto& shape = a_builder.GetShape();
-				built = false;
-				waveOn = lens.settings.Diffraction;
-				ghostsOn = lens.settings.Intensity > 0.f;
-				width = shape.width;
-				height = shape.height;
-				if (!Ensure(width, height)) {
-					a_builder.Fail("its resources could not be made");
+				ListLensPrograms(a_programs);
+				const auto parts = LensParts::Of(a_key);
+				if (!parts || !parts->Any())
 					return;
+				a_programs.Publishes(Published::kPhysicalLensDiffraction);
+				a_programs.Publishes(Published::kPhysicalLensMapping);
+				if (parts->diffraction || parts->ghosts) {
+					for (const auto name : { Published::kPhysicalLensWaveKernel, Published::kPhysicalLensWaveRegions, Published::kPhysicalLensWaveSources,
+							 Published::kPhysicalLensWaveTiles, Published::kPhysicalLensWaveTail, Published::kPhysicalLensGhosts })
+						a_programs.Publishes(name);
 				}
-				gate = a_builder.RunGate();
-				chainLatch = a_builder.LatchBlock();
+			}
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
+			{
+				const auto parts = LensParts::Of(a_key);
+				if (!parts) {
+					a_builder.Fail("its key is incomplete");
+					return nullptr;
+				}
+				auto run = std::make_shared<LensRun>(*this);
+				auto& r = *run;
+				r.imageEffects = parts->imageEffects;
+				r.waveOn = parts->diffraction;
+				r.ghostsOn = parts->ghosts;
+				r.publishes = parts->Any();
+				const auto& shape = a_builder.GetShape();
+				if (!EnsureSession()) {
+					a_builder.Fail("its resources could not be made");
+					return nullptr;
+				}
+				r.sized = SizedFor(shape.width, shape.height);
+				if (!r.sized) {
+					a_builder.Fail("its sized resources could not be made");
+					return nullptr;
+				}
+				r.gate = a_builder.RunGate();
+				r.chainLatch = a_builder.LatchBlock();
 				a_builder.Register(*mapping);
 				a_builder.Register(*focus);
 				a_builder.Register(kImagingName, imagingBuffer);
@@ -660,56 +842,62 @@ namespace ORGPostChain
 					readback = RunReadback::Create("PostProcessing::PhysicalLens::FocusReadback", { 256 });
 				if (!readback) {
 					a_builder.Fail("its focus readback buffer could not be made");
-					return;
+					return nullptr;
 				}
-				readback->Build(a_builder);
+				r.stamp = readback->BuildStamp(a_builder);
 
 				// The camera focus: DoF's when it runs in this chain, else this effect's own pass.
 				const auto dofFocus = a_builder.Find(Published::kDoFFocus);
-				ownFocus = !dofFocus;
-				focusConstants = a_builder.Latch<PhysicalLens::FocusInputs>();
-				if (ownFocus) {
-					focusGate = a_builder.Gate();
+				r.ownFocus = !dofFocus;
+				r.focusConstants = a_builder.Latch<PhysicalLens::FocusInputs>();
+				if (r.ownFocus) {
+					r.focusGate = a_builder.Gate();
 					a_builder.Dispatch({ .name = "focus",
 						.program = a_builder.Compute(kFocusShader, ShaderBindings::Words<FocusBlock>(), {}, L"UpdateFocus"),
-						.bindings = { Bind::Shared(), Bind::Latch(focusConstants), Bind::Srv(depth), Bind::Unused(), Bind::Handle(sampler.Index()), Bind::Uav(focus->Graph()) },
-						.gate = focusGate });
+						.bindings = { Bind::Shared(), Bind::Latch(r.focusConstants), Bind::Srv(depth), Bind::Unused(), Bind::Handle(sampler.Index()), Bind::Uav(focus->Graph()) },
+						.gate = r.focusGate });
 				}
 				// Every run copies it, so a kept recording can replay it. Commit takes it only while the camera is active.
-				readback->AddTexture(a_builder, "focus-readback", 0, ownFocus ? focus->Graph() : dofFocus.graph.Plain(), 1, 1);
-				focusReset = kFocusResetCommits;
+				readback->AddTexture(a_builder, "focus-readback", 0, r.ownFocus ? focus->Graph() : dofFocus.graph.Plain(), 1, 1);
+				// A new build may switch between DoF's focus and its own, so the focus restarts for a few commits.
+				r.focusReset = kFocusResetCommits;
 
-				diffraction = a_builder.Latch<PhysicalLensImaging::DiffractionParameters>();
-				a_builder.PublishLatch(Published::kPhysicalLensDiffraction, diffraction);
-				a_builder.Publish(Published::kPhysicalLensMapping, Image{ mapping->Graph(), kMappingFormat });
+				// With every part off the lens publishes nothing, so Composite draws without it.
+				if (r.publishes) {
+					r.diffraction = a_builder.Latch<PhysicalLensImaging::DiffractionParameters>();
+					a_builder.PublishLatch(Published::kPhysicalLensDiffraction, r.diffraction);
+					a_builder.Publish(Published::kPhysicalLensMapping, Image{ mapping->Graph(), kMappingFormat });
 
-				// The reverse optics and mapping table, for the mapping and the diffraction cache.
-				imagingEntry = a_builder.Gate();
-				AddUpload(a_builder, "imaging-upload", { { imagingBuffer, kImagingOffset, kImagingBytes }, { tableBuffer, kTableOffset, kTableBytes } }, imagingEntry);
-				mappingGate = a_builder.Gate();
-				{
+					// The reverse optics and mapping table, for the mapping and the diffraction cache.
+					r.imagingEntry = a_builder.Gate();
+					AddUpload(a_builder, r, "imaging-upload", { { imagingBuffer, kImagingOffset, kImagingBytes }, { tableBuffer, kTableOffset, kTableBytes } },
+						r.imagingEntry);
+					r.mappingGate = a_builder.Gate();
 					Binds binds;
 					binds.cbv[0] = Of(imagingBuffer);
 					binds.cbv[1] = Of(tableBuffer);
 					binds.uav[1] = ArrayOf(mapping->Graph());
-					AddDispatch(a_builder, "mapping", kTraceShader, L"BuildCameraMaps", {}, kTraceLayout, std::move(binds), mappingGate);
+					AddDispatch(a_builder, r, "mapping", kTraceShader, L"BuildCameraMaps", {}, kTraceLayout, std::move(binds), r.mappingGate);
 				}
 
-				if (waveOn || ghostsOn)
-					BuildFlare(a_builder);
+				if (r.waveOn || r.ghostsOn)
+					BuildFlare(a_builder, r);
 				if (a_builder.Failed())
-					return;
-				built = true;
+					return nullptr;
+				r.gate.reset();
+				r.chainLatch.reset();
+				return run;
 			}
 
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
+			void CommitRun(LensRun& r, const CommitContext& a_commit, PostProcessFeature& a_feature)
 			{
 				auto& lens = static_cast<PhysicalLens&>(a_feature);
+				const auto& rs = *r.sized;
 				const auto& run = a_commit.Run();
 				const auto* camera = lens.owner ? lens.owner->GetActivePhysicalCameraState() : nullptr;
 				const unsigned frame = globals::state->frameCount;
 				float focusM = 0.f;
-				const auto stamp = readback->Commit(a_commit);
+				const auto stamp = readback->Commit(a_commit, r.stamp);
 				if (camera) {
 					// As ResolveCameraFocus: a frame gap or a history reset starts the focus over at the manual distance.
 					const bool reset = lastFocusFrame == ~0u || frame != lastFocusFrame + 1 || globals::state->ShouldResetHistory();
@@ -720,24 +908,25 @@ namespace ORGPostChain
 					}
 					TakeFocus();
 					lastFocusFrame = frame;
-					if (ownFocus) {
-						a_commit.Write(focusConstants, lens.FocusInputsFor(*camera, reset || focusReset > 0));
-						a_commit.Open(focusGate, 1);
+					if (r.ownFocus) {
+						a_commit.Write(r.focusConstants, lens.FocusInputsFor(*camera, reset || r.focusReset > 0));
+						a_commit.Open(r.focusGate, 1);
 					}
 					focusM = resolvedFocusM;
 					lens.SetResolvedFocus(focusM);
 				} else {
 					lastFocusFrame = ~0u;
 				}
-				if (focusReset > 0)
-					--focusReset;
+				if (r.focusReset > 0)
+					--r.focusReset;
 
 				const bool configured = lens.PrepareOptics(aspect, camera, focusM);
 				pendingMapping.reset();
 				pendingWave.reset();
 				pendingGhostWave.reset();
 				pendingPlan.reset();
-				const bool mapped = configured && lens.settings.ImageEffects;
+				// The build's parts, not the live settings: they switch in with the revision that adopts the build.
+				const bool mapped = configured && r.imageEffects;
 				if (mapped != lastMapped || configured != lastConfigured)
 					logger::info("[ORG] Physical Lens: the image mapping is {}{}", mapped ? "on" : "off",
 						configured ? "" : " (the lens cannot be configured for these settings)");
@@ -751,23 +940,23 @@ namespace ORGPostChain
 						constants->WriteValue(run, kImagingOffset, optics);
 						constants->WriteValue(run, kTableOffset, table);
 						imaging = true;
-						a_commit.Open(mappingGate, table.width, table.height, 3);
+						a_commit.Open(r.mappingGate, table.width, table.height, 3);
 						pendingMapping = Mapping{ optics, table };
 					}
 				}
 
-				const bool wave = built && waveOn && configured;
-				const bool drawGhosts = built && ghostsOn && configured && GhostsReady();
-				const bool extract = wave || (built && ghostsOn && configured);
+				const bool wave = r.waveOn && configured;
+				const bool drawGhosts = r.ghostsOn && configured && GhostsReady();
+				const bool extract = wave || (r.ghostsOn && configured);
 				PhysicalLensImaging::DiffractionParameters composite{};
 
 				float sensorWidth = 0.f, sensorHeight = 0.f;
 				if (extract) {
-					auto data = lens.FlareParameters(width, height, ghostSize[0], ghostSize[1], hasExposure);
-					if (ghostsOn && configured)
+					auto data = lens.FlareParameters(rs.width, rs.height, rs.ghostSize[0], rs.ghostSize[1], r.hasExposure);
+					if (r.ghostsOn && configured)
 						StageGhostPaths(lens, data);
 					if (drawGhosts) {
-						// The ghosts use the model their paths were built for. A new model starts the beams over, as PrepareOptics does.
+						// The ghosts use the model of the paths version the adopted revision holds. A new model starts the beams over, as PrepareOptics does.
 						const auto model = paths->Current();
 						CopyModel(data, *std::static_pointer_cast<const Parameters>(model));
 						if (model.get() != beamModel) {
@@ -779,31 +968,32 @@ namespace ORGPostChain
 					sensorHeight = data.sensorHeight;
 					data.beamState = lastGhostFrame != ~0u && frame == lastGhostFrame + 1 && !globals::state->ShouldResetHistory() ? 2.f : 1.f;
 					constants->WriteValue(run, kLensOffset, data);
-					a_commit.Open(lensEntry, 1);
-					a_commit.Open(extractEntry, 64, 36);
-					a_commit.Open(extractOneEntry, 1);
+					a_commit.Open(r.lensEntry, 1);
+					a_commit.Open(r.extractEntry, 64, 36);
+					a_commit.Open(r.extractOneEntry, 1);
 				}
 
 				if (wave) {
-					const auto inputs = lens.DiffractionFor(width, height);
+					const auto inputs = lens.DiffractionFor(rs.width, rs.height);
 					if (!madeWave || !PhysicalLens::DiffractionCacheEqual(inputs, *madeWave)) {
 						if (!imaging) {
 							constants->WriteValue(run, kImagingOffset, inputs.optics);
 							constants->WriteValue(run, kTableOffset, inputs.table);
 							imaging = true;
 						}
-						for (const auto& [entry, groups] : cacheEntries)
+						for (const auto& [entry, groups] : r.cacheEntries)
 							a_commit.Open(entry, groups[0], groups[1], groups[2]);
 						pendingWave = inputs;
 					}
 					composite = inputs.sampling;
-					a_commit.Open(waveOneEntry, 1);
-					a_commit.Open(waveTilesEntry, ((width + 15) / 16 + 7) / 8, ((height + 15) / 16 + 7) / 8);
-					a_commit.Open(waveTailEntry, 1);
+					a_commit.Open(r.waveOneEntry, 1);
+					a_commit.Open(r.waveTilesEntry, ((rs.width + 15) / 16 + 7) / 8, ((rs.height + 15) / 16 + 7) / 8);
+					a_commit.Open(r.waveTailEntry, 1);
 				}
 				if (imaging)
-					a_commit.Open(imagingEntry, 1);
-				a_commit.Write(diffraction, composite);
+					a_commit.Open(r.imagingEntry, 1);
+				if (r.publishes)
+					a_commit.Write(r.diffraction, composite);
 				constants->WriteValue(run, kWaveSeedOffset, wave ? kWaveSeed : std::array<uint32_t, 4>{});
 
 				MipGroups mips{};
@@ -811,10 +1001,10 @@ namespace ORGPostChain
 					if (lens.settings.GhostDiffraction > 0.f) {
 						const auto ghostWave = lens.GhostWaveFor();
 						if (!madeGhostWave || ghostWave.aperture != madeGhostWave->aperture || ghostWave.surface != madeGhostWave->surface) {
-							a_commit.Write(ghostWaveLatch, GhostWaveLatch{ ghostWave.aperture, ghostWave.surface });
-							a_commit.Open(ghostMaterialEntry, PhysicalLensGhostWave::Size / 8, PhysicalLensGhostWave::Size / 8);
-							a_commit.Open(ghostFieldEntry, PhysicalLensGhostWave::Size / 8, PhysicalLensGhostWave::Size / 8, 3);
-							a_commit.Open(ghostTransformEntry, PhysicalLensGhostWave::Size, 3);
+							a_commit.Write(r.ghostWaveLatch, GhostWaveLatch{ ghostWave.aperture, ghostWave.surface });
+							a_commit.Open(r.ghostMaterialEntry, PhysicalLensGhostWave::Size / 8, PhysicalLensGhostWave::Size / 8);
+							a_commit.Open(r.ghostFieldEntry, PhysicalLensGhostWave::Size / 8, PhysicalLensGhostWave::Size / 8, 3);
+							a_commit.Open(r.ghostTransformEntry, PhysicalLensGhostWave::Size, 3);
 							const auto groups = GraphPasses::GenerateMipsGroups(PhysicalLensGhostWave::Size, PhysicalLensGhostWave::Size, kAtlasMips, 1);
 							std::copy_n(groups.begin(), (std::min)(groups.size(), mips.size()), mips.begin());
 							pendingGhostWave = ghostWave;
@@ -823,24 +1013,24 @@ namespace ORGPostChain
 					// Cache only selected paths' plans. A new model or sensor starts the table over.
 					const PlanKey key{ paths->Current().get(), sensorWidth, sensorHeight };
 					if (!madePlan || madePlan->model != key.model || madePlan->sensorWidth != key.sensorWidth || madePlan->sensorHeight != key.sensorHeight) {
-						a_commit.Open(planClearEntry, (kPlanCount + 63) / 64);
+						a_commit.Open(r.planClearEntry, (kPlanCount + 63) / 64);
 						pendingPlan = key;
 					}
-					a_commit.Open(jobsEntry, static_cast<uint32_t>(lens.settings.MaxSources));
-					a_commit.Open(ghostEntry, 1);
-					a_commit.Open(resolveEntry, (ghostSize[0] + 7) / 8, (ghostSize[1] + 7) / 8);
+					a_commit.Open(r.jobsEntry, static_cast<uint32_t>(lens.settings.MaxSources));
+					a_commit.Open(r.ghostEntry, 1);
+					a_commit.Open(r.resolveEntry, (rs.ghostSize[0] + 7) / 8, (rs.ghostSize[1] + 7) / 8);
 					lastGhostFrame = frame;
-				} else if (!ghostsOn || !configured)
+				} else if (!r.ghostsOn || !configured)
 					lastGhostFrame = ~0u;
-				if (ghostsOn && built)
-					a_commit.Write(mipGroups, mips);
+				if (r.ghostsOn)
+					a_commit.Write(r.mipGroups, mips);
 				constants->WriteValue(run, kGhostSeedOffset, drawGhosts ? kGhostSeed : std::array<uint32_t, 32>{});
 				constants->WriteValue(run, kPlanSeedOffset, drawGhosts ? kPlanSeed : std::array<uint32_t, 4>{});
 
 				lens.orgComposite = { .cameraMap = mapped, .flare = drawGhosts, .diffraction = composite };
 			}
 
-			void Executed(PostProcessFeature&) override
+			void ExecutedRun()
 			{
 				readback->Executed();
 				if (pendingMapping)
@@ -880,26 +1070,26 @@ namespace ORGPostChain
 				paths->Publish(std::move(bytes), std::make_shared<const Parameters>(a_data));
 			}
 
-			void AddUpload(Builder& a_builder, std::string_view a_name, std::vector<LensUpload::Part> a_parts, std::optional<GateEntry> a_entry)
+			void AddUpload(Builder& a_builder, const LensRun& r, std::string_view a_name, std::vector<LensUpload::Part> a_parts, std::optional<GateEntry> a_entry)
 			{
 				auto spec = std::make_shared<const LensUpload>(LensUpload{ .latch = constants,
 					.parts = std::move(a_parts),
-					.gate = a_entry ? gate : nullptr,
+					.gate = a_entry ? r.gate : nullptr,
 					.entry = a_entry ? a_entry->index : 0 });
 				a_builder.Add(a_name, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LensUploadPass>(spec); });
 			}
 
 			/** @brief A gated direct dispatch, or with a_indirect an indirect one on runs that opened a_entry. */
-			void AddDispatch(Builder& a_builder, std::string_view a_name, const char* a_source, std::wstring a_entry,
-				std::vector<std::pair<std::string, std::string>> a_defines, const Layout& a_layout, Binds a_binds, GateEntry a_gate,
-				std::vector<uint32_t> a_push = {}, std::shared_ptr<org::Resource> a_indirect = nullptr, uint32_t a_indirectOffset = 0)
+			void AddDispatch(Builder& a_builder, const LensRun& r, std::string_view a_name, const char* a_source, std::wstring a_entry, const Defines& a_defines,
+				const Layout& a_layout, Binds a_binds, GateEntry a_gate, std::vector<uint32_t> a_push = {}, std::shared_ptr<org::Resource> a_indirect = nullptr,
+				uint32_t a_indirectOffset = 0)
 			{
 				for (const auto& slot : a_layout)
 					if (slot.kind == K::Latch && !a_binds.latch[slot.reg]) {
 						a_builder.Fail(std::format("{}: no latch region at b{}", a_name, slot.reg));
 						return;
 					}
-				auto program = a_builder.Compute(a_source, WordsOf(a_layout, static_cast<uint32_t>(a_push.size())), std::move(a_defines), std::move(a_entry));
+				auto program = LensCompute(a_builder, a_source, std::move(a_entry), a_defines, a_layout, static_cast<uint32_t>(a_push.size()));
 				if (!program)
 					return;
 				auto spec = std::make_shared<const LensDispatch>(LensDispatch{ .name = std::string(a_name),
@@ -907,8 +1097,8 @@ namespace ORGPostChain
 					.layout = a_layout,
 					.binds = std::move(a_binds),
 					.push = std::move(a_push),
-					.latch = chainLatch,
-					.gate = gate,
+					.latch = r.chainLatch,
+					.gate = r.gate,
 					.entry = a_gate.index,
 					.indirect = std::move(a_indirect),
 					.indirectOffset = a_indirectOffset });
@@ -916,69 +1106,75 @@ namespace ORGPostChain
 			}
 
 			/** @brief The flare constants, the extraction front end, the diffraction passes and the ghosts. */
-			void BuildFlare(Builder& a_builder)
+			void BuildFlare(Builder& a_builder, LensRun& r)
 			{
+				const auto& rs = *r.sized;
 				for (const auto& [name, resource] : flareBuffers)
 					a_builder.Register(name, resource);
-				for (const auto* texture : { waveTextures[0].get(), waveTextures[1].get(), waveTextures[2].get(), waveMax.get(), waveRadiance.get(), ghosts.get(),
-						 blueViolet.get(), areaLayers[0].get(), areaLayers[1].get(), areaLayers[2].get(), atlas.get(), material.get() })
+				a_builder.Register(std::string(Published::kPhysicalLensWaveTiles), rs.waveTiles);
+				a_builder.Register("PostProcessing::PhysicalLens::ActiveDiffractionTiles", rs.waveWorkTiles);
+				for (const auto* texture : { waveTextures[0].get(), waveTextures[1].get(), waveTextures[2].get(), waveMax.get(), rs.waveRadiance.get(), rs.ghosts.get(),
+						 rs.blueViolet.get(), rs.areaLayers[0].get(), rs.areaLayers[1].get(), rs.areaLayers[2].get(), atlas.get(), material.get() })
 					a_builder.Register(*texture);
 
 				// Auto Exposure's adaptation and constants. Without them the shaders read neither (AutoExposureEnabled is 0), and the
 				// latch entry takes any valid region.
 				const auto adaptation = a_builder.Find(Published::kAdaptation);
 				const auto autoExposure = a_builder.FindLatch<HistogramAutoExposure::AutoExposureCB>(Published::kAutoExposureConstants);
-				hasExposure = adaptation && autoExposure;
-				const uint32_t exposureLatch = hasExposure ? autoExposure->offset : diffraction.offset;
+				r.hasExposure = adaptation && autoExposure;
+				const uint32_t exposureLatch = r.hasExposure ? autoExposure->offset : r.diffraction.offset;
 
-				lensEntry = a_builder.Gate();
-				AddUpload(a_builder, "parameters-upload", { { lensBuffer, kLensOffset, kLensBytes } }, lensEntry);
+				r.lensEntry = a_builder.Gate();
+				AddUpload(a_builder, r, "parameters-upload", { { lensBuffer, kLensOffset, kLensBytes } }, r.lensEntry);
 				// The GPU-written arguments' seeds, on every run, so a kept recording's indirect work has zero counts on runs without it.
-				AddUpload(a_builder, "arguments-seed",
+				AddUpload(a_builder, r, "arguments-seed",
 					{ { waveDispatch, kWaveSeedOffset, kWaveSeedBytes }, { ghostArguments, kGhostSeedOffset, kGhostSeedBytes },
 						{ planArguments, kPlanSeedOffset, kPlanSeedBytes } },
 					std::nullopt);
 
+				const Defines none;
 				Binds front;
 				front.cbv[0] = Of(lensBuffer);
 				front.srv[0] = ImageOf(a_builder.Current());
-				if (hasExposure)
+				if (r.hasExposure)
 					front.srv[5] = ImageOf(adaptation);
 				front.latch[1] = exposureLatch;
 				front.uav[0] = Of(candidates);
 				front.uav[4] = Of(regions);
-				extractEntry = a_builder.Gate();
-				extractOneEntry = a_builder.Gate();
-				AddDispatch(a_builder, "extract", kFlareShader, L"Extract", {}, kFlareLayout, front, extractEntry);
-				AddDispatch(a_builder, "prepare-regions", kFlareShader, L"PrepareRegions", {}, kFlareLayout, front, extractOneEntry);
-				AddDispatch(a_builder, "extract-layers", kFlareShader, L"ExtractLayers", {}, kFlareLayout, front, extractEntry);
+				r.extractEntry = a_builder.Gate();
+				r.extractOneEntry = a_builder.Gate();
+				AddDispatch(a_builder, r, "extract", kFlareShader, L"Extract", none, kFlareLayout, front, r.extractEntry);
+				AddDispatch(a_builder, r, "prepare-regions", kFlareShader, L"PrepareRegions", none, kFlareLayout, front, r.extractOneEntry);
+				AddDispatch(a_builder, r, "extract-layers", kFlareShader, L"ExtractLayers", none, kFlareLayout, front, r.extractEntry);
 				front.uav[1] = Of(sources);
-				AddDispatch(a_builder, "select-sources", kFlareShader, L"SelectSources", {}, kFlareLayout, front, extractOneEntry);
+				AddDispatch(a_builder, r, "select-sources", kFlareShader, L"SelectSources", none, kFlareLayout, front, r.extractOneEntry);
 
-				if (waveOn)
-					BuildWave(a_builder, adaptation, exposureLatch);
-				if (ghostsOn)
-					BuildGhosts(a_builder, adaptation, exposureLatch);
+				if (r.waveOn)
+					BuildWave(a_builder, r, adaptation, exposureLatch);
+				if (r.ghostsOn)
+					BuildGhosts(a_builder, r, adaptation, exposureLatch);
 
 				a_builder.Publish(Published::kPhysicalLensWaveKernel, Image{ waveKernel });
 				a_builder.Publish(Published::kPhysicalLensWaveRegions, Image{ regions });
 				a_builder.Publish(Published::kPhysicalLensWaveSources, Image{ waveSources });
-				a_builder.Publish(Published::kPhysicalLensWaveTiles, Image{ waveTiles });
-				a_builder.Publish(Published::kPhysicalLensWaveTail, Image{ waveRadiance->Graph(), DXGI_FORMAT_R32_FLOAT });
-				a_builder.Publish(Published::kPhysicalLensGhosts, Image{ ghosts->Graph(), DXGI_FORMAT_R32_FLOAT });
+				a_builder.Publish(Published::kPhysicalLensWaveTiles, Image{ rs.waveTiles });
+				a_builder.Publish(Published::kPhysicalLensWaveTail, Image{ rs.waveRadiance->Graph(), DXGI_FORMAT_R32_FLOAT });
+				a_builder.Publish(Published::kPhysicalLensGhosts, Image{ rs.ghosts->Graph(), DXGI_FORMAT_R32_FLOAT });
 			}
 
 			/** @brief UpdateDiffraction's cache and Draw's per-frame diffraction passes. */
-			void BuildWave(Builder& a_builder, const Image& a_adaptation, uint32_t a_exposureLatch)
+			void BuildWave(Builder& a_builder, LensRun& r, const Image& a_adaptation, uint32_t a_exposureLatch)
 			{
+				const auto& rs = *r.sized;
+				const Defines none;
 				// The cache, as UpdateDiffraction: t1 the input, the output at the register its shader writes.
-				cacheEntries.clear();
+				r.cacheEntries.clear();
 				const auto entryFor = [&](std::array<uint32_t, 3> a_groups) {
-					for (const auto& [entry, groups] : cacheEntries)
+					for (const auto& [entry, groups] : r.cacheEntries)
 						if (groups == a_groups)
 							return entry;
-					cacheEntries.emplace_back(a_builder.Gate(), a_groups);
-					return cacheEntries.back().first;
+					r.cacheEntries.emplace_back(a_builder.Gate(), a_groups);
+					return r.cacheEntries.back().first;
 				};
 				const auto wave = [&](uint32_t a_index) { return waveTextures[a_index]->Graph(); };
 				uint32_t step = 0;
@@ -987,11 +1183,11 @@ namespace ORGPostChain
 					Binds binds;
 					binds.cbv[0] = Of(imagingBuffer);
 					binds.cbv[1] = Of(tableBuffer);
-					binds.latch[2] = diffraction.offset;
+					binds.latch[2] = r.diffraction.offset;
 					if (a_input)
 						binds.srv[1] = ArrayOf(wave(*a_input));
 					binds.uav[a_slot] = std::move(a_output);
-					AddDispatch(a_builder, std::format("wave-cache-{}", step++), a_source, a_entry, {}, kWaveLayout, std::move(binds), entryFor(a_groups));
+					AddDispatch(a_builder, r, std::format("wave-cache-{}", step++), a_source, a_entry, none, kWaveLayout, std::move(binds), entryFor(a_groups));
 				};
 				// The paper path reuses one real-pupil spectrum for all wavelengths. Higher-density pupils are cache-only.
 				cache(kDetailShader, L"BuildDetailedPupil", std::nullopt, 2, ArrayOf(wave(0)), { 128, 128, 1 });
@@ -1010,101 +1206,104 @@ namespace ORGPostChain
 					Binds binds;
 					binds.cbv[0] = Of(imagingBuffer);
 					binds.cbv[1] = Of(tableBuffer);
-					binds.latch[2] = diffraction.offset;
+					binds.latch[2] = r.diffraction.offset;
 					binds.srv[1] = ArrayOf(waveMax->Graph(), mip - 1);
 					binds.uav[3] = ArrayOf(waveMax->Graph(), mip);
-					AddDispatch(a_builder, std::format("wave-max-{}", mip), kWaveShader, L"ReduceWaveMax", {}, kWaveLayout, std::move(binds), entryFor({ groups, groups, 3 }));
+					AddDispatch(a_builder, r, std::format("wave-max-{}", mip), kWaveShader, L"ReduceWaveMax", none, kWaveLayout, std::move(binds),
+						entryFor({ groups, groups, 3 }));
 				}
 
 				// Per frame, as Draw.
 				Binds waveBinds;
 				waveBinds.cbv[0] = Of(lensBuffer);
 				waveBinds.latch[1] = a_exposureLatch;
-				waveBinds.latch[2] = diffraction.offset;
-				if (hasExposure)
+				waveBinds.latch[2] = r.diffraction.offset;
+				if (r.hasExposure)
 					waveBinds.srv[5] = ImageOf(a_adaptation);
 				waveBinds.srv[0] = ArrayOf(mapping->Graph());
 				waveBinds.srv[1] = Of(this->sources);
 				waveBinds.srv[3] = Of(waveKernel);
 				waveBinds.srv[4] = ArrayOf(waveMax->Graph());
 				waveBinds.uav[0] = Of(waveSources);
-				waveOneEntry = a_builder.Gate();
-				AddDispatch(a_builder, "wave-sources", kSourcesShader, L"BuildWaveSources", {}, kSourcesLayout, waveBinds, waveOneEntry);
+				r.waveOneEntry = a_builder.Gate();
+				AddDispatch(a_builder, r, "wave-sources", kSourcesShader, L"BuildWaveSources", none, kSourcesLayout, waveBinds, r.waveOneEntry);
 
 				Binds tiles;
 				tiles.cbv[0] = Of(lensBuffer);
 				tiles.latch[1] = a_exposureLatch;
-				tiles.latch[2] = diffraction.offset;
-				if (hasExposure)
+				tiles.latch[2] = r.diffraction.offset;
+				if (r.hasExposure)
 					tiles.srv[5] = ImageOf(a_adaptation);
 				tiles.srv[1] = ArrayOf(mapping->Graph());
 				tiles.srv[2] = Of(waveSources);
 				tiles.srv[3] = Of(regions);
-				tiles.uav[1] = Of(waveTiles);
+				tiles.uav[1] = Of(rs.waveTiles);
 				tiles.uav[2] = Of(waveDispatch);
-				tiles.uav[3] = Of(waveWorkTiles);
-				waveTilesEntry = a_builder.Gate();
-				AddDispatch(a_builder, "wave-tiles", kSourcesShader, L"BuildWaveTiles", {}, kSourcesLayout, tiles, waveTilesEntry);
+				tiles.uav[3] = Of(rs.waveWorkTiles);
+				r.waveTilesEntry = a_builder.Gate();
+				AddDispatch(a_builder, r, "wave-tiles", kSourcesShader, L"BuildWaveTiles", none, kSourcesLayout, tiles, r.waveTilesEntry);
 
 				Binds tail;
-				tail.latch[2] = diffraction.offset;
+				tail.latch[2] = r.diffraction.offset;
 				tail.srv[0] = Of(waveSources);
-				tail.srv[1] = Of(waveTiles);
+				tail.srv[1] = Of(rs.waveTiles);
 				tail.srv[2] = ArrayOf(wave(1));
-				tail.srv[3] = Of(waveWorkTiles);
+				tail.srv[3] = Of(rs.waveWorkTiles);
 				tail.srv[4] = Of(waveDispatch);
-				tail.uav[0] = ArrayOf(waveRadiance->Graph());
+				tail.uav[0] = ArrayOf(rs.waveRadiance->Graph());
 				tail.sampler[0] = sampler.Index();
-				waveTailEntry = a_builder.Gate();
-				AddDispatch(a_builder, "wave-tail", kTailShader, L"BuildWaveTail", {}, kTailLayout, tail, waveTailEntry, {}, waveDispatch, 0);
+				r.waveTailEntry = a_builder.Gate();
+				AddDispatch(a_builder, r, "wave-tail", kTailShader, L"BuildWaveTail", none, kTailLayout, tail, r.waveTailEntry, {}, waveDispatch, 0);
 			}
 
 			/** @brief UpdateGhostWave's cache, then Draw's ghost jobs, planning, tracing, raster and resolve. */
-			void BuildGhosts(Builder& a_builder, const Image& a_adaptation, uint32_t a_exposureLatch)
+			void BuildGhosts(Builder& a_builder, LensRun& r, const Image& a_adaptation, uint32_t a_exposureLatch)
 			{
+				const auto& rs = *r.sized;
+				const Defines none;
 				// The ghost-wave cache: material, then for each of 11 samples the field, four transforms and the accumulation.
-				ghostWaveLatch = a_builder.Latch<GhostWaveLatch>();
-				ghostMaterialEntry = a_builder.Gate();
-				ghostFieldEntry = a_builder.Gate();
-				ghostTransformEntry = a_builder.Gate();
+				r.ghostWaveLatch = a_builder.Latch<GhostWaveLatch>();
+				r.ghostMaterialEntry = a_builder.Gate();
+				r.ghostFieldEntry = a_builder.Gate();
+				r.ghostTransformEntry = a_builder.Gate();
 				const std::array scratch{ waveTextures[0]->Graph(), waveTextures[2]->Graph() };
 				{
 					Binds binds;
-					binds.latch[1] = ghostWaveLatch.offset;
+					binds.latch[1] = r.ghostWaveLatch.offset;
 					binds.uav[2] = Of(material->Graph());
-					AddDispatch(a_builder, "ghost-material", kGhostWaveShader, L"BuildMaterial", {}, kGhostWaveLayout, std::move(binds), ghostMaterialEntry, { 0, 0, 0, 0 });
+					AddDispatch(a_builder, r, "ghost-material", kGhostWaveShader, L"BuildMaterial", none, kGhostWaveLayout, std::move(binds), r.ghostMaterialEntry,
+						{ 0, 0, 0, 0 });
 				}
 				for (uint32_t sample = 0; sample < 11; ++sample) {
 					Binds field;
-					field.latch[1] = ghostWaveLatch.offset;
+					field.latch[1] = r.ghostWaveLatch.offset;
 					field.srv[1] = Of(material->Graph());
 					field.uav[0] = ArrayOf(scratch[0]);
-					AddDispatch(a_builder, std::format("ghost-field-{}", sample), kGhostWaveShader, L"BuildField", {}, kGhostWaveLayout, std::move(field),
-						ghostFieldEntry, { sample, 0, 0, 0 });
+					AddDispatch(a_builder, r, std::format("ghost-field-{}", sample), kGhostWaveShader, L"BuildField", none, kGhostWaveLayout, std::move(field),
+						r.ghostFieldEntry, { sample, 0, 0, 0 });
 					for (uint32_t pass = 0; pass < 4; ++pass) {
 						Binds transform;
-						transform.latch[1] = ghostWaveLatch.offset;
+						transform.latch[1] = r.ghostWaveLatch.offset;
 						transform.srv[0] = ArrayOf(scratch[pass % 2]);
 						transform.uav[0] = ArrayOf(scratch[1 - pass % 2]);
-						AddDispatch(a_builder, std::format("ghost-transform-{}-{}", sample, pass), kGhostWaveShader, L"Transform", {}, kGhostWaveLayout,
-							std::move(transform), ghostTransformEntry, { sample, pass >= 2 ? 1u : 0u, pass == 2 ? 1u : 0u, 0 });
+						AddDispatch(a_builder, r, std::format("ghost-transform-{}-{}", sample, pass), kGhostWaveShader, L"Transform", none, kGhostWaveLayout,
+							std::move(transform), r.ghostTransformEntry, { sample, pass >= 2 ? 1u : 0u, pass == 2 ? 1u : 0u, 0 });
 					}
 					Binds accumulate;
-					accumulate.latch[1] = ghostWaveLatch.offset;
+					accumulate.latch[1] = r.ghostWaveLatch.offset;
 					accumulate.srv[0] = ArrayOf(scratch[0]);
 					accumulate.uav[1] = MipOf(atlas->Graph(), 0);
-					AddDispatch(a_builder, std::format("ghost-accumulate-{}", sample), kGhostWaveShader, L"Accumulate", {}, kGhostWaveLayout, std::move(accumulate),
-						ghostMaterialEntry, { sample, 0, 0, 0 });
+					AddDispatch(a_builder, r, std::format("ghost-accumulate-{}", sample), kGhostWaveShader, L"Accumulate", none, kGhostWaveLayout,
+						std::move(accumulate), r.ghostMaterialEntry, { sample, 0, 0, 0 });
 				}
-				mipGroups = a_builder.Latch<MipGroups>();
-				if (!generateMips)
-					generateMips = GraphPasses::LoadGenerateMips(RenderGraphRuntime::Get().Host()->Device(), false);
-				if (!generateMips) {
+				r.mipGroups = a_builder.Latch<MipGroups>();
+				const auto mipProgram = RenderGraph::Frame::Revision::Adopted().Program(generateMips);
+				if (!mipProgram) {
 					a_builder.Fail("the ghost-wave atlas's mip program did not build");
 					return;
 				}
 				a_builder.Add("ghost-mips", FrameAnchors::PassKind::Compute,
-					[program = generateMips, texture = atlas->Graph(), latch = chainLatch, offset = mipGroups.offset]() {
+					[program = mipProgram, texture = atlas->Graph(), latch = r.chainLatch, offset = r.mipGroups.offset]() {
 						return GraphPasses::MakeGenerateMips(program, texture, { latch, offset });
 					});
 
@@ -1113,28 +1312,28 @@ namespace ORGPostChain
 					Binds binds;
 					binds.cbv[0] = Of(lensBuffer);
 					binds.latch[1] = a_exposureLatch;
-					if (hasExposure)
+					if (r.hasExposure)
 						binds.srv[5] = ImageOf(a_adaptation);
 					binds.srv[1] = Of(sources);
 					binds.srv[2] = View{ .versioned = paths->Versions() };
 					return binds;
 				};
-				ghostEntry = a_builder.Gate();
-				jobsEntry = a_builder.Gate();
-				planClearEntry = a_builder.Gate();
-				resolveEntry = a_builder.Gate();
-				const std::vector<std::pair<std::string, std::string>> area{ { "PHYSICAL_LENS_AREA_LAYERS", "1" } };
-				const std::vector<std::pair<std::string, std::string>> planning{ { "PHYSICAL_LENS_PLANNING", "1" } };
+				r.ghostEntry = a_builder.Gate();
+				r.jobsEntry = a_builder.Gate();
+				r.planClearEntry = a_builder.Gate();
+				r.resolveEntry = a_builder.Gate();
+				const auto& area = AreaDefines();
+				const auto& planning = PlanningDefines();
 				{
 					auto binds = common();
 					binds.uav[2] = Of(jobs);
 					binds.uav[3] = Of(ghostArguments);
-					AddDispatch(a_builder, "build-jobs", kFlareShader, L"BuildJobs", area, kFlareLayout, std::move(binds), jobsEntry);
+					AddDispatch(a_builder, r, "build-jobs", kFlareShader, L"BuildJobs", area, kFlareLayout, std::move(binds), r.jobsEntry);
 				}
 				{
 					Binds binds = common();
 					binds.uav[0] = Of(planStatus);
-					AddDispatch(a_builder, "plan-clear", kPlanningShader, L"ClearPlanStatus", {}, kFlareLayout, std::move(binds), planClearEntry);
+					AddDispatch(a_builder, r, "plan-clear", kPlanningShader, L"ClearPlanStatus", none, kFlareLayout, std::move(binds), r.planClearEntry);
 				}
 				{
 					auto binds = common();
@@ -1142,28 +1341,28 @@ namespace ORGPostChain
 					binds.uav[3] = Of(planArguments);
 					binds.uav[4] = Of(planRequests);
 					binds.srv[3] = Of(jobs);
-					AddDispatch(a_builder, "request-plans", kPlanningShader, L"RequestPlans", {}, kFlareLayout, std::move(binds), ghostEntry, {}, ghostArguments, 32);
+					AddDispatch(a_builder, r, "request-plans", kPlanningShader, L"RequestPlans", none, kFlareLayout, std::move(binds), r.ghostEntry, {}, ghostArguments, 32);
 				}
 				{
 					auto binds = common();
 					binds.srv[0] = Of(planRequests);
 					binds.uav[5] = Of(planTable);
-					AddDispatch(a_builder, "bake-plans", kPlanningShader, L"BakeRequestedPlans", {}, kFlareLayout, std::move(binds), ghostEntry, {}, planArguments, 0);
+					AddDispatch(a_builder, r, "bake-plans", kPlanningShader, L"BakeRequestedPlans", none, kFlareLayout, std::move(binds), r.ghostEntry, {}, planArguments, 0);
 				}
 				{
 					auto binds = common();
 					binds.uav[2] = Of(jobs);
 					binds.uav[4] = Of(pupils);
 					binds.srv[6] = Of(planTable);
-					AddDispatch(a_builder, "expand-jobs", kPlanningShader, L"ExpandCachedJobs", {}, kFlareLayout, std::move(binds), ghostEntry, {}, ghostArguments, 32);
+					AddDispatch(a_builder, r, "expand-jobs", kPlanningShader, L"ExpandCachedJobs", none, kFlareLayout, std::move(binds), r.ghostEntry, {}, ghostArguments, 32);
 				}
 				{
 					auto binds = common();
 					binds.srv[3] = Of(jobs);
 					binds.srv[4] = Of(pupils);
 					binds.uav[1] = Of(rays);
-					AddDispatch(a_builder, "trace-beams", kBeamTraceShader, L"TraceBeams", planning, kFlareLayout, binds, ghostEntry, {}, ghostArguments, 0);
-					AddDispatch(a_builder, "shade-beams", kBeamTraceShader, L"ShadeBeams", area, kFlareLayout, std::move(binds), ghostEntry, {}, ghostArguments, 0);
+					AddDispatch(a_builder, r, "trace-beams", kBeamTraceShader, L"TraceBeams", planning, kFlareLayout, binds, r.ghostEntry, {}, ghostArguments, 0);
+					AddDispatch(a_builder, r, "shade-beams", kBeamTraceShader, L"ShadeBeams", area, kFlareLayout, std::move(binds), r.ghostEntry, {}, ghostArguments, 0);
 				}
 				{
 					auto binds = common();
@@ -1171,7 +1370,7 @@ namespace ORGPostChain
 					binds.srv[3] = Of(jobs);
 					binds.srv[4] = Of(pupils);
 					binds.uav[4] = Of(bundles);
-					AddDispatch(a_builder, "reduce-ghosts", kFlareShader, L"ReduceGhosts", planning, kFlareLayout, std::move(binds), ghostEntry, {}, ghostArguments, 48);
+					AddDispatch(a_builder, r, "reduce-ghosts", kFlareShader, L"ReduceGhosts", planning, kFlareLayout, std::move(binds), r.ghostEntry, {}, ghostArguments, 48);
 				}
 
 				// The raster, as Draw: two bands into the ghost slices, blue and violet packed, then the three area layers.
@@ -1185,34 +1384,18 @@ namespace ORGPostChain
 				beam.srv[5] = Of(atlas->Graph());
 				beam.srv[7] = View{ .versioned = indices->Versions() };
 				beam.sampler[0] = sampler.Index();
-				const auto additive = [](DXGI_FORMAT a_format) {
-					return RasterProgram::Target{ .format = rhi::helpers::ToRHI(a_format),
-						.blend = { .enable = true,
-							.srcColor = rhi::BlendFactor::One,
-							.dstColor = rhi::BlendFactor::One,
-							.colorOp = rhi::BlendOp::Add,
-							.srcAlpha = rhi::BlendFactor::One,
-							.dstAlpha = rhi::BlendFactor::One,
-							.alphaOp = rhi::BlendOp::Add } };
-				};
-				const uint32_t words = WordsOf(kBeamLayout, 4);
-				const auto program = [&](const wchar_t* a_entry, DXGI_FORMAT a_format) {
-					return a_builder.RasterTargets(kBeamShader, words, { additive(a_format) }, area, a_entry, kBeamShader, L"VSMain");
-				};
-				const auto fine = program(L"PSMain", DXGI_FORMAT_R32_FLOAT);
-				const auto violet = program(L"PSPackedViolet", DXGI_FORMAT_R32G32_FLOAT);
-				const auto broad = program(L"PSArea", DXGI_FORMAT_R32G32B32A32_FLOAT);
-				if (!fine || !violet || !broad)
+				const auto beams = LoadBeamPrograms(a_builder);
+				if (!beams.fine || !beams.violet || !beams.broad)
 					return;
-				const RasterProgram::Viewport output{ .width = ghostSize[0], .height = ghostSize[1] };
+				const RasterProgram::Viewport output{ .width = rs.ghostSize[0], .height = rs.ghostSize[1] };
 				const auto draw = [&](std::string a_name, std::shared_ptr<org::Resource> a_target, std::optional<uint32_t> a_slice, RasterProgram::Viewport a_viewport,
 									  std::vector<LensDraw::Step> a_steps) {
 					auto spec = std::make_shared<const LensDraw>(LensDraw{ .name = a_name,
 						.layout = kBeamLayout,
 						.binds = beam,
-						.latch = chainLatch,
-						.gate = gate,
-						.entry = ghostEntry.index,
+						.latch = r.chainLatch,
+						.gate = r.gate,
+						.entry = r.ghostEntry.index,
 						.target = std::move(a_target),
 						.slice = a_slice,
 						.viewport = a_viewport,
@@ -1220,30 +1403,31 @@ namespace ORGPostChain
 						.steps = std::move(a_steps) });
 					a_builder.Add(a_name, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LensDrawPass>(spec); });
 				};
-				draw("ghosts-red", ghosts->Graph(), 0, output, { { fine, { 0, 0, 0, 0 }, 12 } });
-				draw("ghosts-green", ghosts->Graph(), 1, output, { { fine, { 1, 0, 0, 0 }, 12 } });
-				draw("ghosts-blue", blueViolet->Graph(), std::nullopt, output, { { violet, { 2, 0, 0, 0 }, 12 } });
+				draw("ghosts-red", rs.ghosts->Graph(), 0, output, { { beams.fine, { 0, 0, 0, 0 }, 12 } });
+				draw("ghosts-green", rs.ghosts->Graph(), 1, output, { { beams.fine, { 1, 0, 0, 0 }, 12 } });
+				draw("ghosts-blue", rs.blueViolet->Graph(), std::nullopt, output, { { beams.violet, { 2, 0, 0, 0 }, 12 } });
 				for (uint32_t level = 0; level < 3; ++level) {
-					const auto& desc = areaLayers[level]->Desc();
+					const auto& desc = rs.areaLayers[level]->Desc();
 					std::vector<LensDraw::Step> steps;
 					for (uint32_t band = 0; band < 3; ++band)
-						steps.push_back({ broad, { band, level + 1, 0, 0 }, 64 + 20 * level });
-					draw(std::format("ghosts-area-{}", level), areaLayers[level]->Graph(), std::nullopt, { .width = desc.Width, .height = desc.Height }, std::move(steps));
+						steps.push_back({ beams.broad, { band, level + 1, 0, 0 }, 64 + 20 * level });
+					draw(std::format("ghosts-area-{}", level), rs.areaLayers[level]->Graph(), std::nullopt, { .width = desc.Width, .height = desc.Height },
+						std::move(steps));
 				}
 
 				Binds resolve;
 				resolve.srv[0] = Of(ghostArguments);
-				resolve.srv[1] = Of(blueViolet->Graph());
+				resolve.srv[1] = Of(rs.blueViolet->Graph());
 				for (uint32_t level = 0; level < 3; ++level)
-					resolve.srv[2 + level] = Of(areaLayers[level]->Graph());
-				resolve.uav[0] = ArrayOf(ghosts->Graph());
-				resolve.uav[1] = Of(waveTiles);
+					resolve.srv[2 + level] = Of(rs.areaLayers[level]->Graph());
+				resolve.uav[0] = ArrayOf(rs.ghosts->Graph());
+				resolve.uav[1] = Of(rs.waveTiles);
 				resolve.sampler[0] = sampler.Index();
-				AddDispatch(a_builder, "resolve", kResolveShader, L"ResolveArea", {}, kResolveLayout, std::move(resolve), resolveEntry);
+				AddDispatch(a_builder, r, "resolve", kResolveShader, L"ResolveArea", none, kResolveLayout, std::move(resolve), r.resolveEntry);
 			}
 
-			/** @brief The persistent resources: made once for the session, the size-dependent ones again when the chain's size changes. */
-			bool Ensure(uint32_t a_width, uint32_t a_height)
+			/** @brief The persistent resources made once for the session. False, logged, when they cannot be made. */
+			bool EnsureSession()
 			{
 				try {
 					const GraphResources::Options persistent{ .lifetime = GraphResources::Lifetime::Persistent };
@@ -1309,38 +1493,55 @@ namespace ORGPostChain
 						madeGhostWave.reset();
 						madePlan.reset();
 					}
-					if (!waveRadiance || waveRadiance->Desc().Width != a_width || waveRadiance->Desc().Height != a_height) {
-						// As SetupResources and UpdateDiffraction: sized by the chain's input.
-						const uint32_t tiles = ((a_width + 15) / 16) * ((a_height + 15) / 16);
-						std::erase_if(flareBuffers, [](const auto& a_entry) { return a_entry.first.ends_with("DiffractionTiles") || a_entry.first.ends_with("ActiveDiffractionTiles"); });
-						waveTiles = MakeStructured(tiles, 4, std::string(Published::kPhysicalLensWaveTiles).c_str());
-						waveWorkTiles = MakeStructured(tiles, 4, "PostProcessing::PhysicalLens::ActiveDiffractionTiles");
-						flareBuffers.emplace_back(std::string(Published::kPhysicalLensWaveTiles), waveTiles);
-						flareBuffers.emplace_back("PostProcessing::PhysicalLens::ActiveDiffractionTiles", waveWorkTiles);
-						waveRadiance = std::make_unique<GraphResources::Texture2D>(TextureDesc(a_width, a_height, 3, DXGI_FORMAT_R32_FLOAT), std::string(Published::kPhysicalLensWaveTail), persistent);
-						ghostSize = { (std::max)(1u, (a_width + 1) / 2), (std::max)(1u, (a_height + 1) / 2) };
-						constexpr UINT targets = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-						ghosts = std::make_unique<GraphResources::Texture2D>(TextureDesc(ghostSize[0], ghostSize[1], 3, DXGI_FORMAT_R32_FLOAT, 1, targets | D3D11_BIND_UNORDERED_ACCESS),
-							std::string(Published::kPhysicalLensGhosts), persistent);
-						// Floating-point blending must not overflow on concentrated caustics.
-						blueViolet = std::make_unique<GraphResources::Texture2D>(TextureDesc(ghostSize[0], ghostSize[1], 1, DXGI_FORMAT_R32G32_FLOAT, 1, targets),
-							"PostProcessing::PhysicalLens::BlueViolet", persistent);
-						for (uint32_t level = 0; level < 3; ++level)
-							areaLayers[level] = std::make_unique<GraphResources::Texture2D>(
-								TextureDesc((std::max)(1u, ghostSize[0] >> (2 + 2 * level)) + 8, (std::max)(1u, ghostSize[1] >> (2 + 2 * level)) + 8, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, targets),
-								std::format("PostProcessing::PhysicalLens::AreaLayer{}", level), persistent);
-					}
 				} catch (const std::exception& e) {
 					logger::error("[ORG] Physical Lens: its resources could not be made: {}", e.what());
-					mapping.reset();
-					candidates.reset();
-					waveRadiance.reset();
 					return false;
 				}
 				const auto made = [](const auto& a_twin) { return a_twin && *a_twin; };
 				return made(mapping) && made(focus) && constants && imagingBuffer && tableBuffer && lensBuffer && sampler && made(waveTextures[0]) &&
-				       made(waveTextures[1]) && made(waveTextures[2]) && made(waveMax) && made(atlas) && made(material) && made(waveRadiance) && made(ghosts) &&
-				       made(blueViolet) && made(areaLayers[0]) && made(areaLayers[1]) && made(areaLayers[2]);
+				       made(waveTextures[1]) && made(waveTextures[2]) && made(waveMax) && made(atlas) && made(material);
+			}
+
+			/**
+			* @brief The resources sized by the chain's input, as SetupResources and UpdateDiffraction size them. A new size is a new
+			* set; a build of the old size keeps its own until it is dropped. Null, logged, when they cannot be made.
+			*/
+			std::shared_ptr<const LensSized> SizedFor(uint32_t a_width, uint32_t a_height)
+			{
+				if (sized && sized->width == a_width && sized->height == a_height)
+					return sized;
+				auto next = std::make_shared<LensSized>();
+				try {
+					const GraphResources::Options persistent{ .lifetime = GraphResources::Lifetime::Persistent };
+					next->width = a_width;
+					next->height = a_height;
+					const uint32_t tiles = ((a_width + 15) / 16) * ((a_height + 15) / 16);
+					next->waveTiles = MakeStructured(tiles, 4, std::string(Published::kPhysicalLensWaveTiles).c_str());
+					next->waveWorkTiles = MakeStructured(tiles, 4, "PostProcessing::PhysicalLens::ActiveDiffractionTiles");
+					next->waveRadiance = std::make_unique<GraphResources::Texture2D>(TextureDesc(a_width, a_height, 3, DXGI_FORMAT_R32_FLOAT),
+						std::string(Published::kPhysicalLensWaveTail), persistent);
+					next->ghostSize = { (std::max)(1u, (a_width + 1) / 2), (std::max)(1u, (a_height + 1) / 2) };
+					const auto& ghostSize = next->ghostSize;
+					constexpr UINT targets = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+					next->ghosts = std::make_unique<GraphResources::Texture2D>(TextureDesc(ghostSize[0], ghostSize[1], 3, DXGI_FORMAT_R32_FLOAT, 1, targets | D3D11_BIND_UNORDERED_ACCESS),
+						std::string(Published::kPhysicalLensGhosts), persistent);
+					// Floating-point blending must not overflow on concentrated caustics.
+					next->blueViolet = std::make_unique<GraphResources::Texture2D>(TextureDesc(ghostSize[0], ghostSize[1], 1, DXGI_FORMAT_R32G32_FLOAT, 1, targets),
+						"PostProcessing::PhysicalLens::BlueViolet", persistent);
+					for (uint32_t level = 0; level < 3; ++level)
+						next->areaLayers[level] = std::make_unique<GraphResources::Texture2D>(
+							TextureDesc((std::max)(1u, ghostSize[0] >> (2 + 2 * level)) + 8, (std::max)(1u, ghostSize[1] >> (2 + 2 * level)) + 8, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, targets),
+							std::format("PostProcessing::PhysicalLens::AreaLayer{}", level), persistent);
+				} catch (const std::exception& e) {
+					logger::error("[ORG] Physical Lens: its sized resources could not be made: {}", e.what());
+					return nullptr;
+				}
+				const auto made = [](const auto& a_twin) { return a_twin && *a_twin; };
+				if (!next->waveTiles || !next->waveWorkTiles || !made(next->waveRadiance) || !made(next->ghosts) || !made(next->blueViolet) ||
+					!made(next->areaLayers[0]) || !made(next->areaLayers[1]) || !made(next->areaLayers[2]))
+					return nullptr;
+				sized = std::move(next);
+				return sized;
 			}
 
 			/** @brief The newest focus readback since the last reset, in metres, as ResolveCameraFocus maps its staging copy. */
@@ -1357,54 +1558,43 @@ namespace ORGPostChain
 					resolvedFocusM = metres;
 			}
 
+			RenderGraph::Frame::Vars::Var<std::uint32_t> ghostsVariable;  // Derived.PostProcessing.PhysicalLens.ghosts: Intensity above zero
+			RenderGraph::Frame::DeclaredProgram<GraphPasses::GenerateMipsProgram> generateMips;
 			FrameAnchors::Texture depth;
 			float aspect = 16.f / 9.f;
-			uint32_t width = 0, height = 0;
-			std::array<uint32_t, 2> ghostSize{ 1, 1 };
-			bool built = false, waveOn = false, ghostsOn = false, hasExposure = false;
 
-			// The persistent resources.
+			// The persistent resources, for the session. The sized ones are per chain size.
 			std::unique_ptr<GraphResources::Texture2D> mapping;  // the image mapping, RGBA32F, 3 bands
 			std::unique_ptr<GraphResources::Texture2D> focus;    // this effect's focus in km when DoF is not in the chain
 			std::shared_ptr<org::LatchBlock> constants;          // the large blocks and the argument seeds, by run
 			std::shared_ptr<org::Buffer> imagingBuffer, tableBuffer, lensBuffer;
 			org::OwnedDescriptorBinding sampler;
-			std::shared_ptr<org::Buffer> candidates, regions, sources, waveKernel, waveSources, waveTiles, waveWorkTiles, jobs, bundles, rays, pupils;
+			std::shared_ptr<org::Buffer> candidates, regions, sources, waveKernel, waveSources, jobs, bundles, rays, pupils;
 			std::shared_ptr<org::Buffer> planTable, planStatus, planRequests, waveDispatch, ghostArguments, planArguments;
 			std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> flareBuffers;  // registered at each build
 			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> waveTextures;  // 1024, 512 and 1024 squared, 3 bands; 0 and 2 are scratch
-			std::unique_ptr<GraphResources::Texture2D> waveMax, waveRadiance, ghosts, blueViolet, atlas, material;
-			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> areaLayers;
+			std::unique_ptr<GraphResources::Texture2D> waveMax, atlas, material;
+			std::shared_ptr<const LensSized> sized;  // the newest size's
 			std::unique_ptr<RevisedBuffer> paths, indices;
 			std::uint64_t stagedPaths = 0;
-			std::shared_ptr<const GraphPasses::GenerateMipsProgram> generateMips;
 
-			std::shared_ptr<const RenderGraph::RunGate> gate;
-			std::shared_ptr<const org::LatchBlock> chainLatch;
-
-			std::shared_ptr<RunReadback> readback;  // kept across builds
+			std::shared_ptr<RunReadback> readback;  // kept across builds; each build has its stamp region
 			std::uint32_t firstFocusStamp = 0;      // the stamp of the last reset's run
-			bool ownFocus = true;
 			unsigned lastFocusFrame = ~0u, lastGhostFrame = ~0u;
 			const void* beamModel = nullptr;  // the paths snapshot the beams last traced
 			float resolvedFocusM = 10.f;
-			uint32_t focusReset = 0;
 			bool lastMapped = false, lastConfigured = true;  // for the log line when either changes
 
-			// What each cache was made from, and what this frame asked for until Executed.
+			// What each cache was made from, and what this frame asked for until Executed. The caches are shared by every build.
 			std::optional<Mapping> madeMapping, pendingMapping;
 			std::optional<PhysicalLens::DiffractionInputs> madeWave, pendingWave;
 			std::optional<PhysicalLensGhostWave::Parameters> madeGhostWave, pendingGhostWave;
 			std::optional<PlanKey> madePlan, pendingPlan;
-
-			LatchRegion<PhysicalLens::FocusInputs> focusConstants;
-			LatchRegion<PhysicalLensImaging::DiffractionParameters> diffraction;
-			LatchRegion<GhostWaveLatch> ghostWaveLatch;
-			LatchRegion<MipGroups> mipGroups;
-			GateEntry focusGate, mappingGate, imagingEntry, lensEntry, extractEntry, extractOneEntry, waveOneEntry, waveTilesEntry, waveTailEntry;
-			GateEntry ghostEntry, jobsEntry, planClearEntry, resolveEntry, ghostMaterialEntry, ghostFieldEntry, ghostTransformEntry;
-			std::vector<std::pair<GateEntry, std::array<uint32_t, 3>>> cacheEntries;
 		};
+
+		void LensRun::Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) { effect.CommitRun(*this, a_commit, a_feature); }
+
+		void LensRun::Executed(PostProcessFeature&) { effect.ExecutedRun(); }
 	}
 
 	std::unique_ptr<Effect> MakePhysicalLens() { return std::make_unique<PhysicalLensEffect>(); }

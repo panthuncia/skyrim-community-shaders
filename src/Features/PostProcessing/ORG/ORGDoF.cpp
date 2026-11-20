@@ -96,13 +96,11 @@ namespace ORGPostChain
 		* the custom aperture's import) observed by Update. The rest, including the sample table, is latched, so a blade or shape
 		* change needs no build. The focus history stays on the GPU in a 1x1 texture owned here. The custom aperture textures stay
 		* BokehResources' D3D11 textures, imported by name.
-		* The ring count is a define (GATHER_RING_COUNT), a program choice: DeclareProgram later.
+		* The ring count is a define (GATHER_RING_COUNT). Its programs are listed in Programs and built on the programs lane.
 		*/
 		class DoFEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
 			{
 				const auto& settings = static_cast<DoF&>(a_feature).settings;
@@ -152,18 +150,22 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
+			{
+				// The build fails on an incomplete key.
+				if (a_key.size() < 4)
+					return;
+				LoadPrograms(a_programs, Built(a_key));
+				a_programs.Publishes(Published::kDoFFocus);
+			}
+
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
 			{
 				if (a_key.size() < 4) {
 					a_builder.Fail("its key is incomplete");
 					return nullptr;
 				}
-				// As DoF::PrepareFrame: a Cinematic Camera lens always gathers and draws no custom shape.
-				DoFShape built;
-				built.adaptiveGather = frame.cameraLens || a_key[0] != 0;
-				built.gatherQuality = static_cast<std::size_t>(a_key[1]);
-				built.postSmoothing = frame.postSmoothing;
-				built.customShape = !frame.cameraLens && a_key[2] == 1 && static_cast<bool>(shape);
+				const DoFShape built = Built(a_key);
 				if (!sampler) {
 					// DoF::linearSampler: linear, mirrored, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{
@@ -226,12 +228,7 @@ namespace ORGPostChain
 
 				const auto constants = a_builder.Latch<DoFLatch>();
 				const auto samples = a_builder.Latch<SampleTable>();
-				const auto program = [&](const wchar_t* a_entry, bool a_gather = false) {
-					std::vector<std::pair<std::string, std::string>> defines;
-					if (a_gather)
-						defines.emplace_back("GATHER_RING_COUNT", built.gatherQuality == 0 ? "4" : "5");
-					return a_builder.Compute(kShader, ShaderBindings::Words<DoFBlock>(), std::move(defines), a_entry);
-				};
+				const auto programs = LoadPrograms(a_builder, built);
 				const auto dispatch = [&](const char* a_name, std::shared_ptr<const ComputeProgram> a_program, const Slots& a_slots,
 										  std::uint32_t a_groupsX, std::uint32_t a_groupsY) {
 					std::vector<Bind> bindings{ Bind::Shared(), a_slots.out, a_slots.focus, a_slots.coc, a_slots.tile, Bind::Handle(sampler.Index()),
@@ -254,16 +251,16 @@ namespace ORGPostChain
 					}
 				};
 
-				dispatch("focus", program(L"CS_UpdateFocus"), { .focus = Bind::Uav(focus->Graph()), .color = Bind::Srv(input), .depth = Bind::Srv(depth) }, 1, 1);
-				dispatch("coc", program(L"CS_CalculateCoC"),
+				dispatch("focus", programs.focus, { .focus = Bind::Uav(focus->Graph()), .color = Bind::Srv(input), .depth = Bind::Srv(depth) }, 1, 1);
+				dispatch("coc", programs.coc,
 					{ .coc = Bind::Uav(coc), .color = Bind::Srv(input), .previousFocus = Bind::Srv(focus->Graph()), .depth = Bind::Srv(depth) },
 					Groups(width), Groups(height));
-				dispatch("downsample", program(built.adaptiveGather ? L"CS_Downsample" : L"CS_DownsampleLegacy"),
+				dispatch("downsample", programs.downsample,
 					{ .out = Bind::Uav(setupColor), .coc = Bind::Uav(setupCoC), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc) },
 					Groups(halfWidth), Groups(halfHeight));
 				// The CoC-aware colour pyramid for the fixed gather.
 				if (built.adaptiveGather) {
-					auto reduce = program(L"CS_ReduceColorCoC");
+					const auto& reduce = programs.reduceColorCoC;
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						dispatch(std::format("reduce-{}", i + 1).c_str(), reduce,
 							{ .out = Bind::Uav(gatherColor[i]), .coc = Bind::Uav(gatherCoC[i]), .color = Bind::Srv(i == 0 ? setupColor : gatherColor[i - 1]), .reduceCoCInput = Bind::Srv(i == 0 ? setupCoC : gatherCoC[i - 1]) },
@@ -271,19 +268,19 @@ namespace ORGPostChain
 					}
 				}
 				// Flatten, then the separable dilation.
-				dispatch("tile-flatten", program(L"CS_CoCTileFlatten"), { .tile = Bind::Uav(cocTile), .cocInput = Bind::Srv(coc) }, Groups(tileWidth), Groups(tileHeight));
-				dispatch("tile-dilate-h", program(L"CS_CoCTileDilateH"), { .tile = Bind::Uav(cocTileTemporary), .cocTile = Bind::Srv(cocTile) },
+				dispatch("tile-flatten", programs.tileFlatten, { .tile = Bind::Uav(cocTile), .cocInput = Bind::Srv(coc) }, Groups(tileWidth), Groups(tileHeight));
+				dispatch("tile-dilate-h", programs.tileDilateH, { .tile = Bind::Uav(cocTileTemporary), .cocTile = Bind::Srv(cocTile) },
 					Groups(tileWidth), Groups(tileHeight));
-				dispatch("tile-dilate-v", program(L"CS_CoCTileDilateV"), { .tile = Bind::Uav(cocTileDilated), .cocTile = Bind::Srv(cocTileTemporary) },
+				dispatch("tile-dilate-v", programs.tileDilateV, { .tile = Bind::Uav(cocTileDilated), .cocTile = Bind::Srv(cocTileTemporary) },
 					Groups(tileWidth), Groups(tileHeight));
 				{
 					Slots slots{ .out = Bind::Uav(farLayer), .color = Bind::Srv(setupColor), .bokehShape = shapeBind, .cocHalf = Bind::Srv(setupCoC), .cocTile = Bind::Srv(cocTile) };
 					gatherInputs(slots);
-					dispatch("far", built.adaptiveGather ? program(L"CS_FarGather", true) : program(L"CS_FarBlur"), slots, Groups(halfWidth), Groups(halfHeight));
+					dispatch("far", programs.farPass, slots, Groups(halfWidth), Groups(halfHeight));
 				}
 				// The near gather reads a colour-only pyramid of the far result.
 				if (built.adaptiveGather) {
-					auto reduce = program(L"CS_ReduceColor");
+					const auto& reduce = programs.reduceColor;
 					for (std::size_t i = 0; i < kPyramidLevels; ++i) {
 						dispatch(std::format("reduce-near-{}", i + 1).c_str(), reduce,
 							{ .out = Bind::Uav(gatherColor[i]), .color = Bind::Srv(i == 0 ? farLayer : gatherColor[i - 1]) }, Groups(gatherSize[i][0]),
@@ -293,22 +290,22 @@ namespace ORGPostChain
 				{
 					Slots slots{ .out = Bind::Uav(nearLayer), .color = Bind::Srv(farLayer), .bokehShape = shapeBind, .cocHalf = Bind::Srv(setupCoC), .cocTileDilated = Bind::Srv(cocTileDilated) };
 					gatherInputs(slots);
-					dispatch("near", built.adaptiveGather ? program(L"CS_NearGather", true) : program(L"CS_NearBlur"), slots, Groups(halfWidth), Groups(halfHeight));
+					dispatch("near", programs.nearPass, slots, Groups(halfWidth), Groups(halfHeight));
 				}
 				// The setup colour takes the filtered near layer.
-				dispatch("postfilter", program(L"CS_GatherPostfilter"),
+				dispatch("postfilter", programs.postfilter,
 					{ .out = Bind::Uav(farFiltered), .tile = Bind::Uav(setupColor), .color = Bind::Srv(farLayer), .nearBlur = Bind::Srv(nearLayer) },
 					Groups(halfWidth), Groups(halfHeight));
 				// Straight into the output unless post smoothing follows.
 				const Image smooth = built.postSmoothing ? image("PostSmooth", colorFormat, width, height) : Image{};
-				dispatch("combine", program(L"CS_Combiner"),
+				dispatch("combine", programs.combine,
 					{ .out = Bind::Uav(built.postSmoothing ? smooth : output), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc), .farBlur = Bind::Srv(farFiltered), .nearBlur = Bind::Srv(setupColor) },
 					Groups(width), Groups(height));
 				if (built.postSmoothing) {
 					const Image smooth2 = image("PostSmooth2", colorFormat, width, height);
-					dispatch("smooth-1", program(L"CS_PostSmoothing1"), { .out = Bind::Uav(smooth2), .color = Bind::Srv(smooth), .cocInput = Bind::Srv(coc) },
+					dispatch("smooth-1", programs.smooth1, { .out = Bind::Uav(smooth2), .color = Bind::Srv(smooth), .cocInput = Bind::Srv(coc) },
 						Groups(width), Groups(height));
-					dispatch("smooth-2", program(L"CS_PostSmoothing2AndFocusing"),
+					dispatch("smooth-2", programs.smooth2,
 						{ .out = Bind::Uav(output), .color = Bind::Srv(smooth), .cocInput = Bind::Srv(coc), .postSmoothInput = Bind::Srv(smooth2) },
 						Groups(width), Groups(height));
 				}
@@ -318,6 +315,57 @@ namespace ORGPostChain
 
 		private:
 			friend class DoFRun;
+
+			/** @brief The programs one build's passes use. Those its shape does not use stay null. */
+			struct DoFPrograms
+			{
+				std::shared_ptr<const ComputeProgram> focus, coc, downsample, reduceColorCoC, tileFlatten, tileDilateH, tileDilateV, farPass, reduceColor, nearPass,
+					postfilter, combine, smooth1, smooth2;
+			};
+
+			/** @brief The build's passes from its key and this frame's Update. a_key has at least 4 words. */
+			DoFShape Built(std::span<const std::uint64_t> a_key) const
+			{
+				// As DoF::PrepareFrame: a Cinematic Camera lens always gathers and draws no custom shape.
+				DoFShape built;
+				built.adaptiveGather = frame.cameraLens || a_key[0] != 0;
+				built.gatherQuality = static_cast<std::size_t>(a_key[1]);
+				built.postSmoothing = frame.postSmoothing;
+				built.customShape = !frame.cameraLens && a_key[2] == 1 && static_cast<bool>(shape);
+				return built;
+			}
+
+			/** @brief Listed in Programs and built on the programs lane, for the passes a_built has. */
+			static DoFPrograms LoadPrograms(ProgramSource& a_programs, const DoFShape& a_built)
+			{
+				const auto program = [&](const wchar_t* a_entry, bool a_gather = false) {
+					std::vector<std::pair<std::string, std::string>> defines;
+					if (a_gather)
+						defines.emplace_back("GATHER_RING_COUNT", a_built.gatherQuality == 0 ? "4" : "5");
+					return a_programs.Compute(kShader, ShaderBindings::Words<DoFBlock>(), std::move(defines), a_entry);
+				};
+				DoFPrograms programs;
+				const bool gather = a_built.adaptiveGather;
+				programs.focus = program(L"CS_UpdateFocus");
+				programs.coc = program(L"CS_CalculateCoC");
+				programs.downsample = program(gather ? L"CS_Downsample" : L"CS_DownsampleLegacy");
+				if (gather)
+					programs.reduceColorCoC = program(L"CS_ReduceColorCoC");
+				programs.tileFlatten = program(L"CS_CoCTileFlatten");
+				programs.tileDilateH = program(L"CS_CoCTileDilateH");
+				programs.tileDilateV = program(L"CS_CoCTileDilateV");
+				programs.farPass = gather ? program(L"CS_FarGather", true) : program(L"CS_FarBlur");
+				if (gather)
+					programs.reduceColor = program(L"CS_ReduceColor");
+				programs.nearPass = gather ? program(L"CS_NearGather", true) : program(L"CS_NearBlur");
+				programs.postfilter = program(L"CS_GatherPostfilter");
+				programs.combine = program(L"CS_Combiner");
+				if (a_built.postSmoothing) {
+					programs.smooth1 = program(L"CS_PostSmoothing1");
+					programs.smooth2 = program(L"CS_PostSmoothing2AndFocusing");
+				}
+				return programs;
+			}
 
 			FrameAnchors::Texture depth, shape;
 			// Focus distance in km, updated in place each frame. It is no declared texture: Physical Lens reads it as a plain

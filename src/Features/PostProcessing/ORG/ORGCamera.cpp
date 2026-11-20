@@ -21,32 +21,48 @@ namespace ORGPostChain
 			ShaderBindings::Latch camera;
 		};
 
+		/** @brief One build's latch region. */
+		class CameraRun final : public Run
+		{
+		public:
+			explicit CameraRun(LatchRegion<Camera::CameraCB> a_constants) :
+				constants(a_constants) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
+			{
+				a_commit.Write(constants, static_cast<Camera&>(a_feature).Constants(a_commit.DynamicSize()));
+			}
+
+		private:
+			LatchRegion<Camera::CameraCB> constants;
+		};
+
 		/**
-		* @brief Camera::Draw on the graph: the lens pass into a transient lens image, then the finish pass into the output. Film grain
-		* reads SharedData's frame count, so the chain uploads the shared constants.
+		* @brief Camera::Draw on the graph: the lens pass into a transient lens image of the chain, then the finish pass into the
+		* output. The chain declares it on the effect's enabled. Film grain reads SharedData's frame count, so the chain uploads the
+		* shared constants.
 		*/
 		class CameraEffect final : public Effect
 		{
 		public:
-			void Build(Builder& a_builder, PostProcessFeature&) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override { LoadPrograms(a_programs); }
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				if (!sampler) {
 					// Linear, clamped, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					if (!sampler) {
 						a_builder.Fail("its sampler could not be made");
-						return;
+						return nullptr;
 					}
 				}
 				// The output takes kMAIN_COPY's format.
-				const auto& shape = a_builder.GetShape();
-				const auto format = shape.mainCopyFormat;
-				const auto words = ShaderBindings::Words<CameraBlock>();
-				auto lensProgram = a_builder.Raster("PostProcessing/Camera/camera.ps.hlsl", words, { format });
-				auto finishProgram = a_builder.Raster("PostProcessing/Camera/camera_finish.ps.hlsl", words, { format });
+				const auto format = a_builder.GetShape().mainCopyFormat;
+				auto [lensProgram, finishProgram] = LoadPrograms(a_builder);
 				auto lens = a_builder.CreateImage("PostProcessing::Camera::Lens", format, D3D11_BIND_RENDER_TARGET);
 				auto image = a_builder.CreateImage("PostProcessing::Camera::Output", format, D3D11_BIND_RENDER_TARGET);
-				constants = a_builder.Latch<Camera::CameraCB>();
+				const auto constants = a_builder.Latch<Camera::CameraCB>();
 				const auto colorSampler = Bind::Handle(sampler.Index());
 				a_builder.Draw({ .name = "lens",
 					.program = std::move(lensProgram),
@@ -59,16 +75,26 @@ namespace ORGPostChain
 					.target = image,
 					.viewport = a_builder.DynamicViewport() });
 				a_builder.SetCurrent(image);
-			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				a_commit.Write(constants, static_cast<Camera&>(a_feature).Constants(a_commit.DynamicSize()));
+				if (a_builder.Failed())
+					return nullptr;
+				return std::make_shared<CameraRun>(constants);
 			}
 
 		private:
+			struct CameraPrograms
+			{
+				std::shared_ptr<const RasterProgram> lens, finish;
+			};
+
+			static CameraPrograms LoadPrograms(ProgramSource& a_programs)
+			{
+				const auto format = a_programs.GetShape().mainCopyFormat;
+				const auto words = ShaderBindings::Words<CameraBlock>();
+				return { a_programs.Raster("PostProcessing/Camera/camera.ps.hlsl", words, { format }),
+					a_programs.Raster("PostProcessing/Camera/camera_finish.ps.hlsl", words, { format }) };
+			}
+
 			org::OwnedDescriptorBinding sampler;
-			LatchRegion<Camera::CameraCB> constants;
 		};
 	}
 

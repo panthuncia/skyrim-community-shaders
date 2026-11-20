@@ -164,8 +164,6 @@ namespace ORGPostChain
 		class PhysicalGlareEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
 			{
 				using namespace RenderGraph::Frame;
@@ -208,19 +206,28 @@ namespace ORGPostChain
 				if (glare.DebugViewShown())
 					return "its debug view shows the D3D11 glare";
 				// The tear film's strength is no variable yet.
-				a_observed.push_back(glare.GetEffectiveSettings().TearFilmStrength > 0.f ? 1u : 0u);
+				tearFilmStrength = glare.GetEffectiveSettings().TearFilmStrength > 0.f;
+				a_observed.push_back(tearFilmStrength ? 1u : 0u);
 				return nullptr;
 			}
 
-			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
+			{
+				// The build fails on another key.
+				if (a_key.size() != 2)
+					return;
+				LoadPrograms(a_programs, static_cast<uint>(a_key[0]), TearFilm(a_key));
+				a_programs.Publishes(Published::kGlare);
+			}
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
 			{
 				if (a_key.size() != 2) {
 					a_builder.Fail("its key is not the one Key gives");
 					return nullptr;
 				}
 				const uint size = static_cast<uint>(a_key[0]);
-				// The strength is observed each frame, so this build was made for the strength read here.
-				const bool tearFilm = a_key[1] != 0 && static_cast<PhysicalGlare&>(a_feature).GetEffectiveSettings().TearFilmStrength > 0.f;
+				const bool tearFilm = TearFilm(a_key);
 				const auto& shape = a_builder.GetShape();
 
 				auto& wrapSampler = persistent.wrapSampler;
@@ -243,24 +250,18 @@ namespace ORGPostChain
 				for (const auto& texture : psfSpectrum)
 					a_builder.Register(*texture);
 
-				constexpr const char* kDir = "PostProcessing/PhysicalGlare/";
-				const auto program = [&](const char* a_file, std::uint32_t a_words, const wchar_t* a_entry, std::vector<std::pair<std::string, std::string>> a_defines = {}) {
-					return a_builder.Compute(std::format("{}{}", kDir, a_file), a_words, std::move(a_defines), a_entry);
-				};
-				const auto fft = [&](const char* a_axis, const char* a_direction) {
-					return program("fft.cs.hlsl", ShaderBindings::Words<FftBlock>(), L"CS_FFT", { { a_axis, "" }, { a_direction, "" }, { "FFT_SIZE", std::to_string(size) } });
-				};
-				const auto threshold = program("threshold.cs.hlsl", ShaderBindings::Words<ThresholdBlock>(), L"CS_Threshold");
-				const auto aperture = program("aperture.cs.hlsl", ShaderBindings::Words<ApertureBlock>(), L"CS_Aperture");
-				const auto tearFilmProgram = tearFilm ? program("tearfilm.cs.hlsl", ShaderBindings::Words<TearFilmBlock>(), L"CS_TearFilm") : nullptr;
-				const auto psf = program("psf.cs.hlsl", ShaderBindings::Words<PsfBlock>(), L"CS_ChromaticBlur");
-				const auto multiply = program("multiply.cs.hlsl", ShaderBindings::Words<MultiplyBlock>(), L"CS_Multiply");
-				const auto pack = program("pack.cs.hlsl", ShaderBindings::Words<PackBlock>(), L"CS_Pack");
-				const auto composite = program("composite.cs.hlsl", ShaderBindings::Words<CompositeBlock>(), L"CS_Composite");
-				const auto rowForward = fft("ROW_PASS", "FORWARD");
-				const auto colForward = fft("COL_PASS", "FORWARD");
-				const auto rowInverse = fft("ROW_PASS", "INVERSE");
-				const auto colInverse = fft("COL_PASS", "INVERSE");
+				const auto programs = LoadPrograms(a_builder, size, tearFilm);
+				const auto& threshold = programs.threshold;
+				const auto& aperture = programs.aperture;
+				const auto& tearFilmProgram = programs.tearFilm;
+				const auto& psf = programs.psf;
+				const auto& multiply = programs.multiply;
+				const auto& pack = programs.pack;
+				const auto& composite = programs.composite;
+				const auto& rowForward = programs.rowForward;
+				const auto& colForward = programs.colForward;
+				const auto& rowInverse = programs.rowInverse;
+				const auto& colInverse = programs.colInverse;
 				if (a_builder.Failed())
 					return nullptr;
 
@@ -355,7 +356,44 @@ namespace ORGPostChain
 			}
 
 		private:
+			/** @brief The programs one build's passes use. The tear film's stays null without its pass. */
+			struct GlarePrograms
+			{
+				std::shared_ptr<const ComputeProgram> threshold, aperture, tearFilm, psf, multiply, pack, composite;
+				std::shared_ptr<const ComputeProgram> rowForward, colForward, rowInverse, colInverse;  // at the FFT size
+			};
+
+			/** @brief Whether the build has the tear film's pass: pupil mode in a_key (2 words), and the strength this frame's Update observed. */
+			bool TearFilm(std::span<const std::uint64_t> a_key) const { return a_key[1] != 0 && tearFilmStrength; }
+
+			/** @brief Listed in Programs and built on the programs lane, for FFT size a_size. */
+			static GlarePrograms LoadPrograms(ProgramSource& a_programs, uint a_size, bool a_tearFilm)
+			{
+				constexpr const char* kDir = "PostProcessing/PhysicalGlare/";
+				const auto program = [&](const char* a_file, std::uint32_t a_words, const wchar_t* a_entry, std::vector<std::pair<std::string, std::string>> a_defines = {}) {
+					return a_programs.Compute(std::format("{}{}", kDir, a_file), a_words, std::move(a_defines), a_entry);
+				};
+				const auto fft = [&](const char* a_axis, const char* a_direction) {
+					return program("fft.cs.hlsl", ShaderBindings::Words<FftBlock>(), L"CS_FFT", { { a_axis, "" }, { a_direction, "" }, { "FFT_SIZE", std::to_string(a_size) } });
+				};
+				GlarePrograms programs;
+				programs.threshold = program("threshold.cs.hlsl", ShaderBindings::Words<ThresholdBlock>(), L"CS_Threshold");
+				programs.aperture = program("aperture.cs.hlsl", ShaderBindings::Words<ApertureBlock>(), L"CS_Aperture");
+				if (a_tearFilm)
+					programs.tearFilm = program("tearfilm.cs.hlsl", ShaderBindings::Words<TearFilmBlock>(), L"CS_TearFilm");
+				programs.psf = program("psf.cs.hlsl", ShaderBindings::Words<PsfBlock>(), L"CS_ChromaticBlur");
+				programs.multiply = program("multiply.cs.hlsl", ShaderBindings::Words<MultiplyBlock>(), L"CS_Multiply");
+				programs.pack = program("pack.cs.hlsl", ShaderBindings::Words<PackBlock>(), L"CS_Pack");
+				programs.composite = program("composite.cs.hlsl", ShaderBindings::Words<CompositeBlock>(), L"CS_Composite");
+				programs.rowForward = fft("ROW_PASS", "FORWARD");
+				programs.colForward = fft("COL_PASS", "FORWARD");
+				programs.rowInverse = fft("ROW_PASS", "INVERSE");
+				programs.colInverse = fft("COL_PASS", "INVERSE");
+				return programs;
+			}
+
 			Persistent persistent;
+			bool tearFilmStrength = false;  // this frame's, from Update: the tear film's strength is above zero
 		};
 	}
 

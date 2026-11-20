@@ -1027,8 +1027,8 @@ void PostProcessing::PostPostLoad()
 
 Feature::SizeProjection PostProcessing::ProjectSizeSettings() const
 {
-	// The effects' on/off, COD Bloom's used mips, and the DoF, Physical Glare and Lens Flare shape fields are CS::Setting
-	// variables now (frame revision plan 6.9). What is left is no Setting yet: strings, and Physical Lens until 6.20.
+	// The effects' on/off, COD Bloom's used mips, and the DoF, Physical Glare, Lens Flare and Physical Lens shape fields are
+	// CS::Setting variables now (frame revision plan 6.9, 6.20). What is left is no Setting yet: strings.
 	SizeProjection projection;
 	const auto slot = [&](FeaturePipelineIndex a_index) { return pipeline[static_cast<size_t>(a_index)].get(); };
 	if (const auto* lut = static_cast<const ::LUT*>(slot(FeaturePipelineIndex::LUT)))
@@ -1039,10 +1039,5 @@ Feature::SizeProjection PostProcessing::ProjectSizeSettings() const
 			.Add("ColorGrading.enableTonemap", grading->settings.enableTonemap)
 			.Add("ColorGrading.enableAutoHDR", grading->settings.enableAutoHDR)
 			.Add("ColorGrading.skipLUT", grading->settings.skipLUT);
-	// The lens intensity counts only as zero or not, since only zero drops the ghost passes.
-	if (const auto* lens = static_cast<const ::PhysicalLens*>(slot(FeaturePipelineIndex::PhysicalLens)))
-		projection.Add("PhysicalLens.ImageEffects", lens->settings.ImageEffects)
-			.Add("PhysicalLens.Diffraction", lens->settings.Diffraction)
-			.Add("PhysicalLens.Intensity>0", lens->settings.Intensity > 0.0f);
 	return projection;
 }

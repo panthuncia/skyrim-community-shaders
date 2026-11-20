@@ -42,8 +42,6 @@ namespace ORGPostChain
 		class BorderEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			const char* Update(PostProcessFeature&, std::vector<std::uint64_t>& a_observed) override
 			{
 				depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
@@ -55,6 +53,8 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override { LoadProgram(a_programs); }
+
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				const auto& shape = a_builder.GetShape();
@@ -63,7 +63,7 @@ namespace ORGPostChain
 				const auto constants = a_builder.Latch<Border::BorderCB>();
 				// The dispatch covers kMAIN. The shader skips what is past the dynamic size in the constants.
 				a_builder.Dispatch({ .name = "draw",
-					.program = a_builder.Compute("PostProcessing/Border/border.cs.hlsl", ShaderBindings::Words<BorderBlock>()),
+					.program = LoadProgram(a_builder),
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(depth), Bind::Uav(image), Bind::Uav(motion), Bind::Latch(constants) },
 					.groups = { (shape.width + 7) >> 3, (shape.height + 7) >> 3, 1 } });
 				a_builder.SetCurrent(image);
@@ -73,6 +73,12 @@ namespace ORGPostChain
 			}
 
 		private:
+			/** @brief Listed in Programs and built on the programs lane. */
+			static std::shared_ptr<const ComputeProgram> LoadProgram(ProgramSource& a_programs)
+			{
+				return a_programs.Compute("PostProcessing/Border/border.cs.hlsl", ShaderBindings::Words<BorderBlock>());
+			}
+
 			// This frame's imports. The build binds them, and their identities are observed.
 			FrameAnchors::Texture depth, motion;
 		};

@@ -800,12 +800,11 @@ revisions.
   what its passes depend on from the revision's values; `Effect::Update` still observes each frame what is no variable yet
   (imports, loaded LUTs and shapes, Cinematic Camera); `Effect::BuildRun` builds from its key words and returns a `Run`.
 - The chain's key is the observed state (order, kMAIN's shape and imports, linear lighting, the Update words) plus the per-effect
-  key words. A new observed state invalidates the client; the key function builds the chain when the revision starts and a key
-  that fails to build takes the client off (the chain runs on D3D11, logged), so a compile failure stays non-fatal.
+  key words. A new observed state invalidates the client. (Superseded by the 6.9 fixes below: the build is in the make function
+  and a failed build is fatal.)
 - Each registration holds its build and its effects' `Run`s, and registers with `matchesById` and its `generation`, so the frames
   until the revision is adopted commit the build their schedule holds (`FrameAnchors::HeldNow`). The `ScheduledThisFrame`/`Scheduled`
-  gates are gone. Physical Lens and Camera FX keep the legacy form (one state for every build, `Effect::Legacy`): a chain that
-  holds one runs on D3D11 on a frame whose schedule holds an older build, until 6.20.
+  gates are gone. Physical Lens and Camera FX kept the legacy form until 6.20, which removed it.
 - `Shape::dynamicWidth/Height` are gone from the key. `DynamicViewport()` is the whole of kMAIN and effects take
   `CommitContext::DynamicSize()` for their constants until step 8 puts the viewport in the latch.
 - Ported to `CS::Setting`: `PostProcessFeature::enabled` (bound per slot as `PostProcessing.<slot>.enabled`), COD Bloom's
@@ -822,6 +821,50 @@ revisions.
   frame with it reached the GPU. Its readback stays a per-frame late-bound value (the pre-exposure), each build with its own stamp
   region (`RunReadback::BuildStamp`). DoF's focus resets on a frame that does not follow its last commit, as D3D11 does.
 - Test: `tools/cs-test/configs/post-effects.toml` (needs the profile's Post Processing mode on).
+
+**As built (2026-11-19, 6.9 fixes, `org-native/rev-step6-20`).** The render thread never compiles a chain program, and a failed
+build is fatal.
+- The chain's programs are one `DeclareProgram` (`PostProcessing::Chain`) on the client's dependencies. Its key is the chain's
+  *plan*: every program the build of the revision's chain key asks for, by key string (source, entry, words, defines, targets and
+  blend, vertex stage). Each effect lists its programs in `Effect::Programs(ProgramSource&, feature, key words)`, through the same
+  `Raster`/`RasterTargets`/`Compute` calls its `BuildRun` makes (one helper per effect serves both), and names what it publishes
+  (`Publishes`), so Composite's `HAS_*` set follows from what earlier effects publish. The plan resolves the common defines on the
+  render thread (kept per key); the build compiles the new ones on the programs lane into a session store keyed by generation
+  and key. So DoF's `GATHER_RING_COUNT`, Color Grading's `TONEMAP_FUNC`, Physical Glare's `FFT_SIZE` and tear film, Lens Flare's
+  `FFT_SIZE` and fast or FFT path, Composite's `HAS_*` set and every fixed program are built on the lane before their revision
+  starts.
+- `Builder` only looks programs up (`ChainPrograms`). A program `Programs` did not list fails the build. `Builder` and the plan
+  share `ProgramSource` (`GetShape`, `Linear`, `Published`).
+- The plan reads observed state (order, formats, Update's members), so `DeclaredProgram::Invalidate()` (new in Declare.h) is called
+  with the client's `Invalidate` when the observed state changes, and at shader reload. `ProgramsReady` re-keys an invalidated
+  program.
+- The key function reads values and the plan's programs (`DeclaredProgram::For`). The make function builds the chain; a failed
+  build logs `the chain could not be built` and returns false, which `Declare.cpp` makes fatal. `failedKey`, `pendingKey` and the
+  D3D11 fall-back on a failed build are gone. An effect's `Update` reason (a D3D11 readback the chain cannot do) still runs that
+  frame's chain on D3D11, as before.
+- Shader reload (`ClearShaderCache`) clears the store, bumps the generation and invalidates both declarations, so the lane builds
+  every program again.
+
+**As built (2026-11-19, 6.20, `org-native/rev-step6-20`).** Physical Lens and Camera FX follow the revisions.
+- `PhysicalLens::Settings::ImageEffects`, `Diffraction` (`CS::Setting<bool>`) and `Intensity` (`CS::Setting<float>`) are bound in
+  the new `PhysicalLens::PhysicalLens()` as `PostProcessing.PhysicalLens.*`. The ghosts are `Derived.PostProcessing.PhysicalLens.ghosts`
+  (`DeriveFromSetting`: `Intensity > 0`). The lens's `Declare` adds the three to the chain's dependencies, and `Key` gives three
+  words. Physical Lens's `ProjectSizeSettings` entries are gone.
+- The lens model (preset, f-number, focus, zoom, coating) stays CPU input: the latch, the caches (still gates) and the ghost paths
+  (a `kBuffers` fragment since 4e) take it. The ghosts use the model of the paths version the adopted revision holds
+  (`AdoptedPayload`).
+- Both effects have per-build `Run`s. The lens's `LensRun` holds its parts, latch regions, gate entries, its readback stamp region
+  (`RunReadback::BuildStamp`) and its size's resources (`LensSized`: a new chain size is a new set, and an older build keeps its
+  own). The session's resources, the caches' made-state and the focus resolve stay in the effect. Commit reads the build's parts,
+  not the live settings, so they switch in with the revision.
+- With every part off the lens publishes nothing, so Composite builds without `HAS_PHYSICAL_LENS`. Composite's permutation reads
+  what earlier effects published and linear lighting from the chain (`ProgramSource::Linear`), not live state.
+- Camera FX's lens image stays a transient of the chain. Camera is declared on its `enabled`, like every effect.
+- The legacy form is gone: `Effect::Legacy`, `Build`/`Commit`/`Executed`, `LegacyRun`, `RunReadback::Build` and the one-argument
+  `Commit`, and the "older build" D3D11 branch of `HeldBuild`. Every registration sets `matchesById`.
+- The focus and adaptation readbacks stay `RunReadback`s (Q11). The atlas's mip program is a `DeclareProgram` with no inputs
+  (`PostProcessing::PhysicalLens::GenerateMips`), built at Setup.
+- Tests: `post-lens` (new), `post-programs` (new), `post-effects`. All need the profile's Post Processing mode on.
 
 ---
 
@@ -1296,6 +1339,7 @@ return nothing (or only the stated exception) at the end.
 | `GraphResources.h` header rules for `RequestSize`/resize generation | 7a | `rg -n "RequestSize\|resize generation" src/RenderGraph/GraphResources.h` |
 | The guest own-epoch path that takes builds mid-frame | 7b | `rg -n "own epoch" src/RenderGraph/Frame/FrameDriver.cpp` (comment gone) and no `OwnEpoch` build attaches in the census |
 | Schedule gates for clients registered inside the frame (ViewAtmosphere's composite, the screenshot's clean scene) | 6.21, 6.23, 7a | `rg -n "FrameAnchors::Scheduled\|bool Scheduled" src` |
+| Render-thread compiles in the post chain, and its D3D11 fall-back on a failed build | 6.9 fixes | `rg -n "RasterProgram::Load\|ComputeProgram::Load\|LoadGenerateMips\|failedKey\|Legacy\(" src/Features/PostProcessing` shows only `BuildPlan` (the lane) and the lens's `GenerateMips` declaration |
 | The lens's per-frame upload poll (`StagedBuffer::Poll`) | 4e | `rg -n "StagedBuffer\|Poll\(\)" src/Features/PostProcessing/ORG/ORGPhysicalLens.cpp` |
 | Readback captures inside CS stage recordings | Q11's answer | `rg -n "PlanReadbackCapture" src` shows only the places Q11 allows |
 | The screenshot's per-capture size and format compare | 6.23 | `rg -n "const bool same" src/Features/Screenshot/ORGScreenshot.cpp` |
@@ -1783,6 +1827,26 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The scene catalog generator accepts `feat->enabled`** without `&` (Util::Checkbox over the setting) for sub-feature toggles.
 - **Lens Flare in Ultra keeps every spectrum at full size** while on (up to 56 MB at 1024), as the ghosts' kernel groups are no
   variable yet. D3D11 frees the unused ones.
+
+**Decided by the agent (6.9 fixes and step 6.20, 2026-11-19), to confirm:**
+- **One program declaration for the whole chain**, keyed on the plan of the chain key, not one per effect. Effect programs
+  depend on observed state (kMAIN's formats, the tonemapper string, which effects publish), which a per-effect key of variables
+  cannot read. The cost: each effect lists its programs in `Programs` beside `BuildRun` (one shared helper), and a mismatch is a
+  fatal build at the first revision that uses it.
+- **The plan's key reads observed state**, with `DeclaredProgram::Invalidate` as the interim (as `DeclaredClient::Invalidate`).
+  `NoteBegin` re-keys it at each adoption, which plans again on the render thread (CPU only, no compile).
+- **Physical Lens lists every one of its programs in every plan**, whichever parts are on, so a part that turns on compiles
+  nothing. The first plan with the lens compiles about 30 lens programs once a session.
+- **The first chain waits for the lane** at session start: the chain runs on D3D11 until its first plan is built, and other
+  inputs' revisions wait behind that compile (the 6.4 rule).
+- **The lens publishes nothing with every part off**, so Composite drops `HAS_PHYSICAL_LENS`. The focus and its readback still
+  run then.
+- **The lens's focus restarts for a few commits at each new build** (`focusReset` per run), as before, since a build may switch
+  between DoF's focus and its own.
+- **Programs are built with `RasterProgram::Load`/`ComputeProgram::Load` on the programs lane**, with the common defines resolved
+  on the render thread (`ProgramCacheDetail::ResolveDefines`), as SSGI and SSS build theirs.
+- **LUT, Lens Flare and Physical Glare read the values Update observed** (LUT type, kernel groups and blur passes, tear film)
+  in `BuildRun` and `Programs`, no longer the live settings, so the plan and the build agree.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

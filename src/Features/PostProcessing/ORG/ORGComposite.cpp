@@ -5,7 +5,6 @@
 
 #	include "Features/PostProcessing/ORGPostEffect.h"
 
-#	include "Features/LinearLighting.h"
 #	include "Features/PostProcessing/Composite.h"
 #	include "Features/PostProcessing/HistogramAutoExposure.h"
 #	include "Features/PostProcessing/LocalExposure.h"
@@ -75,10 +74,59 @@ namespace ORGPostChain
 			bool drawn = false;
 		};
 
+		/** @brief Which contributors this chain has: what earlier effects publish, and linear lighting. Plan and build read the same. */
+		struct Contributors
+		{
+			bool bloom = false, flare = false, glare = false, exposure = false, localExposure = false, physical = false, preExposed = false;
+
+			/** @brief Nothing to add or resolve, so nothing is drawn, as Composite::Draw. The chain counts on this draw to resolve exposure. */
+			bool Drawn() const { return bloom || flare || glare || exposure || localExposure || physical || preExposed; }
+
+			static Contributors Of(const ProgramSource& a_chain)
+			{
+				Contributors c;
+				c.bloom = a_chain.Published(Published::kBloomOutput);
+				c.flare = a_chain.Published(Published::kLensFlareOutput);
+				c.glare = a_chain.Published(Published::kGlare);
+				c.exposure = a_chain.Published(Published::kAdaptation) && a_chain.Published(Published::kAutoExposureConstants);
+				c.localExposure = a_chain.Published(Published::kLogLuminance) && a_chain.Published(Published::kLuminanceGrid) &&
+				                  a_chain.Published(Published::kBlurredLuminance) && a_chain.Published(Published::kLocalExposureConstants);
+				// Physical Lens publishes these only while one of its parts is on (its key), so its permutation follows them.
+				c.physical = a_chain.Published(Published::kPhysicalLensMapping) && a_chain.Published(Published::kPhysicalLensDiffraction);
+				c.preExposed = a_chain.Linear();
+				return c;
+			}
+		};
+
+		/** @brief As Composite::SetupResources: the resolved exposure can exceed FP16 before the tone mapper. */
+		DXGI_FORMAT CompositeFormat(const Contributors& a_contributors)
+		{
+			return a_contributors.preExposed ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
+		}
+
+		/** @brief One permutation per set of contributors. Null when nothing is drawn. */
+		std::shared_ptr<const RasterProgram> CompositeProgram(ProgramSource& a_programs, const Contributors& a_contributors)
+		{
+			if (!a_contributors.Drawn())
+				return nullptr;
+			std::vector<std::pair<std::string, std::string>> defines;
+			for (const auto& [on, name] : { std::pair{ a_contributors.bloom, "HAS_BLOOM" }, std::pair{ a_contributors.flare, "HAS_LENS_FLARE" },
+					 std::pair{ a_contributors.glare, "HAS_GLARE" }, std::pair{ a_contributors.exposure, "HAS_EXPOSURE" },
+					 std::pair{ a_contributors.localExposure, "HAS_LOCAL_EXPOSURE" }, std::pair{ a_contributors.physical, "HAS_PHYSICAL_LENS" } }) {
+				if (on)
+					defines.emplace_back(name, "");
+			}
+			const auto words = a_contributors.physical ? ShaderBindings::Words<CompositeLensBlock>() : ShaderBindings::Words<CompositeBlock>();
+			return a_programs.Raster("PostProcessing/Composite/composite.ps.hlsl", words, { CompositeFormat(a_contributors) }, std::move(defines), L"PSComposite");
+		}
+
 		class CompositeEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				CompositeProgram(a_programs, Contributors::Of(a_programs));
+			}
 
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
@@ -104,16 +152,16 @@ namespace ORGPostChain
 				if (a_builder.Failed())
 					return nullptr;
 
-				const bool hasBloom = run->hasBloom = static_cast<bool>(bloom);
-				const bool hasFlare = run->hasFlare = static_cast<bool>(flare);
-				const bool hasGlare = static_cast<bool>(glare);
-				const bool hasExposure = adaptation && autoExposure;
-				const bool hasLocalExposure = logLuminance && grid && blurred && localExposure;
+				// The same contributors the plan saw (Programs), from what this build's earlier effects published.
+				const auto contributors = Contributors::Of(a_builder);
+				const bool hasBloom = run->hasBloom = contributors.bloom;
+				const bool hasFlare = run->hasFlare = contributors.flare;
+				const bool hasGlare = contributors.glare;
+				const bool hasExposure = contributors.exposure;
+				const bool hasLocalExposure = contributors.localExposure;
 				// Which of the lens's parts draw is decided each frame, from the lens's commit.
-				const bool hasPhysical = run->hasPhysical = lensMapping && lensDiffraction;
-				// Nothing to add or resolve, so nothing drawn, as Composite::Draw. The chain counts on this draw to resolve exposure.
-				const bool preExposed = globals::features::linearLighting.IsLinearLightingActive();
-				if (!hasBloom && !hasFlare && !hasGlare && !hasExposure && !hasLocalExposure && !hasPhysical && !preExposed)
+				const bool hasPhysical = run->hasPhysical = contributors.physical;
+				if (!contributors.Drawn())
 					return run;
 
 				if (!linearSampler || !borderSampler) {
@@ -128,17 +176,10 @@ namespace ORGPostChain
 					}
 				}
 
-				// One permutation per set of contributors.
-				std::vector<std::pair<std::string, std::string>> defines;
-				for (const auto& [on, name] : { std::pair{ hasBloom, "HAS_BLOOM" }, std::pair{ hasFlare, "HAS_LENS_FLARE" }, std::pair{ hasGlare, "HAS_GLARE" },
-						 std::pair{ hasExposure, "HAS_EXPOSURE" }, std::pair{ hasLocalExposure, "HAS_LOCAL_EXPOSURE" }, std::pair{ hasPhysical, "HAS_PHYSICAL_LENS" } }) {
-					if (on)
-						defines.emplace_back(name, "");
-				}
-				// As Composite::SetupResources: the resolved exposure can exceed FP16 before the tone mapper.
-				const auto format = preExposed ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R16G16B16A16_FLOAT;
-				const auto words = hasPhysical ? ShaderBindings::Words<CompositeLensBlock>() : ShaderBindings::Words<CompositeBlock>();
-				auto program = a_builder.Raster("PostProcessing/Composite/composite.ps.hlsl", words, { format }, std::move(defines), L"PSComposite");
+				const auto format = CompositeFormat(contributors);
+				auto program = CompositeProgram(a_builder, contributors);
+				if (!program)
+					return nullptr;
 				auto image = a_builder.CreateImage("PostProcessing::Composite::Output", format, D3D11_BIND_RENDER_TARGET);
 				const auto constants = run->constants = a_builder.Latch<Composite::CompositeCB>();
 

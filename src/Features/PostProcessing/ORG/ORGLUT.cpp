@@ -58,12 +58,11 @@ namespace ORGPostChain
 		class LUTEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& lut = static_cast<LUT&>(a_feature);
-				a_key.push_back(static_cast<std::uint64_t>(lut.LutType - kNoLut));
+				lutType = lut.LutType;
+				a_key.push_back(static_cast<std::uint64_t>(lutType - kNoLut));
 				source = nullptr;
 				if (lut.LutType == kNoLut)
 					return nullptr;
@@ -84,10 +83,15 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
-			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t>) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				if (lutType != kNoLut)
+					LoadProgram(a_programs);
+			}
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				// Observed in the key with the source it reads.
-				const int lutType = static_cast<LUT&>(a_feature).LutType;
 				if (lutType == kNoLut)
 					return std::make_shared<LUTRun>(LatchRegion<LUT::LUTCB>{}, false);
 				// As LUT::SetupResources, the output takes kMAIN_COPY's format.
@@ -102,7 +106,7 @@ namespace ORGPostChain
 				}
 				// The shader reads only the LUT LutType names.
 				a_builder.Draw({ .name = "draw",
-					.program = a_builder.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { format }),
+					.program = LoadProgram(a_builder),
 					.bindings = { Bind::Srv(a_builder.Current()), is3D ? Bind::Unused() : Bind::Srv(source), is3D ? Bind::Srv(source) : Bind::Unused(),
 						Bind::Latch(constants) },
 					.target = image,
@@ -112,6 +116,12 @@ namespace ORGPostChain
 			}
 
 		private:
+			/** @brief Listed in Programs and built on the programs lane. As LUT::SetupResources, the output takes kMAIN_COPY's format. */
+			static std::shared_ptr<const RasterProgram> LoadProgram(ProgramSource& a_programs)
+			{
+				return a_programs.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { a_programs.GetShape().mainCopyFormat });
+			}
+
 			/**
 			* @brief Re-reads the file's mip 0 on the CPU and stages it for the upload pass, so the graph orders and tracks the copy.
 			* A D3D11 CopyResource would write a graph resource outside the graph. @return Null, or why it cannot be made.
@@ -164,6 +174,7 @@ namespace ORGPostChain
 			std::shared_ptr<const GraphResources::StagedUpload> staged;  // for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held so a new LUT never takes the old one's address
 			FrameAnchors::Texture source;
+			int lutType = kNoLut;  // this frame's, from Update
 		};
 	}
 

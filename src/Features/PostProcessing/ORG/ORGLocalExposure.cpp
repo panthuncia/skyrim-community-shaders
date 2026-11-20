@@ -119,8 +119,6 @@ namespace ORGPostChain
 		class LocalExposureEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies&) override
 			{
 				using namespace RenderGraph::Frame;
@@ -155,6 +153,15 @@ namespace ORGPostChain
 					GraphResources::Options{});
 			}
 
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				LoadPrograms(a_programs);
+				a_programs.Publishes(Published::kLogLuminance);
+				a_programs.Publishes(Published::kLuminanceGrid);
+				a_programs.Publishes(Published::kBlurredLuminance);
+				a_programs.Publishes(Published::kLocalExposureConstants);
+			}
+
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				const auto shape = a_builder.GetShape();
@@ -181,7 +188,7 @@ namespace ORGPostChain
 				a_builder.Register(*blurred);
 				a_builder.Register(*grid);
 
-				const auto words = ShaderBindings::Words<LocalExposureBlock>();
+				auto programs = LoadPrograms(a_builder);
 				const auto constants = a_builder.Latch<LocalExposure::LocalExposureCB>();
 				const auto linear = Bind::Handle(linearSampler.Index());
 				const auto mirror = Bind::Handle(mirrorSampler.Index());
@@ -192,26 +199,25 @@ namespace ORGPostChain
 				};
 
 				a_builder.Dispatch({ .name = "setup",
-					.program = a_builder.Compute(kShader, words, {}, L"CSSetupLogLuminance"),
+					.program = std::move(programs.setup),
 					.bindings = bindings(Bind::Srv(a_builder.Current()), Bind::Unused(), Bind::Uav(*levels[0]), Bind::Unused()),
 					.groups = { Groups8(sizes.width), Groups8(sizes.height), 1 } });
-				auto downsample = a_builder.Compute(kShader, words, {}, L"CSDownsampleLogLuminance");
 				for (std::uint32_t mip = 1; mip <= sizes.blurMip; ++mip) {
 					a_builder.Dispatch({ .name = std::format("pyramid{}", mip),
-						.program = downsample,
+						.program = programs.downsample,
 						.bindings = bindings(Bind::Unused(), Bind::Srv(*levels[mip - 1]), Bind::Uav(*levels[mip]), Bind::Unused()),
 						.groups = { Groups8(DispatchSize(sizes.width, mip)), Groups8(DispatchSize(sizes.height, mip)), 1 } });
 				}
 				a_builder.Dispatch({ .name = "blur-horizontal",
-					.program = a_builder.Compute(kShader, words, {}, L"CSBlurHorizontal"),
+					.program = std::move(programs.blurHorizontal),
 					.bindings = bindings(Bind::Unused(), Bind::Srv(*levels[sizes.blurMip]), Bind::Uav(*blurTemp), Bind::Unused()),
 					.groups = { Groups8(sizes.blurWidth), Groups8(sizes.blurHeight), 1 } });
 				a_builder.Dispatch({ .name = "blur-vertical",
-					.program = a_builder.Compute(kShader, words, {}, L"CSBlurVertical"),
+					.program = std::move(programs.blurVertical),
 					.bindings = bindings(Bind::Unused(), Bind::Srv(*blurTemp), Bind::Uav(*blurred), Bind::Unused()),
 					.groups = { Groups8(sizes.blurWidth), Groups8(sizes.blurHeight), 1 } });
 				a_builder.Dispatch({ .name = "grid",
-					.program = a_builder.Compute(kShader, words, {}, L"CSBuildLuminanceGrid"),
+					.program = std::move(programs.grid),
 					.bindings = bindings(Bind::Unused(), Bind::Srv(*levels[0]), Bind::Unused(), Bind::Uav(*grid)),
 					.groups = { sizes.gridWidth, sizes.gridHeight, 1 } });
 
@@ -225,6 +231,22 @@ namespace ORGPostChain
 			}
 
 		private:
+			struct ExposurePrograms
+			{
+				std::shared_ptr<const ComputeProgram> setup, downsample, blurHorizontal, blurVertical, grid;
+			};
+
+			/** @brief Listed in Programs and built on the programs lane. The downsample is listed even when no level uses it, as the build asks for it. */
+			static ExposurePrograms LoadPrograms(ProgramSource& a_programs)
+			{
+				const auto words = ShaderBindings::Words<LocalExposureBlock>();
+				return { .setup = a_programs.Compute(kShader, words, {}, L"CSSetupLogLuminance"),
+					.downsample = a_programs.Compute(kShader, words, {}, L"CSDownsampleLogLuminance"),
+					.blurHorizontal = a_programs.Compute(kShader, words, {}, L"CSBlurHorizontal"),
+					.blurVertical = a_programs.Compute(kShader, words, {}, L"CSBlurVertical"),
+					.grid = a_programs.Compute(kShader, words, {}, L"CSBuildLuminanceGrid") };
+			}
+
 			std::vector<RenderGraph::Frame::DeclaredTexture2D> levels;  // level 0 at the scene's size
 			RenderGraph::Frame::DeclaredTexture2D blurTemp;
 			RenderGraph::Frame::DeclaredTexture2D blurred;

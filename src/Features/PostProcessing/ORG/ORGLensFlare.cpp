@@ -167,8 +167,6 @@ namespace ORGPostChain
 		class LensFlareEffect final : public Effect
 		{
 		public:
-			bool Legacy() const override { return false; }
-
 			void Declare(PostProcessFeature& a_feature, RenderGraph::Frame::Dependencies& a_dependencies) override
 			{
 				using namespace RenderGraph::Frame;
@@ -215,29 +213,32 @@ namespace ORGPostChain
 				if (flare.debugsettings.disableThreshold || flare.debugsettings.disableGhosts)
 					return "a debug switch (Disable Threshold or Disable Ghosts) is on";
 				// The ghosts and the debug blur are no variables yet.
-				a_observed.push_back(LiveGroups(flare));
-				a_observed.push_back(LiveBlurPasses(flare));
+				observedGroups = LiveGroups(flare);
+				observedBlurPasses = LiveBlurPasses(flare);
+				a_observed.push_back(observedGroups);
+				a_observed.push_back(observedBlurPasses);
 				return nullptr;
 			}
 
-			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature& a_feature, std::span<const std::uint64_t> a_key) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
+			{
+				// The build fails on another key.
+				if (a_key.size() != 2)
+					return;
+				LoadPrograms(a_programs, ShapeFor(a_key));
+				a_programs.Publishes(Published::kLensFlareOutput);
+			}
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t> a_key) override
 			{
 				if (a_key.size() != 2) {
 					a_builder.Fail("its key is not the one Key gives");
 					return nullptr;
 				}
-				auto& flare = static_cast<LensFlare&>(a_feature);
 				auto run = std::make_shared<LensFlareRun>();
-				const int mode = static_cast<int>(static_cast<std::uint32_t>(a_key[0]));
-				auto& shape = run->shape;
-				shape.fft = FFTMode(mode);
-				if (shape.fft) {
-					shape.fftSize = static_cast<std::uint32_t>(a_key[1]);
-					// Quality has one group. Ultra's count is observed, so it is read here.
-					shape.groups = static_cast<LensFlare::GhostMode>(mode) == LensFlare::GhostMode::Ultra ? LiveGroups(flare) : 1u;
-				} else {
-					shape.blurPasses = LiveBlurPasses(flare);
-				}
+				run->shape = ShapeFor(a_key);
+				const auto& shape = run->shape;
+				const auto programs = LoadPrograms(a_builder, shape);
 				run->fullWidth = a_builder.GetShape().width;
 				run->fullHeight = a_builder.GetShape().height;
 				run->halfWidth = (std::max)(run->fullWidth / 2, 1u);
@@ -255,14 +256,14 @@ namespace ORGPostChain
 				const auto ghostHalo = a_builder.CreateImage("PostProcessing::LensFlare::GhostHalo", kColorFormat, uav, run->halfWidth, run->halfHeight);
 				run->thresholdConstants = a_builder.Latch<CB>();
 				a_builder.Dispatch({ .name = "threshold",
-					.program = a_builder.Compute(kShader, ShaderBindings::Words<FlareBlock>(), {}, L"CSThreshold"),
+					.program = programs.threshold,
 					.bindings = FlareBindings(Bind::Srv(a_builder.Current()), Bind::Uav(threshold), run->thresholdConstants),
 					.groups = { Tiles(run->halfWidth), Tiles(run->halfHeight), 1 } });
 
 				if (shape.fft)
-					BuildFFT(a_builder, *run, threshold, ghostHalo);
+					BuildFFT(a_builder, programs, *run, threshold, ghostHalo);
 				else
-					BuildFast(a_builder, *run, threshold, ghostHalo);
+					BuildFast(a_builder, programs, *run, threshold, ghostHalo);
 
 				a_builder.Publish(Published::kLensFlareOutput, ghostHalo);
 				if (a_builder.Failed())
@@ -271,6 +272,66 @@ namespace ORGPostChain
 			}
 
 		private:
+			/** @brief The programs one build's passes use. Those of the other path stay null. */
+			struct FlarePrograms
+			{
+				std::shared_ptr<const ComputeProgram> threshold;
+				// Fast path. Down and up only with blur passes.
+				std::shared_ptr<const ComputeProgram> ghostHalo, down, up;
+				// FFT path.
+				std::shared_ptr<const ComputeProgram> fftThreshold, rowForward, colForward, rowInverse, colInverse, multiply, prepare, compose, composeFirst;
+			};
+
+			/** @brief The build's passes from its key (2 words) and this frame's Update. */
+			PassShape ShapeFor(std::span<const std::uint64_t> a_key) const
+			{
+				PassShape shape;
+				const int mode = static_cast<int>(static_cast<std::uint32_t>(a_key[0]));
+				shape.fft = FFTMode(mode);
+				if (shape.fft) {
+					shape.fftSize = static_cast<std::uint32_t>(a_key[1]);
+					// Quality has one group. Ultra's count is observed by Update.
+					shape.groups = static_cast<LensFlare::GhostMode>(mode) == LensFlare::GhostMode::Ultra ? observedGroups : 1u;
+				} else {
+					shape.blurPasses = observedBlurPasses;
+				}
+				return shape;
+			}
+
+			/** @brief Listed in Programs and built on the programs lane, for the path a_shape takes. */
+			static FlarePrograms LoadPrograms(ProgramSource& a_programs, const PassShape& a_shape)
+			{
+				FlarePrograms programs;
+				programs.threshold = a_programs.Compute(kShader, ShaderBindings::Words<FlareBlock>(), {}, L"CSThreshold");
+				if (!a_shape.fft) {
+					constexpr std::uint32_t words = ShaderBindings::Words<FlareBlock>();
+					programs.ghostHalo = a_programs.Compute(kShader, words, {}, L"CSGhostHalo");
+					if (a_shape.blurPasses > 0) {
+						programs.down = a_programs.Compute(kShader, words, {}, L"CSFlareDown");
+						programs.up = a_programs.Compute(kShader, words, {}, L"CSFlareUp");
+					}
+					return programs;
+				}
+				const std::uint32_t n = a_shape.fftSize;
+				constexpr std::uint32_t words = ShaderBindings::Words<FFTBlock>();
+				const auto program = [&](const wchar_t* a_entry, std::vector<std::pair<std::string, std::string>> a_defines = {}) {
+					return a_programs.Compute(kFFTShader, words, std::move(a_defines), a_entry);
+				};
+				const auto transform = [&](const char* a_axis, const char* a_direction) {
+					return program(L"CS_FFT", { { a_axis, "" }, { a_direction, "" }, { "FFT_SIZE", std::to_string(n) } });
+				};
+				programs.rowForward = transform("ROW_PASS", "FORWARD");
+				programs.colForward = transform("COL_PASS", "FORWARD");
+				programs.rowInverse = transform("ROW_PASS", "INVERSE");
+				programs.colInverse = transform("COL_PASS", "INVERSE");
+				programs.multiply = program(L"CS_Multiply");
+				programs.prepare = program(L"CSBokehPrepare");
+				programs.compose = program(L"CSFFTGhostCompose");
+				programs.composeFirst = program(L"CSFFTGhostCompose", { { "FIRST_GROUP", "" } });
+				programs.fftThreshold = program(L"CSFFTThreshold");
+				return programs;
+			}
+
 			/** @brief The kernel groups the live ghosts ask for, at least one and at most MAX_KERNEL_GROUPS. */
 			static std::uint32_t LiveGroups(const LensFlare& a_flare)
 			{
@@ -316,21 +377,20 @@ namespace ORGPostChain
 			}
 
 			/** @brief DrawFast: ghosts and halo, then Kawase blurs through a quarter-resolution image. */
-			void BuildFast(Builder& a_builder, LensFlareRun& a_run, const Image& a_threshold, const Image& a_ghostHalo)
+			void BuildFast(Builder& a_builder, const FlarePrograms& a_programs, LensFlareRun& a_run, const Image& a_threshold, const Image& a_ghostHalo)
 			{
-				constexpr std::uint32_t words = ShaderBindings::Words<FlareBlock>();
 				a_run.ghostConstants = a_builder.Latch<CB>();
 				a_run.downConstants = a_builder.Latch<CB>();
 				a_run.upConstants = a_builder.Latch<CB>();
 				a_builder.Dispatch({ .name = "ghost-halo",
-					.program = a_builder.Compute(kShader, words, {}, L"CSGhostHalo"),
+					.program = a_programs.ghostHalo,
 					.bindings = FlareBindings(Bind::Srv(a_threshold), Bind::Uav(a_ghostHalo), a_run.ghostConstants),
 					.groups = { Tiles(a_run.halfWidth), Tiles(a_run.halfHeight), 1 } });
 				if (a_run.shape.blurPasses == 0)
 					return;
 				const auto blur = a_builder.CreateImage("PostProcessing::LensFlare::BlurTemp", kColorFormat, D3D11_BIND_UNORDERED_ACCESS, a_run.quarterWidth, a_run.quarterHeight);
-				const auto down = a_builder.Compute(kShader, words, {}, L"CSFlareDown");
-				const auto up = a_builder.Compute(kShader, words, {}, L"CSFlareUp");
+				const auto& down = a_programs.down;
+				const auto& up = a_programs.up;
 				for (std::uint32_t pass = 0; pass < a_run.shape.blurPasses; ++pass) {
 					a_builder.Dispatch({ .name = std::format("blur-down-{}", pass),
 						.program = down,
@@ -344,24 +404,17 @@ namespace ORGPostChain
 			}
 
 			/** @brief DrawQuality: the scene's spectrum once, then per kernel group the convolution and compose. */
-			void BuildFFT(Builder& a_builder, LensFlareRun& a_run, const Image& a_threshold, const Image& a_ghostHalo)
+			void BuildFFT(Builder& a_builder, const FlarePrograms& a_programs, LensFlareRun& a_run, const Image& a_threshold, const Image& a_ghostHalo)
 			{
 				const std::uint32_t n = a_run.shape.fftSize;
-				constexpr std::uint32_t words = ShaderBindings::Words<FFTBlock>();
-				const auto program = [&](const wchar_t* a_entry, std::vector<std::pair<std::string, std::string>> a_defines = {}) {
-					return a_builder.Compute(kFFTShader, words, std::move(a_defines), a_entry);
-				};
-				const auto transform = [&](const char* a_axis, const char* a_direction) {
-					return program(L"CS_FFT", { { a_axis, "" }, { a_direction, "" }, { "FFT_SIZE", std::to_string(n) } });
-				};
-				const auto rowForward = transform("ROW_PASS", "FORWARD");
-				const auto colForward = transform("COL_PASS", "FORWARD");
-				const auto rowInverse = transform("ROW_PASS", "INVERSE");
-				const auto colInverse = transform("COL_PASS", "INVERSE");
-				const auto multiply = program(L"CS_Multiply");
-				const auto prepare = program(L"CSBokehPrepare");
-				const auto compose = program(L"CSFFTGhostCompose");
-				const auto composeFirst = program(L"CSFFTGhostCompose", { { "FIRST_GROUP", "" } });
+				const auto& rowForward = a_programs.rowForward;
+				const auto& colForward = a_programs.colForward;
+				const auto& rowInverse = a_programs.rowInverse;
+				const auto& colInverse = a_programs.colInverse;
+				const auto& multiply = a_programs.multiply;
+				const auto& prepare = a_programs.prepare;
+				const auto& compose = a_programs.compose;
+				const auto& composeFirst = a_programs.composeFirst;
 
 				// Per frame, so chain images.
 				constexpr UINT uav = D3D11_BIND_UNORDERED_ACCESS;
@@ -392,7 +445,7 @@ namespace ORGPostChain
 				const std::array<std::uint32_t, 3> tiles{ Tiles(n), Tiles(n), 1 };
 				const std::array<std::uint32_t, 3> lines{ n, 1, 1 };
 				const auto& first = kernels.front().constants;
-				a_builder.Dispatch({ .name = "fft-threshold", .program = program(L"CSFFTThreshold"),
+				a_builder.Dispatch({ .name = "fft-threshold", .program = a_programs.fftThreshold,
 					.bindings = FFTBindings(first, Bind::Srv(a_threshold), none, none, Bind::Uav(fftA), none), .groups = tiles });
 				a_builder.Dispatch({ .name = "scene-rows", .program = rowForward,
 					.bindings = FFTBindings(first, none, Bind::Srv(fftA), none, Bind::Uav(fftB), none), .groups = lines });
@@ -426,6 +479,9 @@ namespace ORGPostChain
 			org::OwnedDescriptorBinding colorSampler, borderSampler;
 			// Declared once. A build uses the first of them, one per kernel group.
 			std::array<RenderGraph::Frame::DeclaredTexture2D, LensFlare::MAX_KERNEL_GROUPS> spectra;
+			// This frame's, from Update.
+			std::uint32_t observedGroups = 1;
+			std::uint32_t observedBlurPasses = 0;
 		};
 	}
 
