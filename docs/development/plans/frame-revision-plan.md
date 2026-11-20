@@ -784,8 +784,9 @@ revisions.
   with the sky off idle, so a toggle changes nothing in the pre-depth stage. The `FrameAnchors::Scheduled` gate and the D3D11
   fallback in `GenerateLuts` are gone.
 - The AP shadow is `DeclareTexture2D` on `DisplaySize` (decision 6a), published once. The dispatch covers the dynamic region,
-  clamped to `Adopted().Extent`. A new version is exported, so not born cleared: a gated clear (`ap-shadow.clear`, entry 3)
-  runs once per version in place of the one-shot `ap-shadow.init`.
+  clamped to `Adopted().Extent`. A new version is exported, so not born cleared: a gated clear runs once per version in place
+  of the one-shot `ap-shadow.init`. It is in the LUT client (`cs.physical-sky.luts.ap-shadow.clear`, entry 5), which is in the
+  graph from the first revision on, so the first sky-on frame clears it before the Prepass and the draws.
 - `cs.physical-sky` (AP shadow and sky tail) is `DeclareClient` on `enabled`; its key adds the inputs the last Prepass found
   (shadow map import, Terrain Shadows' heights, Cloud Shadows' layer, the clouds' shadow volume), with `Invalidate()` on a
   change. `matchesById`, so the adopted registration keeps running until a new one is adopted. `cs.physical-sky.composite` is

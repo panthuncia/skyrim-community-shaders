@@ -72,12 +72,11 @@ namespace
 	constexpr const char* kShadowAccumShader = "PhysicalSky/ShadowAccum.cs.hlsl";
 	constexpr const char* kApplyApShader = "PhysicalSky/ApplyAerialPerspectiveCS.hlsl";
 
-	// The Prepass gate's entries: the full and the half resolution AP shadow, the sky tail, then the AP shadow's clear.
+	// The Prepass gate's entries: the full and the half resolution AP shadow, then the sky tail.
 	constexpr std::uint32_t kShadowFullEntry = 0;
 	constexpr std::uint32_t kShadowHalfEntry = 1;
 	constexpr std::uint32_t kSkyTailEntry = 2;
-	constexpr std::uint32_t kShadowClearEntry = 3;
-	constexpr std::uint32_t kPrepassEntries = 4;
+	constexpr std::uint32_t kPrepassEntries = 3;
 	// ShadowAccum's push block: the shared handles, depth, shadow map, light latch (two), heights, cloud shadow, shadow volume,
 	// output and sampler.
 	constexpr std::uint32_t kShadowAccumWords = 4 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1;
@@ -190,9 +189,11 @@ namespace
 
 	using Lut = ORGPhysicalSky::Lut;
 	constexpr auto kLutCount = static_cast<std::size_t>(Lut::Count);
-	// Gate entries: the four LutGen dispatches in LUTGEN order, then the disk phase LUT.
+	// Gate entries: the four LutGen dispatches in LUTGEN order, the disk phase LUT, then the AP shadow's clear.
 	constexpr std::uint32_t kLutGenEntries = 4;
 	constexpr std::uint32_t kDiskPhaseEntry = 4;
+	constexpr std::uint32_t kApShadowClearEntry = 5;
+	constexpr std::uint32_t kLutEntries = 6;
 	// The disk phase LUT's 12 floats (DiskPhaseFrame), at the latch's start.
 	constexpr std::uint32_t kDiskPhaseBytes = 12 * sizeof(float);
 	// LutGen's push block: the shared handles, three SRVs, the output and three samplers.
@@ -349,15 +350,17 @@ struct ORGPhysicalSky::Impl
 			gate->OpenDispatch(kDiskPhaseEntry, (PhysicalSky::kDiskPhaseLutSize + 63u) / 64u, 3, 1);
 			diskPhase.reset();
 		}
+		// A new version of the AP shadow is not born cleared (it is exported). The first run of a sky-on frame clears it, before
+		// the Prepass writes it and the frame's draws read it: no shadow.
+		if (ApShadowTwin())
+			if (const void* version = ApShadowTwin()->Graph().get(); version != shadowCleared) {
+				gate->OpenDispatch(kApShadowClearEntry, 1);
+				shadowCleared = version;
+			}
 	}
 
 	void CommitPrepass()
 	{
-		// A new version of the AP shadow is not born cleared (it is exported), so the run clears it first: no shadow.
-		if (const void* version = ApShadowTwin()->Graph().get(); version != shadowCleared) {
-			prepassGate->OpenDispatch(kShadowClearEntry, 1);
-			shadowCleared = version;
-		}
 		if (std::exchange(tail, false))
 			prepassGate->OpenDispatch(kSkyTailEntry, (PhysicalSky::kSvLutW + 7u) >> 3, (PhysicalSky::kSvLutH + 7u) >> 3, 1);
 		if (!shadow)
@@ -424,6 +427,16 @@ struct ORGPhysicalSky::Impl
 			bindings.insert(bindings.end(), samplerBinds.begin(), samplerBinds.end());
 			builder.Add(AnchorPasses::Dispatch{ .name = names[i], .program = lutPrograms[i], .bindings = std::move(bindings), .gate = i });
 		}
+		// The AP shadow's clear, once per version. This client is registered from the first revision on, so the clear is in the
+		// graph before any frame with the sky on.
+		if (ApShadowTwin()) {
+			const auto gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate);
+			builder.Add("ap-shadow.clear", FrameAnchors::PassKind::Compute,
+				[twin = ApShadowTwin().Get(), gateRef] {
+					return GraphPasses::MakeUavClear(*twin, std::array<float, 4>{}, GraphPasses::ClearGate{ gateRef, kApShadowClearEntry });
+				},
+				false, true);
+		}
 		if (builder.Failed()) {
 			logger::error("[ORG] Physical Sky: the LUT passes: {}", builder.Failure());
 			return false;
@@ -435,6 +448,8 @@ struct ORGPhysicalSky::Impl
 		a_client.registerResources = [](org::RenderGraph& a_graph) {
 			for (std::size_t i = 0; i < kLutCount; ++i)
 				TwinOf(static_cast<Lut>(i))->Register(a_graph);
+			if (ApShadowTwin())
+				ApShadowTwin()->Register(a_graph);
 		};
 		// Every run closes the gate first, so a frame without the feature dispatches nothing.
 		a_client.active = [state = a_self] { return state->luts || state->diskPhase.has_value(); };
@@ -463,11 +478,7 @@ struct ORGPhysicalSky::Impl
 			a_inputs.cloud.empty() ? null : Bind::Published(a_inputs.cloud, static_cast<std::uint32_t>(org::SRVViewType::TextureCube)),
 			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null, Bind::Uav(output), Bind::Handle(samplers[0].Index()) };
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kPrepassClientId, kPrepassOrder, prepassLatch, prepassGate);
-		// A new version starts out as no shadow, for readers on frames no AP shadow ran. The commit opens it once per version.
-		const auto gateRef = std::shared_ptr<const RenderGraph::RunGate>(prepassGate);
-		builder.Add("ap-shadow.clear", FrameAnchors::PassKind::Compute,
-			[twin = &output, gateRef] { return GraphPasses::MakeUavClear(*twin, std::array<float, 4>{}, GraphPasses::ClearGate{ gateRef, kShadowClearEntry }); }, false,
-			true);
+		// A new version starts out cleared by the LUT client, for readers on frames no AP shadow ran.
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow", .program = shadowFull, .bindings = bindings, .gate = kShadowFullEntry });
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow.half", .program = shadowHalf, .bindings = bindings, .gate = kShadowHalfEntry });
 		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. ViewAtmosphere's cloud
@@ -769,7 +780,7 @@ bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 	}
 	next->diskPhaseProgram = ComputeProgram::Load(host->Device(), { .source = kDiskPhaseShader, .constantWords = kDiskPhaseWords });
 	next->samplers = { SamplerOf(a_feature.sampTr.get()), SamplerOf(a_feature.sampSv.get()), SamplerOf(a_feature.sampNoise.get()) };
-	next->gate = RenderGraph::RunGate::Create("cs.physical-sky.luts.gate", kLutGenEntries + 1);
+	next->gate = RenderGraph::RunGate::Create("cs.physical-sky.luts.gate", kLutEntries);
 	next->latch = std::make_shared<org::LatchBlock>("cs.physical-sky.luts.latch", kDiskPhaseBytes);
 	const bool programs = std::ranges::all_of(next->lutPrograms, [](const auto& a_program) { return a_program != nullptr; }) && next->diskPhaseProgram;
 	const bool samplers = std::ranges::all_of(next->samplers, [](const auto& a_sampler) { return static_cast<bool>(a_sampler); });
