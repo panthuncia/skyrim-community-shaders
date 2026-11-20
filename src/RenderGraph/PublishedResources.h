@@ -71,11 +71,11 @@ namespace PublishedResources
 	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id);
 
 	/** @brief The bindless index of a_id's whole-resource SRV. Not a declaration, so the undeclared-access validator logs it with a_where.
-	*  False when a_id is not published, withdrawn or has no such view. */
+	*  False when a_id is not published, withdrawn or has no such view. During a build it reads that graph's snapshot, so any thread. */
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where = std::source_location::current());
 
 	/** @brief The view variant ShaderResourceIndex hands out for a_id, so a declaration covers the descriptor it reads.
-	*  UINT32_MAX for a primary view or an unknown id. Render thread. */
+	*  UINT32_MAX for a primary view or an unknown id. Render thread, or a build on any thread (its snapshot). */
 	std::uint32_t ShaderResourceVariant(std::string_view a_id);
 
 	/** @brief The id whose twin exports a_view, or empty. A pass reading the export through its own import is not ordered after the producer.
