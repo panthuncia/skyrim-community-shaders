@@ -214,3 +214,12 @@ final until the user confirms it.
 
     This is listed for after step 10. A shader reload is a development action, so the render-thread build only affects
     developers.
+43. **6.20 and 6.22 are merged, so every step 6 migration is in.** 6.20 also fixed 6.9: the chain's programs build on the
+    programs lane, and a failed build is fatal. Two D3D11 runs remain:
+    - an `Update` hold (Color Grading's readback) runs that frame's chain on D3D11;
+    - at session start the chain stays on D3D11 until its first plan is built.
+
+    These are to confirm. A fix lead does the same for Effects11.
+44. **The `ibl` config hangs** in native Vulkan and guest. A world recipe finding ("reads a resource before the pass that
+    writes it") on `pre-main`'s new build is fatal and opens a message box. Before it, PublishedResources is read on the
+    BuildManager thread. A fix lead is on it.
