@@ -15,16 +15,7 @@ namespace DCLF
 		std::atomic<std::uint64_t> snapshotsBuilt{ 0 }, snapshotsCoalesced{ 0 }, snapshotsWithoutDraws{ 0 };
 		std::atomic<std::uint64_t> payloadsInstalled{ 0 };
 		EventQueue<ImplSnapshotBuilder::SnapshotTiming, 256> snapshotTimings;
-		enum SnapshotStale : std::size_t
-		{
-			kStaleBuild,
-			kStaleTargets,
-			kStaleShadowFormat,
-			kStaleMain,
-			kStaleKinds
-		};
 		std::uint64_t snapshotsAdopted = 0, snapshotFramesKept = 0;
-		std::array<std::uint64_t, kStaleKinds> snapshotsStale{};
 		std::vector<std::uint32_t> adoptionLatency;
 		// Frames from a growth's adoption to draws that embed its versions. ~0u for none.
 		std::uint32_t growthAdoptedFrame = ~0u;

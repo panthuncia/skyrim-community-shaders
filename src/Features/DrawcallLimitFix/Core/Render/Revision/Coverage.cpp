@@ -80,7 +80,8 @@ namespace DCLF
 			       a_next.blockSizes == a_previous.blockSizes &&
 			       a_next.resourceInputs == a_previous.resourceInputs &&
 			       a_next.shadowSlots == a_previous.shadowSlots && a_next.asyncEpochs == a_previous.asyncEpochs && a_next.cpuPipeline == a_previous.cpuPipeline && a_next.forwardDirect == a_previous.forwardDirect && a_next.firstPersonForwardDirect == a_previous.firstPersonForwardDirect &&
-			       a_next.build == a_previous.build && !a_next.uploads.owner_before(a_previous.uploads) && !a_previous.uploads.owner_before(a_next.uploads);
+			       a_next.build == a_previous.build && a_next.frameVersionsSerial == a_previous.frameVersionsSerial &&
+			       !a_next.uploads.owner_before(a_previous.uploads) && !a_previous.uploads.owner_before(a_next.uploads);
 		}
 	}
 
@@ -131,6 +132,12 @@ namespace DCLF
 		}
 		Extensions::PostSceneResourceInputs(next.resourceInputs);
 		next.build = CurrentBuildState();
+		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs (plan step 10b).
+		{
+			auto frameVersions = RenderGraph::Frame::Revision::SceneFrameVersions();
+			next.frameVersions = std::move(frameVersions.versions);
+			next.frameVersionsSerial = frameVersions.serial;
+		}
 		const auto& previous = postedInputs;
 		next.mainGeneration = previous.mainGeneration + (next.main != previous.main ? 1u : 0u);
 		const bool same = SameRevisionInputs(next, previous);
@@ -178,10 +185,10 @@ namespace DCLF
 		std::string epochs;
 		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e)
 			epochs += fmt::format("{}{} {}{}", e ? ", " : "", EpochTraitsOf(e).name, s.revisions.covered[e] ? "covered" : "UNCOVERED", EpochTraitsOf(e).claims ? " (claims)" : "");
-		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, stale kind {} of {}, build generation {} against {} attached, main generation {} against {}), "
-						   "newest taken stale {}, payload {}, adopted set {}; epochs: {}",
-			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, adopted ? s.StaleKindOf(*adopted) : static_cast<std::size_t>(Impl::kStaleKinds),
-			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
+		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, current {}, frame versions {}, build generation {} against {} attached, main "
+						   "generation {} against {}), newest taken dropped {}, payload {}, adopted set {}; epochs: {}",
+			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, s.AdoptedCurrent(), adopted ? adopted->frameVersions : 0,
+			adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
 			adopted ? adopted->mainGeneration : 0, s.postedInputs.mainGeneration, s.snapshotStale, !payload ? "none" : FrameValues::Get().Available() ? "installed" : "installed, NO FRAME VALUES",
 			s.adoptedSet ? "named" : "none", epochs);
 	}

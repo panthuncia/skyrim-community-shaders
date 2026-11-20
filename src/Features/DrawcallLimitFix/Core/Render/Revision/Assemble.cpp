@@ -8,6 +8,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 
+#include <ORGModuleServices/ComposedVersions.h>
+
 namespace DCLF
 {
 	using org::async::RevisionFragment;
@@ -179,10 +181,17 @@ namespace DCLF
 			using R = Revisions;
 			const std::uint32_t e = a_epoch;
 			const auto& shapeFragment = a_inputs[1];
+			// DCLF's buffers first, then the frame's versions: a frame revision's pending textures while one with DCLF epochs in its
+			// closure is in preparation (plan step 10b). The versions fragment changes with them, so every epoch records again.
+			std::shared_ptr<const org::IResourceVersions> composed;
+			if (a_frame.frameVersions)
+				composed = std::make_shared<const org::services::ComposedVersions>(
+					std::initializer_list<std::shared_ptr<const org::IResourceVersions>>{ a_versions, a_frame.frameVersions });
 			std::vector<std::shared_ptr<const EpochRevisionData>> requests;
 			auto request = [&](auto&& a_fill) {
 				auto data = std::make_shared<EpochRevisionData>();
 				data->versions = a_versions;
+				data->composed = composed;
 				a_fill(data->shapes);
 				requests.push_back(std::move(data));
 			};
@@ -263,13 +272,15 @@ namespace DCLF
 		producer.buildWanted = 0;
 		auto draft = rv.assembler.Begin();
 		// Keep the versions fragment while nothing changed, so every recording stays valid.
-		// A graph build gets a new fragment, which forces every epoch to record again.
+		// A graph build or new frame versions get a new fragment, which forces every epoch to record again.
 		const std::uint64_t builds = producer.inputs.buildGeneration;
+		const std::uint64_t frameVersions = producer.inputs.frameVersionsSerial;
 		const auto& seal = rv.sealed;
-		if (rv.versionsFragmentSet != seal.named || rv.graphBuilds != builds) {
+		if (rv.versionsFragmentSet != seal.named || rv.graphBuilds != builds || rv.frameVersions != frameVersions) {
 			rv.versionsFragment = rv.versionsFragmentSet == seal.named ? RevisionFragment::MakeReady(seal.named) : seal.fragment;
 			rv.versionsFragmentSet = seal.named;
 			rv.graphBuilds = builds;
+			rv.frameVersions = frameVersions;
 			++rv.versionSets;
 		}
 		if (draft.Get(R::kVersionsSlot) != rv.versionsFragment)

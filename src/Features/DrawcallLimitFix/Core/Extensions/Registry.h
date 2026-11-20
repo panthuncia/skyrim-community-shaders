@@ -95,6 +95,15 @@ namespace DCLF::Extensions
 		decltype(Api::FrameTexture::view) view = nullptr;  // null means the captured view, graph only
 		bool capturedWhenNull = false;
 		decltype(Api::FrameTexture::graphResources) graphResources{};  // static strings. Empty ones are unused.
+		decltype(Api::FrameTexture::facesGraphResources) facesGraphResources{};  // the same, read by the reflection faces in place of the above
+		/** @brief Whether the faces read ids of their own here (per-epoch views). */
+		bool FacesOwnIds() const
+		{
+			for (const auto id : facesGraphResources)
+				if (!id.empty())
+					return true;
+			return false;
+		}
 	};
 	/** @brief A feature's registered report lines. */
 	struct ReportLinesEntry

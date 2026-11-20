@@ -444,6 +444,16 @@ namespace PublishedResources
 		return true;
 	}
 
+	bool IsVersioned(std::string_view a_id)
+	{
+		if (const auto snapshot = t_building.lock()) {
+			const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
+			return found != snapshot->resources.end() && (found->slot || found->bufferSlot);
+		}
+		const auto* entry = Find(Published(), a_id);
+		return entry && (entry->slot || entry->bufferSlot);
+	}
+
 	std::uint32_t ShaderResourceVariant(std::string_view a_id)
 	{
 		const auto source = IndexSourceOf(a_id);
@@ -491,6 +501,7 @@ namespace PublishedResources
 	bool IsDeclarable(std::string_view) { return false; }
 	bool IsExportOf(const ID3D11ShaderResourceView*, std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&, std::source_location) { return false; }
+	bool IsVersioned(std::string_view) { return false; }
 	std::uint32_t ShaderResourceVariant(std::string_view) { return UINT32_MAX; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
 	bool IsExport(const ID3D11ShaderResourceView*) { return false; }

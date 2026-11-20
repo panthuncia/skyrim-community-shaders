@@ -74,13 +74,34 @@ namespace DCLF
 		s_buildPointFrame = a_frame;
 	}
 
-	void AdoptSnapshotAtBegin()
+	void SceneTaken(const std::shared_ptr<const void>& a_scene)
+	{
+		IndirectDraws::Get().SceneTaken(a_scene);
+	}
+
+	void InstallScene(const std::shared_ptr<const void>& a_scene)
+	{
+		IndirectDraws::Get().InstallScene(a_scene);
+	}
+
+	void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
+		std::span<const std::uint32_t> a_epochs)
+	{
+		IndirectDraws::Get().DropScene(a_scene, a_why, a_text, a_epochs);
+	}
+
+	bool SceneRecorded()
+	{
+		return globals::features::drawcallLimitFix.HooksInstalled() && IndirectDraws::Get().SceneRecorded();
+	}
+
+	void AfterSceneStep()
 	{
 		if (!globals::features::drawcallLimitFix.HooksInstalled())
 			return;
-		TracyCZoneN(adoptAtBegin, "CS.DCLF.AdoptAtBegin", true);
-		IndirectDraws::Get().AdoptAtBegin();
-		TracyCZoneEnd(adoptAtBegin);
+		TracyCZoneN(afterScene, "CS.DCLF.AfterSceneStep", true);
+		IndirectDraws::Get().AfterSceneStep();
+		TracyCZoneEnd(afterScene);
 	}
 
 	void IndirectDraws::NoteInputChanged(std::string_view a_what)
@@ -150,7 +171,7 @@ namespace DCLF
 		// Load screen frames have no claims, so they are never waited for or required to be covered.
 		const bool loading = Scene::FrameView::IsLoadingScreenUp();
 		{
-			// The snapshot was adopted at this frame's Begin (AdoptSnapshotAtBegin), with the staged builds it was recorded on.
+			// The frame revision adopted the snapshot at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
 			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			view.HandOverAtFrameStart(draws.AdoptedPublication());

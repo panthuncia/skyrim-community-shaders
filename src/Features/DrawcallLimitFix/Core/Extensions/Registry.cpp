@@ -360,7 +360,8 @@ namespace DCLF::Extensions
 			if (a_lists.frameTextures.size() >= kFrameTextureSlots)
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} is one past kFrameTextureSlots: grow it first", a_who, a_texture.name));
 			a_lists.frameTextureIndices[r] = static_cast<std::uint8_t>(a_lists.frameTextures.size());
-			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources });
+			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources,
+				a_texture.facesGraphResources });
 		}
 
 		/** @brief Whether a_contributor has everything its stage needs and ascending registers within t16-t127. */

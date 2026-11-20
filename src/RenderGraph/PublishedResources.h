@@ -71,6 +71,12 @@ namespace PublishedResources
 	*  False when a_id is not published, withdrawn or has no such view. During a build it reads that graph's snapshot, so any thread. */
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where = std::source_location::current());
 
+	/**
+	* @brief Whether a_id's resolver is a versioned slot (a texture's or a buffer's), whose descriptor follows its versions. A build's Declare reads the
+	* snapshot that graph registers, so any thread then; otherwise the render thread.
+	*/
+	bool IsVersioned(std::string_view a_id);
+
 	/** @brief The view variant ShaderResourceIndex hands out for a_id, so a declaration covers the descriptor it reads.
 	*  UINT32_MAX for a primary view or an unknown id. Render thread, or a build on any thread (its snapshot). */
 	std::uint32_t ShaderResourceVariant(std::string_view a_id);

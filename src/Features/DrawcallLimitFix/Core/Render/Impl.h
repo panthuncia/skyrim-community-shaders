@@ -78,13 +78,12 @@ namespace DCLF
 		 */
 		bool RefreshWorkContext();
 		/**
-		 * @brief Why a_snapshot is stale for the graphs, targets, shadow format and main resources. kStaleKinds when current.
-		 * Render thread. Each DCLF epoch's recordings must be of its attached or its staged build. a_staged gets the epochs whose
-		 * staged build the snapshot was recorded on, which attach with its adoption.
+		 * @brief Render thread. Whether the adopted snapshot is current: a revision, complete draws for the main resources the frame
+		 * runs, a ready payload, and every epoch's recordings of its attached build.
 		 */
-		std::size_t StaleKindOf(const SceneSnapshot& a_snapshot, std::vector<std::uint32_t>* a_staged = nullptr) const;
-		/** @brief Render thread. Whether the adopted snapshot is current, with a revision, complete draws and a ready payload. */
 		bool AdoptedCurrent() const;
+		/** @brief Render thread, at a scene's install. Warns once per epoch recording that binds a version the frame does not read. */
+		void CheckSceneVersions(const SceneSnapshot& a_snapshot);
 
 		/** @brief Fills the buffer addresses, SRV indices and capacities a build embeds. Other fields of a_out are left alone. */
 		static void AddressesOf(const NamedVersions& a_sealed, const MainLayout& a_layout, const Resources& a_resources, std::uint32_t a_frame, ResourceAddresses& a_out);

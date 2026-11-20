@@ -97,7 +97,10 @@ namespace DCLF::Extensions
 
 	/** @brief Any thread, after InstallFeatures. Every frame texture's graph ids, once each, for the colour passes to declare. */
 	std::span<const std::string_view> ColourGraphTextureIds();
-	/** @brief Any thread, after InstallFeatures. Graph ids of frame textures that have a view. The faces read no others. */
+	/**
+	 * @brief Any thread, after InstallFeatures. The reflection faces' graph ids: each frame texture's own faces ids when it has them
+	 * (per-epoch views), else its graph ids if it has a view. The faces read no others.
+	 */
 	std::span<const std::string_view> FacesGraphTextureIds();
 
 	/**
@@ -116,7 +119,10 @@ namespace DCLF::Extensions
 	 */
 	void DeclarePublishedRead(org::RenderPassBuilder& a_builder, std::string_view a_id, DeclaredReads& a_out);
 
-	/** @brief Logs "[ORG] declared view mismatch" once per declared read whose build-time index no longer matches its view. */
+	/**
+	 * @brief Logs "[ORG] declared view mismatch" once per declared read whose build-time index no longer matches its view. Reads of
+	 * a versioned slot are not compared: their index follows the version a frame revision records them against.
+	 */
 	void CheckDeclaredReads(const DeclaredReads& a_reads, const org::FramePreparationContext& a_preparation, std::string_view a_site);
 
 	/**
@@ -134,6 +140,13 @@ namespace DCLF::Extensions
 	 */
 	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,
 		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
+
+	/**
+	 * @brief Render thread. A per-epoch view (Api::FrameTexture::facesGraphResources): writes the index of the first of a_ids a graph
+	 * build declared and that is published, with no view to match. False when none is, and the reader reads the null texture.
+	 */
+	bool DeclaredTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::span<const std::string_view> a_ids,
+		std::uint32_t& a_index);
 
 	/** @brief Published ids the character light's noise can read: the HDR downsample chain, whose last level the luminance chain alternates. */
 	std::span<const std::string_view> CharacterLightGraphTextureIds();

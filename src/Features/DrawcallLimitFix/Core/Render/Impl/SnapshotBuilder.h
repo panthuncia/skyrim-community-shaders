@@ -89,10 +89,9 @@ namespace DCLF
 			std::array<std::uint64_t, static_cast<std::size_t>(RenderGraphRuntime::Segment::Count)> epochBuilds{};
 			// What its graphs are built from. It becomes the attached build state when the snapshot is adopted.
 			std::shared_ptr<const Draws::BuildState> build;
-			// Stale while newer than the built build state.
-			std::uint64_t buildSerial = 0;
-			std::uint32_t targetsGeneration = 0;
-			DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
+			// The frame versions its recordings named (Frame::Revision::SceneVersions::serial). The frame revision adopts it alone only
+			// while the frame runs those, and with the revision of that serial while it is in preparation.
+			std::uint64_t frameVersions = RenderGraph::Frame::Revision::kAnySceneVersions;
 			// CPU pipeline view batches, made only while the graph is the CPU pipeline's. Null otherwise or on failure.
 			std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
 		};
@@ -102,9 +101,13 @@ namespace DCLF
 			double aheadMs = 0.0, shapesMs = 0.0, recordingsMs = 0.0;
 			bool ahead = false;
 		};
+		// A snapshot whose recordings named frame versions the builder no longer knows. The frame revision never adopts one.
+		static constexpr std::uint64_t kUnknownFrameVersions = UINT64_MAX - 1;
+		// Scenes dropped for their builds with no new build state, before it is a tap error (plan 7.8, like the anchors' Starved).
+		static constexpr std::uint64_t kRestageStarvedAfter = 4 * RenderGraphRuntime::kGameFramesInFlight;
 		LatestSlot<SnapshotWork> snapshotWorkSlot;  // the coordinator -> the builder
-		LatestSlot<SceneSnapshot> snapshotSlot;     // the builder -> the frame's start
-		// Polled by a frame waiting for a current snapshot, so it takes the slot only when something new is there.
+		// The builder posts its snapshots to the frame revision (Frame::Revision::PublishScene), which adopts them (plan step 10b).
+		// Counted, because a frame waiting after a pipeline swap polls the count.
 		std::atomic<std::uint64_t> snapshotsPosted{ 0 };
 		// The publication gate's scene pass half is open while a Begin waits after a pipeline swap. The frame's own scene pass only runs
 		// after its start, so a payload held for that pass would never be published.
@@ -149,6 +152,15 @@ namespace DCLF
 			return adoptedSnapshot ? adoptedSnapshot->viewBatches : kNone;
 		}
 		bool snapshotStale = false;
+		// Render thread. Whether this Begin took a scene; Begins that took none are counted (snapshotFramesKept).
+		bool sceneTakenThisBegin = false;
+		// Scenes not adopted since the last report, by Frame::Revision::SceneDrop, and in the session for the log's rate limit.
+		std::array<std::uint64_t, 4> scenesDropped{};
+		std::uint64_t scenesDroppedLogged = 0;
+		// Scenes dropped for their builds since the last new build state (restageInputSerial), for the starvation rule.
+		std::uint64_t restagesWithoutInput = 0, restageInputSerial = 0;
+		// Adopted scenes with a recording of a version the frame does not read, in the session (CheckSceneVersions).
+		std::uint64_t staleSceneVersions = 0;
 		// Begin waits after a shader reload's pipeline swap since the last report, and in the session.
 		std::uint64_t snapshotWaits = 0, shaderReloadWaits = 0;
 		double snapshotWaitMs = 0.0, snapshotWaitMaxMs = 0.0;

@@ -22,12 +22,12 @@ namespace DCLF
 		const auto percentile = [this](std::size_t a_percent) {
 			return adoptionLatency.empty() ? 0u : adoptionLatency[(std::min)(adoptionLatency.size() - 1, adoptionLatency.size() * a_percent / 100)];
 		};
-		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted ({} with their staged "
-									   "builds, {} staged attaches refused), {} Begins adopting nothing new; passed over as stale: build {}, targets {}, shadow "
-									   "format {}, main resources {}; built without draws for the main resources {}\n",
+		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted ({} on new builds, {} "
+									   "staged attaches refused), {} Begins taking nothing new; not adopted by the frame revision: stale frame versions {}, "
+									   "replaced build {}, refused {}, superseded {}; built without draws for the main resources {}\n",
 			snapshotsBuilt.exchange(0, std::memory_order_relaxed), snapshotsCoalesced.exchange(0, std::memory_order_relaxed), snapshotsAdopted,
-			std::exchange(stagedAdoptions, 0), std::exchange(stagedRefusals, 0), snapshotFramesKept, snapshotsStale[kStaleBuild], snapshotsStale[kStaleTargets],
-			snapshotsStale[kStaleShadowFormat], snapshotsStale[kStaleMain], snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
+			std::exchange(stagedAdoptions, 0), std::exchange(stagedRefusals, 0), snapshotFramesKept, scenesDropped[0], scenesDropped[1], scenesDropped[2],
+			scenesDropped[3], snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
 		text += fmt::format("[DCLF] snapshot builds (ms, avg/p95/max): draws ahead {} ({} built), shapes {}, recordings wait {}; commit to adoption (frames): p50 {}, p95 {}, "
 							"max {}\n",
 			Reports::Spread(ahead, 2), aheadBuilt, Reports::Spread(shapes, 2), Reports::Spread(recordings, 2), percentile(50), percentile(95), adoptionLatency.empty() ? 0u : adoptionLatency.back());
@@ -52,7 +52,7 @@ namespace DCLF
 			growthToDraws.empty() ? 0u : growthToDraws[growthToDraws.size() / 2], growthToDraws.empty() ? 0u : growthToDraws.back());
 		growthToDraws.clear();
 		snapshotsAdopted = snapshotFramesKept = 0;
-		snapshotsStale = {};
+		scenesDropped = {};
 		adoptionLatency.clear();
 		// The builder's own lines are a report behind.
 		producerReportSlot.TakeInto(producerReport);

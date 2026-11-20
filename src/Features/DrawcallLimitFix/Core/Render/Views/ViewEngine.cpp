@@ -157,6 +157,17 @@ namespace DCLF
 			for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t) {
 				const auto at = frameTextureAt[t];
 				const auto* const texture = at != Extensions::kNoFrameTexture && at < frameTextures.size() ? &frameTextures[at] : nullptr;
+				// A per-epoch view: the faces read their own published ids here, bound by their graphs, never the main view's texture.
+				if (texture && texture->FacesOwnIds()) {
+					std::uint32_t own = 0;
+					if (Extensions::DeclaredTextureIndex(Extensions::GraphTextureReader::Faces, t, texture->name, texture->facesGraphResources, own)) {
+						HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
+						a_state.frameTextures[t] = own;
+					} else {
+						a_state.frameTextures[t] = HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, textures.NullIndex(), a_owners);
+					}
+					continue;
+				}
 				// A registration without a view reads null.
 				auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
 				                   texture && texture->view     ? static_cast<ID3D11ShaderResourceView*>(texture->view()) :
