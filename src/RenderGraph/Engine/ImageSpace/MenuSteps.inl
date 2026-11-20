@@ -7,13 +7,24 @@
 // Each is a step of the UI stage in every frame kind. The player's face tint at a load is a step of the start stage in a
 // world frame and of the UI stage in a loading screen. Hooks only stage the engine's constants, and the stage records at execution.
 
+/** @brief What the composites' registration is a function of. Their clients are declared on these variables (Frame/Declare.h). */
+struct MenuKey
+{
+	Frame::Vars::Extent2D display{};
+	std::uint32_t levels = 0, effects = 0, states = 0;
+	friend bool operator==(const MenuKey&, const MenuKey&) = default;
+};
+
+/** @brief The composites' clients, in their declarations' order. */
+constexpr std::array<PostPart, 3> kMenuParts{ PostPart::Menu, PostPart::Frozen, PostPart::FaceTint };
+
 struct MenuSteps
 {
 	bool on = false;          // native mode with CS's stages
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
+	bool registered = false;  // a registration was built
+	std::optional<MenuKey> built;
+	std::array<std::optional<FrameAnchors::ClientDesc>, 3> descs;
+	std::array<Frame::DeclaredClient, 3> clients;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 	std::map<StepKey, std::uint32_t> entries;
 	std::array<bool, kGateEntries> made{};
@@ -40,28 +51,46 @@ MenuSteps& Menu()
 	return menu;
 }
 
-void RegisterMenuSteps();
+/** @brief The composites' key at a revision's values, or none while the engine is not ready for them. */
+template <class Values>
+std::optional<MenuKey> MenuKeyOf(const Values& a_values)
+{
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !Menu().on)
+		return std::nullopt;
+	return MenuKey{ a_values.Get(Frame::Vars::DisplaySize()), shape->luminanceLevels, shape->effects, shape->states };
+}
 
-/** @brief Re-registers when kMAIN's or the final target's size or the level count change, or a build left a pass out. Render owner. */
-void CheckMenuSteps()
+bool MenuLagging()
+{
+	return Lagging(Menu().built, [](const auto& a_values) { return MenuKeyOf(a_values); });
+}
+
+void BuildMenuSteps(const MenuKey& a_key);
+
+/** @brief The composite client a_part's registration for a_key. Builds the three clients' once per key. */
+const std::optional<FrameAnchors::ClientDesc>* MenuDescFor(const MenuKey& a_key, std::size_t a_part)
 {
 	auto& menu = Menu();
-	if (!menu.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
-		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	const auto final = FinalSize();
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (menu.registered && menu.retry && frame - menu.registeredFrame < kRetryFrames)
-		return;
-	if (menu.registered && !menu.retry && menu.width == main.Width && menu.height == main.Height && menu.finalWidth == final.first &&
-		menu.finalHeight == final.second && menu.levels == Frame::PostChain::LuminanceLevels())
-		return;
-	RegisterAtBoundary(menu.pending, [] { return Menu().on && StepTargetsReady(); }, RegisterMenuSteps);
+	if (menu.built != a_key) {
+		menu.built = a_key;
+		BuildMenuSteps(a_key);
+	}
+	return &menu.descs[a_part];
+}
+
+/**
+* @brief Setup. The composites' clients, declared on their variables. The first revision registers them, so the build is
+* ready for the main menu. False, logged, on failure.
+*/
+bool DeclareMenuSteps()
+{
+	auto& menu = Menu();
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace());
+	for (std::size_t part = 0; part < menu.clients.size(); ++part)
+		menu.clients[part] = DeclareStepClient<MenuKey>(kMenuParts[part], dependencies, [](const Frame::Inputs& a_in) { return MenuKeyOf(a_in); },
+			[part](const MenuKey& a_key) { return MenuDescFor(a_key, part); });
+	return std::ranges::all_of(menu.clients, [](const Frame::DeclaredClient& a_client) { return static_cast<bool>(a_client); });
 }
 
 /** @brief Its own client, first in the UI stage. */
@@ -76,24 +105,28 @@ constexpr StepKey TintKey()
 	return { WorldScope::MenuCopy, Effects::ISAlphaBlend, 0 };
 }
 
-/** @brief Registers the UI stage's composite clients for the current sizes, in the engine's order. */
-void RegisterMenuSteps()
+/**
+* @brief The UI stage's composite clients' registrations for a_key, in the engine's order. Their declarations register them when
+* the revision starts, and the revision switches their builds in. Render thread.
+*/
+void BuildMenuSteps(const MenuKey& a_key)
 {
 	auto& state = IS();
 	auto& menu = Menu();
 	menu.registered = false;
-	menu.retry = false;
-	menu.registeredFrame = Frame::Driver::Current().frame;
+	menu.descs = {};
 	menu.entries.clear();
 	menu.made.fill(false);
 	menu.count = 0;
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
+		return;
 	D3D11_TEXTURE2D_DESC main{};
 	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
 	menu.width = main.Width;
 	menu.height = main.Height;
 	std::tie(menu.finalWidth, menu.finalHeight) = FinalSize();
-	menu.levels = Frame::PostChain::LuminanceLevels();
+	menu.levels = a_key.levels;
 	using E = Effects;
 	using T = RE::RENDER_TARGET;
 	const auto engine = [](std::int32_t a_target) { return StepTexture::Engine(a_target); };
@@ -208,7 +241,6 @@ void RegisterMenuSteps()
 			++menu.count;
 			menu.entries[step.key] = entry;
 		}
-		NoteImports(*spec);
 		(isFrozen ? frozenPasses : isTint ? tintPasses : passes)
 			.push_back({ .name = fmt::format("{}.{}", owner.id, spec->name),
 				.anchor = Anchor::ImageSpace,
@@ -223,8 +255,6 @@ void RegisterMenuSteps()
 						Menu().tintMade = pass != nullptr;
 					else
 						Menu().made[entry] = pass != nullptr;
-					if (!pass)
-						Menu().retry = true;
 					return pass;
 				},
 				.atExecution = true,
@@ -252,18 +282,17 @@ void RegisterMenuSteps()
 		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 		return desc;
 	};
-	if (!FrameAnchors::Register(makeDesc(PostPart::Menu, std::move(passes)))) {
-		logger::error("[ORG] ImageSpace: the menu composites' client was refused");
-		menu.on = false;
-		return;
-	}
-	if (!frozenPasses.empty() && !FrameAnchors::Register(makeDesc(PostPart::Frozen, std::move(frozenPasses))))
-		logger::error("[ORG] ImageSpace: the frozen composite's client was refused; a menu over a frozen world draws no frozen frame");
-	if (!tintPasses.empty() && !FrameAnchors::Register(makeDesc(PostPart::FaceTint, std::move(tintPasses))))
-		logger::error("[ORG] ImageSpace: the face tint's client was refused; the player's face tint is not drawn");
+	// An empty client is no client. Its declaration then registers none.
+	std::array<std::vector<FrameAnchors::PassDesc>*, 3> partPasses{ &passes, &frozenPasses, &tintPasses };
+	for (std::size_t part = 0; part < kMenuParts.size(); ++part)
+		if (!partPasses[part]->empty())
+			menu.descs[part] = makeDesc(kMenuParts[part], std::move(*partPasses[part]));
+	if (!menu.descs[1])
+		logger::info("[ORG] ImageSpace: the frozen composite has no pass; a menu over a frozen world draws no frozen frame");
 	menu.registered = true;
-	logger::info("[ORG] ImageSpace: the menus' and the loading screen's composites are CS passes: {} passes ({} luminance levels), {}x{} into {}x{}", menu.count,
-		menu.levels, menu.width, menu.height, menu.finalWidth, menu.finalHeight);
+	logger::info("[ORG] ImageSpace: the menus' and the loading screen's composites are CS passes: {} passes ({} luminance levels), {}x{} into {}x{}, registered "
+				 "for the revision starting now",
+		menu.count, menu.levels, menu.width, menu.height, menu.finalWidth, menu.finalHeight);
 }
 
 bool MenuStepNow(std::size_t a_effect)
@@ -373,8 +402,8 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	const bool isTint = known && key == TintKey() && !IS().post[static_cast<std::size_t>(PostPart::FaceTint)].specs.empty();
 	const auto found = known && !isFrozen && !isTint ? menu.entries.find(key) : menu.entries.end();
 	if (!isFrozen && !isTint && found == menu.entries.end()) {
-		// The engine may draw for new sizes before the next Begin registers them.
-		if (menu.pending) {
+		// The engine may draw for new sizes before the revision with their registration is adopted.
+		if (MenuLagging()) {
 			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
 			return true;
 		}

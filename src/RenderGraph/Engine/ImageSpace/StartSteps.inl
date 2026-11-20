@@ -9,13 +9,22 @@ constexpr std::uint16_t kRippleInstances = 8;    // per target of the pair
 constexpr std::uint16_t kHeightmapInstances = 4;  // 0.025 s each, so a 0.1 s frame makes four
 constexpr std::uint16_t kFlowInstances = 32;
 
+/** @brief What the start steps' registration is a function of. Its client is declared on these variables (Frame/Declare.h). */
+struct StartKey
+{
+	std::uint32_t displacementSize = 0, flowCopySize = 0;
+	std::uint64_t flowMap = 0;
+	std::uint32_t effects = 0, states = 0;
+	friend bool operator==(const StartKey&, const StartKey&) = default;
+};
+
 struct StartSteps
 {
 	bool on = false;          // native mode with the start stage
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
+	bool registered = false;  // a registration was built
+	std::optional<StartKey> built;
+	std::array<std::optional<FrameAnchors::ClientDesc>, 1> descs;
+	Frame::DeclaredClient client;
 	std::uint32_t displacementSize = 0, flowSize = 0;
 	std::map<StepKey, std::uint32_t> entries;
 	std::array<bool, kGateEntries> made{};
@@ -41,34 +50,36 @@ std::int32_t WaterDisplacementTarget()
 	return *target.get();
 }
 
-void RegisterStartSteps();
+/** @brief The start steps' key at a revision's values, or none while the engine has no displacement pair. */
+template <class Values>
+std::optional<StartKey> StartKeyOf(const Values& a_values)
+{
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !Start().on || !shape->displacementSize)
+		return std::nullopt;
+	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states };
+}
 
-/** @brief Re-registers when the displacement pair or flow map is remade, or a build left a pass out. Render owner. */
-void CheckStartSteps()
+void BuildStartSteps(const StartKey& a_key);
+
+/** @brief The start client's registration for a_key. Built once per key. */
+const std::optional<FrameAnchors::ClientDesc>* StartDescFor(const StartKey& a_key)
 {
 	auto& start = Start();
-	if (!start.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	auto* displacement = targets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture;
-	if (!displacement)
-		return;
-	D3D11_TEXTURE2D_DESC desc{};
-	displacement->GetDesc(&desc);
-	auto* flow = FlowCopyTexture();
-	D3D11_TEXTURE2D_DESC flowDesc{};
-	if (flow)
-		flow->GetDesc(&flowDesc);
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (start.registered && start.retry && frame - start.registeredFrame < kRetryFrames)
-		return;
-	if (start.registered && !start.retry && start.displacementSize == desc.Width && start.flowSize == flowDesc.Width)
-		return;
-	RegisterAtBoundary(start.pending, [] {
-		return Start().on && IS().on && RE::ImageSpaceManager::GetSingleton() &&
-		       globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture;
-	}, RegisterStartSteps);
+	if (start.built != a_key) {
+		start.built = a_key;
+		BuildStartSteps(a_key);
+	}
+	return &start.descs[0];
+}
+
+/** @brief Setup. The start client, declared on the engine's ImageSpace shape. False, logged, on failure. */
+bool DeclareStartSteps()
+{
+	auto& start = Start();
+	start.client = DeclareStepClient<StartKey>(PostPart::Start, Frame::DependsOn(Frame::Vars::EngineImageSpace()),
+		[](const Frame::Inputs& a_in) { return StartKeyOf(a_in); }, [](const StartKey& a_key) { return StartDescFor(a_key); });
+	return static_cast<bool>(start.client);
 }
 
 /** @brief All on. Each pass only works where the engine opens its gate entry. */
@@ -79,29 +90,29 @@ void StartRows(std::array<std::uint64_t, 4>& a_rows)
 		a_rows[entry / 64] |= 1ull << (entry % 64);
 }
 
-void RegisterStartSteps()
+/**
+* @brief The start client's registration for a_key. Its declaration registers it when the revision starts, and the revision
+* switches its build in. Render thread.
+*/
+void BuildStartSteps(const StartKey& a_key)
 {
 	auto& state = IS();
 	auto& start = Start();
 	start.registered = false;
-	start.retry = false;
-	start.registeredFrame = Frame::Driver::Current().frame;
+	start.descs = {};
 	start.entries.clear();
 	start.made.fill(false);
 	start.count = 0;
 	using E = Effects;
 	using T = RE::RENDER_TARGET;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (auto* displacement = targets[T::kWATER_DISPLACEMENT].texture) {
-		D3D11_TEXTURE2D_DESC desc{};
-		displacement->GetDesc(&desc);
-		start.displacementSize = desc.Width;
-	}
-	start.flowSize = 0;
-	if (auto* flow = FlowCopyTexture()) {
-		D3D11_TEXTURE2D_DESC desc{};
-		flow->GetDesc(&desc);
-		start.flowSize = desc.Width;
+	start.displacementSize = a_key.displacementSize;
+	start.flowSize = a_key.flowCopySize;
+	// Another texture in the flow map's slot (Unified Water's) is published in its place, for the water draws.
+	// A new resource under the id rebuilds every graph once (step 9 makes it a declared import).
+	if (state.publishedFlowMap && a_key.flowMap && a_key.flowMap != reinterpret_cast<std::uint64_t>(state.publishedFlowMap)) {
+		logger::info("[ORG] ImageSpace: another texture took the flow map's slot; it is published in its place{}",
+			a_key.flowCopySize ? "" : " (it has no UAV, so there are no flow copies)");
+		PublishFlowMap();
 	}
 	const auto engine = [](std::int32_t a_target) { return StepTexture::Engine(a_target); };
 	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 };
@@ -156,7 +167,6 @@ void RegisterStartSteps()
 		}
 		++start.count;
 		start.entries[step.key] = entry;
-		NoteImports(*spec);
 		passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
 			.anchor = Anchor::ImageSpace,
 			.order = static_cast<std::int32_t>(entry),
@@ -164,8 +174,6 @@ void RegisterStartSteps()
 			.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(client.latch), gate = std::shared_ptr<const RunGate>(client.gate), id = client.id, entry] {
 				auto pass = MakePass(spec, latch, gate, id);
 				Start().made[entry] = pass != nullptr;
-				if (!pass)
-					Start().retry = true;
 				return pass;
 			},
 			// Most instances are empty most frames, so record at execution and let unused ones skip and fold their barriers.
@@ -189,14 +197,12 @@ void RegisterStartSteps()
 	// Each water update and flow copy taps its own instances, and the frame's taps add up.
 	desc.repeats = true;
 	desc.segmentOnly = true;
-	if (!FrameAnchors::Register(std::move(desc))) {
-		logger::error("[ORG] ImageSpace: the start step client was refused");
-		start.on = false;
-		return;
-	}
+	// An empty client is no client. Its declaration then registers none.
+	if (!desc.passes.empty())
+		start.descs[0] = std::move(desc);
 	start.registered = true;
 	logger::info("[ORG] ImageSpace: the water effects are start stage passes: {} passes ({} ripples and {} heightmap steps per target, {} flow copies), "
-				 "displacement {}x{}, flow map {}x{}",
+				 "displacement {}x{}, flow map {}x{}, registered for the revision starting now",
 		start.count, kRippleInstances, kHeightmapInstances, start.flowSize ? kFlowInstances : 0, start.displacementSize, start.displacementSize, start.flowSize,
 		start.flowSize);
 }

@@ -86,6 +86,22 @@ namespace RenderGraph::Frame::Vars
 		friend bool operator==(const UpscalerOptions&, const UpscalerOptions&) = default;
 	};
 
+	/**
+	* @brief The engine's ImageSpace shape: the loops its effects run and the water's textures (frame revision plan, 6.7).
+	* The engine raises no event for these, so ImageSpace writes them at each Begin.
+	*/
+	struct ImageSpaceShape
+	{
+		std::uint32_t luminanceLevels = 0;   // the HDR effect's luminance chain, from kHDR_DOWNSAMPLE0's size and two engine flags
+		std::uint32_t saoLevels = 0;         // RenderSSAO's level count
+		std::uint32_t displacementSize = 0;  // kWATER_DISPLACEMENT's width, 0 before the engine made it
+		std::uint32_t flowCopySize = 0;      // the width of the flow map the flow copies write, 0 for none
+		std::uint64_t flowMap = 0;           // the water's flow map texture, 0 for none
+		std::uint32_t effects = 0;           // the covered effects the engine has made, 0 before its ImageSpace manager exists
+		std::uint32_t states = 0;            // the engine blend states the steps use that it has made
+		friend bool operator==(const ImageSpaceShape&, const ImageSpaceShape&) = default;
+	};
+
 	/** @brief A frame-wide variable by name, as declarations name their dependencies (Frame/Declare.h). */
 	template <class T>
 	struct Var
@@ -102,6 +118,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<TargetIdentity> HdrOutputTarget() { return { "HdrOutputTarget" }; }
 	constexpr Var<ShadowMapShape> EngineShadowMap() { return { "EngineShadowMap" }; }
 	constexpr Var<CubemapShape> ReflectionCubemap() { return { "ReflectionCubemap" }; }
+	constexpr Var<ImageSpaceShape> EngineImageSpace() { return { "EngineImageSpace" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -119,6 +136,8 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. The engine's reflection cubemap. */
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer);
+	/** @brief Any thread. The engine's ImageSpace shape. */
+	bool SetEngineImageSpace(const ImageSpaceShape& a_value, std::string_view a_writer);
 	/** @brief Any thread. What the upscaler SDK is configured with. */
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer);
 	/**
@@ -242,6 +261,16 @@ struct std::formatter<RenderGraph::Frame::Vars::CubemapShape> : std::formatter<s
 	auto format(const RenderGraph::Frame::Vars::CubemapShape& a_value, std::format_context& a_context) const
 	{
 		return std::format_to(a_context.out(), "{}", a_value.size);
+	}
+};
+
+template <>
+struct std::formatter<RenderGraph::Frame::Vars::ImageSpaceShape> : std::formatter<std::string_view>
+{
+	auto format(const RenderGraph::Frame::Vars::ImageSpaceShape& a_value, std::format_context& a_context) const
+	{
+		return std::format_to(a_context.out(), "luminance {} SAO {} displacement {} flow copies {} flow map {:#x} effects {} states {}", a_value.luminanceLevels,
+			a_value.saoLevels, a_value.displacementSize, a_value.flowCopySize, a_value.flowMap, a_value.effects, a_value.states);
 	}
 };
 

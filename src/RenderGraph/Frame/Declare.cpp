@@ -242,6 +242,7 @@ namespace RenderGraph::Frame
 	template Vars::TargetIdentity Inputs::Get(Vars::Var<Vars::TargetIdentity>) const;
 	template Vars::ShadowMapShape Inputs::Get(Vars::Var<Vars::ShadowMapShape>) const;
 	template Vars::CubemapShape Inputs::Get(Vars::Var<Vars::CubemapShape>) const;
+	template Vars::ImageSpaceShape Inputs::Get(Vars::Var<Vars::ImageSpaceShape>) const;
 
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const
 	{
@@ -400,6 +401,7 @@ namespace RenderGraph::Frame
 	template Vars::TargetIdentity Inputs::Get(Vars::Var<Vars::TargetIdentity>) const;
 	template Vars::ShadowMapShape Inputs::Get(Vars::Var<Vars::ShadowMapShape>) const;
 	template Vars::CubemapShape Inputs::Get(Vars::Var<Vars::CubemapShape>) const;
+	template Vars::ImageSpaceShape Inputs::Get(Vars::Var<Vars::ImageSpaceShape>) const;
 
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const { CS::SettingRegistry::RaisedBytes(a_id, a_out, a_size); }
 	DeclaredTexture2D DeclareTexture2D(std::string, Dependencies, Texture2DDescFn, const GraphResources::Options&) { return {}; }

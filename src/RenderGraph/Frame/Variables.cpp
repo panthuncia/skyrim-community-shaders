@@ -52,6 +52,7 @@ namespace RenderGraph::Frame::Vars
 			Variable<ShadowMapShape> engineShadowMap = set.Declare("EngineShadowMap", ShadowMapShape{});
 			Variable<CubemapShape> reflectionCubemap = set.Declare("ReflectionCubemap", CubemapShape{});
 			Variable<UpscalerOptions> upscalerOptions = set.Declare("UpscalerOptions", UpscalerOptions{});
+			Variable<ImageSpaceShape> engineImageSpace = set.Declare("EngineImageSpace", ImageSpaceShape{});
 			Variable<FrameGen::PresentationConfig> presentationConfig = set.Declare("PresentationConfig", FrameGen::PresentationConfig{});
 
 			std::mutex eventsMutex;
@@ -142,6 +143,10 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().engineShadowMap, a_value, "EngineShadowMap", a_writer); }
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().reflectionCubemap, a_value, "ReflectionCubemap", a_writer); }
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().upscalerOptions, a_value, "UpscalerOptions", a_writer); }
+	bool SetEngineImageSpace(const ImageSpaceShape& a_value, std::string_view a_writer)
+	{
+		return SetFrameVariable(FrameVariableSet().engineImageSpace, a_value, "EngineImageSpace", a_writer);
+	}
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view a_writer)
 	{
 		return SetFrameVariable(FrameVariableSet().presentationConfig, a_value, "PresentationConfig", a_writer);
@@ -335,6 +340,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape, std::string_view) { return false; }
 	bool SetReflectionCubemap(CubemapShape, std::string_view) { return false; }
 	bool SetUpscalerOptions(UpscalerOptions, std::string_view) { return false; }
+	bool SetEngineImageSpace(const ImageSpaceShape&, std::string_view) { return false; }
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view)
 	{
 		const std::lock_guard lock(g_stubPresentationMutex);

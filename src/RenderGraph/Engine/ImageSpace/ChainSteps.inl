@@ -31,17 +31,32 @@ constexpr std::uint16_t kNoCopy = 0xffff;
 
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
 
+/**
+* @brief What the chain's registration is a function of. Its three clients are declared on these variables (Frame/Declare.h), so
+* a change registers them again when a revision starts, and the revision switches the new builds in.
+*/
+struct ChainKey
+{
+	Frame::Vars::Extent2D display{};
+	Frame::Vars::TargetIdentity hdr{};  // HDR Display's scene texture, the final target while HDR is on
+	Frame::Vars::Ratios ratios{};       // the VL composite's render-size viewport is baked at registration until step 8
+	std::uint32_t levels = 0, effects = 0, states = 0;
+	friend bool operator==(const ChainKey&, const ChainKey&) = default;
+};
+
 struct ChainSteps
 {
 	bool on = false;          // native mode with the post stages
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
+	bool registered = false;  // a registration was built
+	std::optional<ChainKey> built;
+	std::array<std::optional<FrameAnchors::ClientDesc>, 3> descs;
+	std::array<Frame::DeclaredClient, 3> clients;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::int32_t final = RE::RENDER_TARGET::kFRAMEBUFFER;
-	const void* finalObject = nullptr;
+	// The registration's HDR scene texture, null while HDR is off.
+	ID3D11Texture2D* hdrTarget = nullptr;
+	DXGI_FORMAT hdrFormat = DXGI_FORMAT_UNKNOWN;
 	struct Entry
 	{
 		std::uint8_t part = 0;
@@ -100,6 +115,11 @@ ChainSteps& Chain()
 {
 	static ChainSteps chain;
 	return chain;
+}
+
+ID3D11Texture2D* ChainHdrTarget()
+{
+	return Chain().hdrTarget;
 }
 
 Frame::SegmentId SegmentOfPart(std::size_t)
@@ -289,7 +309,7 @@ std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_
 
 /**
 * @brief CS_ORG_ADAPT_READBACK=1 diagnostic. Copies the luminance chain's last level and both adapted targets into a readback ring.
-* CheckChainSteps logs them five frames later, every 30th frame.
+* BeginFrame logs them five frames later, every 30th frame.
 */
 struct AdaptReadback
 {
@@ -442,8 +462,6 @@ void LogReadback(std::uint64_t a_frame)
 		text[0], text[1], text[2]);
 }
 
-void RegisterChainSteps();
-
 /**
 * @brief Read from the render target manager, a static at 524970 / 411451, not CommonLib's GetSingleton pointer.
 * The renderer's own entry holds no texture in native mode.
@@ -455,34 +473,84 @@ std::pair<std::uint32_t, std::uint32_t> FinalSize()
 	return { data.width, data.height };
 }
 
-/** @brief HDR Display's scene texture while HDR is on, else kFRAMEBUFFER. */
+/** @brief The registration's HDR scene texture while HDR is on, else kFRAMEBUFFER. */
 std::int32_t FinalName()
 {
-	return globals::features::hdrDisplay.PostChainTarget() ? kHdrSceneOutput : static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
+	return Chain().hdrTarget ? kHdrSceneOutput : static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
 }
 
-/** @brief Re-registers when a size, the level count or the ratios change, or a build left a pass out. Render owner. */
-void CheckChainSteps()
+/** @brief The engine target the adapted luminance of a_parity replaces for a_levels luminance levels, or -1 for none. */
+std::int32_t AdaptTargetOf(std::uint32_t a_levels, std::uint32_t a_parity)
+{
+	using T = RE::RENDER_TARGET;
+	constexpr auto kFirst = static_cast<std::int32_t>(T::kHDR_DOWNSAMPLE1), kLast = static_cast<std::int32_t>(T::kHDR_DOWNSAMPLE13);
+	if (a_levels == 0 || kFirst + static_cast<std::int32_t>(a_levels) + 1 > kLast)
+		return -1;
+	return kFirst + static_cast<std::int32_t>(a_levels) - 1 + 2 * static_cast<std::int32_t>(a_parity);
+}
+
+/** @brief The chain's key at a revision's values, or none while the engine is not ready for it. */
+template <class Values>
+std::optional<ChainKey> ChainKeyOf(const Values& a_values)
+{
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !Chain().on)
+		return std::nullopt;
+	return ChainKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::HdrOutputTarget()), a_values.Get(Frame::Vars::DynamicRatios()),
+		shape->luminanceLevels, shape->effects, shape->states };
+}
+
+bool ChainLagging()
+{
+	return Lagging(Chain().built, [](const auto& a_values) { return ChainKeyOf(a_values); });
+}
+
+void BuildChainSteps(const ChainKey& a_key);
+
+/** @brief The chain client a_part's registration for a_key. Builds the three clients' once per key. */
+const std::optional<FrameAnchors::ClientDesc>* ChainDescFor(const ChainKey& a_key, std::size_t a_part)
 {
 	auto& chain = Chain();
-	if (!chain.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
-		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	const auto final = FinalSize();
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (chain.registered)
-		LogReadback(frame);
-	if (chain.registered && chain.retry && frame - chain.registeredFrame < kRetryFrames)
-		return;
-	if (chain.registered && !chain.retry && chain.width == main.Width && chain.height == main.Height && chain.finalWidth == final.first &&
-		chain.finalHeight == final.second && chain.final == FinalName() && chain.finalObject == EngineObjectOf(chain.final) && chain.levels == Frame::PostChain::LuminanceLevels() && chain.ratios == DynamicRatios())
-		return;
-	RegisterAtBoundary(chain.pending, [] { return Chain().on && StepTargetsReady(); }, RegisterChainSteps);
+	if (chain.built != a_key) {
+		chain.built = a_key;
+		BuildChainSteps(a_key);
+	}
+	return &chain.descs[a_part];
+}
+
+/** @brief Setup. The kept chain textures, the adapted pair published once, and the three clients declared on their variables. */
+bool DeclareChainSteps()
+{
+	using T = RE::RENDER_TARGET;
+	auto& chain = Chain();
+	// Kept across frames so a frame whose bloom lags reads the last bloom, not an unwritten transient.
+	if (!DeclareKept(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom") || !DeclareKept(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0") ||
+		!DeclareKept(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1"))
+		return false;
+	// The pair follows the luminance chain's last level. One texel like the first level while the levels have no pair.
+	for (std::uint32_t parity = 0; parity < 2; ++parity)
+		if (!DeclareKept(chain.adapt[parity], kAdaptedIds[parity], Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace()),
+				[parity](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) {
+					const auto target = AdaptTargetOf(a_in.Get(Frame::Vars::EngineImageSpace()).luminanceLevels, parity);
+					if (target >= 0)
+						return OwnedDescLike(target, a_desc);
+					if (!OwnedDescLike(T::kHDR_DOWNSAMPLE1, a_desc))
+						return false;
+					a_desc.Width = a_desc.Height = 1;
+					return true;
+				}))
+			return false;
+	// Published once, so DCLF's graphs read it by id. A new level count is a new version of each slot and publishes nothing.
+	for (const auto& target : chain.adapt)
+		if (!PublishedResources::Publish(*target.texture)) {
+			logger::error("[ORG] ImageSpace: the adapted luminance pair could not be published");
+			return false;
+		}
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::HdrOutputTarget(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace());
+	for (std::size_t part = 0; part < chain.clients.size(); ++part)
+		chain.clients[part] = DeclareStepClient<ChainKey>(kChainParts[part], dependencies, [](const Frame::Inputs& a_in) { return ChainKeyOf(a_in); },
+			[part](const ChainKey& a_key) { return ChainDescFor(a_key, part); });
+	return std::ranges::all_of(chain.clients, [](const Frame::DeclaredClient& a_client) { return static_cast<bool>(a_client); });
 }
 
 /** @brief The chain groups a description has on, from its post fields plus every group a hook asked for. */
@@ -567,20 +635,23 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	}
 }
 
-/** @brief Made with the engine target's size and RTV format, so a plain texel copy works. Also works for the final target, which has only a view in native mode. */
-bool MakeOwnedLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
+/**
+* @brief A registration's transient texture with the engine target's size and RTV format, so a plain texel copy works. Also works
+* for the final target, which has only a view in native mode. Fatal when it cannot be made.
+*/
+void MakeTransientLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name)
 {
 	const auto index = a_like;
 	const auto import = ImportOf(ImportOfName(index));
 	if (!import || !import.Width() || !import.Height())
-		return false;
+		stl::report_and_fail(fmt::format("Community Shaders: the ImageSpace texture {} is made like target {}, which has no import", a_name, index));
 	D3D11_RENDER_TARGET_VIEW_DESC view{};
 	if (index & kHdrSceneOutput)
-		view.Format = globals::features::hdrDisplay.hdrTexture->desc.Format;
+		view.Format = Chain().hdrFormat;
 	else if (auto* rtv = globals::game::renderer->GetRuntimeData().renderTargets[index].RTV)
 		rtv->GetDesc(&view);
 	else
-		return false;
+		stl::report_and_fail(fmt::format("Community Shaders: the ImageSpace texture {} is made like target {}, which has no RTV", a_name, index));
 	D3D11_TEXTURE2D_DESC desc{};
 	desc.Width = import.Width();
 	desc.Height = import.Height();
@@ -592,16 +663,11 @@ bool MakeOwnedLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_n
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
 	// A texel copy needs texels of the same size.
 	const auto bytes = rhi::FormatByteSize(rhi::helpers::ToRHI(view.Format));
-	if (!bytes || bytes != rhi::FormatByteSize(import.Format())) {
-		logger::warn("[ORG] ImageSpace: {}: target {}'s view format {} and its import's format {} differ in size; no copy between them", a_name, index,
-			static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format()));
-		return false;
-	}
-	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
-	a_out.texture = std::move(made.texture);
-	a_out.fresh = made.fresh;
+	if (!bytes || bytes != rhi::FormatByteSize(import.Format()))
+		stl::report_and_fail(fmt::format("Community Shaders: ImageSpace's {}: target {}'s view format {} and its import's format {} differ in size; no copy between them",
+			a_name, index, static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format())));
+	MakeTransient(a_out, desc, a_name);
 	a_out.format = RtvFormatOf(index, import);
-	return static_cast<bool>(a_out);
 }
 
 /** @brief One texel load per pixel, built once per format. Render thread. */
@@ -624,14 +690,16 @@ std::shared_ptr<const RasterProgram> CaptureProgram(rhi::Format a_format)
 	return program;
 }
 
-/** @brief Registers the chain's three clients for the current sizes. The passes are a fixed list in the engine's order. */
-void RegisterChainSteps()
+/**
+* @brief The chain's three clients' registrations for a_key. The passes are a fixed list in the engine's order. Their declarations
+* register them when the revision starts, and the revision switches their builds in. Render thread.
+*/
+void BuildChainSteps(const ChainKey& a_key)
 {
 	auto& state = IS();
 	auto& chain = Chain();
 	chain.registered = false;
-	chain.retry = false;
-	chain.registeredFrame = Frame::Driver::Current().frame;
+	chain.descs = {};
 	chain.entries.clear();
 	chain.requested = {};
 	chain.captureEntry = kNoCopy;
@@ -644,47 +712,42 @@ void RegisterChainSteps()
 	}
 	chain.throughEntry = kNoCopy;
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
+		return;
 	D3D11_TEXTURE2D_DESC main{};
 	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
 	chain.width = main.Width;
 	chain.height = main.Height;
 	std::tie(chain.finalWidth, chain.finalHeight) = FinalSize();
+	// The key's HDR target, not the live one, so the registration matches the revision that switches it in.
+	chain.hdrTarget = a_key.hdr.id ? reinterpret_cast<ID3D11Texture2D*>(a_key.hdr.id) : nullptr;
+	chain.hdrFormat = static_cast<DXGI_FORMAT>(a_key.hdr.format);
 	chain.final = FinalName();
-	chain.finalObject = EngineObjectOf(chain.final);
-	chain.ratios = DynamicRatios();
-	chain.levels = Frame::PostChain::LuminanceLevels();
-	using Lifetime = GraphResources::Lifetime;
+	chain.ratios = { a_key.ratios.x, a_key.ratios.y };
+	chain.levels = a_key.levels;
+	// MakeStepSpec bakes the render-size viewports with the key's ratios.
+	const BuildRatiosScope ratioScope(chain.ratios);
 	using T = RE::RENDER_TARGET;
-	bool adapted = chain.levels > 0 && T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) + 1 <= T::kHDR_DOWNSAMPLE13;
-	for (std::uint32_t p = 0; adapted && p < 2; ++p)
-		adapted = MakeOwned(chain.adapt[p], static_cast<T>(T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) - 1 + 2 * static_cast<std::int32_t>(p)),
-			kAdaptedIds[p], Lifetime::History);
-	if (!adapted) {
-		logger::warn("[ORG] ImageSpace: the adapted luminance pair could not be made for {} levels; registered again at a later frame", chain.levels);
-		chain.retry = true;
+	if (AdaptTargetOf(chain.levels, 1) < 0) {
+		// The kept pair is one texel then, and no step could write it.
+		logger::error("[ORG] ImageSpace: the luminance chain has {} levels, which the adapted pair cannot follow; the post chain has no CS passes", chain.levels);
 		return;
 	}
-	// Published so DCLF's graphs can read it by id. A new pair rebuilds every graph once.
-	for (const auto& target : chain.adapt)
-		(void)PublishedResources::Publish(*target.texture);
-	// Kept across frames so a frame whose bloom lags reads the last bloom, not an unwritten transient.
-	if (!MakeOwned(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom", Lifetime::History) ||
-		!MakeOwned(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample", Lifetime::Transient) ||
-		!MakeOwned(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0", Lifetime::History) ||
-		!MakeOwned(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1", Lifetime::History) ||
-		!MakeOwned(chain.getHitA, T::kGETHIT_BUFFER, "ImageSpace::GetHitA", Lifetime::Transient) ||
-		!MakeOwned(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB", Lifetime::Transient) ||
-		!MakeOwned(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown", Lifetime::Transient) ||
-		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient) ||
-		!MakeOwnedLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch", Lifetime::Transient) ||
-		!MakeOwnedLike(chain.ldrScratch, chain.final, "ImageSpace::LdrScratch", Lifetime::Transient)) {
-		logger::warn("[ORG] ImageSpace: the post chain's targets could not be made; registered again at a later frame");
-		chain.retry = true;
-		return;
-	}
+	for (std::uint32_t parity = 0; parity < 2; ++parity)
+		KeptExtentLike(chain.adapt[parity], AdaptTargetOf(chain.levels, parity));
+	KeptExtentLike(chain.bloom, T::kHDR_BLOOM);
+	for (auto& history : chain.taaHistory)
+		KeptExtentLike(history, T::kTEMPORAL_AA_ACCUMULATION_1);
+	MakeTransient(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap");
+	MakeTransient(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample");
+	MakeTransient(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap");
+	MakeTransient(chain.getHitA, T::kGETHIT_BUFFER, "ImageSpace::GetHitA");
+	MakeTransient(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB");
+	MakeTransient(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap");
+	MakeTransient(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown");
+	MakeTransient(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap");
+	MakeTransientLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch");
+	MakeTransientLike(chain.ldrScratch, chain.final, "ImageSpace::LdrScratch");
 
 	using E = Effects;
 	// effects[9] to [15] draw ISBlurN with the HDR flag at +0x95, else ISNonHDRBlurN. None is a bright pass.
@@ -996,31 +1059,15 @@ void RegisterChainSteps()
 		client.batch.clear();
 		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
-		// Clear a newly made target before any pass reads it.
-		if (p == 1 && chain.bloom.fresh) {
-			AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -5);
-			builder.Add(AnchorPasses::ClearOf("bloom.clear", *chain.bloom.texture), true);
-			for (auto& pass : builder.Take())
-				passes.push_back(std::move(pass));
+		// Clear the kept textures' first versions before any pass reads them. Later versions are born cleared.
+		if (p == 1) {
+			ClearFirstVersion(chain.bloom, client.id, -5, "bloom.clear", passes);
+			for (std::uint32_t h = 0; h < 2; ++h)
+				ClearFirstVersion(chain.adapt[h], client.id, -3 - static_cast<std::int32_t>(h), fmt::format("hdr.adapted{}.clear", h), passes);
 		}
-		if (p == 1)
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				if (!chain.adapt[h].fresh)
-					continue;
-				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -3 - static_cast<std::int32_t>(h));
-				builder.Add(AnchorPasses::ClearOf(fmt::format("hdr.adapted{}.clear", h), *chain.adapt[h].texture), true);
-				for (auto& pass : builder.Take())
-					passes.push_back(std::move(pass));
-			}
 		if (p == 2)
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				if (!chain.taaHistory[h].fresh)
-					continue;
-				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -1 - static_cast<std::int32_t>(h));
-				builder.Add(AnchorPasses::ClearOf(fmt::format("taa.history{}.clear", h), *chain.taaHistory[h].texture), true);
-				for (auto& pass : builder.Take())
-					passes.push_back(std::move(pass));
-			}
+			for (std::uint32_t h = 0; h < 2; ++h)
+				ClearFirstVersion(chain.taaHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("taa.history{}.clear", h), passes);
 		std::vector<std::uint32_t> finals;
 		for (auto& step : steps) {
 			if (step.part != p)
@@ -1053,7 +1100,6 @@ void RegisterChainSteps()
 						builder.Failure());
 					continue;
 				}
-				state.importedObjects[T::kMENUBG] = EngineObjectOf(T::kMENUBG);
 				++part.count;
 				part.keys[entry] = step.key;
 				part.group[entry] = step.group;
@@ -1117,7 +1163,6 @@ void RegisterChainSteps()
 			chain.entries.try_emplace(step.key, ChainSteps::Entry{ p, entry });
 			if (step.final)
 				finals.push_back(entry);
-			NoteImports(*spec);
 			passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
 				.anchor = Anchor::ImageSpace,
 				.order = static_cast<std::int32_t>(entry),
@@ -1125,8 +1170,6 @@ void RegisterChainSteps()
 				.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(client.latch), gate = std::shared_ptr<const RunGate>(client.gate), id = client.id, entry, p] {
 					auto pass = MakePass(spec, latch, gate, id);
 					Chain().parts[p].made[entry] = pass != nullptr;
-					if (!pass)
-						Chain().retry = true;
 					return pass;
 				},
 				// Every step's hook has run by the commit, so a step the engine did not draw skips and folds its barriers.
@@ -1151,8 +1194,8 @@ void RegisterChainSteps()
 			const auto inputLevel = levelInput(levels - 1);
 			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> manager{ REL::RelocationID(524970, 411451) };
 			const auto& input = manager.get()->renderTargetData[inputLevel];
-			readback.sizes = { std::pair{ input.width, input.height }, std::pair{ chain.adapt[0].texture->Desc().Width, chain.adapt[0].texture->Desc().Height },
-				std::pair{ chain.adapt[1].texture->Desc().Width, chain.adapt[1].texture->Desc().Height } };
+			readback.sizes = { std::pair{ input.width, input.height }, std::pair{ chain.adapt[0].width, chain.adapt[0].height },
+				std::pair{ chain.adapt[1].width, chain.adapt[1].height } };
 			readback.formats = { RtvFormatOf(inputLevel, ImportOf(inputLevel)), chain.adapt[0].format, chain.adapt[1].format };
 			std::array<FrameAnchors::Texture, AdaptReadback::kEntries> sources{ FrameAnchors::EngineTarget(static_cast<std::uint32_t>(inputLevel)), AnchorPasses::TextureOf(*chain.adapt[0].texture), AnchorPasses::TextureOf(*chain.adapt[1].texture) };
 			bool fits = readback.buffer != nullptr;
@@ -1196,15 +1239,13 @@ void RegisterChainSteps()
 		desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) { ChainRows(p, a_rows); };
 		desc.repeats = true;
 		desc.segmentOnly = true;
-		if (!FrameAnchors::Register(std::move(desc))) {
-			logger::error("[ORG] ImageSpace: the post chain client {} was refused", client.id);
-			chain.on = false;
-			return;
-		}
+		// An empty client is no client. Its declaration then registers none.
+		if (!desc.passes.empty())
+			chain.descs[p] = std::move(desc);
 	}
 	chain.registered = true;
 	logger::info("[ORG] ImageSpace: the post chain is CS passes: {} composite, {} pre-tonemap and {} post-tonemap passes ({} luminance levels), for {}x{} "
-				 "into {}x{} at ratios {:.3f}x{:.3f}",
+				 "into {}x{} at ratios {:.3f}x{:.3f}, registered for the revision starting now",
 		chain.parts[0].count, chain.parts[1].count, chain.parts[2].count, chain.levels, chain.width, chain.height, chain.finalWidth, chain.finalHeight,
 		chain.ratios.first, chain.ratios.second);
 }
@@ -1370,9 +1411,9 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	}
 	const auto found = chain.entries.find(key);
 	if (found == chain.entries.end()) {
-		// Shortly after a registration the frame may run on the old build while the engine draws for the new sizes. That is lag, not a mismatch.
-		constexpr std::uint64_t kRegistrationFrames = 300;
-		if (chain.pending || Frame::Driver::Current().frame - chain.registeredFrame < kRegistrationFrames) {
+		// Until the revision with a new registration is adopted, the frame runs the old build while the engine draws for the new one.
+		// That is lag, not a mismatch.
+		if (ChainLagging()) {
 			chain.requested[group] = Frame::Driver::Current().frame;
 			Frame::Driver::NoteLaggedWork(segment);
 			return true;

@@ -1342,6 +1342,39 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
   drag adopts variables-only revisions and never a new version.
 
+**Decided by the agent (step 6.7, 2026-11-19), to confirm:**
+- **One new frame variable, `EngineImageSpace`** (`Vars::ImageSpaceShape`: luminance levels, SAO levels, the displacement and flow copy
+  widths, the flow map's identity, and how many covered effects and blend states the engine has made). The engine raises no event
+  for any of these, so ImageSpace writes it at Setup and at each Begin (`OnFrameBegin`, after the adoption point). Only a change is
+  an event, as with `HdrOutputTarget` and `DynamicRatios`. Additive in `Variables.{h,cpp}` and one instantiation in `Declare.cpp`.
+- **The retry every 120 frames became events.** A pass left out at a build waited for one of three things: the engine making its
+  effect, the engine filling its blend table, or a feature publishing an output. The first two are counts in `EngineImageSpace`, so
+  making them registers the clients again. The third already rebuilds every graph at the publish, which makes the pass then.
+  The 300-frame grace in `TakeChainStep` and the `pending` flags became `Lagging()`: the registration was built for other values
+  than the newest written or the adopted ones.
+- **Kept means History.** Bloom, the TAA pair, the adapted pair and the SAO textures are declared at Setup on `DisplaySize` (the
+  adapted pair also on `EngineImageSpace`, since its size follows the last luminance level). Their descriptions read the engine
+  target they replace: the engine makes its targets once a session with the display size (Q4), so a native swap chain resize finds
+  the same extent and makes no version. Transients (scratches, swaps, downsamples) are made at each registration through
+  `Frame::Resources`, which is now transient only (no `RequestSize`, no `fresh`).
+- **One-shot clears of a kept texture's first version stay.** A declared twin's first version is not born cleared (only later
+  versions are), so the first registration clears it once (`ClearFirstVersion`). Later registrations clear nothing.
+- **The adapted pair is published once at Setup**, one texel like the first level while the levels have no pair. A level count the
+  pair cannot follow logs an error and builds no chain clients; it never happens with the engine's targets.
+- **One declaration per client, one build per group.** Each step group (world, chain, start, composites) declares each of its clients
+  with the group's key. The key function builds the group's registrations once per key and gives each client its own; an empty client
+  is no client. The face tint is the composites' third client, so the revision waits for its start stage build too.
+- **The chain's final target comes from the key** (`HdrOutputTarget`), not the live `PostChainTarget()`, so a registration and the
+  imports it names match the revision that switches it in.
+- **The layout switches when the registration is built, not when it is adopted**, as before (the hooks read the new entries while the
+  old build runs until the revision adopts). Entries rarely move (HDR and ratio changes keep them), so this was left. Versioning the
+  layout with the registration (`ClientDesc::generation`, `FrameAnchors::HeldNow`) is the fix if a test shows wrong draws in that window.
+- **`CheckImports` is deleted without a replacement.** Engine targets are made once a session (Q4) and their imports are slots;
+  `EndSet` raises `DisplaySize`, which every step client follows. The flow map's republish moved from `CheckFlowMap` into the start
+  registration, driven by the flow map's identity in `EngineImageSpace`; it still rebuilds every graph once (step 9 makes it a
+  declared import).
+- **Missing engine targets and texture failures at a registration are fatal**, not a later retry.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's
