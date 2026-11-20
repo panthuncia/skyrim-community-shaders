@@ -137,3 +137,13 @@ final until the user confirms it.
     - 6.12 (Volumetric Lighting).
 
     SSGI (6.6) and Sun Rays (6.10) wait for `DeclareProgram`.
+26. **6.1 integration passed on nfg** (9 of 9 runs), and guest fog now matches native in the `fog` shots. The black guest fog
+    the 6.1 lead saw came from an older nfg stage. Merged since: 6.2 (`PublishTexture` added to `Revision.h`), 6.3 (a
+    `HeightMap` variable, plus the new `terrain-shadows` config, which assumes Dragonborn and terrain shadows on) and 6.8
+    (the LLF grid as a latch value, which now always applies the adopted ratios, even under `dynamicResolutionLock`). The
+    plan doc's per-step "Decided by the agent" blocks conflict at each merge; the director keeps every block.
+27. **The 6.8 lead changed the shared git config.** In the main checkout's `.git/config`, `submodule.extern/*.url` now points
+    at the main checkout's own `extern/*`, because the cs-integration clones lacked local-only commits (BasicRHI `021308d`).
+    The change is kept while worktrees need the local-only commits. Restore the upstream URLs before any push.
+28. **Next migration leads:** 6.13 (LLF local shadows, which may add `DeclareBuffer`), 6.14 (Upscaling, together with the
+    upscaler options from the adopted revision) and 6.16 with 6.17 (IBL and Skylighting).
