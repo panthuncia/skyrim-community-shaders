@@ -847,6 +847,28 @@ revisions.
 - Hot reload needs no feature code: `DrawcallLimitFix::ClearShaderCache` asks `RenderGraphRuntime::RequestShaderReload`, which
   swaps every live pipeline. That is why `programsDirty` could go without a replacement where no define follows a setting.
 
+**As built (2026-11-19, step 6 follow-ups, `org-native/rev-step6-followups`).** Cross-feature items the migrations left open.
+- **`Frame::DeclareBuffer`** (Declare.h): a structured buffer as a function of variables, by analogy with `DeclareTexture2D`. The
+  description function returns a `D3D11_BUFFER_DESC`, and only `ByteWidth` may change (whole elements). A new element count is a
+  new version of the same slot. `AdoptedRevision::Elements(buffer)` and `FirstFrame(buffer)` read the bound version.
+  - The twin is a versioned `GraphResources::StructuredBuffer`. It holds an `org::VersionedBuffer` slot (`BufferVersions()`), which
+    `Register` registers as the name's resolver and passes declare (`org::ResourceResolverAndRange(*slot)`).
+  - The step 4 buffer fragment carries it: `Declarations::Evaluate` gives a new count to the coordinator (`OnBufferWish`), the lane
+    makes the version with `MakeStructured` and nothing to upload, and the fragment resolves at once. At adoption the slot adopts
+    the version, then `StructuredBuffer::AdoptVersion` makes the D3D11 export and views, updates `Count()` and `Graph()`, and
+    releases the old export after D3D11's last use.
+  - `PublishedResources` publishes a declared buffer as its slot (`Entry::bufferSlot`), so its readers resolve every version
+    without a build, `ShaderResourceIndex` follows the current one, and `IsExportOf` follows the twin's export.
+- **Light Limit Fix's cluster buffers** (clusters, light index list, light grid) are declared on `DisplaySize`. A larger native
+  display is a new version of each. The lights and the counter keep their size.
+  - The dispatches are indirect through a run gate (`LightLimitFix::CullingGate`): each run's commit writes the group counts of
+    the bound buffers' grid. That grid also goes in the latch (`LLFLatch::clusterCapacity`), where the shaders clamp the run's grid
+    to it, so the push constants hold only view and latch indices. No recording follows the display size.
+  - `BoundGrid` is the adopted display's grid when the bound clusters buffer holds it, else the first versions' grid (only before
+    the first adoption); anything else is fatal. `AdoptedClusterGrid` clamps to it. The "larger than at setup" warning is gone.
+- **Histogram Auto Exposure's two buffers** are declared buffers of a fixed size, made at the effect's `Declare`. Only their
+  creation changed; the passes, the reset gate and the readback are as 6.9 left them.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1828,6 +1850,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   never seen.
 - **Between setup and the first adopted registration** Volumetric and Cloud Shadows report active with no client, so their maps
   are unwritten for those frames (as before, until the first build). SSS and Dynamic Cubemaps draw D3D11 or nothing then, as before.
+
+**Decided by the agent (step 6 follow-ups, 2026-11-19), to confirm:**
+- **A buffer version has undefined contents.** Every declared buffer so far is written before it is read (LLF's cluster buffers
+  every run). A buffer that needs zeros or data would need the fragment's upload path, which `PublishBuffer` already has.
+- **The lights buffer and the counter are not declared.** Their size follows the light capacity, a constant.
+- **LLF's grid comes from the bound buffers, not a recorded constant.** The gate and the latch carry it per run, as 6.8 did for the
+  run's grid. Push-constant capacity would make every display size a new pass revision outside a revision.
+- **The guest culling epoch is no CS stage**, so it is not a member of the revision that adopts the new buffers. It takes them
+  after adoption through `NoteNewVersions`, as DCLF's readers of other slots do. Not checked in a run: that the first frame after a
+  resize binds the new buffers in that epoch. If it binds the old ones, the dispatch covers a grid larger than they hold.
+- **Histogram Auto Exposure keeps one version, with no one-element version while off.** The chain binds the buffers' graph
+  resources (`Bind::Uav(Graph())`, the readback's `AddBuffer`, Composite's `Image` of the adaptation). A new version would leave
+  those bindings on the old one. Binding a buffer slot there needs `AnchorPasses::Bind`, `RunReadback` and the chain's `Image` to
+  take a `VersionedBuffer`, which is the post chain's code (6.20). The buffers are 1 KB.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

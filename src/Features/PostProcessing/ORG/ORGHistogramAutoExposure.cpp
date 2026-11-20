@@ -77,14 +77,28 @@ namespace ORGPostChain
 
 		/**
 		* @brief HistogramAutoExposure::Draw on the graph. The histogram and adaptation are history buffers owned here, for the session.
-		* Their first frame (and the first after a shader reload) opens a gated CS_Reset, until a frame with it reached the GPU: the
-		* buffers' FirstFrame. Buffers are no declared textures, so the effect keeps that state. The readback stays a per-frame,
-		* late-bound value: its passes copy every run, so a kept recording replays them, and the pre-exposure takes what arrived.
+		* They are declared buffers of a fixed size, made once at Declare, so they follow no variable and get no version. Their first
+		* frame (and the first after a shader reload) opens a gated CS_Reset, until a frame with it reached the GPU. The readback stays
+		* a per-frame, late-bound value: its passes copy every run, so a kept recording replays them, and the pre-exposure takes what
+		* arrived.
 		*/
 		class HistogramAutoExposureEffect final : public Effect
 		{
 		public:
 			bool Legacy() const override { return false; }
+
+			void Declare(PostProcessFeature&, RenderGraph::Frame::Dependencies&) override
+			{
+				using namespace RenderGraph::Frame;
+				// The chain binds their graph resources, so they keep one version for the session (no one-element version while off).
+				const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History };
+				histogram = DeclareBuffer("PostProcessing::HistogramAutoExposure::Histogram", {}, [](const Inputs&) { return StructuredDesc(kBins, sizeof(std::uint32_t)); },
+					history);
+				adaptation = DeclareBuffer("PostProcessing::HistogramAutoExposure::Adaptation", {}, [](const Inputs&) { return StructuredDesc(1, sizeof(float)); }, history);
+				// New buffers hold nothing yet.
+				firstFrame = true;
+				reset = true;
+			}
 
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>&) override
 			{
@@ -100,19 +114,7 @@ namespace ORGPostChain
 			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
 				if (!histogram || !adaptation) {
-					const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History };
-					histogram = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(kBins, sizeof(std::uint32_t)), kBins,
-						"PostProcessing::HistogramAutoExposure::Histogram", history);
-					adaptation = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(1, sizeof(float)), 1,
-						"PostProcessing::HistogramAutoExposure::Adaptation", history);
-					// New buffers hold nothing yet.
-					firstFrame = true;
-					reset = true;
-				}
-				if (!*histogram || !*adaptation) {
 					a_builder.Fail("its history buffers could not be made");
-					histogram.reset();
-					adaptation.reset();
 					return nullptr;
 				}
 				if (!readback)
@@ -192,8 +194,8 @@ namespace ORGPostChain
 				}
 			}
 
-			std::unique_ptr<GraphResources::StructuredBuffer> histogram;
-			std::unique_ptr<GraphResources::StructuredBuffer> adaptation;
+			RenderGraph::Frame::DeclaredBuffer histogram;
+			RenderGraph::Frame::DeclaredBuffer adaptation;
 			std::shared_ptr<RunReadback> readback;  // kept across builds
 			std::uint64_t shaderGeneration = 0;
 			std::uint64_t loggedFrame = 0;  // CS_ORG_PP_LOG's last line

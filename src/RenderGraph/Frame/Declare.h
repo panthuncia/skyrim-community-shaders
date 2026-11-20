@@ -22,6 +22,7 @@
 namespace GraphResources
 {
 	class Resource;
+	class StructuredBuffer;
 	class Texture2D;
 	class Texture3D;
 	struct Options;
@@ -35,11 +36,12 @@ namespace FrameAnchors
 /**
 * @brief The CS declaration API (frame revision plan, step 6).
 *
-* A feature declares its textures and its clients as functions of variables: the frame-wide ones (Frame/Variables.h) and its
+* A feature declares its textures, buffers and clients as functions of variables: the frame-wide ones (Frame/Variables.h) and its
 * own CS::Setting fields. It does that once, at setup, on the render thread. A change of a dependency is evaluated when the next
 * frame revision starts (Frame/Revision.h), against the values that revision carries:
 * - a texture whose description changes gets a new version, made off the render thread. A History texture's new version is
 *   born cleared, and FirstFrame says so for its first frame;
+* - a structured buffer whose element count changes gets a new version, made off the render thread, with undefined contents;
 * - a client whose key changes is registered again, or removed when its key is empty. The revision then waits for the stage
 *   builds that hold the change, so the values, the versions and the builds switch in at the same Begin;
 * - a program whose key changes is built off the render thread first. The revision starts once it is built.
@@ -109,6 +111,7 @@ namespace RenderGraph::Frame
 	namespace Detail
 	{
 		struct TextureDeclaration;
+		struct BufferDeclaration;
 		struct ClientDeclaration;
 	}
 
@@ -157,6 +160,47 @@ namespace RenderGraph::Frame
 		RenewFn a_renew = {});
 	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options,
 		RenewFn a_renew = {});
+
+	/** @brief A declared structured buffer. Keep it for as long as the feature uses the buffer. Render thread. */
+	class DeclaredBuffer
+	{
+	public:
+		DeclaredBuffer() = default;
+
+		/**
+		* @brief The twin. Passes declare its slot (BufferVersions()), never Graph(), so a new element count needs no build. Its
+		* count, Graph() and D3D11 export change only at adoption.
+		*/
+		GraphResources::StructuredBuffer& operator*() const { return *twin; }
+		GraphResources::StructuredBuffer* operator->() const { return twin; }
+		GraphResources::StructuredBuffer* Get() const { return twin; }
+		explicit operator bool() const { return twin != nullptr; }
+
+		const std::shared_ptr<Detail::BufferDeclaration>& Declaration() const { return declaration; }
+
+		DeclaredBuffer(std::shared_ptr<Detail::BufferDeclaration> a_declaration, GraphResources::StructuredBuffer* a_twin) :
+			declaration(std::move(a_declaration)), twin(a_twin) {}
+
+	private:
+		std::shared_ptr<Detail::BufferDeclaration> declaration;
+		GraphResources::StructuredBuffer* twin = nullptr;
+	};
+
+	/**
+	* @brief A structured buffer's description from the inputs. Only ByteWidth may change between revisions (same stride, bind
+	* and misc flags), and it must be a whole number of elements. One element is the existence rule's size while off.
+	*/
+	using BufferDescFn = std::function<D3D11_BUFFER_DESC(const Inputs&)>;
+
+	/**
+	* @brief Render thread, at setup. Makes a versioned structured buffer twin from a_desc of the newest values and follows
+	* a_dependencies from then on. A new element count is a new version of the same slot, made on the revision lane and adopted
+	* with the revision that carries the values, so the frame never sees a count its passes were not recorded for. A version's
+	* contents are undefined until a pass writes them; an exported one gets its D3D11 export at adoption. a_options.versioned is
+	* forced on, and a transient is fatal. A description that changes more than ByteWidth is fatal. Null without the graph or when
+	* the twin cannot be made (logged).
+	*/
+	DeclaredBuffer DeclareBuffer(std::string a_name, Dependencies a_dependencies, BufferDescFn a_desc, const GraphResources::Options& a_options);
 
 	/**
 	* @brief A declared client. Keep it as long as the client follows its dependencies. Dropping it stops that and leaves the
@@ -361,6 +405,15 @@ namespace RenderGraph::Frame
 		{
 			return static_cast<bool>(a_texture);
 		}
+
+		/** @brief The element count of the buffer's bound version. Zero when it is not declared. */
+		std::uint32_t Elements(const DeclaredBuffer& a_buffer) const;
+
+		/** @brief True in the first frame that binds a new version of the buffer, and in the first frame after its declaration. */
+		bool FirstFrame(const DeclaredBuffer& a_buffer) const;
+
+		/** @brief Whether the buffer is declared and live. */
+		bool Has(const DeclaredBuffer& a_buffer) const { return static_cast<bool>(a_buffer); }
 
 	private:
 		Inputs Values() const;
