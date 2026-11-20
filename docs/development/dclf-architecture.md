@@ -1149,7 +1149,8 @@ name. The scene payload is not in the set: it travels as pooled versions of its 
 3.  **Sealed set.** A sealed set (`NamedVersions`) is immutable: every buffer's version, units, bytes, device address and SRV
     index, and every latch block. While nothing changed, `Seal` returns the very same set (its `Serial`), so every recording made
     against it stands; the shapes key (`RevisionShapesKey`) mixes that serial and the layouts.
-4.  **Adoption.** The frame adopts the snapshot it selects (`AdoptSnapshot`: `NamedVersions::AdoptAll` and the revision). Commits
+4.  **Adoption.** The frame revision adopts the snapshot as its scene fragment (`Frame::Revision`, `IndirectDraws::InstallScene`:
+    `NamedVersions::AdoptAll` and the revision), alone or with the frame revision it was recorded against. Commits
     and latch writes read the adopted set (`Impl::Adopted()`). After the frame's last submission, `BindAdopted` binds the adopted
     set's backings (`NamedVersions::Bind(SubmittedRetirementPoint())`). Nothing flows from the frame back to the producer.
 

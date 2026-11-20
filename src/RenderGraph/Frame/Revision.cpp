@@ -33,19 +33,32 @@
 #	include <Resources/VersionedTexture.h>
 
 #	include <algorithm>
+#	include <array>
 #	include <atomic>
 #	include <chrono>
 #	include <deque>
 #	include <map>
 #	include <mutex>
 #	include <optional>
+#	include <span>
 #	include <string>
 #	include <vector>
 
 namespace DCLF
 {
-	// DCLF's snapshot adoption, at every render-owner Begin (plan step 10a).
-	void AdoptSnapshotAtBegin();
+	// DCLF's side of its scene fragment (plan step 10b), in Core/Render/FrameDriver.cpp. Render thread, main thread only.
+	// The frame took a_scene from the builder's post, adopted or not.
+	void SceneTaken(const std::shared_ptr<const void>& a_scene);
+	// Inside the adoption point, after its staged builds attached.
+	void InstallScene(const std::shared_ptr<const void>& a_scene);
+	// Not adopted. DCLF keeps it to release it on its builder, and makes a new one.
+	void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
+		std::span<const std::uint32_t> a_epochs);
+	// Any thread. The frames whose coverage ran a DCLF epoch, in the session. While it moves, a revision with DCLF epochs in its
+	// closure must adopt a scene recorded for it.
+	std::uint64_t SceneRecordedFrames();
+	// After the scene step of every Begin: the named shader-reload wait (plan step 10a).
+	void AfterSceneStep();
 }
 
 namespace RenderGraph::Frame::Revision
@@ -62,10 +75,17 @@ namespace RenderGraph::Frame::Revision
 		constexpr std::uint32_t kRevisionBuilds = 3;
 		constexpr std::uint32_t kRevisionRecordings = 4;
 		constexpr std::uint32_t kRevisionInputWaits = 5;
-		constexpr std::uint32_t kRevisionSlots = 6;
+		// DCLF's scene (kScene, plan step 10b): its publication, draws and payload, and the buffer set its recordings name. They
+		// inherit like the others, so a revision of CS stages keeps the adopted scene and a scene alone keeps the rest.
+		constexpr std::uint32_t kRevisionScene = 6;
+		constexpr std::uint32_t kRevisionSceneBuffers = 7;
+		constexpr std::uint32_t kRevisionSlots = 8;
 
 		// The starvation rule (plan 7.8): recordings dropped and asked for again this often with no new input is a schedule bug.
 		constexpr std::uint64_t kRevisionStarvedAfter = 4 * RenderGraphRuntime::kGameFramesInFlight;
+		// A revision with DCLF epochs in its closure waits for DCLF's scene only while DCLF's epochs ran in one of this many last
+		// Begins (plan 7.8). A menu without a scene pass, a load screen or an idle DCLF posts no scene, so then it adopts alone.
+		constexpr std::uint64_t kSceneIdleFrames = 4 * RenderGraphRuntime::kGameFramesInFlight;
 
 		/** @brief A declared texture's newest extent, held by its twin's Alive() token since the twin may go first. */
 		struct ExtentRequest
@@ -163,6 +183,22 @@ namespace RenderGraph::Frame::Revision
 			std::shared_ptr<FrameAnchors::RevisionRecordings> recordings;
 		};
 
+		/**
+		* @brief The value of the scene fragment: the DCLF scene the revision runs. It names the scene and DCLF owns it, so nothing of
+		* a scene is released on the render thread.
+		*/
+		struct RevisionScene
+		{
+			std::uint64_t serial = 0;
+			std::uint64_t frameVersions = 0;
+		};
+
+		/** @brief The value of the scene buffers fragment: the serial of the DCLF buffer set the scene's recordings name. */
+		struct RevisionSceneBuffers
+		{
+			std::uint64_t serial = 0;
+		};
+
 		/** @brief One revision: what the render thread planned, what the lane made of it, and its recordings. */
 		struct PreparedRevision
 		{
@@ -205,6 +241,8 @@ namespace RenderGraph::Frame::Revision
 			std::shared_ptr<const org::services::ComposedVersions> versionSet;
 			std::shared_ptr<FrameAnchors::RevisionRecordings> recordings;
 			std::vector<std::uint32_t> others;  // closure epochs that are not CS stages
+			// Some of others are DCLF's. Then DCLF records its scene against versionSet, and the scene is adopted with it.
+			bool dclfMembers = false;
 			std::uint64_t askedAgain = 0;
 			std::uint32_t recordingCount = 0;
 			std::uint32_t buildCount = 0;
@@ -215,6 +253,9 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t prepared = 0, adopted = 0, superseded = 0, askedAgain = 0, builds = 0, buffers = 0, variableRevisions = 0;
 			std::uint32_t maxMembers = 0, maxRecordings = 0, maxBuilds = 0;
 			std::vector<std::uint64_t> inputFrames;
+			// DCLF's scenes: adopted alone, adopted with a revision, and dropped by SceneDrop.
+			std::uint64_t scenesAlone = 0, scenesWithRevision = 0;
+			std::array<std::uint64_t, 4> scenesDropped{};
 		};
 
 		struct Coordinator
@@ -234,7 +275,19 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t textureFirstInput = 0;
 			std::atomic<std::uint64_t> beginFrame{ 0 };  // the frame of the last Begin, for extents from other threads
 			std::map<const void*, std::shared_ptr<const void>> adoptedPayloads;
+			// DCLF's newest scene, from its builder (PublishScene).
+			std::mutex sceneMutex;
+			std::optional<Scene> postedScene;
 			// Render thread from here.
+			// A scene recorded against the revision in preparation, adopted with it.
+			std::optional<Scene> heldScene;
+			// The last adopted revision that had DCLF epochs in its closure: the frame versions a scene adopted alone must name.
+			std::uint64_t adoptedSceneVersions = 0;
+			// DCLF's SceneRecordedFrames at the last Begin, and the Begin's frame when it last moved (plan 7.8).
+			std::uint64_t sceneRecordedSeen = 0, sceneRecordedFrame = 0;
+			// Scenes that could not serve a revision waiting for DCLF's scene, since the last new input: posted on other versions,
+			// or held and dropped for their builds. The starvation rule (plan 7.8) for the scene.
+			std::uint64_t sceneMissesSinceInput = 0;
 			std::map<GraphResources::Resource*, ExtentRequest> extents;
 			std::uint64_t extentSerial = 0;
 			std::uint64_t renewSerial = 0;
@@ -301,6 +354,184 @@ namespace RenderGraph::Frame::Revision
 					return RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(s)) ? fmt::format("DCLF epoch {} (segment {})", a_epoch, s) :
 					                                                                    fmt::format("epoch {} (segment {})", a_epoch, s);
 			return fmt::format("epoch {}", a_epoch);
+		}
+
+		/** @brief Whether a_epoch is one of DCLF's. */
+		bool IsDclfEpoch(std::uint32_t a_epoch)
+		{
+			using Segment = RenderGraphRuntime::Segment;
+			for (std::uint32_t s = 0; s < static_cast<std::uint32_t>(Segment::Count); ++s)
+				if (RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(s)) && RenderGraphRuntime::EpochOf(static_cast<Segment>(s)) == a_epoch)
+					return true;
+			return false;
+		}
+
+		/** @brief Marks a revision whose closure has DCLF epochs. Render thread. */
+		void NoteDclfMembers(PreparedRevision& a_revision)
+		{
+			a_revision.dclfMembers = a_revision.dclfMembers || std::ranges::any_of(a_revision.others, IsDclfEpoch);
+		}
+
+		/** @brief Hands a scene that is not adopted back to DCLF, and counts it. Render thread. */
+		void DropScene(Coordinator& a_coordinator, Scene a_scene, SceneDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs = {})
+		{
+			{
+				const std::lock_guard lock(a_coordinator.statsMutex);
+				++a_coordinator.window.scenesDropped[static_cast<std::size_t>(a_why)];
+				++a_coordinator.session.scenesDropped[static_cast<std::size_t>(a_why)];
+			}
+			DCLF::DropScene(a_scene.value, a_why, a_text, a_epochs);
+		}
+
+		/**
+		* @brief Takes DCLF's newest posted scene. One recorded against the revision in preparation is held for its adoption, and
+		* the one held before is dropped. Any other is returned, to be adopted alone or dropped. Render thread, main thread.
+		*/
+		std::optional<Scene> TakePostedScene(Coordinator& a_coordinator)
+		{
+			std::optional<Scene> scene;
+			{
+				const std::lock_guard lock(a_coordinator.sceneMutex);
+				scene = std::move(a_coordinator.postedScene);
+				a_coordinator.postedScene.reset();
+			}
+			if (!scene)
+				return std::nullopt;
+			DCLF::SceneTaken(scene->value);
+			const auto& preparing = a_coordinator.preparing;
+			if (scene->frameVersions == kAnySceneVersions || !preparing || !preparing->dclfMembers || scene->frameVersions != preparing->serial) {
+				// A scene with recordings on other versions while a revision needs DCLF's scene is a miss for the starvation rule.
+				if (scene->frameVersions != kAnySceneVersions && preparing && preparing->dclfMembers)
+					++a_coordinator.sceneMissesSinceInput;
+				return scene;
+			}
+			if (a_coordinator.heldScene)
+				DropScene(a_coordinator, std::move(*a_coordinator.heldScene), SceneDrop::Superseded, "a newer scene was recorded for the same revision");
+			a_coordinator.heldScene = std::move(scene);
+			return std::nullopt;
+		}
+
+		/** @brief Notes whether DCLF's epochs ran since the last Begin. Render thread, every Begin. */
+		void NoteSceneRuns(Coordinator& a_coordinator, std::uint64_t a_frame)
+		{
+			if (const std::uint64_t runs = DCLF::SceneRecordedFrames(); runs != a_coordinator.sceneRecordedSeen) {
+				a_coordinator.sceneRecordedSeen = runs;
+				a_coordinator.sceneRecordedFrame = a_frame;
+			}
+		}
+
+		/**
+		* @brief Whether DCLF's epochs ran in one of the last kSceneIdleFrames Begins. Only then does a revision with DCLF epochs in its
+		* closure wait for DCLF's scene (plan 7.8): a DCLF that does not draw posts no scene. Render thread.
+		*/
+		bool DclfDraws(const Coordinator& a_coordinator, std::uint64_t a_frame)
+		{
+			return a_coordinator.sceneRecordedSeen != 0 && a_frame - a_coordinator.sceneRecordedFrame <= kSceneIdleFrames;
+		}
+
+		/**
+		* @brief Whether every build a_scene's recordings are of is attached or staged. a_staged gets the staged ones, which attach with
+		* it. a_why says which is neither.
+		*/
+		bool SceneBuildsReady(const Scene& a_scene, std::vector<std::uint32_t>& a_staged, std::string& a_why)
+		{
+			a_staged.clear();
+			if (a_scene.builds.empty())
+				return true;
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host) {
+				a_why = "the graph host is gone";
+				return false;
+			}
+			for (const auto& [epoch, generation] : a_scene.builds) {
+				const std::uint64_t attached = host->BuildGeneration(epoch);
+				if (generation == attached)
+					continue;
+				const std::uint64_t staged = host->StagedGeneration(epoch);
+				if (generation != 0 && generation == staged) {
+					if (std::ranges::find(a_staged, epoch) == a_staged.end())
+						a_staged.push_back(epoch);
+					continue;
+				}
+				a_why = fmt::format("{} was recorded on build {}, and its attached build is {}, its staged one {}", EpochText(epoch), generation, attached, staged);
+				return false;
+			}
+			return true;
+		}
+
+		/**
+		* @brief Attaches the staged builds a_scene was recorded on. False when it cannot be adopted: it is dropped then. Render thread,
+		* inside the adoption point.
+		*/
+		bool AttachSceneBuilds(Coordinator& a_coordinator, Scene& a_scene)
+		{
+			std::vector<std::uint32_t> staged;
+			std::string why;
+			if (!SceneBuildsReady(a_scene, staged, why)) {
+				DropScene(a_coordinator, std::move(a_scene), SceneDrop::BuildReplaced, why);
+				return false;
+			}
+			if (staged.empty())
+				return true;
+			const Boundary::Caller caller("dclf scene");
+			// DCLF's builds can meet a host configuration change from its own conditions, so a refusal drops the scene and DCLF builds
+			// them again (plan step 10a). Nothing of the revision was adopted yet.
+			if (const auto refused = RenderGraph::Builds::AttachStaged(staged); !refused.empty()) {
+				DropScene(a_coordinator, std::move(a_scene), SceneDrop::Refused, refused, staged);
+				return false;
+			}
+			return true;
+		}
+
+		/** @brief Puts a_scene's fragments in a_draft. */
+		void SetScene(org::async::RevisionAssembler::Draft& a_draft, const Scene& a_scene)
+		{
+			auto buffersValue = std::make_shared<RevisionSceneBuffers>();
+			buffersValue->serial = a_scene.buffersSerial;
+			const auto buffers = org::async::RevisionFragment::MakeReady(std::move(buffersValue));
+			a_draft.Set(kRevisionSceneBuffers, buffers);
+			auto sceneValue = std::make_shared<RevisionScene>();
+			sceneValue->serial = a_scene.serial;
+			sceneValue->frameVersions = a_scene.frameVersions;
+			a_draft.Set(kRevisionScene, org::async::RevisionFragment::MakeReady(std::move(sceneValue), { { kRevisionSceneBuffers, buffers } }));
+		}
+
+		/** @brief Installs a scene the revision assembler selected. Render thread, inside the adoption point. */
+		void InstallScene(const Scene& a_scene)
+		{
+			const Boundary::Caller caller("dclf scene");
+			DCLF::InstallScene(a_scene.value);
+		}
+
+		/**
+		* @brief Adopts a scene that names no revision in preparation: alone, as a revision of the scene fragments only, when it names
+		* the adopted frame versions. Otherwise it is dropped. Render thread, inside the adoption point.
+		*/
+		bool AdoptSceneAlone(Coordinator& a_coordinator, std::optional<Scene>& a_scene)
+		{
+			if (!a_scene)
+				return false;
+			auto scene = std::move(*a_scene);
+			a_scene.reset();
+			if (scene.frameVersions != kAnySceneVersions && scene.frameVersions != a_coordinator.adoptedSceneVersions) {
+				const auto text = fmt::format("its recordings name the frame versions of revision {}, and the frame runs those of revision {}", scene.frameVersions,
+					a_coordinator.adoptedSceneVersions);
+				DropScene(a_coordinator, std::move(scene), SceneDrop::Stale, text);
+				return false;
+			}
+			if (!AttachSceneBuilds(a_coordinator, scene))
+				return false;
+			auto& assembler = *a_coordinator.assembler;
+			auto draft = assembler.Begin();
+			SetScene(draft, scene);
+			assembler.Seal(std::move(draft));
+			if (!assembler.Collect().failures.empty() || assembler.TrySelect() != org::async::RevisionAssembler::Selection::Selected)
+				FailRevision(fmt::format("DCLF's scene {} was complete but not selected", scene.serial));
+			InstallScene(scene);
+			const std::lock_guard lock(a_coordinator.statsMutex);
+			++a_coordinator.window.scenesAlone;
+			++a_coordinator.session.scenesAlone;
+			return true;
 		}
 
 		/**
@@ -450,6 +681,7 @@ namespace RenderGraph::Frame::Revision
 			++coordinator.extentSerial;
 			// A new event: drops asked again before it are not starvation.
 			coordinator.askedAgainSinceInput = 0;
+			coordinator.sceneMissesSinceInput = 0;
 			// A declared texture changes only its extent, so another shape class is a declaration error.
 			if (!a_twin.Preparable(a_extent))
 				FailRevision(fmt::format("{} has no version at {}: the extent changes its shape class (mips or slices)", a_twin.Name(), ExtentText(a_extent)));
@@ -629,6 +861,12 @@ namespace RenderGraph::Frame::Revision
 		{
 			auto revision = std::move(a_coordinator.preparing);
 			logger::info("[ORG] frame revision {}: superseded before adoption ({}); its inputs are prepared again", revision->serial, a_why);
+			// DCLF's scene recorded for it can run no other. DCLF records the next one against the adopted versions.
+			if (a_coordinator.heldScene) {
+				DropScene(a_coordinator, std::move(*a_coordinator.heldScene), SceneDrop::Superseded, "its frame revision was superseded");
+				a_coordinator.heldScene.reset();
+			}
+			a_coordinator.sceneMissesSinceInput = 0;
 			for (auto& need : revision->needs)
 				a_coordinator.carriedNeeds.push_back(std::move(need));
 			a_coordinator.plannedSerial = 0;
@@ -660,10 +898,14 @@ namespace RenderGraph::Frame::Revision
 				a_coordinator.retiring.pop_front();
 		}
 
-		/** @brief Adopts a ready revision whole. Render thread, inside the adoption point. */
-		void Adopt(Coordinator& a_coordinator, std::uint64_t a_frame)
+		/**
+		* @brief Adopts a ready revision whole, with a_scene, DCLF's scene recorded against it, when it has one. Its staged builds attached
+		* already. Render thread, inside the adoption point.
+		*/
+		void Adopt(Coordinator& a_coordinator, std::uint64_t a_frame, const Scene* a_scene)
 		{
 			auto revision = std::move(a_coordinator.preparing);
+			a_coordinator.sceneMissesSinceInput = 0;
 			auto& assembler = *a_coordinator.assembler;
 			const auto stagedEpochs = revision->recordings ? FrameAnchors::RevisionStagedEpochs(*revision->recordings) : std::vector<std::uint32_t>{};
 			// Sealed once complete, so it is selected in this Begin.
@@ -696,6 +938,9 @@ namespace RenderGraph::Frame::Revision
 			auto memberValue = std::make_shared<RevisionMemberRecordings>();
 			memberValue->recordings = revision->recordings;
 			draft.Set(kRevisionRecordings, org::async::RevisionFragment::MakeReady(std::move(memberValue), std::move(requirements)));
+			// Without a scene of its own the revision inherits the adopted one.
+			if (a_scene)
+				SetScene(draft, *a_scene);
 			assembler.Seal(std::move(draft));
 			const auto collected = assembler.Collect();
 			if (!collected.failures.empty())
@@ -756,6 +1001,11 @@ namespace RenderGraph::Frame::Revision
 			}
 			if (recorded->recordings)
 				FrameAnchors::InstallRevisionSchedules(*recorded->recordings, a_frame);
+			// DCLF's epochs take their recordings of the same versions in the same frame (plan step 10b).
+			if (a_scene)
+				InstallScene(*a_scene);
+			if (revision->dclfMembers)
+				a_coordinator.adoptedSceneVersions = revision->serial;
 			// After the staged attach, which a later build would refuse. Every graph is built here with the host's thread held, so
 			// every epoch takes the new pipelines in this Begin and no recording made before the swap runs after it.
 			if (const std::uint64_t shaderGeneration = Vars::AdoptedShaderGeneration(); shaderGeneration != shaderGenerationBefore) {
@@ -783,6 +1033,7 @@ namespace RenderGraph::Frame::Revision
 					stats->maxRecordings = (std::max)(stats->maxRecordings, revision->recordingCount);
 					stats->maxBuilds = (std::max)(stats->maxBuilds, static_cast<std::uint32_t>(stagedEpochs.size()));
 					stats->inputFrames.push_back(inputFrames);
+					stats->scenesWithRevision += a_scene ? 1 : 0;
 				}
 			}
 			if (++a_coordinator.adoptedLines <= 64 || a_coordinator.adoptedLines % 100 == 0) {
@@ -807,9 +1058,10 @@ namespace RenderGraph::Frame::Revision
 				logger::info(
 					"[ORG] frame revision {}: adopted at frame {} with every member stage, {} frames after its first input (prepared in {:.2f} ms "
 					"on the lane); twins [{}]; buffers [{}]; variables [{}]; inputs [{}]; staged builds {}; member stages [{}] with {} recordings; not "
-					"members [{}]",
+					"members [{}]; DCLF scene {}",
 					revision->serial, a_frame, inputFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, waits, stagedEpochs.size(),
-					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others);
+					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others,
+					a_scene ? fmt::format("{} recorded with it", a_scene->serial) : std::string(revision->dclfMembers ? "none (DCLF's epochs did not run)" : "kept"));
 			}
 			a_coordinator.adopted = std::move(revision);
 		}
@@ -889,7 +1141,7 @@ namespace RenderGraph::Frame::Revision
 			if (!revision.host) {
 				// A revision of variables alone has no recordings to make.
 				if (inputsReady)
-					Adopt(a_coordinator, a_frame);
+					Adopt(a_coordinator, a_frame, nullptr);
 				return;
 			}
 			// The zero fills and uploads run on the uploader's queue. Recordings wait for nothing, but the revision is adopted only once they are done.
@@ -905,6 +1157,8 @@ namespace RenderGraph::Frame::Revision
 						std::initializer_list<std::shared_ptr<const org::IResourceVersions>>{ textures, revision.buffers });
 				revision.recordings = FrameAnchors::MakeRevisionRecordings(revision.closure, revision.versionSet, revision.versionSet ? revision.versionSet->Serial() : 0,
 					revision.others);
+				// DCLF's epochs among the others record their scene against versionSet from the next build point (SceneFrameVersions).
+				NoteDclfMembers(revision);
 				if (!revision.needs.empty())
 					FrameAnchors::RequireBuilds(*revision.recordings, revision.needs);
 				const std::lock_guard lock(a_coordinator.statsMutex);
@@ -913,6 +1167,7 @@ namespace RenderGraph::Frame::Revision
 			} else if (const auto slots = ChangedSlots(revision, held); !slots.empty()) {
 				// Builds may change which graphs declare the slots, so the closure is taken again until adoption.
 				FrameAnchors::AddRevisionMembers(*revision.recordings, revision.host->EpochsDeclaring(slots), revision.others);
+				NoteDclfMembers(revision);
 			}
 			const auto progress = FrameAnchors::AdvanceRevisionRecordings(*revision.recordings, a_frame);
 			// A staged build found first is a new input: drops before it are not starvation.
@@ -935,9 +1190,33 @@ namespace RenderGraph::Frame::Revision
 			}
 			if (!progress.ready || !inputsReady)
 				return;
+			// With DCLF epochs in its closure, the revision takes DCLF's scene recorded against its versions, while DCLF's epochs run
+			// (plan 7.8: they ran in one of the last kSceneIdleFrames Begins). Until it comes, frames keep the adopted revision and
+			// scene. Its staged builds attach first: a refusal drops that scene, and the revision waits for the next one. A DCLF that
+			// does not draw posts no scene, so then the revision adopts alone and DCLF's next scene is recorded on it.
+			std::optional<Scene> scene;
+			if (revision.dclfMembers && (a_coordinator.heldScene || DclfDraws(a_coordinator, a_frame))) {
+				if (!a_coordinator.heldScene) {
+					// DCLF draws and keeps posting scenes that cannot serve this revision, with no new input: a schedule bug, not a wait.
+					if (a_coordinator.sceneMissesSinceInput > kRevisionStarvedAfter) {
+						Driver::NoteTapError(Driver::TapError::Starved, SegmentId::Count,
+							fmt::format("frame revision {} (inputs from frame {}) has not been adopted: DCLF's epochs draw, and {} of its scenes since the last "
+										"new input were recorded on other frame versions or dropped for their builds; none was recorded against revision {}",
+								revision.serial, revision.firstInput, a_coordinator.sceneMissesSinceInput, revision.serial));
+						a_coordinator.sceneMissesSinceInput = 0;
+					}
+					return;
+				}
+				scene = std::move(a_coordinator.heldScene);
+				a_coordinator.heldScene.reset();
+				if (!AttachSceneBuilds(a_coordinator, *scene)) {
+					++a_coordinator.sceneMissesSinceInput;
+					return;
+				}
+			}
 			revision.recordingCount = progress.recordings;
 			revision.buildCount = progress.builds;
-			Adopt(a_coordinator, a_frame);
+			Adopt(a_coordinator, a_frame, scene ? &*scene : nullptr);
 		}
 
 		std::string Percentiles(std::vector<std::uint64_t> a_values)
@@ -990,7 +1269,16 @@ namespace RenderGraph::Frame::Revision
 				coordinator.variablesFirstChange = frame;
 			// A new event: drops asked again before it are not starvation.
 			coordinator.askedAgainSinceInput = 0;
+			coordinator.sceneMissesSinceInput = 0;
 		}
+		// DCLF's newest scene (plan step 10b). One recorded against the revision in preparation is held for its adoption below. DCLF
+		// draws on the main thread only, so a loading screen's thread that owns rendering leaves its scenes to the main thread's Begin.
+		const bool mainThread = FrameAnchors::IsMainThread();
+		std::optional<Scene> scene;
+		if (mainThread)
+			scene = TakePostedScene(coordinator);
+		// Whether DCLF's epochs still run, so a revision with DCLF epochs knows whether to wait for its scene (plan 7.8).
+		NoteSceneRuns(coordinator, frame);
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
 		// A revision of builds alone needs no lane, so it is advanced in the Begin that starts it.
@@ -998,11 +1286,12 @@ namespace RenderGraph::Frame::Revision
 		StartPreparation(coordinator, frame);
 		if (idle && coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
-		// DCLF adopts its newest scene snapshot here in both modes, with or without a frame revision, after a pipeline swap the
-		// revision ran. A snapshot recorded on staged builds attaches them (plan step 10a). DCLF draws on the main thread only, so a
-		// loading screen's thread that owns rendering leaves it to the main thread's next Begin.
-		if (FrameAnchors::IsMainThread())
-			DCLF::AdoptSnapshotAtBegin();
+		if (mainThread) {
+			// A scene of the adopted frame versions is adopted alone, after any revision this Begin adopted. Then the shader-reload
+			// wait, after a pipeline swap that revision ran (plan step 10a).
+			AdoptSceneAlone(coordinator, scene);
+			DCLF::AfterSceneStep();
+		}
 		// After any adoption, so FirstFrame sees the versions this frame binds.
 		Declarations::NoteBegin(frame);
 	}
@@ -1041,6 +1330,49 @@ namespace RenderGraph::Frame::Revision
 		return it != coordinator.adoptedPayloads.end() ? it->second : nullptr;
 	}
 
+	SceneVersions SceneFrameVersions()
+	{
+		const auto& coordinator = GetCoordinator();
+		// The revision's pending versions, once its lane made them and its closure has DCLF epochs.
+		if (const auto& preparing = coordinator.preparing; preparing && preparing->dclfMembers && preparing->versionSet)
+			return { preparing->serial, preparing->versionSet };
+		return { coordinator.adoptedSceneVersions, nullptr };
+	}
+
+	void PublishScene(Scene a_scene)
+	{
+		auto& coordinator = GetCoordinator();
+		// A replaced scene is released here, on the poster's thread, outside the lock.
+		std::optional<Scene> replaced;
+		{
+			const std::lock_guard lock(coordinator.sceneMutex);
+			replaced = std::move(coordinator.postedScene);
+			coordinator.postedScene = std::move(a_scene);
+		}
+	}
+
+	bool AdoptScene()
+	{
+		auto& coordinator = GetCoordinator();
+		if (!coordinator.installed || !FrameAnchors::IsRenderOwner() || !FrameAnchors::IsMainThread())
+			return false;
+		auto scene = TakePostedScene(coordinator);
+		return AdoptSceneAlone(coordinator, scene);
+	}
+
+	std::uint64_t SupersedeForSceneWait(std::string_view a_why)
+	{
+		auto& coordinator = GetCoordinator();
+		if (!coordinator.installed || !FrameAnchors::IsRenderOwner() || !FrameAnchors::IsMainThread())
+			return 0;
+		// Only a revision whose closure has DCLF epochs holds DCLF's scenes. Its lane is done, since Advance marked it.
+		if (!coordinator.preparing || !coordinator.preparing->dclfMembers)
+			return 0;
+		const std::uint64_t serial = coordinator.preparing->serial;
+		Supersede(coordinator, a_why);
+		return serial;
+	}
+
 	void LogStats()
 	{
 		auto& coordinator = GetCoordinator();
@@ -1056,6 +1388,10 @@ namespace RenderGraph::Frame::Revision
 			w.prepared, w.adopted, w.superseded, w.maxMembers, w.maxRecordings, w.maxBuilds, w.builds, w.buffers, Percentiles(w.inputFrames), w.askedAgain,
 			s.prepared, s.adopted, s.superseded, s.maxMembers, s.maxRecordings, s.maxBuilds, s.builds, s.buffers, Percentiles(s.inputFrames),
 			s.askedAgain, w.variableRevisions, s.variableRevisions);
+		logger::info("[ORG] frame revision scenes: DCLF scenes adopted alone {}, with a revision {}; dropped as stale {}, on a replaced build {}, refused {}, "
+					 "superseded {}; session: alone {}, with a revision {}, dropped {}/{}/{}/{}",
+			w.scenesAlone, w.scenesWithRevision, w.scenesDropped[0], w.scenesDropped[1], w.scenesDropped[2], w.scenesDropped[3], s.scenesAlone,
+			s.scenesWithRevision, s.scenesDropped[0], s.scenesDropped[1], s.scenesDropped[2], s.scenesDropped[3]);
 		coordinator.window = {};
 		Vars::LogStats();
 	}
@@ -1071,6 +1407,10 @@ namespace RenderGraph::Frame::Revision
 	void PublishBuffer(const std::shared_ptr<org::VersionedBuffer>&, std::uint32_t, std::vector<std::byte>, std::shared_ptr<const void>) {}
 	void PublishTexture(const std::shared_ptr<org::VersionedTexture>&, std::shared_ptr<org::GloballyIndexedResource>, std::shared_ptr<const void>) {}
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer&) { return nullptr; }
+	SceneVersions SceneFrameVersions() { return {}; }
+	void PublishScene(Scene) {}
+	bool AdoptScene() { return false; }
+	std::uint64_t SupersedeForSceneWait(std::string_view) { return 0; }
 	void LogStats() {}
 }
 

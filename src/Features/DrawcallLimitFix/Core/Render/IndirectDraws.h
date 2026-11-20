@@ -10,6 +10,7 @@
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDrawStats.h"
+#include "RenderGraph/Frame/Revision.h"
 
 struct ID3D11Texture2D;
 
@@ -178,16 +179,29 @@ namespace DCLF
 		/** @brief Records the age of the oldest event an installed publication carried, for the snapshot report. */
 		void NoteEventAdoption(double a_ms, std::uint32_t a_frames);
 		/**
-		 * @brief Render thread, at Begin. Adopts the newest posted snapshot unless it is stale, otherwise keeps the previous one.
-		 * A snapshot recorded on staged builds attaches them with it. Returns its ScenePublication, or null before the first.
+		 * @brief Render thread, main thread, at Begin. The frame revision took a_scene, a snapshot the builder posted (plan step 10b),
+		 * whether it adopts it or not. Opens the builder's publication gate.
 		 */
-		std::shared_ptr<const void> AdoptSnapshot();
+		void SceneTaken(const std::shared_ptr<const void>& a_scene);
 		/**
-		 * @brief Render thread, at every render-owner Begin (Frame::Revision::AdoptLatest). Adopts the newest snapshot. Waits only
-		 * after a shader reload's pipeline swap rebuilt DCLF's graphs in this Begin, while DCLF draws: a named, counted wait
-		 * (plan step 10a), until recordings name their pipelines.
+		 * @brief Render thread, inside the adoption point: the frame revision adopts a_scene, alone or with the frame revision it was
+		 * recorded against, after its staged builds attached. The scene fragment's install.
 		 */
-		void AdoptAtBegin();
+		void InstallScene(const std::shared_ptr<const void>& a_scene);
+		/** @brief Render thread. The frame revision did not adopt a_scene. It is released on the builder, which makes a new one. */
+		void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
+			std::span<const std::uint32_t> a_epochs);
+		/**
+		 * @brief Any thread. The frames whose coverage ran at least one DCLF epoch, in the session. While it moves, a frame revision with
+		 * DCLF epochs needs a scene recorded for it. A failed graph's frames are not counted.
+		 */
+		std::uint64_t SceneRecordedFrames() const;
+		/**
+		 * @brief Render thread, after the frame revision's scene step at every main-thread Begin. Waits only after a shader reload's
+		 * pipeline swap rebuilt DCLF's graphs, while DCLF draws: a named, counted wait (plan step 10a), until recordings name their
+		 * pipelines.
+		 */
+		void AfterSceneStep();
 		/** @brief Render thread. The adopted snapshot's ScenePublication, or null before the first. */
 		std::shared_ptr<const void> AdoptedPublication() const;
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */

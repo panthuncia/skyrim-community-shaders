@@ -4,6 +4,8 @@
 # texture, which may only switch in at a frame boundary. The upscale switches also change the dynamic-resolution ratios that
 # ImageSpace's world and chain clients follow (frame revision plan 6.7), so those register again with the revision.
 # Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
+# DCLF's epochs record against each new version and switch in with it (frame revision plan, step 10b): no declared view
+# mismatch, and no DCLF recording of a version the frame does not read.
 extends = ["base"]
 
 [run]
@@ -92,3 +94,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["fog", "grid", "fsr", "taa"]
+no_log = ["frame tap error", "a frame revision failed", "declared view mismatch", "binds a version the frame does not read"]

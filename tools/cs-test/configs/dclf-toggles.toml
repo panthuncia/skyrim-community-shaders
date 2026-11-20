@@ -88,4 +88,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["before", "cull-frustum", "cull-off", "cull-occlusion", "pipeline-cpu", "pipeline-gpu"]
 no_log = ["frame tap error", "a frame revision failed", "graph failed to prepare", "for a snapshot current for the graph as built",
-	"staged builds were refused at its adoption"]
+	"staged builds were refused at its adoption", "binds a version the frame does not read"]

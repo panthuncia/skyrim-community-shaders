@@ -37,7 +37,8 @@ namespace FrameAnchors
 
 	/**
 	* @brief Render owner. A revision whose member stages are the CS stages among a_epochs, recorded against a_versions (a_serial is
-	* its serial, for the cache). The other epochs are added to a_others: they are not revision members (DCLF's until step 10b).
+	* its serial, for the cache). The other epochs are added to a_others. DCLF's among them record their scene against a_versions and
+	* are adopted with the revision as its scene fragment (Frame::Revision, plan step 10b).
 	*/
 	std::shared_ptr<RevisionRecordings> MakeRevisionRecordings(std::span<const std::uint32_t> a_epochs, std::shared_ptr<const org::IResourceVersions> a_versions,
 		std::uint64_t a_serial, std::vector<std::uint32_t>& a_others);

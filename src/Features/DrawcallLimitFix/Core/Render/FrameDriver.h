@@ -4,10 +4,14 @@
 // The feature's hooks call it. It reads the scene through Scene::FrameView and drives IndirectDraws.
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
+#include "RenderGraph/Frame/Revision.h"
 
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <span>
+#include <string_view>
 
 namespace RE
 {
@@ -24,10 +28,18 @@ namespace DCLF
 	void BuildPointAtFrameStart(std::uint64_t a_frame);
 
 	/**
-	 * @brief Every render-owner Begin, from Frame::Revision::AdoptLatest in both modes. Adopts DCLF's newest scene snapshot,
-	 * with the staged builds it was recorded on (plan step 10a). BeginFrame hands its publication over.
+	 * @brief DCLF's side of its scene fragment in the frame revision (plan step 10b), called from Frame::Revision::AdoptLatest at
+	 * every main-thread render-owner Begin, in both modes. The frame revision takes DCLF's newest snapshot, adopts it alone or with
+	 * the revision it was recorded against, and BeginFrame hands its publication over.
 	 */
-	void AdoptSnapshotAtBegin();
+	void SceneTaken(const std::shared_ptr<const void>& a_scene);
+	void InstallScene(const std::shared_ptr<const void>& a_scene);
+	void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::SceneDrop a_why, std::string_view a_text,
+		std::span<const std::uint32_t> a_epochs);
+	/** @brief The frames whose coverage ran a DCLF epoch, in the session. The frame revision waits for a scene only while it moves. */
+	std::uint64_t SceneRecordedFrames();
+	/** @brief After the scene step: the shader-reload wait (plan step 10a). */
+	void AfterSceneStep();
 
 	class FrameDriver
 	{

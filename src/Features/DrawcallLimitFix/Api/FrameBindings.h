@@ -40,6 +40,10 @@ namespace DCLF::Api
 	 *   Used when the texture is only DCLF's to name while the feature binds it itself.
 	 * - graphResources: ids a producer ported to ORG publishes the texture under. See dclf-architecture.md, "Frame graph textures".
 	 *   A commit reads the graph resource when the resolved view is that id's export, and imports the view otherwise.
+	 * - facesGraphResources: per-epoch views. Ids the reflection faces' epochs read at this register in place of the main view's
+	 *   texture, such as a reflection medium. Bound: the faces' graphs declare them and the faces read the first one published by
+	 *   id, with no view callback, so the faces' view changes only with a frame revision. Until one is on the graph the faces read
+	 *   the null texture. Empty: the faces read what the main view reads.
 	 */
 	struct FrameTexture
 	{
@@ -48,6 +52,7 @@ namespace DCLF::Api
 		void* (*view)() = nullptr;
 		bool capturedWhenNull = false;
 		std::array<std::string_view, kFrameTextureGraphIds> graphResources{};
+		std::array<std::string_view, kFrameTextureGraphIds> facesGraphResources{};
 	};
 
 	/**

@@ -85,15 +85,23 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		/** @brief Every frame texture's graph ids once each. With a_withView, only textures that have a view. */
-		std::vector<std::string_view> GraphIdsOf(bool a_withView)
+		/**
+		 * @brief Every frame texture's graph ids once each, for the colour passes. With a_faces, the reflection faces' ids: a texture's
+		 * own faces ids when it has them (per-epoch views), else its graph ids if it has a view.
+		 */
+		std::vector<std::string_view> GraphIdsOf(bool a_faces)
 		{
 			std::vector<std::string_view> ids;
+			const auto add = [&](const auto& a_ids) {
+				for (const auto id : a_ids)
+					if (!id.empty() && std::ranges::find(ids, id) == ids.end())
+						ids.push_back(id);
+			};
 			for (const auto& texture : RegisteredFrameTextures())
-				if (!a_withView || texture.view)
-					for (const auto id : texture.graphResources)
-						if (!id.empty() && std::ranges::find(ids, id) == ids.end())
-							ids.push_back(id);
+				if (a_faces && texture.FacesOwnIds())
+					add(texture.facesGraphResources);
+				else if (!a_faces || texture.view)
+					add(texture.graphResources);
 			return ids;
 		}
 
@@ -137,9 +145,11 @@ namespace DCLF::Extensions
 	{
 		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
 		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
-		// The index of the view just declared, which the commit latches.
+		// The index of the view just declared, which the commit latches. A versioned slot's index follows its versions, which change
+		// only with a frame revision that records its readers against the new one (plan step 10b), so the build's index is no
+		// reference for it. ORG checks those readers' version currency instead.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
-		if (!PublishedResources::ShaderResourceIndex(a_id, entry.latched))
+		if (PublishedResources::IsVersioned(a_id) || !PublishedResources::ShaderResourceIndex(a_id, entry.latched))
 			entry.latched = UINT32_MAX;
 		if (!a_out.entries)
 			a_out.entries = std::make_shared<std::vector<DeclaredReads::Entry>>();
@@ -196,6 +206,39 @@ namespace DCLF::Extensions
 			if (std::ranges::find(*next, id) == next->end())
 				next->push_back(id);
 		s_declared.store(std::move(next), std::memory_order_release);
+	}
+
+	bool DeclaredTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::span<const std::string_view> a_ids,
+		std::uint32_t& a_index)
+	{
+		// Only an id a graph build declared, so the graph orders the read after its writes.
+		const auto declared = s_declared.load(std::memory_order_acquire);
+		std::string_view read;
+		for (const auto id : a_ids) {
+			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
+				continue;
+			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+			if (PublishedResources::ShaderResourceIndex(id, a_index)) {
+				read = id;
+				break;
+			}
+		}
+		// Log each change once per reader and register. Commits run only on the render thread.
+		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
+		static std::array<std::array<std::string_view, kTextureRegisters>, kReaders> s_logged{};
+		static std::array<std::array<bool, kTextureRegisters>, kReaders> s_seen{};
+		const auto reader = static_cast<std::size_t>(a_reader);
+		const auto slot = a_register < kTextureRegisters ? a_register : 0;
+		if (!s_seen[reader][slot] || s_logged[reader][slot] != read) {
+			s_seen[reader][slot] = true;
+			s_logged[reader][slot] = read;
+			const auto who = GraphTextureWho(a_reader, a_register, a_name);
+			if (read.empty())
+				logger::info("[DCLF] {} reads the null texture until its own graph resource is declared", who);
+			else
+				logger::info("[DCLF] {} reads its own graph resource '{}' (descriptor {})", who, read, a_index);
+		}
+		return !read.empty();
 	}
 
 	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,

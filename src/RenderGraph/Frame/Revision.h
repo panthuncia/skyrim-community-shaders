@@ -6,11 +6,13 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace org
 {
 	class GloballyIndexedResource;
+	struct IResourceVersions;
 	class VersionedBuffer;
 	class VersionedTexture;
 }
@@ -30,6 +32,8 @@ namespace org::services
 * - CS-owned versioned buffers' new contents (PublishBuffer): uploaded from the lane, ready once the upload completes;
 * - textures a caller made as new versions of a versioned texture (PublishTexture), such as ImGui's atlas pages;
 * - staged builds of CS stages: every frame slot is recorded on the staged build;
+* - DCLF's scene snapshots (PublishScene): a scene recorded against the revision in preparation is adopted with it, and one
+*   recorded against the adopted versions is adopted alone (plan step 10b);
 * - the frame-wide variables (Frame/Variables.h): every revision carries the newest snapshot it started with, and adoption
 *   makes it the frame's. A revision with only variable changes needs no lane work and is adopted in the Begin that starts it,
 *   unless a variable it changed has an input producer (RegisterInputProducer). Then it is adopted once those inputs are ready.
@@ -101,6 +105,65 @@ namespace RenderGraph::Frame::Revision
 
 	/** @brief Any thread. The payload of a_buffer's version adopted last. Null until a PublishBuffer of it was adopted. */
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer& a_buffer);
+
+	/**
+	* @brief The frame's texture and buffer versions DCLF's scene recordings name (plan step 10b). While a revision whose closure has
+	* DCLF epochs is in preparation, they are its pending versions and serial is that revision's. Otherwise versions is null (the
+	* adopted ones) and serial is the last adopted revision that had DCLF epochs in its closure, 0 before the first.
+	*/
+	struct SceneVersions
+	{
+		std::uint64_t serial = 0;
+		std::shared_ptr<const org::IResourceVersions> versions;
+	};
+
+	/** @brief A scene's SceneVersions serial when it has no recordings, so any frame revision can run it. */
+	inline constexpr std::uint64_t kAnySceneVersions = UINT64_MAX;
+
+	/** @brief Render thread. The versions DCLF's next scene recordings name. */
+	SceneVersions SceneFrameVersions();
+
+	/**
+	* @brief DCLF's scene snapshot as a fragment of the frame revision (kScene, plan step 10b). Its builder posts one per scene revision.
+	* A scene recorded against a revision in preparation is adopted with that revision. One recorded against the adopted versions is
+	* adopted alone, at the first Begin that takes it. Any other is dropped, and its builder makes a new one.
+	*/
+	struct Scene
+	{
+		std::shared_ptr<const void> value;  // DCLF's snapshot. DCLF owns it: the fragments name it, and a drop hands it back
+		std::uint64_t serial = 0;           // for the logs
+		std::uint64_t buffersSerial = 0;    // its buffer set's serial (DCLF's NamedVersions), 0 without one
+		std::uint64_t frameVersions = kAnySceneVersions;  // the SceneVersions serial its recordings named
+		// The build each DCLF epoch's recordings are of: (epoch, build generation). Each must be the attached or the staged one
+		// at its adoption. Staged ones attach with it.
+		std::vector<std::pair<std::uint32_t, std::uint64_t>> builds;
+	};
+
+	/** @brief Why a posted scene was not adopted. */
+	enum class SceneDrop
+	{
+		Stale,          // recorded against other frame versions
+		BuildReplaced,  // an epoch's build it was recorded on is neither attached nor staged any more
+		Refused,        // ORG refused its staged builds at the adoption
+		Superseded,     // a newer scene for the same revision, or its revision was superseded
+	};
+
+	/** @brief Any thread (DCLF's snapshot builder). a_scene replaces any scene posted and not taken yet. Latest wins. */
+	void PublishScene(Scene a_scene);
+
+	/**
+	* @brief Render thread, inside the adoption point. Takes a posted scene and adopts it if it can stand alone. For DCLF's
+	* shader-reload wait, which needs a scene in the Begin it waits in. True when one was adopted.
+	*/
+	bool AdoptScene();
+
+	/**
+	* @brief Render thread, main thread, inside the adoption point. For DCLF's shader-reload wait: supersedes a revision in preparation
+	* whose closure has DCLF epochs. Such a revision holds DCLF's scenes until it adopts at a later Begin, so the wait could get none.
+	* Its inputs are prepared again from the next Begin, on the rebuilt graphs, and DCLF's next scene names the adopted versions.
+	* Returns the superseded revision's serial, 0 when there was none.
+	*/
+	std::uint64_t SupersedeForSceneWait(std::string_view a_why);
 
 	/** @brief Logs the "[ORG] frame revision:" census line for the window and resets it. */
 	void LogStats();

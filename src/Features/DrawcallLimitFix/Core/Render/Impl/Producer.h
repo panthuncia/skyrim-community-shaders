@@ -59,6 +59,9 @@ namespace DCLF
 			std::shared_ptr<const org::async::RevisionFragment> versionsFragment;
 			std::shared_ptr<const NamedVersions> versionsFragmentSet;  // the sealed set versionsFragment was made for
 			std::uint64_t graphBuilds = ~0ull;  // the build versionsFragment was made for (RevisionInputs::buildGeneration)
+			// The frame versions versionsFragment was made for (RevisionInputs::frameVersionsSerial). New ones make every epoch record
+			// again against them (plan step 10b).
+			std::uint64_t frameVersions = ~0ull;
 			std::uint64_t growthWaits = 0;  // makes whose set was pending on a growth, since the last report
 			std::uint64_t buildWaits = 0;  // makes that sealed nothing while waiting for a graph build
 			std::uint64_t seals = 0, versionSets = 0, sealFailures = 0;
