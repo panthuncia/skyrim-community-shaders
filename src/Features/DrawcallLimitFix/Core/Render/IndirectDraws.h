@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDrawStats.h"
@@ -177,18 +178,25 @@ namespace DCLF
 		/** @brief Records the age of the oldest event an installed publication carried, for the snapshot report. */
 		void NoteEventAdoption(double a_ms, std::uint32_t a_frames);
 		/**
-		 * @brief Render thread, frame start. Adopts the newest posted snapshot unless it is stale, otherwise keeps the previous one.
-		 * Returns its ScenePublication, or null before the first.
+		 * @brief Render thread, at Begin. Adopts the newest posted snapshot unless it is stale, otherwise keeps the previous one.
+		 * A snapshot recorded on staged builds attaches them with it. Returns its ScenePublication, or null before the first.
 		 */
 		std::shared_ptr<const void> AdoptSnapshot();
 		/**
-		 * @brief Adopts a snapshot and, with a_wait, blocks until the builder delivers one the frame can draw from.
-		 * This is a one-off stall after a graph build or resource change, so DCLF never hands a frame back to the engine.
-		 * Nothing the builder needs may be posted later in the frame. Five seconds without a snapshot is a fatal defect.
+		 * @brief Render thread, at every render-owner Begin (Frame::Revision::AdoptLatest). Adopts the newest snapshot. Waits only
+		 * after a shader reload's pipeline swap rebuilt DCLF's graphs in this Begin, while DCLF draws: a named, counted wait
+		 * (plan step 10a), until recordings name their pipelines.
 		 */
-		std::shared_ptr<const void> AdoptCurrentSnapshot(bool a_wait);
+		void AdoptAtBegin();
+		/** @brief Render thread. The adopted snapshot's ScenePublication, or null before the first. */
+		std::shared_ptr<const void> AdoptedPublication() const;
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */
 		void BindAdopted();
+		/**
+		 * @brief Render thread. What DCLF's graphs and snapshots are built for changed after DCLF first drew (plan step 10a-0).
+		 * No revision carries such a change, so it is a tap error (TapError::DclfInputChanged), fatal in development builds.
+		 */
+		static void NoteInputChanged(std::string_view a_what);
 		/** @brief Render thread, frame start. Builds the frame's payload from the installed snapshot. False without one. */
 		bool MakeFramePayload();
 		/** @brief Render thread, frame start. Posts the resources and fits the next builds need, latest wins. */
@@ -368,7 +376,7 @@ namespace DCLF
 		void ResetShadowStats() { shadowStats = {}; }
 
 		const Stats& GetStats() const { return stats; }
-		/** @brief Render thread. How long this frame's start waited for a current snapshot, in microseconds. */
+		/** @brief Render thread. How long this frame's Begin waited after a pipeline swap, in microseconds. */
 		std::uint32_t LastAdoptWaitUs() const { return lastAdoptWaitUs; }
 
 		~IndirectDraws();

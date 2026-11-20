@@ -286,6 +286,21 @@ namespace DCLF
 		ResolveShadowLookups(tables, a_catalog, *inputs, a_state, a_lookups);
 	}
 
+	namespace
+	{
+		/** @brief The engine depth target's view format, unknown before the engine made it. */
+		DXGI_FORMAT EngineDepthViewFormat(std::uint32_t a_target)
+		{
+			auto* renderer = globals::game::renderer;
+			auto* view = renderer ? renderer->GetDepthStencilData().depthStencils[a_target].views[0] : nullptr;
+			if (!view)
+				return DXGI_FORMAT_UNKNOWN;
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+			view->GetDesc(&desc);
+			return desc.Format;
+		}
+	}
+
 	void IndirectDraws::PostLookupInputs()
 	{
 		if (!impl || failed)
@@ -293,17 +308,24 @@ namespace DCLF
 		// Publish the import context and fixed bindings before the scene work runs.
 		GpuTextures::Get().PublishImportContext();
 		UpdateShadowCapability();
-		// The pipeline lane's shadow inputs. The format is the shadow views' depth format, or an occlusion map's while no shadow view has drawn.
+		// The pipeline lane's shadow inputs. The format is the engine shadow map's depth view format, or the occlusion map's
+		// without one. The engine makes its targets once (step 9a), so it is set before DCLF draws and never changes (plan step 10a-0).
 		auto& engine = *impl->shadowEngine;
+		if (engine.pipelineShadowFormat == DXGI_FORMAT_UNKNOWN) {
+			using T = RE::RENDER_TARGETS_DEPTHSTENCIL;
+			DXGI_FORMAT format = EngineDepthViewFormat(T::kSHADOWMAPS_ESRAM);
+			if (format == DXGI_FORMAT_UNKNOWN)
+				format = EngineDepthViewFormat(T::kPRECIPITATION_OCCLUSION_MAP);
+			if (format != DXGI_FORMAT_UNKNOWN && !Scene::FrameView::Get().NotDrawingYet())
+				NoteInputChanged(fmt::format("the engine's shadow map format became known ({}) only after DCLF drew", static_cast<int>(format)));
+			engine.pipelineShadowFormat = format;
+		}
+		if (globals::game::utilityShader)
+			DrawPipelines::Get().SetShadowInputs(engine.pipelineShadowFormat, *globals::game::utilityShader);
 		auto& views = engine.lastShadow;
 		ShadowLookupInputs inputs;
 		inputs.enabled = SceneToggles().shadows && views.known && globals::game::utilityShader;
 		if (inputs.enabled) {
-			DXGI_FORMAT shadowFormat = views.dsvFormat;
-			for (const DXGI_FORMAT occlusionFormat : engine.OcclusionFormats())
-				if (shadowFormat == DXGI_FORMAT_UNKNOWN)
-					shadowFormat = occlusionFormat;
-			DrawPipelines::Get().SetShadowInputs(shadowFormat, *globals::game::utilityShader);
 			inputs.modes = views.modes;
 			inputs.rasterStates = views.rasterStates;
 			inputs.dsvFormat = views.dsvFormat;

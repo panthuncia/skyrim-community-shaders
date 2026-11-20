@@ -1,9 +1,10 @@
 // The snapshot builder. It runs one pass at a time on DCLF's preparation pool. For each publication it builds the draws ahead,
-// makes and seals the revision, and posts a snapshot. The render thread adopts the newest snapshot. Once DCLF draws, it waits
-// for a current one.
+// makes and seals the revision, and posts a snapshot. The render thread adopts the newest snapshot at each Begin, with the
+// staged builds it was recorded on. It waits only after a shader reload's pipeline swap (plan step 10a).
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
+#include "RenderGraph/BuildManager.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -15,6 +16,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix.h"
 
+#include <algorithm>
 #include <thread>
 
 #include <Tracy/TracyC.h>
@@ -687,10 +689,12 @@ namespace DCLF
 			}
 		}
 		snapshot->buildGeneration = inputs.buildGeneration;
+		snapshot->epochBuilds = inputs.epochBuilds;
+		snapshot->build = inputs.build;
 		snapshot->mainGeneration = inputs.mainGeneration;
 		snapshot->buildSerial = inputs.build ? inputs.build->serial : 0;
-		// Use the catalog's own targets generation. A snapshot made before the new catalog exists stays stale, so the frame waits
-		// rather than adopting one that cannot draw. ~0 is stale for every generation.
+		// Use the catalog's own targets generation. A snapshot made before the new catalog exists stays stale, so the frame keeps
+		// the one it has rather than adopting one that cannot draw. ~0 is stale for every generation.
 		const auto* catalog = snapshot->publication ? snapshot->publication->catalog.get() : nullptr;
 		snapshot->targetsGeneration = catalog && catalog->setVersion && catalog->targetsGeneration == inputs.targetsGeneration ? inputs.targetsGeneration : ~0u;
 		snapshot->shadowFormat = inputs.shadowFormat;
@@ -736,46 +740,71 @@ namespace DCLF
 		snapshotTimings.Push(b.timing);
 	}
 
+	std::shared_ptr<const void> IndirectDraws::AdoptedPublication() const
+	{
+		return impl && impl->adoptedSnapshot ? impl->adoptedSnapshot->publication : nullptr;
+	}
+
 	std::shared_ptr<const void> IndirectDraws::AdoptSnapshot()
 	{
 		if (!impl)
 			return nullptr;
 		auto& s = *impl;
-		const auto adoptedPublication = [&s]() -> std::shared_ptr<const void> { return s.adoptedSnapshot ? s.adoptedSnapshot->publication : nullptr; };
 		auto taken = s.snapshotSlot.Take();
 		DCLF_ZONE("CS.DCLF.Snapshot.Adopt");
 		ZoneValue(taken ? 1 : 0);
 		if (!taken) {
 			++s.snapshotFramesKept;
-			return adoptedPublication();
+			return AdoptedPublication();
 		}
+		// At Begin the frame view still counts the last frame. This adoption is for the next one (plan Q7).
+		const std::uint32_t frame = Scene::FrameView::Get().GetFrame() + 1;
 		// The slot is free, so the builder may publish the next payload after this frame's scene pass.
 		// A failed feature's posts have no serial.
 		if (taken->serial) {
-			s.snapshotTakenFrame.store(Scene::FrameView::Get().GetFrame(), std::memory_order_release);
+			s.snapshotTakenFrame.store(frame, std::memory_order_release);
 			s.snapshotTaken.store(taken->serial, std::memory_order_release);
 		}
 		using Stale = Impl::SnapshotStale;
-		if (const std::size_t stale = s.StaleKindOf(*taken); stale != Stale::kStaleKinds) {
+		std::vector<std::uint32_t> staged;
+		std::size_t stale = s.StaleKindOf(*taken, &staged);
+		// The staged builds it was recorded on attach with it, so the frame runs the graphs its recordings are of.
+		if (stale == Stale::kStaleKinds && !staged.empty()) {
+			const RenderGraph::Frame::Boundary::Caller boundaryCaller("dclf");
+			if (const auto refused = RenderGraph::Builds::AttachStaged(staged); !refused.empty()) {
+				// The host's configuration changed since the builds started. Build them again, and a snapshot is made on the new ones.
+				++s.stagedRefusals;
+				if (++s.stagedRefusalsLogged <= 8 || s.stagedRefusalsLogged % 100 == 0)
+					logger::warn("[DCLF] snapshot {}'s staged builds were refused at its adoption ({}); they are built again ({} refusals)", taken->serial, refused,
+						s.stagedRefusalsLogged);
+				for (const auto epoch : staged)
+					RenderGraph::Builds::Request(epoch, "Drawcall Limit Fix: its staged build was refused at a snapshot's adoption");
+				stale = Stale::kStaleBuild;
+			} else {
+				++s.stagedAdoptions;
+			}
+		}
+		if (stale != Stale::kStaleKinds) {
 			// Stale, so not adopted. Ask the builder for a new one.
 			++s.snapshotsStale[stale];
 			s.snapshotStale = true;
 			s.retiredSnapshots.Push(std::shared_ptr<const Impl::SceneSnapshot>(std::move(taken)));
 			s.snapshotInputsMoved.store(true, std::memory_order_release);
 			WakeSnapshotBuilder();
-			return adoptedPublication();
+			return AdoptedPublication();
 		}
 		std::shared_ptr<const Impl::SceneSnapshot> snapshot(std::move(taken));
+		// The frame takes the conditions and build state of the graphs it now runs.
+		if (snapshot->build && snapshot->build->serial > Draws::AttachedBuildSerial())
+			Draws::PublishAttachedBuildState(snapshot->build);
 		TracyCZoneN(adoptVersions, "CS.DCLF.Snapshot.AdoptVersions", true);
-		// DCLF's own adoption point is an allowed exception until it moves into the frame's (step 10a).
 		const RenderGraph::Frame::Boundary::Caller boundaryCaller("dclf");
-		const RenderGraph::Frame::Boundary::Allow boundaryAllow(RenderGraph::Frame::Boundary::Exception::Dclf);
 		const auto versions = snapshot->revision ? snapshot->revision->Get<NamedVersions>(Impl::SceneRevisions::kVersionsSlot) : nullptr;
 		if (versions && versions->AdoptAll()) {
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				host->NoteNewVersions();
 			if (s.growthAdoptedFrame == ~0u)
-				s.growthAdoptedFrame = Scene::FrameView::Get().GetFrame();
+				s.growthAdoptedFrame = frame;
 		}
 		TracyCZoneEnd(adoptVersions);
 		s.revisions.active = snapshot->revision;
@@ -793,14 +822,10 @@ namespace DCLF
 		}
 		s.snapshotStale = false;
 		++s.snapshotsAdopted;
-		if (Diagnostics::Armed<Diagnostics::SnapshotAdopted>()) {
-			const std::uint32_t frameNow = Scene::FrameView::Get().GetFrame();
-			Diagnostics::Notify(Diagnostics::SnapshotAdopted{ frameNow, snapshot->serial, versions.get(), snapshot->payload.get(), s.growthAdoptedFrame == frameNow });
-		}
-		if (const auto& publication = snapshot->publication) {
-			const std::uint32_t frameNow = Scene::FrameView::Get().GetFrame();
-			s.adoptionLatency.push_back(frameNow >= publication->commitFrame ? frameNow - publication->commitFrame : 0u);
-		}
+		if (Diagnostics::Armed<Diagnostics::SnapshotAdopted>())
+			Diagnostics::Notify(Diagnostics::SnapshotAdopted{ frame, snapshot->serial, versions.get(), snapshot->payload.get(), s.growthAdoptedFrame == frame });
+		if (const auto& publication = snapshot->publication)
+			s.adoptionLatency.push_back(frame >= publication->commitFrame ? frame - publication->commitFrame : 0u);
 		// Hand the replaced snapshot back so it is released on the builder, not here.
 		{
 			DCLF_ZONE("CS.DCLF.Snapshot.RetireReplaced");
@@ -811,51 +836,87 @@ namespace DCLF
 		return snapshot->publication;
 	}
 
-	std::size_t IndirectDraws::Impl::StaleKindOf(const SceneSnapshot& a_snapshot) const
+	std::size_t IndirectDraws::Impl::StaleKindOf(const SceneSnapshot& a_snapshot, std::vector<std::uint32_t>* a_staged) const
 	{
 		// Checks only what a snapshot cannot know ahead, by generation. Toggles are not checked, because adopting a snapshot
 		// adopts its toggles. A snapshot without a revision is always adopted for its tables.
 		if (!a_snapshot.revision)
 			return kStaleKinds;
-		auto* host = RenderGraphRuntime::Get().Host();
+		const auto stale = [a_staged](std::size_t a_kind) {
+			if (a_staged)
+				a_staged->clear();
+			return a_kind;
+		};
+		// Each DCLF epoch's recordings are of its attached build, or of its staged one, which attaches with the snapshot.
+		if (auto* host = RenderGraphRuntime::Get().Host())
+			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment) {
+				const auto kind = static_cast<RenderGraphRuntime::Segment>(segment);
+				if (!RenderGraphRuntime::IsDclfSegment(kind))
+					continue;
+				const auto epoch = RenderGraphRuntime::EpochOf(kind);
+				const std::uint64_t recorded = a_snapshot.epochBuilds[segment];
+				if (recorded == host->BuildGeneration(epoch))
+					continue;
+				if (recorded == 0 || recorded != host->StagedGeneration(epoch))
+					return stale(kStaleBuild);
+				if (a_staged && std::ranges::find(*a_staged, epoch) == a_staged->end())
+					a_staged->push_back(epoch);
+			}
+		// Its graphs are still building.
+		if (a_snapshot.buildSerial > BuiltBuildSerial())
+			return stale(kStaleBuild);
+		// The three below change only before DCLF draws (plan step 10a-0).
 		const auto& drawPipelines = DrawPipelines::Get();
-		if (host && a_snapshot.buildGeneration != GraphBuildGeneration(*host))
-			return kStaleBuild;
-		// Its graphs are still building or waiting to attach at a frame's end.
-		if (a_snapshot.buildSerial > AttachedBuildSerial())
-			return kStaleBuild;
 		if (a_snapshot.targetsGeneration != drawPipelines.Generation())
-			return kStaleTargets;
+			return stale(kStaleTargets);
 		if (a_snapshot.shadowFormat != drawPipelines.ShadowFormat())
-			return kStaleShadowFormat;
+			return stale(kStaleShadowFormat);
 		if (a_snapshot.mainGeneration != postedInputs.mainGeneration)
-			return kStaleMain;
+			return stale(kStaleMain);
 		return kStaleKinds;
 	}
 
 	bool IndirectDraws::Impl::AdoptedCurrent() const
 	{
-		// Recheck the generations, because a snapshot adopted before this frame's build point is stale for a build made there.
+		// Its staged builds attached with it, so each epoch's recordings must be of the attached build now.
 		const auto& adopted = adoptedSnapshot;
-		return adopted && adopted->revision && adopted->drawsComplete && StaleKindOf(*adopted) == kStaleKinds && installedPayload;
+		std::vector<std::uint32_t> staged;
+		return adopted && adopted->revision && adopted->drawsComplete && StaleKindOf(*adopted, &staged) == kStaleKinds && staged.empty() && installedPayload;
 	}
 
-	std::shared_ptr<const void> IndirectDraws::AdoptCurrentSnapshot(bool a_wait)
+	void IndirectDraws::AdoptAtBegin()
 	{
 		lastAdoptWaitUs = 0;
-		const std::uint64_t postedBefore = impl ? impl->snapshotsPosted.load(std::memory_order_acquire) : 0;
-		auto publication = AdoptSnapshot();
-		auto* host = RenderGraphRuntime::Get().Host();
-		// The first frame after a frame-end attach needs the new graphs' recordings. Logged to show the worst-case wait.
-		const bool afterAttach = impl && impl->graphsAttachedFrame != ~0u && Scene::FrameView::Get().GetFrame() == impl->graphsAttachedFrame + 1;
-		if (!a_wait || !impl || failed || !host || impl->AdoptedCurrent()) {
-			if (afterAttach && impl->AdoptedCurrent() && (++impl->graphsAttachWaitLogs <= 50 || impl->graphsAttachWaitLogs % 100 == 0))
-				logger::info("[DCLF] frame {} adopted a snapshot of the graphs attached at the last frame's end without waiting",
-					Scene::FrameView::Get().GetFrame());
-			return publication;
-		}
-		DCLF_ZONE("CS.DCLF.WaitCurrentSnapshot");
+		if (!impl)
+			return;
 		auto& s = *impl;
+		const std::uint64_t postedBefore = s.snapshotsPosted.load(std::memory_order_acquire);
+		(void)AdoptSnapshot();
+		// A shader reload's pipeline swap rebuilt every graph in a Begin, so the adopted snapshot's recordings are of the old builds.
+		// Until recordings name their pipelines, this is the one case a Begin waits (director, item 57). A swap made while DCLF does
+		// not draw is waited for at the first Begin that draws, unless a current snapshot came first.
+		const std::uint64_t swaps = RenderGraphRuntime::Get().PipelineSwaps();
+		if (swaps != std::exchange(s.pipelineSwapsSeen, swaps))
+			s.pipelineSwapPending = true;
+		if (!s.pipelineSwapPending)
+			return;
+		if (failed || !RenderGraphRuntime::Get().Host() || s.AdoptedCurrent()) {
+			s.pipelineSwapPending = false;
+			return;
+		}
+		if (Scene::FrameView::Get().NotDrawingYet() || Scene::FrameView::IsLoadingScreenUp())
+			return;
+		s.pipelineSwapPending = false;
+		const double ms = s.WaitAfterPipelineSwap(postedBefore);
+		lastAdoptWaitUs = static_cast<std::uint32_t>((std::min)(ms * 1000.0, 4.0e9));
+	}
+
+	double IndirectDraws::Impl::WaitAfterPipelineSwap(std::uint64_t a_postedBefore)
+	{
+		DCLF_ZONE("CS.DCLF.WaitAfterPipelineSwap");
+		auto& s = *this;
+		auto& draws = IndirectDraws::Get();
+		auto* host = RenderGraphRuntime::Get().Host();
 		using Clock = std::chrono::steady_clock;
 		// A snapshot normally takes milliseconds, so five idle seconds means the builder is stuck. Compiles share the builder's
 		// threads, so the five seconds count from the last time no compile ran. New targets wait up to kCatalogTimeout.
@@ -870,31 +931,35 @@ namespace DCLF
 		std::size_t busyBuilds = 0;
 		bool busyCompiling = false;
 		const auto staleBefore = s.snapshotsStale;
-		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
-		// Open the scene pass half of the publication gate, because this frame's pass only runs after its start ends.
+		const std::uint64_t wait = ++s.shaderReloadWaits;
+		// The frame this Begin starts.
+		const std::uint32_t frame = Scene::FrameView::Get().GetFrame() + 1;
+		// Open the scene pass half of the publication gate, because this frame's pass only runs after its start.
 		s.frameWaiting.store(true, std::memory_order_seq_cst);
 		// The payload may wait on a backing the last frame read, so submit queued work now.
 		Direct::SubmitQueued();
 		(void)s.SnapshotPump();
 		s.snapshotInputsMoved.store(true, std::memory_order_release);
 		WakeSnapshotBuilder();
-		std::uint64_t seen = postedBefore;
+		std::uint64_t seen = a_postedBefore;
 		for (;;) {
 			// Serve the owner thread's build point work while waiting, since nothing else will run it during this wait.
+			// A poll here stages a build, which attaches with the snapshot recorded on it.
 			s.ServeRevisionRequests();
 			if (s.revisions.explicitBuilds && (host->RebuildRequested() || !RenderGraphRuntime::Get().DclfBuildsSettled()))
-				s.BuildIfAsked(true);
+				s.BuildIfAsked();
+			s.PostRevisionInputs();
 			// The graph stopped after a host failure, so no snapshot will come.
 			if (!RenderGraphRuntime::Get().IsActive()) {
 				s.frameWaiting.store(false, std::memory_order_release);
-				return publication;
+				return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 			}
 			if (const auto now = Clock::now(); now - ticketsAt >= kTicketPeriod) {
 				// A failed epoch means no snapshot will ever be current. Fail clearly now instead of after a timeout.
 				RenderGraphRuntime::Get().PollEpochFailures();
 				if (const auto& failure = DrawcallLimitFix::GraphEpochFailure(); !failure.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} waited at its start for a scene snapshot, and {}. DCLF does not "
-													 "hand drawing back to the engine within a frame it draws",
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} waited at its Begin after a shader reload's pipeline swap for a scene snapshot, and "
+													 "{}. DCLF does not hand drawing back to the engine within a frame it draws",
 						frame, failure));
 				s.ReleaseTicketsForRecordings(*host, 0);
 				// Flush DXVK's stream. A recording waits for each slot's last run, and a run still in this thread's stream never
@@ -912,7 +977,7 @@ namespace DCLF
 			}
 			if (const std::uint64_t posted = s.snapshotsPosted.load(std::memory_order_acquire); posted != seen) {
 				seen = posted;
-				publication = AdoptSnapshot();
+				(void)draws.AdoptSnapshot();
 				if (s.AdoptedCurrent())
 					break;
 			}
@@ -922,12 +987,12 @@ namespace DCLF
 			const bool catalogWait = s.adoptedSnapshot && s.StaleKindOf(*s.adoptedSnapshot) == Impl::kStaleTargets;
 			if (waited > progressAt && waited <= kCatalogTimeout) {
 				if (catalogWait)
-					logger::info("[DCLF] frame {} has waited {} s at its start for the pipelines of the new target formats (generation {})", frame,
-						std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
+					logger::info("[DCLF] shader-reload wait {}: frame {} has waited {} s at its Begin for the pipelines of the target formats (generation {})", wait,
+						frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), DrawPipelines::Get().Generation());
 				else if (idle < kTimeout)
-					logger::info("[DCLF] frame {} has waited {} s at its start for a scene snapshot while shaders compile ({} pipeline builds in flight, "
-								 "Community Shaders' compile workers {})",
-						frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), busyBuilds, busyCompiling ? "busy" : "idle");
+					logger::info("[DCLF] shader-reload wait {}: frame {} has waited {} s at its Begin for a scene snapshot while shaders compile ({} pipeline "
+								 "builds in flight, Community Shaders' compile workers {})",
+						wait, frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), busyBuilds, busyCompiling ? "busy" : "idle");
 				progressAt += std::chrono::seconds(5);
 			}
 			if (catalogWait ? waited > kCatalogTimeout : (idle > kTimeout || waited > kCatalogTimeout)) {
@@ -939,24 +1004,24 @@ namespace DCLF
 				for (std::size_t k = 0; k < Impl::kStaleKinds; ++k)
 					stale += fmt::format("{}{}", k ? "/" : "", s.snapshotsStale[k] - staleBefore[k]);
 				stl::report_and_fail(fmt::format(
-					"Drawcall Limit Fix: frame {} waited {} s at its start for a scene snapshot current for the graph as built and never got one, and DCLF does "
-					"not hand drawing back to the engine (no shader compile or pipeline build ran for the last {} s). Waiting for: build generation {} (rebuild requested: {}), main resources generation {}, targets "
-					"generation {}. Stale snapshots taken meanwhile (build/targets/shadow format/main): {}; snapshots posted {}, recordings outstanding {}, "
-					"inputs moved {}, publication gated {}, build ahead running {}. Adopted snapshot: serial {}, revision {}, draws complete {}, build "
-					"generation {}, main generation {}, payload {}. The builder (read racily, for this message): stage {}, passes {} ({} idle), work {}, draws {}, "
-					"payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest {} pending {} (sealed {}, published {}, "
-					"failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained {}, notifications {}, passes {}, "
-					"rejected {}; retirement: {}. ORG's {}",
-					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(), Impl::GraphBuildGeneration(*host), host->RebuildRequested(),
-					s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen, s.recordingsOutstanding.load(std::memory_order_acquire),
-					s.snapshotInputsMoved.load(std::memory_order_acquire), s.publicationGated.load(std::memory_order_acquire),
-					s.aheadRunning.load(std::memory_order_acquire), adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete,
-					adopted ? adopted->buildGeneration : 0, adopted ? adopted->mainGeneration : 0,
-					!s.installedPayload ? "none" : "installed", static_cast<int>(s.snapshotBuilder.stage),
-					s.snapshotBuilder.passes, s.snapshotBuilder.idlePasses, s.snapshotBuilder.work != nullptr, s.snapshotBuilder.draws != nullptr,
-					s.snapshotBuilder.payload != nullptr, s.snapshotBuilder.payloadFailed, s.snapshotBuilder.payloadSource != nullptr, PayloadPools::PendingParts(),
-					s.snapshotBuilder.sealedSequence, s.revisions.assembler.LatestSequence(), s.revisions.assembler.Pending(), assembler.sealed, assembler.published,
-					assembler.failed, assembler.superseded, assembler.abandoned, active ? active->Sequence() : 0, pumpStats.runnerActive, pumpStats.requestedEpoch, pumpStats.drainedEpoch, pumpStats.notifications,
+					"Drawcall Limit Fix: frame {} waited {} s at its Begin after a shader reload's pipeline swap for a scene snapshot recorded on the rebuilt graphs and "
+					"never got one, and DCLF does not hand drawing back to the engine (no shader compile or pipeline build ran for the last {} s). Waiting for: build "
+					"generation {} (rebuild requested: {}), main resources generation {}, targets generation {}. Stale snapshots taken meanwhile (build/targets/shadow "
+					"format/main): {}; snapshots posted {}, recordings outstanding {}, inputs moved {}, publication gated {}, build ahead running {}. Adopted snapshot: "
+					"serial {}, revision {}, draws complete {}, build generation {}, main generation {}, payload {}. The builder (read racily, for this message): stage "
+					"{}, passes {} ({} idle), work {}, draws {}, payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest "
+					"{} pending {} (sealed {}, published {}, failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained "
+					"{}, notifications {}, passes {}, rejected {}; retirement: {}. ORG's {}",
+					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(),
+					Impl::GraphBuildGeneration(*host), host->RebuildRequested(), s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen,
+					s.recordingsOutstanding.load(std::memory_order_acquire), s.snapshotInputsMoved.load(std::memory_order_acquire),
+					s.publicationGated.load(std::memory_order_acquire), s.aheadRunning.load(std::memory_order_acquire), adopted ? adopted->serial : 0,
+					adopted && adopted->revision, adopted && adopted->drawsComplete, adopted ? adopted->buildGeneration : 0, adopted ? adopted->mainGeneration : 0,
+					!s.installedPayload ? "none" : "installed", static_cast<int>(s.snapshotBuilder.stage), s.snapshotBuilder.passes, s.snapshotBuilder.idlePasses,
+					s.snapshotBuilder.work != nullptr, s.snapshotBuilder.draws != nullptr, s.snapshotBuilder.payload != nullptr, s.snapshotBuilder.payloadFailed,
+					s.snapshotBuilder.payloadSource != nullptr, PayloadPools::PendingParts(), s.snapshotBuilder.sealedSequence, s.revisions.assembler.LatestSequence(),
+					s.revisions.assembler.Pending(), assembler.sealed, assembler.published, assembler.failed, assembler.superseded, assembler.abandoned,
+					active ? active->Sequence() : 0, pumpStats.runnerActive, pumpStats.requestedEpoch, pumpStats.drainedEpoch, pumpStats.notifications,
 					pumpStats.drainPasses, pumpStats.rejected, RetirementState(), host->DescribeAsyncState()));
 			}
 			if (waited < kSpin)
@@ -966,16 +1031,13 @@ namespace DCLF
 		}
 		s.frameWaiting.store(false, std::memory_order_release);
 		const double ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-		lastAdoptWaitUs = static_cast<std::uint32_t>((std::min)(ms * 1000.0, 4.0e9));
 		++s.snapshotWaits;
 		s.snapshotWaitMs += ms;
 		s.snapshotWaitMaxMs = std::max(s.snapshotWaitMaxMs, ms);
-		logger::info("[DCLF] frame {} waited {:.2f} ms at its start for a snapshot current for the graph as built (build generation {}, main resources "
-					 "generation {}): adopted serial {}",
-			frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
-		if (afterAttach && (++s.graphsAttachWaitLogs <= 50 || s.graphsAttachWaitLogs % 100 == 0))
-			logger::info("[DCLF] frame {} waited {:.2f} ms at its start for the recordings of the graphs attached at the last frame's end", frame, ms);
-		return publication;
+		logger::info("[DCLF] shader-reload wait {}: frame {} waited {:.2f} ms at its Begin after the pipeline swap for a snapshot recorded on the rebuilt "
+					 "graphs (build generation {}, main resources generation {}): adopted serial {}",
+			wait, frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+		return ms;
 	}
 
 	void IndirectDraws::NoteScenePassDone(std::uint32_t a_frame)

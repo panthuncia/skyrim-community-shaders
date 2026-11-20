@@ -1,16 +1,15 @@
-// DCLF's epoch graph builds: the build state the render thread makes, the scene worker's builds of it, and the attached
-// state settled at frame boundaries.
+// DCLF's epoch graph builds: the build state the render thread makes, the scene worker's builds of it, and the built
+// state settled at each build manager poll.
 //
 // A structural change goes like this. The render thread changes its state and asks for builds. The build manager hands
 // them to the "DCLF graph builds" lane with the newest build state. Frames keep the attached graphs meanwhile, and no
-// snapshot is made for the new state until its builds attach. Finished builds attach together at a frame's end, after
-// its epochs were submitted. Once none is pending, the newest state becomes the attached one and the next frame adopts
-// a snapshot made for it.
+// snapshot is made for the new state until its builds are staged. Each finished build is staged at the next poll. Once
+// none is pending, the newest state is the built one, and the snapshot builder records on the staged graphs. A Begin that
+// adopts that snapshot attaches the staged graphs with it (plan step 10a).
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
-#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "RenderGraph/BuildManager.h"
 
@@ -117,13 +116,17 @@ namespace DCLF
 		if (!host || !RenderGraphRuntime::Get().IsActive())
 			return;
 		const auto state = CurrentBuildState();
-		if (state->serial == Draws::AttachedBuildSerial())
+		if (state->serial == Draws::BuiltBuildSerial())
 			return;
-		// While a build is pending the attached graphs are the old ones.
-		if (AnyDclfGraph(*host) && !RenderGraphRuntime::Get().DclfBuildsSettled())
+		// While a build is pending, the staged or attached graphs are the old ones.
+		const bool graphs = AnyDclfGraph(*host);
+		if (graphs && !RenderGraphRuntime::Get().DclfBuildsSettled())
 			return;
-		Draws::PublishAttachedBuildState(state);
-		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is attached.
+		Draws::PublishBuiltBuildState(state->serial);
+		// Before any DCLF graph exists, the host builds each at its first submission from the newest state, so it is attached too.
+		if (!graphs)
+			Draws::PublishAttachedBuildState(state);
+		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is built.
 		PostRevisionInputs();
 		(void)SnapshotPump();
 		snapshotInputsMoved.store(true, std::memory_order_release);
@@ -158,13 +161,14 @@ namespace DCLF
 				return true;
 			};
 		}
-		builder.boundary = [this](bool a_attached) {
-			if (a_attached)
-				graphsAttachedFrame = Scene::FrameView::Get().GetFrame();
+		builder.boundary = [this](bool a_staged) {
 			SettleBuildState();
+			// New staged generations, which the snapshot builder records on.
+			if (a_staged)
+				PostRevisionInputs();
 		};
 		builds->SetExternalBuilder(std::move(builder));
-		logger::info("[DCLF] graph builds: {}", Draws::AsyncGraphBuilds() ? "on the scene worker from the build state, attached at a frame's end" :
-																			"on the render thread at the build point (CS_DCLF_ASYNC_BUILDS=0)");
+		logger::info("[DCLF] graph builds: {}; staged, and attached with a snapshot at a Begin",
+			Draws::AsyncGraphBuilds() ? "on the scene worker from the build state" : "on the render thread at the build point (CS_DCLF_ASYNC_BUILDS=0)");
 	}
 }

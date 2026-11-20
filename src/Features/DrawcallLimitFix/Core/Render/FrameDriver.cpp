@@ -74,6 +74,20 @@ namespace DCLF
 		s_buildPointFrame = a_frame;
 	}
 
+	void AdoptSnapshotAtBegin()
+	{
+		if (!globals::features::drawcallLimitFix.HooksInstalled())
+			return;
+		TracyCZoneN(adoptAtBegin, "CS.DCLF.AdoptAtBegin", true);
+		IndirectDraws::Get().AdoptAtBegin();
+		TracyCZoneEnd(adoptAtBegin);
+	}
+
+	void IndirectDraws::NoteInputChanged(std::string_view a_what)
+	{
+		RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::DclfInputChanged, RenderGraph::Frame::SegmentId::Count, a_what);
+	}
+
 	FrameDriver& FrameDriver::Get()
 	{
 		static FrameDriver driver;
@@ -136,13 +150,10 @@ namespace DCLF
 		// Load screen frames have no claims, so they are never waited for or required to be covered.
 		const bool loading = Scene::FrameView::IsLoadingScreenUp();
 		{
-			// Once DCLF draws, a frame with a stale snapshot waits here for a current one rather than hand drawing back to the engine.
-			// Everything the builder needs has been posted by now.
+			// The snapshot was adopted at this frame's Begin (AdoptSnapshotAtBegin), with the staged builds it was recorded on.
+			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			TracyCZoneN(bfAdoptSnapshot, "CS.DCLF.BF.AdoptCurrentSnapshot", true);
-			auto adopted = draws.AdoptCurrentSnapshot(!view.NotDrawingYet() && !loading);
-			TracyCZoneEnd(bfAdoptSnapshot);
-			view.HandOverAtFrameStart(std::move(adopted));
+			view.HandOverAtFrameStart(draws.AdoptedPublication());
 			{
 				DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
 				view.SyncFrameTables();
@@ -160,7 +171,7 @@ namespace DCLF
 		{
 			DCLF_ZONE("CS.DCLF.BF.Claims");
 			// Before the first covered frame the engine draws everything. After it, an uncovered frame is a defect,
-			// because the frame already waited for a snapshot it can draw from. Load screen frames are the exception.
+			// because the adopted snapshot stays current until a Begin adopts a newer one with its builds. Load screen frames are the exception.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			const bool covered = draws.DecideCoverage();
 			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
@@ -191,7 +202,7 @@ namespace DCLF
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
 													 "draws. D3D11's device removed reason: {:#x}",
 						view.GetFrame(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} is not covered by the snapshot it adopted after waiting for a current one, and DCLF "
+				stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} is not covered by the snapshot it adopted at its Begin, and DCLF "
 												 "does not hand drawing back to the engine once it draws: {}",
 					view.GetFrame(), draws.CoverageState()));
 			}

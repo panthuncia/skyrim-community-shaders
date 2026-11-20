@@ -307,9 +307,9 @@ namespace RenderGraph::Frame::Driver
 		next.slot = static_cast<std::uint32_t>(next.frame % RenderGraphRuntime::kGameFramesInFlight);
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
 		next.kind = DecideKind(state, next.capture);
-		// In native mode every build attaches here before the schedule is chosen, so DCLF's build point runs here for a world frame.
-		// Guest mode keeps DCLF's build point at Main::Draw (DCLF's BeginFrame), since its epochs are external until step 10a.
-		// No anchor runs an epoch of its own, and CS stage builds are staged: they attach only in AdoptLatest, in both modes.
+		// In native mode DCLF's build point runs here for a world frame, before the schedule is chosen. Guest mode keeps it at
+		// Main::Draw (DCLF's BeginFrame). Either way it only stages builds. No anchor runs an epoch of its own. CS stage builds attach
+		// in AdoptLatest, and DCLF's with the snapshot it adopts there, in both modes (plan step 10a).
 		if (Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
 			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			DCLF::BuildPointAtFrameStart(next.frame);
@@ -398,6 +398,8 @@ namespace RenderGraph::Frame::Driver
 			return "missed settings writer";
 		case TapError::OutsideAdoption:
 			return "outside the adoption point";
+		case TapError::DclfInputChanged:
+			return "DCLF input changed after it drew";
 		default:
 			return "?";
 		}

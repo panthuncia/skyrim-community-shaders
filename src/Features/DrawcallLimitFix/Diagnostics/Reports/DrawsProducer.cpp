@@ -22,12 +22,12 @@ namespace DCLF
 		const auto percentile = [this](std::size_t a_percent) {
 			return adoptionLatency.empty() ? 0u : adoptionLatency[(std::min)(adoptionLatency.size() - 1, adoptionLatency.size() * a_percent / 100)];
 		};
-		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted, {} frames adopting nothing new; "
-									   "passed over as stale: build {}, targets {}, shadow format {}, main resources {}; built without draws for the main "
-									   "resources {}\n",
-			snapshotsBuilt.exchange(0, std::memory_order_relaxed), snapshotsCoalesced.exchange(0, std::memory_order_relaxed), snapshotsAdopted, snapshotFramesKept,
-			snapshotsStale[kStaleBuild], snapshotsStale[kStaleTargets], snapshotsStale[kStaleShadowFormat], snapshotsStale[kStaleMain],
-			snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
+		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted ({} with their staged "
+									   "builds, {} staged attaches refused), {} Begins adopting nothing new; passed over as stale: build {}, targets {}, shadow "
+									   "format {}, main resources {}; built without draws for the main resources {}\n",
+			snapshotsBuilt.exchange(0, std::memory_order_relaxed), snapshotsCoalesced.exchange(0, std::memory_order_relaxed), snapshotsAdopted,
+			std::exchange(stagedAdoptions, 0), std::exchange(stagedRefusals, 0), snapshotFramesKept, snapshotsStale[kStaleBuild], snapshotsStale[kStaleTargets],
+			snapshotsStale[kStaleShadowFormat], snapshotsStale[kStaleMain], snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
 		text += fmt::format("[DCLF] snapshot builds (ms, avg/p95/max): draws ahead {} ({} built), shapes {}, recordings wait {}; commit to adoption (frames): p50 {}, p95 {}, "
 							"max {}\n",
 			Reports::Spread(ahead, 2), aheadBuilt, Reports::Spread(shapes, 2), Reports::Spread(recordings, 2), percentile(50), percentile(95), adoptionLatency.empty() ? 0u : adoptionLatency.back());
@@ -165,7 +165,7 @@ namespace DCLF
 				uncovered += fmt::format("{}{} {}", e ? ", " : "", EpochTraitsOf(e).name, std::exchange(rv.uncovered[e], 0));
 			const std::uint64_t unbuiltTotal = unbuilt[kAsyncZPrepass] + unbuilt[kAsyncColour] + shadowUnbuilt;
 			text += fmt::format("[DCLF] strict epochs: {} frames without the adopted snapshot's main recordings (DCLF not drawing yet, or a load screen up); "
-								"waits at the frame's start for a snapshot current for the graph as built: {} ({:.2f} ms, max {:.2f} ms); {} graph builds at the "
+								"shader-reload waits at a Begin for a snapshot recorded on the rebuilt graphs: {} ({:.2f} ms, max {:.2f} ms); {} graph builds at the "
 								"build point, {} tickets of epochs not submitted given back for recordings; frames whose revision lacked an epoch's current recordings: {}; "
 								"shadow views left to the engine: {} frames without the revision's shadow recording or the installed shadow payload; occlusion maps "
 								"left to the engine for want of the revision's shape: {}; covered epochs without the installed publication's payload: Z-prepass {}, "

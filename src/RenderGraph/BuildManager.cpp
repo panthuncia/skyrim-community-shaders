@@ -108,7 +108,7 @@ namespace RenderGraph
 		struct Group
 		{
 			std::size_t remaining = 0;
-			bool external = false;  // attached only at Attach::All and Attach::External polls
+			bool external = false;  // the external builder's (DCLF's), which are staged too
 			std::vector<std::unique_ptr<Done>> done;
 		};
 
@@ -226,14 +226,9 @@ namespace RenderGraph
 			return ownerBuilt.contains(a_epoch) || (external.contains(a_epoch) && !externalBuilder.post);
 		}
 
-		/** @brief Tells the boundary check of an attach. The owner's own epochs are DCLF's, which attach at its build points until step 10a. */
+		/** @brief Tells the boundary check of an attach. */
 		void NoteAttached(std::uint32_t a_epoch) const
 		{
-			if (ownerBuilt.contains(a_epoch) || external.contains(a_epoch)) {
-				const Frame::Boundary::Allow allow(Frame::Boundary::Exception::Dclf);
-				Frame::Boundary::NoteAttach(Label(a_epoch));
-				return;
-			}
 			Frame::Boundary::NoteAttach(Label(a_epoch));
 		}
 
@@ -374,8 +369,9 @@ namespace RenderGraph
 				return false;
 			}
 			const auto begin = Clock::now();
-			// A staged epoch is recorded by the host's thread first, and a frame revision attaches it.
-			if (staged.contains(epoch) && !a_synchronous) {
+			// A staged epoch is recorded by the host's thread first, and a frame revision (or DCLF's snapshot adoption) attaches it.
+			// A synchronous build of one is staged too (DCLF's with CS_DCLF_ASYNC_BUILDS=0).
+			if (staged.contains(epoch)) {
 				const auto stagedResult = host.StageEpochGraph(a_done.graph);
 				if (stagedResult.staged) {
 					supersededInARow.erase(epoch);
@@ -385,9 +381,10 @@ namespace RenderGraph
 						if (fn)
 							fn();
 					stagedAttach[epoch] = std::move(a_done.context.attached);
-					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms off the render thread, staged in {:.3f} ms, {} frames after it was "
+					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms {}, staged in {:.3f} ms, {} frames after it was "
 								 "asked for; it attaches with a frame revision; why: {}",
-						Label(epoch), stagedResult.generation, buildMs, MillisecondsSince(begin), frames - a_done.job.frame, a_done.job.reason);
+						Label(epoch), stagedResult.generation, buildMs, a_synchronous ? "on the render thread" : "off the render thread", MillisecondsSince(begin),
+						frames - a_done.job.frame, a_done.job.reason);
 					return true;
 				}
 				if (!stagedResult.attached) {
@@ -436,14 +433,16 @@ namespace RenderGraph
 			return true;
 		}
 
-		/** @brief Attaches every group whose builds have all finished and that a_attach names. */
-		bool AttachFinished(Attach a_attach, bool* a_external = nullptr)
+		/**
+		* @brief Attaches or stages every group whose builds have all finished. a_external is set when an external group's build
+		* was staged. The external builder's epochs are staged, so none of them attaches here.
+		*/
+		bool AttachFinished(bool* a_external = nullptr)
 		{
 			Collect();
 			bool attached = false;
 			for (auto it = groups.begin(); it != groups.end();) {
-				const bool named = it->second.external ? a_attach != Attach::Live : a_attach != Attach::External;
-				if (it->second.remaining || !named) {
+				if (it->second.remaining) {
 					++it;
 					continue;
 				}
@@ -481,21 +480,15 @@ namespace RenderGraph
 					a_caller);
 		}
 
-		/**
-		 * @brief Builds the owner thread's epochs now. With a_all it also builds epochs being built elsewhere.
-		 * Those other builds are then rejected at their attach, since this one started later.
-		 */
-		bool BuildOwnerEpochs(std::string_view a_caller, bool a_all = false)
+		/** @brief Builds the owner thread's epochs now. Staged ones are staged, not attached. */
+		bool BuildOwnerEpochs(std::string_view a_caller)
 		{
 			auto& host = *desc.host;
 			bool built = false;
 			std::shared_ptr<void> scope;
 			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
 				const auto epoch = host.EpochAt(i);
-				const bool chosen = a_all ? (ownerBuilt.contains(epoch) || external.contains(epoch)) : BuiltOnOwner(epoch);
-				if (!chosen)
-					continue;
-				if (a_all ? !host.RebuildRequested(epoch) || !host.Graph(epoch) : !Due(epoch))
+				if (!BuiltOnOwner(epoch) || !Due(epoch))
 					continue;
 				WarnSynchronous(Label(epoch), a_caller);
 				++window.synchronous;
@@ -556,7 +549,7 @@ namespace RenderGraph
 		void Dispatch(std::string_view a_point)
 		{
 			auto& host = *desc.host;
-			// The external builder's epochs form their own group, attached at a frame's end.
+			// The external builder's epochs form their own group, staged at the poll that finds it finished.
 			if (externalBuilder.post) {
 				std::vector<Job> posted;
 				const auto group = ++groupSerial;
@@ -571,7 +564,7 @@ namespace RenderGraph
 					auto& entry = groups[group];
 					entry.external = true;
 					entry.remaining = posted.size();
-					// Refused jobs are built here on the owner thread and attached with the group.
+					// Refused jobs are built here on the owner thread and staged with the group.
 					auto refused = PostExternal(std::move(posted));
 					if (!refused.empty()) {
 						auto scope = OwnerScope();
@@ -647,8 +640,8 @@ namespace RenderGraph
 	{
 		logger::info(
 			"[ORG] build manager: structural builds run on a thread of their own and are attached at frame boundaries; {} owner-built epochs, "
-			"{} built by an external builder and attached at a frame's end",
-			impl->ownerBuilt.size(), impl->external.size());
+			"{} built by an external builder, {} staged and attached with a frame revision or DCLF's snapshot",
+			impl->ownerBuilt.size(), impl->external.size(), impl->staged.size());
 	}
 
 	BuildManager::~BuildManager()
@@ -725,25 +718,26 @@ namespace RenderGraph
 	void BuildManager::SetExternalBuilder(ExternalBuilder a_builder)
 	{
 		impl->externalBuilder = std::move(a_builder);
-		logger::info("[ORG] build manager: external builder set ({} epochs; {})", impl->external.size(),
-			impl->externalBuilder.post ? "built on its worker, attached at a frame's end" : "built on the render thread");
+		logger::info("[ORG] build manager: external builder set ({} epochs; {}, staged)", impl->external.size(),
+			impl->externalBuilder.post ? "built on its worker" : "built on the render thread");
 	}
 
-	bool BuildManager::Poll(std::string_view a_point, Attach a_attach)
+	bool BuildManager::Poll(std::string_view a_point)
 	{
 		auto& m = *impl;
 		const Frame::Boundary::Caller caller(a_point);
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		bool changed = false;
-		bool externalAttached = false;
-		changed = m.AttachFinished(a_attach, &externalAttached) || changed;
+		bool externalStaged = false;
+		changed = m.AttachFinished(&externalStaged) || changed;
 		m.RequestStale();
-		changed = m.BuildOwnerEpochs(a_point) || changed;
+		const bool builtHere = m.BuildOwnerEpochs(a_point);
+		changed = builtHere || changed;
 		m.Dispatch(a_point);
-		// The external builder hears of every boundary that may attach its epochs, attached or not.
-		if (a_attach != Attach::Live && m.externalBuilder.boundary)
-			m.externalBuilder.boundary(externalAttached);
+		// The external builder hears of every poll, since any may stage its epochs.
+		if (m.externalBuilder.boundary)
+			m.externalBuilder.boundary(externalStaged || builtHere);
 		return changed;
 	}
 
@@ -759,14 +753,6 @@ namespace RenderGraph
 			if (const auto epoch = host.EpochAt(i); host.RebuildRequested(epoch) && !impl->staged.contains(epoch))
 				return true;
 		return false;
-	}
-
-	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
-	{
-		const Frame::Boundary::Caller caller(a_caller);
-		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
-		impl->ApplyPending();
-		return impl->BuildOwnerEpochs(a_caller, true);
 	}
 
 	bool BuildManager::BuildSetupGraphs(std::string_view a_caller)

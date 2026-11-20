@@ -187,13 +187,8 @@ namespace DCLF
 		bool ready = false;
 		const auto resourcesBefore = impl->resources;
 		try {
+			// New main resources are made only before DCLF draws, so their graphs build like any other DCLF build.
 			ready = impl->Setup(capture, depthOnly);
-			// New main resources under claims. The graph is built now on this thread because the colour epoch, the frame's last,
-			// draws with them. Only DCLF's epochs are built here, and the next frame waits at its start for a matching snapshot.
-			if (ready && impl->resources != resourcesBefore && resourcesBefore) {
-				(void)RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix: main resources made again under claims");
-				impl->SettleBuildState();
-			}
 		} catch (const std::exception& e) {
 			// Never retried. The feature stays on the native path.
 			logger::error("[DCLF] Main-pass graph resources could not be created: {}", e.what());
@@ -260,10 +255,10 @@ namespace DCLF
 		std::shared_ptr<MainPayload> ahead = impl->installedDraws ? impl->installedDraws->payloads[jobIndex] : nullptr;
 		if (!revision || !ahead || ahead->inputs.addresses.identity != resources.get()) {
 			// Only resources made at this frame's Setup lead here. Adopting a new payload mid-frame would mismatch the claims, so this
-			// frame's colour epoch is not DCLF's and the next frame waits for a matching snapshot. Anything else is a defect.
+			// frame's colour epoch is not DCLF's, and a later Begin adopts a matching snapshot. Anything else is a defect.
 			if (newResources)
 				logger::info("[DCLF] main resources made at frame {}'s colour pass ({}x{}): its colour epoch is not drawn (no revision of the frame's is for them); "
-							 "the next frame waits at its start for a snapshot made for them",
+							 "a later Begin adopts a snapshot made for them",
 					Scene::FrameView::Get().GetFrame(), resources->width, resources->height);
 			else if (revision && resources == resourcesBefore && impl->unbuilt[jobIndex]++ == 0)
 				logger::warn("[DCLF] the {} epoch of frame {} has no payload for its resources in the installed publication: not submitted <- UNBUILT",

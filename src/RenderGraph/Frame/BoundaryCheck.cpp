@@ -10,7 +10,6 @@ namespace RenderGraph::Frame::Boundary
 		thread_local bool t_inBoundaryScope = false;
 		thread_local std::string_view t_boundaryCaller;
 		thread_local std::uint32_t t_boundaryChanges = 0;
-		thread_local Exception t_boundaryException = Exception::Count;
 	}
 
 	// The thread that opens the adoption point is the render thread the census counts.
@@ -41,15 +40,6 @@ namespace RenderGraph::Frame::Boundary
 	Caller::~Caller()
 	{
 		t_boundaryCaller = outer;
-	}
-
-	Allow::Allow(Exception a_exception) :
-		outer(std::exchange(t_boundaryException, a_exception))
-	{}
-
-	Allow::~Allow()
-	{
-		t_boundaryException = outer;
 	}
 
 	Change::Change(std::string_view a_what, std::string_view a_caller)
@@ -92,22 +82,6 @@ namespace RenderGraph::Frame::Boundary
 {
 	namespace
 	{
-		struct BoundaryExceptionInfo
-		{
-			std::string_view name;
-			std::string_view until;
-		};
-
-		// The one list of allowed exceptions to rule R1. Each row goes with the step that names it.
-		constexpr std::array<BoundaryExceptionInfo, static_cast<std::size_t>(Exception::Count)> kBoundaryExceptions{ {
-			{ "dclf", "step 10a" },
-		} };
-
-		struct BoundaryExceptionCounts
-		{
-			std::uint64_t versions = 0;
-			std::uint64_t attaches = 0;
-		};
 		// Distinct keys kept per window. The rest are counted under one key.
 		constexpr std::size_t kBoundaryKeys = 128;
 		constexpr std::size_t kBoundaryTop = 6;
@@ -153,8 +127,6 @@ namespace RenderGraph::Frame::Boundary
 			BoundaryCounts changes;
 			BoundaryCounts attaches;
 			BoundaryCounts refusals;  // by site and reason, any thread
-			std::array<BoundaryExceptionCounts, static_cast<std::size_t>(Exception::Count)> allowed{};
-			std::array<BoundaryExceptionCounts, static_cast<std::size_t>(Exception::Count)> sessionAllowed{};
 			std::uint64_t atBegin = 0;
 			std::uint64_t sessionVersions = 0, sessionFirst = 0, sessionChanges = 0, sessionAttaches = 0, sessionRefusals = 0;
 		};
@@ -175,16 +147,7 @@ namespace RenderGraph::Frame::Boundary
 			return t_boundaryCaller.empty() ? std::string_view("untagged") : t_boundaryCaller;
 		}
 
-		/** @brief The open exception's window or session counts, or null outside an Allow scope. Under the state's mutex. */
-		BoundaryExceptionCounts* AllowedCounts(BoundaryState& a_state, bool a_session)
-		{
-			const auto index = static_cast<std::size_t>(t_boundaryException);
-			if (index >= kBoundaryExceptions.size())
-				return nullptr;
-			return a_session ? &a_state.sessionAllowed[index] : &a_state.allowed[index];
-		}
-
-		/** @brief Rule R1 broken with no exception. A tap error, fatal in development builds. Called with no census lock held. */
+		/** @brief Rule R1 broken. A tap error, fatal in development builds. Called with no census lock held. */
 		void ReportOutsideAdoption(std::string_view a_what) noexcept
 		{
 			try {
@@ -204,11 +167,6 @@ namespace RenderGraph::Frame::Boundary
 				const std::lock_guard lock(state.mutex);
 				if (t_inBoundaryScope) {
 					++state.atBegin;
-					return;
-				}
-				if (auto* allowed = AllowedCounts(state, false)) {
-					++allowed->versions;
-					++AllowedCounts(state, true)->versions;
 					return;
 				}
 				const auto& name = a_version.resource ? a_version.resource->GetName() : std::string();
@@ -259,11 +217,6 @@ namespace RenderGraph::Frame::Boundary
 		const auto what = fmt::format("{} at {}", a_epoch, CallerTag());
 		{
 			const std::lock_guard lock(state.mutex);
-			if (auto* allowed = AllowedCounts(state, false)) {
-				++allowed->attaches;
-				++AllowedCounts(state, true)->attaches;
-				return;
-			}
 			state.attaches.Add(what);
 			++state.sessionAttaches;
 		}
@@ -285,26 +238,18 @@ namespace RenderGraph::Frame::Boundary
 		const auto part = [](const BoundaryCounts& a_counts) {
 			return a_counts.total ? fmt::format("{} (top: {})", a_counts.total, a_counts.Top()) : std::string("0");
 		};
-		const auto exceptions = [](const auto& a_counts) {
-			std::string line;
-			for (std::size_t e = 0; e < kBoundaryExceptions.size(); ++e)
-				line += fmt::format("{}{} (until {}) versions {} attaches {}", line.empty() ? "" : ", ", kBoundaryExceptions[e].name, kBoundaryExceptions[e].until,
-					a_counts[e].versions, a_counts[e].attaches);
-			return line;
-		};
-		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; new resources made late {}; allowed exceptions: {}; "
+		logger::info("[ORG] boundary: late versions {}{}, late changes {}, late attaches {}; new resources made late {}; "
 					 "adoptions at Begin {}; build refusals {}; session: late versions {}, late changes {}, late attaches {}, "
-					 "new resources made late {}, allowed exceptions: {}; build refusals {}",
+					 "new resources made late {}; build refusals {}",
 			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
-			part(state.attaches), part(state.firstVersions), exceptions(state.allowed), state.atBegin, part(state.refusals),
-			state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionFirst, exceptions(state.sessionAllowed), state.sessionRefusals);
+			part(state.attaches), part(state.firstVersions), state.atBegin, part(state.refusals),
+			state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionFirst, state.sessionRefusals);
 		state.versions = {};
 		state.firstVersions = {};
 		state.versionCallers = {};
 		state.changes = {};
 		state.attaches = {};
 		state.refusals = {};
-		state.allowed = {};
 		state.atBegin = 0;
 	}
 

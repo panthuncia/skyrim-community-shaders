@@ -209,13 +209,7 @@ public:
 	*  Use this, never the host's BuildIfRequested, so a failed host thread stops the graph instead of throwing into the frame. */
 	bool BuildIfRequested(std::string_view a_caller = "build point");
 
-	/** @brief Owner thread, mid-frame. Builds requested owner-built epochs now. Not a build point. */
-	bool BuildOwnerEpochsNow(std::string_view a_caller);
-
-	/** @brief Owner thread, at a frame's start before DCLF submits. Attaches only DCLF's finished builds. Not a build point. */
-	bool AttachDclfBuilds(std::string_view a_caller);
-
-	/** @brief Owner thread. Whether no DCLF epoch is requested, building or waiting to attach. True while inactive. */
+	/** @brief Owner thread. Whether no DCLF epoch is requested or building. A staged build is settled. True while inactive. */
 	bool DclfBuildsSettled() const;
 
 	/** @brief Owner thread. Whether a requested rebuild leaves frames without the graph until built. Staged CS stages never do. */
@@ -366,6 +360,8 @@ public:
 	* and builds every graph, with the host's thread held (BuildManager::SwapPipelines). A throw stops the graph.
 	*/
 	void SwapStagedPipelines(std::string_view a_reason);
+	/** @brief Render thread: SwapStagedPipelines calls so far. DCLF waits after one for a snapshot recorded on the rebuilt graphs. */
+	std::uint64_t PipelineSwaps() const { return pipelineSwaps; }
 	/** @brief Any thread: the next a_epochs completed epochs log each graphics timestamp range in GPU order ("[TSDUMP]"). */
 	static void RequestTimestampDump(std::uint32_t a_epochs);
 	/** @brief Diagnostics. DCLF's epochs in a_segments report submitted without submitting.
@@ -433,6 +429,7 @@ private:
 	std::uint64_t buildPoints = 0;  // BuildIfRequested's calls
 	std::uint64_t buildPointsAtSeal = 0;  // buildPoints at the last SealPresented
 	std::uint64_t shaderGenerationRaised = 0;  // the last ShaderGeneration that ServicePipelineReload wrote. Render thread
+	std::uint64_t pipelineSwaps = 0;  // SwapStagedPipelines calls. Render thread
 	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 	FrameConfig frameConfig;  // ConfigureFrame's (frameConfigured)

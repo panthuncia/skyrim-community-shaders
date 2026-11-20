@@ -6,7 +6,7 @@
 // thread polls the manager, which attaches finished builds and hands the remaining requests to its build thread.
 // The old graph runs until the new one is attached.
 // An owner can build its epochs on its own worker (DCLF on its scene worker). The manager still decides what is built, and
-// those builds attach only at a frame's end or at the owner's own wait.
+// those builds are staged: DCLF attaches them with the snapshot recorded on them at a Begin (frame revision plan step 10a).
 
 #include <cstdint>
 #include <functional>
@@ -27,13 +27,6 @@ namespace RenderGraph
 	{
 	public:
 		/** @brief Which finished builds a poll attaches. */
-		enum class Attach
-		{
-			Live,      // every epoch's but the external builder's (a frame's start)
-			All,       // every epoch's (a frame's end)
-			External,  // the external builder's alone (its owner's wait at a frame's start)
-		};
-
 		/** @brief An epoch owner that builds its graphs on its own worker. The manager keeps the policy and the logs. */
 		struct ExternalBuilder
 		{
@@ -41,8 +34,8 @@ namespace RenderGraph
 			std::function<bool(std::function<void()> a_build)> post;
 			// Held around every build made on the owner thread, so the owner's extensions read a consistent state there too.
 			std::function<std::shared_ptr<void>()> ownerScope;
-			// Owner thread, after each poll that may attach the external epochs. a_attached says whether one was.
-			std::function<void(bool a_attached)> boundary;
+			// Owner thread, after every poll. a_staged says whether one of its epochs was staged.
+			std::function<void(bool a_staged)> boundary;
 		};
 
 		struct Desc
@@ -50,9 +43,11 @@ namespace RenderGraph
 			org::GraphHost* host = nullptr;
 			// Epochs built on the render thread at the poll, such as DCLF's with CS_DCLF_ASYNC_BUILDS=0. Logged as synchronous after the first world frame.
 			std::vector<std::uint32_t> ownerBuilt;
-			// Epochs the external builder builds, attached only at Attach::All and Attach::External polls.
+			// Epochs the external builder builds. Each finished group is taken at the next poll.
 			std::vector<std::uint32_t> external;
-			// Epochs whose finished builds are staged, not attached. Frame revisions record them and attach them with AttachStaged.
+			// Epochs whose finished builds are staged, not attached, on either thread. Frame revisions (and DCLF's snapshot adoption)
+			// record them and attach them with AttachStaged. Owner-built and external epochs must be in it, since a poll inside a frame
+			// stages them.
 			std::vector<std::uint32_t> staged;
 			// An epoch's name in the log lines.
 			std::function<std::string(std::uint32_t)> label;
@@ -94,12 +89,10 @@ namespace RenderGraph
 		/** @brief Owner thread: the external epochs' builder (replaces the last one). */
 		void SetExternalBuilder(ExternalBuilder a_builder);
 
-		/** @brief Owner thread, at a frame boundary. Attaches finished builds and hands every other request to its builder.
-		*  Returns whether a graph was attached or built. */
-		bool Poll(std::string_view a_point, Attach a_attach = Attach::Live);
-		/** @brief Owner thread. Builds requested owner-built and external epochs now, mid-frame. A build in progress elsewhere is then rejected. */
-		bool BuildOwnerEpochsNow(std::string_view a_caller);
-		/** @brief Owner thread. Whether no owner-built or external epoch is requested, building or waiting to attach. */
+		/** @brief Owner thread, at a frame boundary. Attaches or stages finished builds and hands every other request to its builder.
+		*  Returns whether a graph was attached, staged or built. */
+		bool Poll(std::string_view a_point);
+		/** @brief Owner thread. Whether no owner-built or external epoch is requested, or building. Staged ones are settled. */
 		bool Settled() const;
 		/** @brief Owner thread. Whether a rebuild was asked for an epoch whose builds attach at once. Staged epochs never leave a frame without a graph. */
 		bool UnstagedRebuildRequested() const;

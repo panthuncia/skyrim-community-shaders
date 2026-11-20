@@ -1,0 +1,91 @@
+# DCLF's graph changes during play (frame revision plan, step 10a): the cull mode (occlusion, frustum, off, occlusion again),
+# then the CPU pipeline and back to the GPU one. Each change rebuilds DCLF's epochs. Their builds are staged, the snapshot
+# builder records on them, and a Begin adopts that snapshot with the staged builds. No frame waits for it. The shots must match
+# the "before" shot within the noise.
+# Compose it: native-vulkan+dclf-toggles, native-d3d12+dclf-toggles, guest+dclf-toggles.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = "frustum"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "cull-frustum"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "cull-off"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = "occlusion"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "cull-occlusion"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:pipeline"
+arg = "cpu"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "pipeline-cpu"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:pipeline"
+arg = "gpu"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "pipeline-gpu"
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "cull-frustum", "cull-off", "cull-occlusion", "pipeline-cpu", "pipeline-gpu"]
+no_log = ["frame tap error", "a frame revision failed", "graph failed to prepare", "for a snapshot current for the graph as built",
+	"staged builds were refused at its adoption"]

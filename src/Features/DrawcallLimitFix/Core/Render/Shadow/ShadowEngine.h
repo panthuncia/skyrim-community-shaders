@@ -109,6 +109,8 @@ namespace DCLF
 		std::atomic<std::uint8_t> shadowCapability{ 0 };
 		bool shadowCatalogBuilt = false;
 		DXGI_FORMAT shadowTargetFormat = DXGI_FORMAT_UNKNOWN;
+		// The shadow pipelines' depth format. Taken from the engine's shadow map once it exists, before DCLF draws, and fixed from then on.
+		DXGI_FORMAT pipelineShadowFormat = DXGI_FORMAT_UNKNOWN;
 		/** @brief Fills the catalog with every solid-fill engine state a shadow view can use, plus the cascades' clones. */
 		void BuildShadowCatalog();
 		/** @brief The capability changed, so every caster is decided again. a_defect marks a view the catalog did not foresee. */
