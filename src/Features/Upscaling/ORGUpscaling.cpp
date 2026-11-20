@@ -246,12 +246,13 @@ struct ORGUpscaling::Impl
 	RenderGraph::Frame::Vars::Extent2D setupDisplay{};
 
 	// The engine targets the Upscale anchor imports, as the last frame found them. A change bumps the serial, which the Upscale
-	// client's key holds: an interim until engine imports are declared (frame revision plan, step 9b).
+	// client's key holds. They are ORG's engine targets, whose slots never change, so the frame may look them up.
 	DepthInputs inputs;
 	std::uint64_t inputsSerial = 0;
-	// The hudless copy's source, as the last copy found it. The hudless client's key holds the serial, as for inputsSerial.
-	FrameAnchors::Texture hudlessSource;
-	std::uint64_t hudlessSourceSerial = 0;
+	// The hudless copy's source texture and view, as the last copy found them. Not a variable yet, so a change invalidates the
+	// hudless client. Its key imports them, so the copy makes no import mid-frame.
+	winrt::com_ptr<ID3D11Texture2D> hudlessSourceTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> hudlessSourceView;
 
 	// Render thread.
 	std::uint32_t queued = 0;
@@ -561,9 +562,24 @@ namespace
 	{
 		std::uint32_t format = 0;  // the index in kHudlessFormats
 		Vars::Extent2D display{};
-		std::uint64_t source = 0;  // Impl::hudlessSourceSerial
+		FrameAnchors::Texture source;  // the copy's source, imported by the key
 		bool operator==(const HudlessKey&) const = default;
 	};
+
+	/**
+	* @brief The hudless copy's source as the graph reads it: the back buffer, HDR's twin, or an import of the D3D11 texture.
+	* Call it only from the hudless client's key, where a new texture joins the revision.
+	*/
+	FrameAnchors::Texture HudlessSourceOf(ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_view)
+	{
+		// HDR's clean composite is its output twin with CS_ORG_HDR_DISPLAY, ordered after its writes, else an imported D3D11 texture.
+		const auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		if (framebuffer.texture == a_texture)
+			return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
+		if (auto slot = ORGHDRDisplay::Get().GraphOf(a_texture))
+			return slot;
+		return FrameAnchors::D3D11Texture("Upscaling::HudlessSource", a_texture, a_view, nullptr);
+	}
 
 	/** @brief A declared twin as passes declare it: its slot. */
 	FrameAnchors::Texture SlotOf(const RenderGraph::Frame::DeclaredTexture2D& a_texture)
@@ -689,14 +705,14 @@ namespace
 	{
 		auto& impl = *a_impl;
 		const auto index = a_key.format;
-		if (index >= impl.hudless.size() || !impl.hudless[index] || !impl.hudlessSource) {
+		if (index >= impl.hudless.size() || !impl.hudless[index] || !a_key.source) {
 			logger::error("[ORG] Upscaling: the hudless copy has no texture or no source for format index {}", index);
 			return false;
 		}
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kClientId, kOrderBase, nullptr, impl.hudlessGate);
 		builder.Add(RenderGraph::AnchorPasses::Draw{ .name = "hudless-copy",
 			.program = CopyProgram(impl, rhi::helpers::ToRHI(kHudlessFormats[index])),
-			.bindings = { Bind::Srv(impl.hudlessSource) },
+			.bindings = { Bind::Srv(a_key.source) },
 			.target = SlotOf(impl.hudless[index]),
 			.viewport = { .width = a_key.display.width, .height = a_key.display.height },
 			.gate = 0 });
@@ -808,9 +824,15 @@ namespace
 					return std::nullopt;
 				const auto index = HudlessIndexIn(a_in);
 				// The source comes from the last copy that named one. Before one did, the client waits for it.
-				if (!index || !impl->hudlessSource)
+				if (!index || !impl->hudlessSourceTexture)
 					return std::nullopt;
-				return HudlessKey{ *index, DisplayOr(a_in.Get(Vars::DisplaySize()), impl->setupDisplay), impl->hudlessSourceSerial };
+				// Imported here, when the revision starts, so a new source texture joins the revision.
+				auto source = HudlessSourceOf(impl->hudlessSourceTexture.get(), impl->hudlessSourceView.get());
+				if (!source) {
+					logger::error("[ORG] Upscaling: the hudless copy's source cannot be imported; the frame has no hudless colour");
+					return std::nullopt;
+				}
+				return HudlessKey{ *index, DisplayOr(a_in.Get(Vars::DisplaySize()), impl->setupDisplay), std::move(source) };
 			},
 			[weak](const HudlessKey& a_key, FrameAnchors::ClientDesc& a_client) {
 				const auto impl = weak.lock();
@@ -1165,19 +1187,10 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 	winrt::com_ptr<ID3D11Texture2D> texture;
 	if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.put()))) || !texture)
 		return false;
-	// HDR's clean composite is its output twin with CS_ORG_HDR_DISPLAY, ordered after its writes, else an imported D3D11 texture.
-	auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
-	FrameAnchors::Texture source;
-	if (framebuffer.texture == texture.get())
-		source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
-	else if (!(source = ORGHDRDisplay::Get().GraphOf(texture.get())))
-		source = FrameAnchors::D3D11Texture("Upscaling::HudlessSource", texture.get(), a_source, nullptr);
-	if (!source)
-		return false;
-	// A new source registers the client again when the next revision starts (an interim until engine imports are declared).
-	if (source != impl->hudlessSource) {
-		impl->hudlessSource = std::move(source);
-		++impl->hudlessSourceSerial;
+	// A new source registers the client again when the next revision starts, whose key imports it. No import is made here.
+	if (texture.get() != impl->hudlessSourceTexture.get() || a_source != impl->hudlessSourceView.get()) {
+		impl->hudlessSourceTexture = std::move(texture);
+		impl->hudlessSourceView.copy_from(a_source);
 		impl->hudlessClient.Invalidate();
 	}
 	// The adopted revision has no hudless texture while frame generation is off or the presenter has no format for it.

@@ -69,10 +69,11 @@ struct ORGTerrainBlending::Impl
 	RenderGraph::Frame::DeclaredTexture2D blendedDepth;
 	RenderGraph::Frame::DeclaredTexture2D blendedDepth16;
 	RenderGraph::Frame::DeclaredTexture2D mask;
-	// Declared on Enabled. Its key adds the inputs the last depth pass imported.
+	// Declared on Enabled. Its key imports the depth textures the last depth pass found.
 	RenderGraph::Frame::DeclaredClient client;
-	FrameAnchors::Texture mainDepth;
-	FrameAnchors::Texture terrainDepth;
+	// The textures Observe saw last. Not variables yet, so a change invalidates the client. Null before the first depth pass.
+	const void* observedMainDepth = nullptr;
+	const void* observedTerrainDepth = nullptr;
 
 	/** @brief In publish order. */
 	std::array<std::pair<std::string_view, GraphResources::Texture2D*>, 3> Outputs() const
@@ -104,6 +105,14 @@ namespace
 	{
 		static std::uint64_t s_frame = UINT64_MAX;
 		return s_frame;
+	}
+
+	/** @brief The terrain depth's texture, the graph's or Terrain Blending's D3D11 one. Null when there is none. */
+	const void* TerrainDepthTexture()
+	{
+		if (auto owned = ORGTerrainBlending::Get().TerrainDepthGraph())
+			return owned.get();
+		return globals::features::terrainBlending.terrainDepth.texture;
 	}
 
 	FrameAnchors::Texture TerrainDepth()
@@ -481,15 +490,19 @@ bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 			return false;
 		}
 	}
-	// The client follows Enabled from the first revision. Its key needs the inputs a depth pass imported (Observe).
+	// The client follows Enabled from the first revision. Its key needs a depth pass to have found the inputs (Observe).
 	const std::weak_ptr<Impl> weak = next;
 	next->client = DeclareClient<BlendInputs>(
 		kClientId, DependsOn(globals::features::terrainBlending.settings.Enabled),
 		[weak](const Inputs& a_in) -> std::optional<BlendInputs> {
 			const auto current = weak.lock();
-			if (!current || !a_in.Get(globals::features::terrainBlending.settings.Enabled) || !current->mainDepth || !current->terrainDepth)
+			if (!current || !a_in.Get(globals::features::terrainBlending.settings.Enabled) || !current->observedMainDepth || !current->observedTerrainDepth)
 				return std::nullopt;
-			return BlendInputs{ current->mainDepth, current->terrainDepth };
+			// Imported here, when the revision starts, so a new texture joins the revision.
+			BlendInputs inputs{ MainDepth(), TerrainDepth() };
+			if (!inputs.mainDepth || !inputs.terrainDepth)
+				stl::report_and_fail("Community Shaders: Terrain Blending's main or terrain depth cannot be imported into the render graph");
+			return inputs;
 		},
 		[weak](const BlendInputs& a_inputs, FrameAnchors::ClientDesc& a_client) {
 			const auto current = weak.lock();
@@ -509,16 +522,17 @@ void ORGTerrainBlending::Observe()
 {
 	if (!Active())
 		return;
-	auto mainDepth = MainDepth();
-	auto terrainDepth = TerrainDepth();
+	// No import here: the client's key imports them when the next revision starts.
+	const void* mainDepth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
+	const void* terrainDepth = TerrainDepthTexture();
 	if (!mainDepth || !terrainDepth) {
-		Fail("the main or the terrain depth could not be imported");
+		Fail("the main or the terrain depth is missing");
 		return;
 	}
-	if (mainDepth == impl->mainDepth && terrainDepth == impl->terrainDepth)
+	if (mainDepth == impl->observedMainDepth && terrainDepth == impl->observedTerrainDepth)
 		return;
-	impl->mainDepth = std::move(mainDepth);
-	impl->terrainDepth = std::move(terrainDepth);
+	impl->observedMainDepth = mainDepth;
+	impl->observedTerrainDepth = terrainDepth;
 	// Not variables yet: the next revision makes the client for them.
 	impl->client.Invalidate();
 }

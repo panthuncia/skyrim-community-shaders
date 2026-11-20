@@ -35,9 +35,6 @@ namespace RenderGraph::Frame
 	{
 		bool declared = false;        // the frame contains the segment, so its end tap is expected
 		std::uint64_t graph = 0;      // 0 when not built yet
-		// Moves when a slot the graph binds publishes a new version, such as after a resize.
-		// A recording binds the versions it was recorded with, so a new version needs a new recording.
-		std::uint64_t versions = 0;
 		std::uint32_t clients = 0;
 		std::uint32_t clientsOn = 0;  // a bit per client in the graph's client order
 		// Per client, how many instances of its passes run this frame. 0 for a client without instances.

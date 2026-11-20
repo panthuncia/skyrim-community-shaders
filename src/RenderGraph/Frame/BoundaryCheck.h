@@ -10,8 +10,7 @@
 * - late versions: every versioned resource adoption ORG reports (VersionedResource::SetAdoptionObserver), by resource name and caller tag;
 * - late changes: client registrations and rebuild requests made inside the frame;
 * - late attaches: graph builds attached or staged graphs switched in outside the adoption point;
-* - refusals: builds ORG refused at their staging, attach or switch, by site and reason, on any thread (plan Q9);
-* - version lags: stage schedules that lagged behind a version published outside a frame revision, by slot, on any thread.
+* - refusals: builds ORG refused at their staging, attach or switch, by site and reason, on any thread (plan Q9).
 * Late versions and late attaches are tap errors (TapError::OutsideAdoption), fatal in development builds, unless an Allow scope
 * names an Exception. Exceptions are counted apart, by name. A new resource's first version is counted, not an error.
 * Late changes and the counts below them stay counted, not fatal, until step 10c.
@@ -20,6 +19,9 @@
 */
 namespace RenderGraph::Frame::Boundary
 {
+	/** @brief Whether the calling thread is inside the adoption point (a Scope is open). Engine imports change only there (step 9b). */
+	bool InAdoptionPoint();
+
 	/** @brief Marks the adoption point on the calling thread. Frame::Driver::OnBegin opens it around its body. */
 	class Scope
 	{
@@ -49,8 +51,7 @@ namespace RenderGraph::Frame::Boundary
 	/** @brief The exceptions to rule R1 allowed for now. Each is deleted by the step that names it. */
 	enum class Exception : std::uint8_t
 	{
-		Dclf,           // DCLF adopts its snapshot's versions and attaches its own epochs' builds at its build points (step 10a)
-		EngineImports,  // imports found in the frame (FrameAnchors.cpp JoinSlot) take versions when the engine makes them (step 9b)
+		Dclf,  // DCLF adopts its snapshot's versions and attaches its own epochs' builds at its build points (step 10a)
 		Count
 	};
 
@@ -91,13 +92,6 @@ namespace RenderGraph::Frame::Boundary
 
 	/** @brief ORG refused a build at a_site (staging, attach, switch) for a_reason (GraphHost::AttachRefusalName). Counted on any thread. */
 	void NoteRefusal(std::string_view a_site, std::string_view a_reason);
-
-	/**
-	* @brief A stage's schedule lagged a frame or more because a_slot got a version outside a frame revision (an import found in the
-	* frame). Counted by slot on any thread, until step 9b brings those slots into revisions. Engine targets and the native back
-	* buffer take theirs with a revision since step 9a.
-	*/
-	void NoteVersionLag(std::string_view a_slot);
 
 	/** @brief Logs the census line for the window and resets it. Called from Frame::Driver::LogStats. */
 	void LogStats();

@@ -51,7 +51,6 @@ namespace RenderGraph::Frame
 		const auto mix = [&](std::uint64_t a_word) { hash = (hash ^ a_word) * 1099511628211ull; };
 		mix(a_fields.declared);
 		mix(a_fields.graph);
-		mix(a_fields.versions);
 		mix(a_fields.clients);
 		mix(a_fields.clientsOn);
 		for (std::size_t i = 0; i < a_fields.instances.size(); i += 8) {
@@ -82,7 +81,6 @@ namespace RenderGraph::Frame
 		std::string out;
 		Append(out, "declared", a_before.declared ? "yes" : "no", a_after.declared ? "yes" : "no");
 		Append(out, "graph", std::to_string(a_before.graph), std::to_string(a_after.graph));
-		Append(out, "versions", std::to_string(a_before.versions), std::to_string(a_after.versions));
 		Append(out, "clients", std::to_string(a_before.clients), std::to_string(a_after.clients));
 		Append(out, "clientsOn", fmt::format("{:#x}", a_before.clientsOn), fmt::format("{:#x}", a_after.clientsOn));
 		const auto instances = [](const SegmentFields& a_fields) {

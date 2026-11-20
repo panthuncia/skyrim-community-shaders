@@ -1339,6 +1339,44 @@ target as the import from the start, with Dynamic Cubemaps' "first update done" 
 
 **Size.** Medium to large. 9a and 9b separate agents; 9b's sources can split by feature.
 
+**As built (9b, 2026-11-19, `org-native/rev-step9b`).** Code only; not built or run by the agent. Merge after 9a: it deletes
+`Boundary::Exception::EngineImports`, whose other two sites (`EngineTargets.cpp`, `NativeDevice.cpp`) 9a removes.
+- **Census before the change** (the `*-integ-6b4` runs, 2026-11-19: quick in all modes, hdr, hdr-resize, resize, resize-drag,
+  menu, fg, guest-map, upscalers, dclf-family): no `JoinSlot`, no `EnsureViews`, no import replaced or moved, no version lag. The
+  only late versions were 9a's volumetric lighting twins. Most sources had already moved their imports into declared clients'
+  keys in step 6.
+- **The rule** (`FrameAnchors.cpp`, `Import`, `EnsureViews`, `JoinSlot`, `RefusedOutsideAdoption`): a new texture under an id, an id
+  moving to another import's slot, or a view a slot lacks is a change. Inside the adoption point (`Boundary::InAdoptionPoint`, new:
+  declared clients' keys, makes and adopted calls) a same-class texture becomes a pending version through
+  `Revision::PublishTexture`, recorded with and adopted with the revision. The key runs in `Declarations::Evaluate`, before
+  `StartPreparation` takes the texture requests, so it joins the revision that re-keys the client. Another shape class is a new slot
+  and a structural rebuild, as before. Outside the adoption point it is `TapError::OutsideAdoption`, naming the id and the caller,
+  and the slot keeps its version. The import functions take a defaulted `std::source_location`, so every caller is named.
+- **The replaced D3D11 texture lives with the new version** (an `EngineImport` owner holds it), since frames bind the old version
+  until adoption. Before, it was released after D3D11 at once.
+- **Views declared at the first import** (`DeclareBindFlagViews`): an SRV and an RTV wherever the bind flags allow them, in the
+  texture's typed format, plus the caller's. `EnsureViews` stays only for a view in another format or one the flags do not give, and
+  it is a pending version inside the adoption point and a tap error outside.
+- **The version-lag branch is gone.** `SegmentFields::versions`, `versionGeneration`, `frameVersionsCurrent` and
+  `Boundary::NoteVersionLag` (and the census's "version lags") are deleted. A schedule that binds a replaced version at Begin is
+  `TapError::StaleRecording` and the slot has no schedule. `RequestDeclared` drops a kept recording of the current versions that a
+  revision replaced since, so a later description records again.
+- **Sources** (worker audit: every import site classified as in a key/make, mid-frame on a slot that cannot change, or moved):
+  - moved into the key, with the observed texture as the interim input: Dynamic Cubemaps' capture colour source (`captureMain`, the
+    key imports it; `AfterUpdate` only compares the target index), Upscaling's hudless source (`HudlessSourceOf` in the key;
+    `CopyHudless` compares the texture and view), Screenshot's clean scene (the key imports kFRAMEBUFFER; `SnapshotCleanScene`
+    compares the texture), Terrain Blending's depths (the key imports them; `Observe` compares pointers);
+  - ImGui (`Menu/ImGuiRenderer.cpp`): a declared client whose key imports the target the last draw observed. The draw invalidates
+    on a new target and draws only once the adopted registration is for the bound texture (`adopted` sets it). The last
+    `FrameAnchors::Refresh` outside DCLF's harness is gone;
+  - Post Processing's 2D LUT imports each loaded texture under its own id (`pp.lut.<address>`), since a new file is another shape;
+  - unchanged, already in keys or makes: ImageSpace, HDR's composite, Bink, Physical Sky, Effects11's files, View Atmosphere;
+    unchanged, mid-frame on ORG-owned engine targets (`Targets::Find` returns first, so no version can be published): Upscaling's
+    inputs, EHF's and Physical Sky's shadow maps (the fog's frame-checked map is kSHADOWMAPS, owned), Skylighting, Effects11's
+    observations, DCLF's family draws.
+- **Not audited:** DCLF `Resources.cpp`'s `ShareImage` calls, Scaleform `Passes.cpp`, `Skeleton.cpp`'s `engine.kMAIN.copy`,
+  Cloud Shadows. Any of them that changes an import mid-frame now stops the game with its file and line.
+
 ---
 
 ### Step 10. DCLF joins
@@ -1708,8 +1746,8 @@ return nothing (or only the stated exception) at the end.
 | `ResetHistories`, `clearPending` | 6.1, 6.9 | `rg -n "ResetHistories\|clearPending" src` |
 | `Frame::Resources` `fresh` | 7a | `rg -n "\bfresh\b" src/RenderGraph/Frame src/RenderGraph/Engine/ImageSpace*` |
 | Per-stage staged switch (`SwitchStaged`, `stagedAsked*`, `kAskedAgainLimit` in `Schedule`) | 4e, 7b | `rg -n "SwitchStaged\|stagedAsked\|kAskedAgainLimit" src` |
-| Version-lag branch in `Schedule` (`versionGeneration` bumps, `frameVersionsCurrent` exception) | 9b | `rg -n "versionGeneration\|frameVersionsCurrent" src/RenderGraph/FrameAnchors.cpp` |
-| Mid-frame import publishing (`JoinSlot`/`EnsureViews` outside adoption) | 9b | `rg -n "JoinSlot\|EnsureViews" src/RenderGraph/FrameAnchors.cpp` shows calls only from the revision's adoption path |
+| Version-lag branch in `Schedule` (`versionGeneration` bumps, `frameVersionsCurrent` exception). Gone in 9b | 9b | `rg -n "versionGeneration\|frameVersionsCurrent" src/RenderGraph/FrameAnchors.cpp` |
+| Mid-frame import publishing (`JoinSlot`/`EnsureViews` outside adoption). 9b: both are called from `Import`/`ShareImage`, and refuse outside `Boundary::InAdoptionPoint` | 9b | `rg -n "JoinSlot\|EnsureViews" src/RenderGraph/FrameAnchors.cpp` shows calls only behind `RefusedOutsideAdoption`; `rg -n "EngineImports" src` empty |
 | `EngineTargets` `Settle` builds and generation bump | 9a | `rg -n "Settle\(\|heldReplaced\|heldResized" src/RenderGraph/Engine/Targets` |
 | DCLF frame-start wait | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|kCatalogTimeout" src` |
 | `RenderGraphRuntime::AttachDclfBuilds`, DCLF `external` epochs, frame-end `Attach::All` for DCLF | 10a | `rg -n "AttachDclfBuilds\|Attach::All\|\.external" src` |
@@ -2494,6 +2532,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   is counted as a late change (step 10c).
 - **The engine target's pending version has no owner.** The version holds the image and ORG owns its memory, so the old image
   lives while its version is still current or held.
+
+**Decided by the agent (step 9b, 2026-11-19), to confirm:**
+- **A change inside the adoption point is a pending version, not a direct publish.** A direct publish at Begin would leave every
+  stage's schedule binding the old version, which is the lag 9b deletes.
+- **Observed inputs stay where the texture is no variable** (the hudless source, the cubemap capture's target, the clean scene's
+  back buffer, Terrain Blending's depths, ImGui's bound target): the frame compares a raw pointer and calls `Invalidate`, and only
+  the key imports. A back buffer identity variable raised by 9a's resize path would retire the three back buffer ones.
+- **The cubemap capture keeps the switch.** `forwardRenderTargets[0]` is kFRAMEBUFFER until Deferred's first `StartDeferred`, so the
+  forward target cannot be the import from the start.
+- **SRV and RTV are declared from the bind flags; UAVs and depth views are not.** Typed UAVs and depth SRVs need formats only the
+  caller knows, so a widened guess could make an invalid view.
+- **A refused change keeps the old slot** in builds where tap errors are not fatal (`CS_ORG_MISMATCH_FATAL=0`, Release profile).
+- **Each loaded LUT is its own import.** Old LUT imports stay in the import table for the session (one entry per file loaded).
+- **ImGui's key holds the observed format,** read at the draw that observed the texture, so the adopted call's key matches.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

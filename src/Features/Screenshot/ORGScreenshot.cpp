@@ -121,8 +121,9 @@ namespace
 	/** @brief What the clean copy's registration depends on. */
 	struct CleanKey
 	{
-		Vars::Extent2D display{};      // the copy's size
-		FrameAnchors::Texture source;  // kFRAMEBUFFER's import
+		Vars::Extent2D display{};                // the copy's size
+		FrameAnchors::Texture source;            // kFRAMEBUFFER's import
+		const ID3D11Texture2D* texture = nullptr;  // the D3D11 texture the key imported
 		bool operator==(const CleanKey&) const = default;
 	};
 
@@ -134,8 +135,9 @@ namespace
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		Vars::Extent2D setupDisplay{};  // kFRAMEBUFFER's size at setup, before the first DisplaySize event
 		D3D11_TEXTURE2D_DESC desc{};    // the texture's description at the copy's size, for the capture
-		// kFRAMEBUFFER's import as the frame last saw it. Not a variable yet, so a change calls client.Invalidate().
-		FrameAnchors::Texture source;
+		// kFRAMEBUFFER's texture as the frame last saw it. Not a variable yet, so a change calls client.Invalidate().
+		// The key imports it, so the frame makes no import. Only compared, so it holds no reference to the back buffer.
+		const ID3D11Texture2D* observed = nullptr;
 		// The key of the registration the adopted revision holds. Set by the client's adopted call, cleared with the client.
 		std::optional<CleanKey> held;
 		bool armed = false;          // SnapshotCleanScene is running the anchor for it
@@ -527,20 +529,30 @@ namespace
 		return true;
 	}
 
-	/** @brief kFRAMEBUFFER's description. With the engine's targets on the graph the slot has no texture, so take it from a view. */
-	bool FramebufferDesc(D3D11_TEXTURE2D_DESC& a_desc)
+	/** @brief kFRAMEBUFFER's texture. With the engine's targets on the graph the slot has no texture, so take it from a view. */
+	winrt::com_ptr<ID3D11Texture2D> FramebufferTexture()
 	{
+		winrt::com_ptr<ID3D11Texture2D> framebuffer;
 		if (!globals::game::renderer)
-			return false;
+			return framebuffer;
 		const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
-		winrt::com_ptr<ID3D11Texture2D> viewed;
-		ID3D11Texture2D* framebuffer = target.texture;
-		if (ID3D11View* view = target.SRV ? static_cast<ID3D11View*>(target.SRV) : static_cast<ID3D11View*>(target.RTV); !framebuffer && view) {
+		if (target.texture) {
+			framebuffer.copy_from(target.texture);
+			return framebuffer;
+		}
+		if (ID3D11View* view = target.SRV ? static_cast<ID3D11View*>(target.SRV) : static_cast<ID3D11View*>(target.RTV)) {
 			winrt::com_ptr<ID3D11Resource> resource;
 			view->GetResource(resource.put());
-			if (resource && SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(viewed.put()))))
-				framebuffer = viewed.get();
+			if (resource)
+				framebuffer = resource.try_as<ID3D11Texture2D>();
 		}
+		return framebuffer;
+	}
+
+	/** @brief kFRAMEBUFFER's description. */
+	bool FramebufferDesc(D3D11_TEXTURE2D_DESC& a_desc)
+	{
+		const auto framebuffer = FramebufferTexture();
 		if (!framebuffer)
 			return false;
 		framebuffer->GetDesc(&a_desc);
@@ -577,7 +589,7 @@ namespace
 			return nullptr;
 		}
 		// The first SnapshotCleanScene takes it again if this one is not the frame's.
-		clean->source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
+		clean->observed = FramebufferTexture().get();
 		const auto setup = clean->setupDisplay;
 		clean->texture = DeclareTexture2D(
 			"Screenshot::CleanScene", DependsOn(Vars::DisplaySize(), Vars::HdrEnabled()),
@@ -603,11 +615,18 @@ namespace
 				if (!current)
 					return std::nullopt;
 				// No client, so none is held from here on.
-				if (a_in.Get(Vars::HdrEnabled()) || !current->source) {
+				if (a_in.Get(Vars::HdrEnabled()) || !current->observed) {
 					current->held.reset();
 					return std::nullopt;
 				}
-				return CleanKey{ DisplayOr(a_in.Get(Vars::DisplaySize()), current->setupDisplay), current->source };
+				// Imported here, when the revision starts, so a new back buffer joins the revision.
+				const auto texture = FramebufferTexture();
+				auto source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
+				if (!texture || !source) {
+					current->held.reset();
+					return std::nullopt;
+				}
+				return CleanKey{ DisplayOr(a_in.Get(Vars::DisplaySize()), current->setupDisplay), std::move(source), texture.get() };
 			},
 			[weak](const CleanKey& a_key, FrameAnchors::ClientDesc& a_client) {
 				const auto current = weak.lock();
@@ -635,23 +654,25 @@ bool ORGScreenshot::SnapshotCleanScene()
 		return false;
 	auto& state = *impl;
 	auto& clean = *state.clean;
-	auto source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
-	if (!source) {
+	const auto framebuffer = FramebufferTexture();
+	if (!framebuffer) {
 		if (!std::exchange(state.cleanWarned, true))
-			logger::warn("[ORG] Screenshot: kFRAMEBUFFER cannot be imported, so this capture has no clean scene; captures read kFRAMEBUFFER at the capture point");
+			logger::warn("[ORG] Screenshot: kFRAMEBUFFER has no texture, so this capture has no clean scene; captures read kFRAMEBUFFER at the capture point");
 		return false;
 	}
-	// The import is not a variable yet. A new one registers the copy again when the next revision starts.
-	if (source != clean.source) {
-		clean.source = std::move(source);
+	// The back buffer is not a variable yet. A new one registers the copy again when the next revision starts, whose key imports it.
+	if (framebuffer.get() != clean.observed) {
+		clean.observed = framebuffer.get();
 		clean.client.Invalidate();
 		return false;
 	}
-	// The frame's build holds the adopted registration. It copies only while that one was made for this source at its size.
+	// The frame's build holds the adopted registration. It copies only while that one was made for this texture at its size.
 	// Otherwise the revision with the new size is still on its way.
+	D3D11_TEXTURE2D_DESC framebufferDesc{};
+	framebuffer->GetDesc(&framebufferDesc);
 	const auto& held = clean.held;
-	if (!clean.client.Registered() || !held || held->source != clean.source || held->display.width != clean.source.Width() ||
-		held->display.height != clean.source.Height())
+	if (!clean.client.Registered() || !held || held->texture != framebuffer.get() || held->display.width != framebufferDesc.Width ||
+		held->display.height != framebufferDesc.Height)
 		return false;
 	clean.desc.Width = held->display.width;
 	clean.desc.Height = held->display.height;

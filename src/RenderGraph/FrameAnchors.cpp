@@ -11,6 +11,7 @@
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Recipe.h"
 #	include "RenderGraph/Frame/RecipeTable.h"
+#	include "RenderGraph/Frame/Revision.h"
 #	include "RenderGraph/Frame/RevisionRecordings.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Native/Native.h"
@@ -53,6 +54,7 @@
 #	include <set>
 #	include <mutex>
 #	include <optional>
+#	include <source_location>
 #	include <typeindex>
 
 namespace FrameAnchors
@@ -282,8 +284,6 @@ namespace FrameAnchors
 			std::vector<std::shared_ptr<SegmentRecording>> entries;
 			RenderGraph::Frame::SegmentFields last{}; // the last description's fields, to log why a new one differs
 			bool any = false;
-			// Bumped when a kept recording binds a version that is no longer current. Render owner.
-			std::uint64_t versionGeneration = 0;
 		};
 
 		/**
@@ -606,9 +606,6 @@ namespace FrameAnchors
 			// The description a slot last began to wait for, per segment, and the frame it did: a switch's lag counts from it.
 			std::array<std::uint64_t, kDeclared> waitHash{};
 			std::array<std::uint64_t, kDeclared> waitFrame{};
-			// Whether this frame's recording bound the current versions at Begin.
-			// A version published after Begin is a mismatch. One published before it lags until the new recording is ready.
-			std::array<bool, kDeclared> frameVersionsCurrent{};
 			bool inBegin = false; // BeginFrame is choosing schedules. A recording asked for outside it is a mid-frame re-record
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// Taps so far of each step in the held run. Reset when the frame's first tap takes the ticket.
@@ -1482,26 +1479,60 @@ namespace FrameAnchors
 		/** @brief How a new backing joined an import's slot. */
 		enum class Joined : std::uint8_t
 		{
-			Version, // the slot's next version, same size. Nothing is rebuilt
-			Resized, // the slot's next version, new size. Passes that read the size at build are made again
+			Version, // the slot's next version, same size, pending in the revision being prepared. Nothing is rebuilt
+			Resized, // the slot's next version, new size, pending. Passes that read the size at build are made again
 			NewShape, // new format, mip or slice count. A new slot, and graphs using the old one rebuild
+			Refused, // asked for outside the adoption point: a tap error, and the slot keeps its version
 		};
 
-		/** @brief Publishes a_next as a_slot's next version if the shape class matches. a_owner keeps it alive. Render thread. */
-		Joined JoinSlot(org::VersionedTexture& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next, std::shared_ptr<const void> a_owner = {})
+		/** @brief Where an import call came from, for its errors: "Features/Foo.cpp:12 (Bar)". */
+		std::string CallerText(const std::source_location& a_caller)
 		{
-			const auto previous = a_slot.CurrentResource();
-			const bool sameSize = previous && WidthOf(previous.get()) == WidthOf(a_next.get()) && HeightOf(previous.get()) == HeightOf(a_next.get());
-			try {
-				// Imports take versions when the engine makes them, an allowed exception until step 9b.
-				const RenderGraph::Frame::Boundary::Caller caller("engine import");
-				const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
-				a_slot.PublishImage(std::move(a_next), std::move(a_owner));
-			} catch (const std::exception&) {
+			std::string_view file = a_caller.file_name();
+			for (const std::string_view root : { "src\\", "src/" })
+				if (const auto at = file.rfind(root); at != std::string_view::npos) {
+					file.remove_prefix(at + root.size());
+					break;
+				}
+			return fmt::format("{}:{} ({})", file, a_caller.line(), a_caller.function_name());
+		}
+
+		/**
+		* @brief An import may change its texture or views only inside the frame's adoption point, where declared clients' keys run.
+		* Elsewhere the change was discovered mid-frame (step 9b): a tap error naming the import and its caller. Returns whether it is refused.
+		*/
+		bool RefusedOutsideAdoption(std::string_view a_id, std::string_view a_change, const std::source_location& a_caller)
+		{
+			if (RenderGraph::Frame::Boundary::InAdoptionPoint())
+				return false;
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::OutsideAdoption, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("the import '{}' {} at {}, outside the frame's adoption point. An import changes only when a frame revision starts: "
+							"import it in a declared client's key, with the variable it follows as a dependency",
+					a_id, a_change, CallerText(a_caller)));
+			return true;
+		}
+
+		/** @brief Whether two images can be versions of one slot: the same format, mip count and slice count. */
+		bool SameShapeClass(const DxvkOrgInteropImageInfo& a_left, const DxvkOrgInteropImageInfo& a_right)
+		{
+			return a_left.format == a_right.format && (std::max)(a_left.mipLevels, 1u) == (std::max)(a_right.mipLevels, 1u) &&
+			       (std::max)(a_left.arrayLayers, 1u) == (std::max)(a_right.arrayLayers, 1u);
+		}
+
+		/**
+		* @brief a_next as a_slot's next version, if the shape class matches. Inside the adoption point only: the version is pending
+		* in the revision being prepared, recorded with it and adopted with it (Revision::PublishTexture). a_owner keeps it alive.
+		*/
+		Joined JoinSlot(const std::shared_ptr<org::VersionedTexture>& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next,
+			const DxvkOrgInteropImageInfo& a_from, const DxvkOrgInteropImageInfo& a_to, std::shared_ptr<const void> a_owner, std::string_view a_id,
+			std::string_view a_change, const std::source_location& a_caller)
+		{
+			if (RefusedOutsideAdoption(a_id, a_change, a_caller))
+				return Joined::Refused;
+			if (!SameShapeClass(a_from, a_to))
 				return Joined::NewShape;
-			}
-			if (auto* host = RenderGraphRuntime::Get().Host())
-				host->NoteNewVersions();
+			const bool sameSize = a_from.extent.width == a_to.extent.width && a_from.extent.height == a_to.extent.height;
+			RenderGraph::Frame::Revision::PublishTexture(a_slot, std::move(a_next), std::move(a_owner));
 			return sameSize ? Joined::Version : Joined::Resized;
 		}
 
@@ -1529,9 +1560,13 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_state.imports, [&](const auto& a_entry) { return a_entry.first != a_except && a_entry.second == a_import; });
 		}
 
-		/** @brief Makes a_import's slot serve a_want's views too, by importing the image again when a view is missing.
-		*  Passes keep declaring the slot, so nothing is rebuilt. Render thread. */
-		void EnsureViews(const std::shared_ptr<EngineImport>& a_import, const org::TextureDescription& a_want, std::string_view a_by)
+		/**
+		* @brief Makes a_import's slot serve a_want's views too. The first import declared every view the bind flags allow, so this
+		* is only for a view in another format or one the flags do not give. Inside the adoption point the image is imported again
+		* with the views as a pending version. Outside it is a tap error. Passes keep declaring the slot, so nothing is rebuilt.
+		*/
+		void EnsureViews(const std::shared_ptr<EngineImport>& a_import, const org::TextureDescription& a_want, std::string_view a_by,
+			const std::source_location& a_caller)
 		{
 			if (Covers(a_import->views, a_want))
 				return;
@@ -1555,25 +1590,79 @@ namespace FrameAnchors
 					logger::warn("[ORG] frame anchors: {} asks {}'s graph-owned texture for a view its bind flags do not allow; it keeps its views", a_by, a_import->id);
 				return;
 			}
+			if (RefusedOutsideAdoption(a_import->id, fmt::format("was asked by {} for views its slot lacks", a_by), a_caller))
+				return;
 			DescribeSubresources(merged, a_import->info);
 			auto& runtime = RenderGraphRuntime::Get();
-			// Frames already prepared with the old version finish with it.
-			RenderGraph::RetireImageResource(old.get());
 			auto next = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), a_import->info, merged, a_import->id.c_str());
 			// A loose slot's versions keep its entry, and with it the D3D11 texture.
 			std::shared_ptr<const void> owner;
 			if (!a_import->slot)
 				owner = a_import;
-			if (!next || JoinSlot(*slot, next, owner) == Joined::NewShape) {
+			if (!next || JoinSlot(slot, next, a_import->info, a_import->info, std::move(owner), a_import->id, "", a_caller) != Joined::Version) {
 				logger::warn("[ORG] frame anchors: {}'s image could not be imported again with the views {} asks for; it keeps the slot's views", a_import->id, a_by);
-				if (old)
-					RenderGraph::NoteImageResource(a_import->image, old, a_import->id);
 				return;
 			}
+			// Frames still bind the old version until the revision is adopted. Its duplicate check entry goes now; the new one is the image's.
+			RenderGraph::RetireImageResource(old.get());
 			a_import->views = std::move(merged);
 			static std::atomic<std::uint32_t> logged{ 0 };
 			if (LogImportLine(logged))
-				logger::info("[ORG] frame anchors: {}'s slot has the views {} asks for now: a version of the same image", a_import->id, a_by);
+				logger::info("[ORG] frame anchors: {}'s slot gets the views {} asks for with the next frame revision: a version of the same image", a_import->id, a_by);
+		}
+
+		/** @brief Whether a DXGI format is typeless, so a view's format cannot be taken from it. */
+		bool Typeless(DXGI_FORMAT a_format)
+		{
+			switch (a_format) {
+			case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+			case DXGI_FORMAT_R32G32B32_TYPELESS:
+			case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+			case DXGI_FORMAT_R32G32_TYPELESS:
+			case DXGI_FORMAT_R32G8X24_TYPELESS:
+			case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+			case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+			case DXGI_FORMAT_R16G16_TYPELESS:
+			case DXGI_FORMAT_R32_TYPELESS:
+			case DXGI_FORMAT_R24G8_TYPELESS:
+			case DXGI_FORMAT_R8G8_TYPELESS:
+			case DXGI_FORMAT_R16_TYPELESS:
+			case DXGI_FORMAT_R8_TYPELESS:
+			case DXGI_FORMAT_BC1_TYPELESS:
+			case DXGI_FORMAT_BC2_TYPELESS:
+			case DXGI_FORMAT_BC3_TYPELESS:
+			case DXGI_FORMAT_BC4_TYPELESS:
+			case DXGI_FORMAT_BC5_TYPELESS:
+			case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+			case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+			case DXGI_FORMAT_BC6H_TYPELESS:
+			case DXGI_FORMAT_BC7_TYPELESS:
+				return true;
+			default:
+				return false;
+			}
+		}
+
+		/**
+		* @brief The views declared at an image's first import (step 9b): the caller's, plus an SRV and an RTV wherever the bind
+		* flags allow them and the texture's format is typed. Then a later importer of the image asking for those finds them, and no
+		* view is added mid-frame. Depth textures and UAVs keep only the views the caller names, since their formats need the caller.
+		*/
+		void DeclareBindFlagViews(org::TextureDescription& a_desc, const D3D11_TEXTURE2D_DESC& a_texture)
+		{
+			if (a_desc.hasDSV || (a_texture.BindFlags & D3D11_BIND_DEPTH_STENCIL) || Typeless(a_texture.Format))
+				return;
+			const auto format = rhi::helpers::ToRHI(a_texture.Format);
+			if (format == rhi::Format::Unknown)
+				return;
+			if (!a_desc.hasSRV && (a_texture.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
+				a_desc.hasSRV = true;
+				a_desc.srvFormat = format;
+			}
+			if (!a_desc.hasRTV && (a_texture.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+				a_desc.hasRTV = true;
+				a_desc.rtvFormat = format;
+			}
 		}
 
 		/** @brief Drops a_import once nothing names it. Its D3D11 texture goes once D3D11 is done with it. */
@@ -1584,7 +1673,7 @@ namespace FrameAnchors
 		}
 
 		Texture Import(ID3D11Texture2D* a_texture, const std::string& a_id,
-			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe)
+			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe, const std::source_location& a_caller)
 		{
 			auto lock = Guard();
 			auto& state = Anchors();
@@ -1623,12 +1712,16 @@ namespace FrameAnchors
 			// One image, one graph resource, whoever imported it first.
 			// Two resources would each track the image's state and race on layout moves.
 			if (auto shared = FindImage(state, image)) {
-				EnsureViews(shared, desc, a_id);
 				if (shared == previous) {
 					// The same image under another handle (a port's handle around it).
+					EnsureViews(shared, desc, a_id, a_caller);
 					shared->texture.copy_from(a_texture);
 					return Texture(a_id, shared->slot);
 				}
+				// The id moves to another import's slot: a new slot for its readers, so it must come with a revision.
+				if (previous && RefusedOutsideAdoption(a_id, fmt::format("moved to the slot of '{}'", shared->id), a_caller))
+					return Texture(a_id, previous->slot);
+				EnsureViews(shared, desc, a_id, a_caller);
 				if (!shared->slot) {
 					// A loose slot from ShareImage becomes this id's. The loose entry stays its versions' owner, since they hold it.
 					auto taken = std::make_shared<EngineImport>(*shared);
@@ -1651,15 +1744,23 @@ namespace FrameAnchors
 				return Texture(a_id, shared->slot);
 			}
 
+			// A new texture under an id is a change of the id: only inside the adoption point.
+			if (previous && RefusedOutsideAdoption(a_id, "took a new texture", a_caller))
+				return Texture(a_id, previous->slot);
+			// The image's views are declared now, for every importer to come.
+			DeclareBindFlagViews(desc, textureDesc);
 			auto backing = MakeBacking(a_texture, info.image, desc, a_id);
 			if (!backing)
 				return {};
-			// A new texture for an id that alone names its slot becomes the slot's next version. A shared slot stays with the other id.
+			// A new texture for an id that alone names its slot becomes the slot's next version, pending in the revision being
+			// prepared. A shared slot stays with the other id.
 			if (previous && !NamedElsewhere(state, previous, a_id)) {
-				const auto joined = JoinSlot(*previous->slot, backing);
-				if (joined != Joined::NewShape) {
-					// The old D3D11 texture goes once D3D11 is done with it. The old version lives while a frame or ticket holds it.
-					runtime.ReleaseAfterD3D11(std::make_shared<winrt::com_ptr<ID3D11Texture2D>>(std::move(previous->texture)));
+				// The replaced D3D11 texture lives until the new version goes, since frames bind the old one until the adoption.
+				// The entry's destructor sends the texture to the render thread.
+				auto replaced = std::make_shared<EngineImport>();
+				replaced->texture = std::move(previous->texture);
+				const auto joined = JoinSlot(previous->slot, backing, previous->info, info.image, std::move(replaced), a_id, "took a new texture", a_caller);
+				if (joined == Joined::Version || joined == Joined::Resized) {
 					previous->texture.copy_from(a_texture);
 					previous->image = image;
 					previous->info = info.image;
@@ -2204,7 +2305,6 @@ namespace FrameAnchors
 			if (!built)
 				return fields;  // graph 0: not built yet
 			fields.graph = a_graph;
-			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
 			const auto& clients = SegmentClients(*built, a_declared);
 			// A stage with no client and no module step has nothing to record, so it is absent from the frame.
 			bool foreignStep = false;
@@ -2282,8 +2382,8 @@ namespace FrameAnchors
 		{
 			const auto message = fmt::format(
 				"Community Shaders native mode: the {} could not be recorded, so the frame cannot be drawn. Description: graph build {}, "
-				"version generation {}, clients on {:#x} of {}, module steps on {:#x}, pass revisions {:#x}, frame slot {}. Cause: {}",
-				declaredInfo[a_declared].names.label, a_fields.graph, a_fields.versions, a_fields.clientsOn, a_fields.clients, a_fields.foreignOn,
+				"clients on {:#x} of {}, module steps on {:#x}, pass revisions {:#x}, frame slot {}. Cause: {}",
+				declaredInfo[a_declared].names.label, a_fields.graph, a_fields.clientsOn, a_fields.clients, a_fields.foreignOn,
 				a_fields.passes, a_slot, a_cause);
 			logger::critical("[ORG] frame segments: {}", message);
 			stl::report_and_fail(message);
@@ -2315,6 +2415,11 @@ namespace FrameAnchors
 					if (kept.done && !kept.recording) {
 						if (!kept.dropped)
 							FailRecording(a_declared, kept.fields, kept.slot, kept.error.empty() ? std::string("no recording") : kept.error);
+						recordings.entries.erase(it);
+						break;
+					}
+					// A recording of the versions current when it was made, which a frame revision replaced since. It never runs again.
+					if (kept.done && a_versions.serial == 0 && !a_state.host->EpochRecordingVersionsCurrent(*kept.recording, a_slot)) {
 						recordings.entries.erase(it);
 						break;
 					}
@@ -2416,19 +2521,13 @@ namespace FrameAnchors
 			// A schedule of an older build is gone. Builds attach only at a frame boundary, before this.
 			if (active.recording && !host.EpochRecordingCurrent(*active.recording))
 				active = {};
-			// A schedule whose recording binds a replaced version gets a new description for the new version.
-			// The slot keeps the old schedule until that is ready, so the stage lags a frame or two but is never blank.
-			// Only slots published outside frame revisions lag (engine imports, the native back buffer), since a revision switches every
-			// stage that declares its slots. The census counts the lags by slot.
-			a_state.frameVersionsCurrent[a_declared] = true;
+			// Versions change only with a frame revision, which installs every member stage's recordings for them (step 9b). A
+			// schedule that binds a replaced version had a slot published outside one: a tap error, and the slot has no schedule.
 			if (active.recording && !host.EpochRecordingVersionsCurrent(*active.recording, slot)) {
-				if (active.fields.versions == recordings.versionGeneration) {
-					++recordings.versionGeneration;
-					// The slot's name, without the version numbers, so the census groups by slot.
-					const auto stale = host.EpochRecordingStaleVersion(*active.recording, slot);
-					RenderGraph::Frame::Boundary::NoteVersionLag(std::string_view(stale).substr(0, stale.find(" (slot ")));
-				}
-				a_state.frameVersionsCurrent[a_declared] = false;
+				Driver::NoteTapError(Driver::TapError::StaleRecording, segment,
+					fmt::format("slot {} of its graph took a version outside a frame revision; versions change only with a revision",
+						host.EpochRecordingStaleVersion(*active.recording, slot)));
+				active = {};
 			}
 			// A staged build switches in with a frame revision, recorded for every slot (Frame::Revision). Until then the slots keep the
 			// attached build's schedule.
@@ -2449,12 +2548,6 @@ namespace FrameAnchors
 					// Parity fields fit only the slots of this frame's parity.
 					if (s % 2 != a_frame.parity)
 						continue;
-					if (kept.recording && kept.fields == ahead && host.EpochRecordingCurrent(*kept.recording)) {
-						// A version was replaced since. The next frame's description names the new one.
-						if (!host.EpochRecordingVersionsCurrent(*kept.recording, s) && kept.fields.versions == recordings.versionGeneration)
-							++recordings.versionGeneration;
-						continue;
-					}
 					const auto entry = RequestDeclared(a_state, a_declared, ahead, s, a_frame.frame, " (ahead, for the next frame of its kinds)");
 					std::shared_ptr<const org::GraphHost::EpochRecording> ready;
 					{
@@ -2464,8 +2557,6 @@ namespace FrameAnchors
 					}
 					if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, s))
 						kept = { ahead, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
-					else if (ready && host.EpochRecordingCurrent(*ready) && ahead.versions == recordings.versionGeneration)
-						++recordings.versionGeneration;
 				}
 			}
 			if (!wanted.declared)
@@ -2513,9 +2604,6 @@ namespace FrameAnchors
 						if (otherReady && host.EpochRecordingCurrent(*otherReady) && host.EpochRecordingVersionsCurrent(*otherReady, s))
 							other = { wanted, std::move(otherReady), active.built };
 					}
-				} else if (ready && host.EpochRecordingCurrent(*ready)) {
-					// A slot replaced a version while this was recorded. The next frame's description names the new one.
-					++recordings.versionGeneration;
 				}
 			}
 			if (!active.recording) {
@@ -2737,7 +2825,7 @@ namespace FrameAnchors
 				return mismatch(Driver::TapError::NotDeclared, "its commit came in a frame without a schedule for it");
 			if (!host.EpochRecordingCurrent(*recording))
 				return mismatch(Driver::TapError::LostToBuild, "a build of its graph attached after the frame's Begin; builds attach only at a frame boundary");
-			if (a_state.frameVersionsCurrent[a_declared] && !host.EpochRecordingVersionsCurrent(*recording, frame.slot))
+			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot))
 				return mismatch(Driver::TapError::StaleRecording,
 					fmt::format("slot {} of its graph published a new version after the frame's Begin; versions are published only at a frame boundary",
 						host.EpochRecordingStaleVersion(*recording, frame.slot)));
@@ -4159,7 +4247,7 @@ namespace FrameAnchors
 			logger::info("[ORG] frame anchors, peak runs in one frame: {}", runs);
 	}
 
-	Texture EngineTarget(std::uint32_t a_target)
+	Texture EngineTarget(std::uint32_t a_target, const std::source_location& a_caller)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_target >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
@@ -4176,20 +4264,20 @@ namespace FrameAnchors
 			texture = reinterpret_cast<decltype(texture)>(fromView.get());
 		}
 		return Import(texture, fmt::format("cs.engine.target.{}", a_target),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.RTV, target.UAV); });
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.RTV, target.UAV); }, a_caller);
 	}
 
-	Texture EngineDepth(std::uint32_t a_depthStencil)
+	Texture EngineDepth(std::uint32_t a_depthStencil, const std::source_location& a_caller)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_depthStencil >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL))
 			return {};
 		const auto target = renderer->GetDepthStencilData().depthStencils[a_depthStencil];
 		return Import(target.texture, fmt::format("cs.engine.depth.{}", a_depthStencil),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(target, a_desc); });
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(target, a_desc); }, a_caller);
 	}
 
-	Texture EngineCubemap(std::uint32_t a_cubemap)
+	Texture EngineCubemap(std::uint32_t a_cubemap, const std::source_location& a_caller)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_cubemap >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kTOTAL))
@@ -4197,19 +4285,19 @@ namespace FrameAnchors
 		const auto target = renderer->GetRendererData().cubemapRenderTargets[a_cubemap];
 		// The faces' RTVs share one format; the graph makes its own views of each face.
 		return Import(target.texture, fmt::format("cs.engine.cubemap.{}", a_cubemap),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.cubeSideRTV[0], nullptr); });
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.cubeSideRTV[0], nullptr); }, a_caller);
 	}
 
 	Texture D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
-		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv)
+		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv, const std::source_location& a_caller)
 	{
 		if (a_name.empty())
 			return {};
 		return Import(a_texture, fmt::format("cs.d3d11.{}", a_name),
-			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, a_rtv, a_uav); });
+			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, a_rtv, a_uav); }, a_caller);
 	}
 
-	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
+	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv, const std::source_location& a_caller)
 	{
 		// Native mode: an exempt texture is one plain graph resource, read untracked. No build is needed.
 		if (RenderGraph::Engine::Native::Active() && a_texture && RenderGraphRuntime::Get().IsActive()) {
@@ -4219,22 +4307,23 @@ namespace FrameAnchors
 			if (auto exempt = RenderGraph::Engine::Native::ImmutableTextureOf(a_texture, a_srv ? view.Format : DXGI_FORMAT_UNKNOWN))
 				return Texture(std::move(exempt));
 		}
-		return D3D11Texture(a_name, a_texture, a_srv, nullptr);
+		return D3D11Texture(a_name, a_texture, a_srv, nullptr, nullptr, a_caller);
 	}
 
-	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id)
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id, const std::source_location& a_caller)
 	{
-		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); });
+		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); }, a_caller);
 	}
 
-	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views)
+	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views, const std::source_location& a_caller)
 	{
 		if (a_id.empty())
 			return {};
-		return Import(a_texture, std::string(a_id), [&](const D3D11_TEXTURE2D_DESC&) { return a_views; });
+		return Import(a_texture, std::string(a_id), [&](const D3D11_TEXTURE2D_DESC&) { return a_views; }, a_caller);
 	}
 
-	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name)
+	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name,
+		const std::source_location& a_caller)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
@@ -4253,7 +4342,7 @@ namespace FrameAnchors
 			return made;
 		// The slot an importer already made for the image, with the caller's views added when it lacks one.
 		if (auto shared = FindImage(state, image)) {
-			EnsureViews(shared, desc, name);
+			EnsureViews(shared, desc, name, a_caller);
 			if (auto slot = shared->Slot())
 				return Texture(shared->id, std::move(slot));
 		}
@@ -4262,6 +4351,12 @@ namespace FrameAnchors
 		entry->id = name;
 		entry->image = image;
 		entry->info = a_image;
+		// The image's views are declared now, for every importer to come.
+		if (a_texture) {
+			D3D11_TEXTURE2D_DESC textureDesc{};
+			a_texture->GetDesc(&textureDesc);
+			DeclareBindFlagViews(desc, textureDesc);
+		}
 		auto backing = MakeBacking(a_texture, a_image, desc, name);
 		if (!backing)
 			return {};
@@ -4427,14 +4522,14 @@ namespace FrameAnchors
 	std::uint32_t Texture::Height() const { return 0; }
 	rhi::Format Texture::Format() const { return rhi::Format{}; }
 	const org::IResourceResolver* Texture::DeclaredResolver() const { return nullptr; }
-	Texture EngineTarget(std::uint32_t) { return {}; }
-	Texture EngineDepth(std::uint32_t) { return {}; }
-	Texture EngineCubemap(std::uint32_t) { return {}; }
-	Texture D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*) { return {}; }
-	Texture ImmutableTexture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*) { return {}; }
-	Texture ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return {}; }
-	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&) { return {}; }
-	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view) { return {}; }
+	Texture EngineTarget(std::uint32_t, const std::source_location&) { return {}; }
+	Texture EngineDepth(std::uint32_t, const std::source_location&) { return {}; }
+	Texture EngineCubemap(std::uint32_t, const std::source_location&) { return {}; }
+	Texture D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*, const std::source_location&) { return {}; }
+	Texture ImmutableTexture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, const std::source_location&) { return {}; }
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&, const std::source_location&) { return {}; }
+	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&, const std::source_location&) { return {}; }
+	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view, const std::source_location&) { return {}; }
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
 	void SetLateEpochHook(std::function<void()>) {}
 	std::uint32_t SegmentOf(Anchor) { return 0; }

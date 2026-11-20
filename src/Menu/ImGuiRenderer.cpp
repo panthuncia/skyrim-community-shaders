@@ -19,6 +19,7 @@
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/HDRDisplay.h"
 #	include "RenderGraph/DxvkImageImport.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -26,6 +27,8 @@
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
+
+#	include <optional>
 #endif
 
 #include <cstring>
@@ -42,15 +45,34 @@ namespace ImGuiRenderer
 			bool org = false;     // ImGuiBasicRHI is installed
 			bool failed = false;  // the graph's path stopped: D3D11 for good
 #if defined(CS_HAS_RENDER_GRAPH)
-			// What ImGui draws onto: the texture behind the bound render target and its graph import.
-			winrt::com_ptr<ID3D11Texture2D> targetTexture;
-			FrameAnchors::Texture target;
-			bool ownImport = false;  // not the framebuffer: imported for this client (the anchors register it)
-			bool targetChanged = false;  // UpdateTarget took a new target this frame
+			// The texture behind the render target bound at the last draw. Not a variable yet, so a new one invalidates the client,
+			// whose key imports it when the next revision starts. The draw itself never imports.
+			winrt::com_ptr<ID3D11Texture2D> observed;
+			DXGI_FORMAT observedFormat = DXGI_FORMAT_UNKNOWN;  // the bound view's format at that draw
+			// The client follows the observed target (Frame/Declare.h).
+			RenderGraph::Frame::DeclaredClient declared;
+			// The texture of the registration the adopted revision holds, and what its commit draws for. Set by the adopted call.
+			const ID3D11Texture2D* heldTexture = nullptr;
 			ImGuiBasicRHI::Target targetInfo;
 			ImDrawData* pending = nullptr;  // the frame RenderDrawData is drawing, for the commit
 #endif
 		};
+
+#if defined(CS_HAS_RENDER_GRAPH)
+		/** @brief What the client's registration is made for: the observed target, imported by the key. */
+		struct TargetKey
+		{
+			winrt::com_ptr<ID3D11Texture2D> texture;
+			FrameAnchors::Texture target;
+			bool ownImport = false;  // not the framebuffer: imported for this client (the anchors register it)
+			ImGuiBasicRHI::Target info;
+			bool operator==(const TargetKey& a_other) const
+			{
+				return texture == a_other.texture && target == a_other.target && ownImport == a_other.ownImport && info.width == a_other.info.width &&
+				       info.height == a_other.info.height && info.format == a_other.info.format;
+			}
+		};
+#endif
 
 		State& Renderer()
 		{
@@ -79,78 +101,87 @@ namespace ImGuiRenderer
 			return { binding.index, std::move(binding.owner) };
 		}
 
-		/**
-		 * @brief The graph texture behind the bound render target: the engine's framebuffer through the anchors' import, any other
-		 * (HDR's UI texture) imported here. False when there is none or it cannot be imported; the frame is not drawn then, and an
-		 * import that failed sets failed, so the next NewFrame falls back to imgui_impl_dx11.
-		 */
-		bool UpdateTarget(State& a_state)
+		/** @brief The texture behind the bound render target, or null. a_rtv receives the bound view. */
+		winrt::com_ptr<ID3D11Texture2D> BoundTarget(State& a_state, winrt::com_ptr<ID3D11RenderTargetView>* a_rtv)
 		{
 			winrt::com_ptr<ID3D11RenderTargetView> rtv;
 			a_state.context->OMGetRenderTargets(1, rtv.put(), nullptr);
 			if (!rtv)
-				return false;
+				return nullptr;
 			winrt::com_ptr<ID3D11Resource> resource;
 			rtv->GetResource(resource.put());
-			auto texture = resource.try_as<ID3D11Texture2D>();
-			if (!texture)
-				return false;
-			if (texture == a_state.targetTexture)
-				return a_state.target != nullptr;
+			*a_rtv = rtv;
+			return resource.try_as<ID3D11Texture2D>();
+		}
 
-			D3D11_RENDER_TARGET_VIEW_DESC viewDesc{};
-			rtv->GetDesc(&viewDesc);
+		/**
+		 * @brief The key: the observed target, imported now, when a revision starts. The engine's framebuffer through the anchors'
+		 * import, any other (HDR's UI texture) imported here. No client before a draw observed one. A target that cannot be
+		 * imported sets failed, so the next NewFrame falls back to imgui_impl_dx11.
+		 */
+		std::optional<TargetKey> CurrentTarget(State& a_state)
+		{
+			if (!a_state.observed || a_state.failed)
+				return std::nullopt;
+			const auto& texture = a_state.observed;
 			D3D11_TEXTURE2D_DESC textureDesc{};
 			texture->GetDesc(&textureDesc);
-			const auto format = rhi::helpers::ToRHI(viewDesc.Format);
-			FrameAnchors::Texture target;
-			bool own = false;
+			const auto format = rhi::helpers::ToRHI(a_state.observedFormat);
+			TargetKey key;
+			key.texture = texture;
 			auto* renderer = globals::game::renderer;
 			if (renderer && renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].texture == texture.get()) {
-				target = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
+				key.target = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
 			} else {
 				// Through the anchors' imports, so the image is one graph resource whoever else imports it: HDR's UI texture by the name and
 				// views Bink and Scaleform import it with, any other as a render target in the view's format.
 				const auto& hdr = globals::features::hdrDisplay;
 				if (hdr.uiTexture && hdr.uiTexture->resource && hdr.uiTexture->resource.get() == texture.get()) {
 					const auto& ui = *hdr.uiTexture;
-					target = FrameAnchors::D3D11Texture("hdr.ui", ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
+					key.target = FrameAnchors::D3D11Texture("hdr.ui", ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
 				} else {
 					org::TextureDescription desc{};
 					desc.format = format;
 					desc.channels = 4;
 					desc.hasRTV = true;
 					desc.rtvFormat = format;
-					target = FrameAnchors::ImportTexture(kTargetId, texture.get(), desc);
+					key.target = FrameAnchors::ImportTexture(kTargetId, texture.get(), desc);
 				}
-				own = true;
+				key.ownImport = true;
 			}
-			a_state.targetTexture = texture;
-			a_state.target = target;
-			a_state.ownImport = own;
-			a_state.targetChanged = true;
-			a_state.targetInfo = { textureDesc.Width, textureDesc.Height, static_cast<std::uint32_t>(format) };
-			if (!target) {
+			key.info = { textureDesc.Width, textureDesc.Height, static_cast<std::uint32_t>(format) };
+			if (!key.target) {
 				// The menu must not stay invisible: the next NewFrame falls back to imgui_impl_dx11.
 				logger::warn("[ORG] ImGui: the overlay's render target ({}x{}, DXGI format {}) could not be imported; imgui_impl_dx11 draws from the next frame",
-					textureDesc.Width, textureDesc.Height, static_cast<int>(viewDesc.Format));
+					textureDesc.Width, textureDesc.Height, static_cast<int>(a_state.observedFormat));
 				a_state.failed = true;
-				a_state.targetTexture = nullptr;
-				a_state.ownImport = false;
-				return false;
+				return std::nullopt;
 			}
-			if (!ImGuiBasicRHI::Prepare(a_state.targetInfo.format)) {
-				a_state.failed = true;
-				return false;
-			}
-			logger::info("[ORG] ImGui: drawing onto {} ({}x{}, DXGI format {})", own ? "an imported render target" : "the framebuffer", textureDesc.Width,
-				textureDesc.Height, static_cast<int>(viewDesc.Format));
-			// The pass declares the new target from the next build.
-			FrameAnchors::Refresh(kClientId);
-			return true;
+			return key;
 		}
 
-		FrameAnchors::ClientDesc MakeClient()
+		/**
+		 * @brief Whether the frame can draw onto the bound target: the adopted registration was made for it. A new target is
+		 * observed here, and the next revision imports it and registers the client for it. Until then no overlay is drawn.
+		 */
+		bool UpdateTarget(State& a_state)
+		{
+			winrt::com_ptr<ID3D11RenderTargetView> rtv;
+			auto texture = BoundTarget(a_state, &rtv);
+			if (!texture)
+				return false;
+			if (texture != a_state.observed) {
+				D3D11_RENDER_TARGET_VIEW_DESC viewDesc{};
+				rtv->GetDesc(&viewDesc);
+				a_state.observed = std::move(texture);
+				a_state.observedFormat = viewDesc.Format;
+				a_state.declared.Invalidate();
+				return false;
+			}
+			return a_state.heldTexture == texture.get();
+		}
+
+		FrameAnchors::ClientDesc MakeClient(const TargetKey& a_key)
 		{
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
@@ -166,13 +197,12 @@ namespace ImGuiRenderer
 				.anchor = FrameAnchors::Anchor::Overlay,
 				.order = 1000,
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [] { return ImGuiBasicRHI::MakePass(Renderer().target); },
+				.make = [target = a_key.target] { return ImGuiBasicRHI::MakePass(target); },
 				.atExecution = true });
-			client.registerResources = [](org::RenderGraph& a_graph) {
-				auto& state = Renderer();
+			client.registerResources = [own = a_key.ownImport, plain = a_key.target.Plain()](org::RenderGraph& a_graph) {
 				// The anchors register their imports; only a plain resource is this client's to register.
-				if (state.ownImport && state.target.Plain())
-					a_graph.RegisterResource(org::ResourceIdentifier(kTargetId), state.target.Plain());
+				if (own && plain)
+					a_graph.RegisterResource(org::ResourceIdentifier(kTargetId), plain);
 			};
 			client.commit = [](const FrameAnchors::Point&) {
 				auto& state = Renderer();
@@ -181,6 +211,19 @@ namespace ImGuiRenderer
 			};
 			client.active = [] { return Renderer().pending != nullptr; };
 			return client;
+		}
+
+		/** @brief The registration for a_key. Builds the target format's pipeline first. False is fatal (Declare.h). */
+		bool MakeRegistration(const TargetKey& a_key, FrameAnchors::ClientDesc& a_out)
+		{
+			if (!ImGuiBasicRHI::Prepare(a_key.info.format)) {
+				logger::error("[ORG] ImGui: the pipeline for the overlay's target (RHI format {}) could not be built", a_key.info.format);
+				return false;
+			}
+			a_out = MakeClient(a_key);
+			logger::info("[ORG] ImGui: the client is made for {} ({}x{}, RHI format {}); it draws from the revision that carries it",
+				a_key.ownImport ? "an imported render target" : "the framebuffer", a_key.info.width, a_key.info.height, a_key.info.format);
+			return true;
 		}
 
 		/**
@@ -206,8 +249,18 @@ namespace ImGuiRenderer
 			if (framebufferRTV)
 				framebufferRTV->GetDesc(&viewDesc);
 			// The pipeline for the framebuffer now, so a shader failure leaves the D3D11 backend in place.
-			if (!framebufferRTV || !ImGuiBasicRHI::Prepare(static_cast<std::uint32_t>(rhi::helpers::ToRHI(viewDesc.Format))) ||
-				!FrameAnchors::Register(MakeClient())) {
+			// One declaration for the session. Its key is the target the draw observed, imported when a revision starts.
+			namespace RF = ::RenderGraph::Frame;
+			if (framebufferRTV && ImGuiBasicRHI::Prepare(static_cast<std::uint32_t>(rhi::helpers::ToRHI(viewDesc.Format))))
+				a_state.declared = RF::DeclareClient<TargetKey>(
+					kClientId, RF::DependsOn(RF::Vars::DisplaySize()), [](const RF::Inputs&) { return CurrentTarget(Renderer()); },
+					[](const TargetKey& a_key, FrameAnchors::ClientDesc& a_desc) { return MakeRegistration(a_key, a_desc); },
+					[](const TargetKey& a_key) {
+						auto& state = Renderer();
+						state.heldTexture = a_key.texture.get();
+						state.targetInfo = a_key.info;
+					});
+			if (!a_state.declared) {
 				a_state.failed = true;
 				// Native mode has no D3D11 to fall back to.
 				if (RenderGraph::Engine::Native::Requested())
@@ -226,11 +279,13 @@ namespace ImGuiRenderer
 		{
 			if (RenderGraph::Engine::Native::Requested())
 				RenderGraph::Engine::Native::Fail("the menu's ImGui", "the render graph's ImGui backend failed, and imgui_impl_dx11 draws through D3D11");
+			a_state.declared = {};
 			FrameAnchors::Unregister(kClientId);
 			ImGuiBasicRHI::Shutdown();
 			a_state.org = false;
-			a_state.target = {};
-			a_state.targetTexture = nullptr;
+			a_state.observed = nullptr;
+			a_state.observedFormat = DXGI_FORMAT_UNKNOWN;
+			a_state.heldTexture = nullptr;
 			ImGui_ImplDX11_Init(a_state.device, a_state.context);
 			a_state.dx11 = true;
 			logger::warn("[ORG] ImGui: imgui_impl_dx11 draws again");
@@ -265,6 +320,7 @@ namespace ImGuiRenderer
 		auto& state = Renderer();
 #if defined(CS_HAS_RENDER_GRAPH)
 		if (state.org) {
+			state.declared = {};
 			FrameAnchors::Unregister(kClientId);
 			ImGuiBasicRHI::Shutdown();
 			state.org = false;
@@ -299,10 +355,8 @@ namespace ImGuiRenderer
 #if defined(CS_HAS_RENDER_GRAPH)
 		if (!state.org || state.failed || !a_drawData || a_drawData->DisplaySize.x <= 0.0f || a_drawData->DisplaySize.y <= 0.0f)
 			return;
+		// A new target is a new registration, switched in with a frame revision: until then the overlay is not drawn.
 		if (!UpdateTarget(state))
-			return;
-		// A new target is a new build of the UI stage's graph, switched in at a frame boundary: this frame draws no overlay.
-		if (std::exchange(state.targetChanged, false) && FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay))
 			return;
 		state.pending = a_drawData;
 		FrameAnchors::Run(FrameAnchors::Anchor::Overlay);
