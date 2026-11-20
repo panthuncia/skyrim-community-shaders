@@ -1,0 +1,75 @@
+# Subsurface Scattering's mode and character lighting toggled in Dragonsreach, where NPC skin is on screen. SSMode switches the
+# programs (built on the programs lane first) and the client's passes in one frame revision; character lighting is engine state
+# applied each frame (frame revision plan, 6.18). Compose it: native-vulkan+sss, native-d3d12+sss, guest+sss.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+SubsurfaceScattering = true
+
+[[steps]]
+at = "world-ready"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "burley"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "SubsurfaceScattering.SSMode=0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "separable"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "SubsurfaceScattering.EnableCharacterLighting=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "separable-character-light"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "SubsurfaceScattering.SSMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "SubsurfaceScattering.EnableCharacterLighting=0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "burley-again"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["burley", "separable", "separable-character-light", "burley-again"]
+no_log = ["frame tap error", "a frame declaration failed", "Subsurface Scattering's render graph path failed"]

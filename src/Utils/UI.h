@@ -969,6 +969,9 @@ namespace Util
 	/** @brief ImGui::Combo over an unsigned setting holding the item index. */
 	bool Combo(const char* label, CS::Setting<std::uint32_t>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
 
+	/** @brief ImGui::RadioButton over an int setting: a click stores v_button. @return True when the control edited the value. */
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int v_button);
+
 	/**
 	 * Draws a 2-4 component float slider. Holding Shift edits all components from the first component.
 	 */

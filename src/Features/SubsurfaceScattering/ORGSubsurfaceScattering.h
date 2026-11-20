@@ -10,7 +10,8 @@
 * Separable mode extracts diffuse, then blurs horizontally into a temporary and vertically back into the main target.
 * Burley mode clears, extracts masked pixels, and blurs them back. The engine targets are imported so D3D11 readers see the result.
 * The commit latches the constants and opens the gate only on frames with skin.
-* On any failure the feature returns to D3D11. Render thread throughout. Free of ORG/Vulkan includes.
+* The working textures are declared on the display size, the programs and the client on SSMode, so a change switches in with a
+* frame revision. A setup failure keeps D3D11; a failure after setup is fatal. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGSubsurfaceScattering
 {
@@ -30,11 +31,11 @@ public:
 
 	bool IsActive() const;
 
-	/** @brief At DrawSSS, after the anchor ran. Keeps the passes current for the next frame. @return False means D3D11 drew this frame. */
+	/** @brief At DrawSSS, after the anchor ran. Notes newly imported engine targets for the next revision. @return False means D3D11 draws this frame. */
 	bool AfterDeferredPasses();
 
-	/** @brief Programs rebuild at the next frame. */
-	void ClearShaderCache();
+	/** @brief The client's commit, on the render thread: this frame's DeferredPasses ran the passes. */
+	void NoteRan();
 
 	~ORGSubsurfaceScattering();
 

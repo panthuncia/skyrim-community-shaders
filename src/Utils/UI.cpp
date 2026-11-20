@@ -1066,6 +1066,11 @@ namespace Util
 		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::Combo(label, &a_value, items, itemCount, popupMaxHeightInItems); });
 	}
 
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int v_button)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::RadioButton(label, &a_value, v_button); });
+	}
+
 	ImVec2 GetNativeViewportSizeScaled(float scale)
 	{
 		const auto Size = ImGui::GetMainViewport()->Size;

@@ -28,6 +28,7 @@ ORGSubsurfaceScattering& ORGSubsurfaceScattering::Get()
 #	include "Features/SubsurfaceScattering.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -37,16 +38,25 @@ ORGSubsurfaceScattering& ORGSubsurfaceScattering::Get()
 #	include "RenderGraph/UavClearPass.h"
 #	include "Utils/D3D.h"
 #	include "Utils/Game.h"
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#		include "RenderGraph/ProgramBuild.h"
+#	endif
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/VersionedTexture.h>
 
+#	include <algorithm>
 #	include <cstddef>
 #	include <functional>
+#	include <optional>
+#	include <string>
+#	include <string_view>
 #	include <utility>
+#	include <vector>
 
 namespace
 {
@@ -81,42 +91,73 @@ namespace
 
 	enum Mode : int
 	{
-		kAnyMode = -1,  // a pass of both modes
 		kSeparable = 0,
 		kBurley = 1,
 	};
 
+	int ModeOf(int a_ssMode) { return a_ssMode == kBurley ? kBurley : kSeparable; }
+
+	const char* ModeName(int a_mode) { return a_mode == kBurley ? "Burley" : "separable"; }
+
 	using Program = std::shared_ptr<const ComputeProgram>;
+	using Defines = std::vector<std::pair<std::wstring, std::wstring>>;
 
-	/** @brief As SubsurfaceScattering's GetComputeShader* compile them. */
-	struct Programs
+	/**
+	* @brief One mode's programs, as SubsurfaceScattering's GetComputeShader* compile them. Separable: the extraction, the
+	* horizontal and the vertical blur. Burley: its extraction and its blur, with no second blur.
+	*/
+	struct ModePrograms
 	{
-		Program extraction, extractionBurley, horizontal, vertical, burley;
-
-		explicit operator bool() const { return extraction && extractionBurley && horizontal && vertical && burley; }
+		int mode = kSeparable;
+		Program extraction, blur, secondBlur;
 	};
 
-	/** @brief Adds the defines every D3D11 build gets. */
-	template <class Block>
-	Program LoadProgram(rhi::Device a_device, const char* a_source, std::vector<std::pair<std::wstring, std::wstring>> a_defines)
+	/**
+	* @brief Render thread, at setup. The defines every D3D11 build gets. They read State, so they are resolved here and not on
+	* the programs lane. A program's own defines come first, as ComputeProgram::Load orders them, so the shader store hits.
+	*/
+	Defines ResolveCommonDefines()
 	{
-		return ComputeProgram::Load(a_device, { .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = std::move(a_defines) });
+#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+		return RenderGraph::ProgramBuild::WithCommonDefines({}, L"cs_6_6");
+#	else
+		return {};
+#	endif
 	}
 
-	std::shared_ptr<const Programs> LoadPrograms(rhi::Device a_device)
+	/** @brief Any thread. a_own, then the common defines it does not name. */
+	template <class Block>
+	Program LoadProgram(rhi::Device a_device, const char* a_source, Defines a_own, const Defines& a_common)
 	{
-		auto programs = std::make_shared<Programs>();
-		programs->extraction = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, {});
-		programs->extractionBurley = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, { { L"BURLEY", L"" } });
-		programs->horizontal = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"HORIZONTAL", L"" } });
-		programs->vertical = LoadProgram<BlurBlock>(a_device, kBlurShader, {});
-		programs->burley = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"BURLEY", L"" } });
-		if (!*programs)
-			return nullptr;
+		Defines defines = std::move(a_own);
+		for (const auto& define : a_common)
+			if (std::ranges::none_of(defines, [&](const auto& a_define) { return a_define.first == define.first; }))
+				defines.push_back(define);
+		return ComputeProgram::Load(a_device,
+			{ .source = a_source, .constantWords = ShaderBindings::Words<Block>(), .defines = std::move(defines), .commonDefines = false });
+	}
+
+	/** @brief Any thread. Null, logged by ComputeProgram, on failure. */
+	std::shared_ptr<const ModePrograms> LoadModePrograms(rhi::Device a_device, int a_mode, const Defines& a_common)
+	{
+		auto programs = std::make_shared<ModePrograms>();
+		programs->mode = a_mode;
+		if (a_mode == kBurley) {
+			programs->extraction = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, { { L"BURLEY", L"" } }, a_common);
+			programs->blur = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"BURLEY", L"" } }, a_common);
+			if (!programs->extraction || !programs->blur)
+				return nullptr;
+		} else {
+			programs->extraction = LoadProgram<ExtractionBlock>(a_device, kExtractionShader, {}, a_common);
+			programs->blur = LoadProgram<BlurBlock>(a_device, kBlurShader, { { L"HORIZONTAL", L"" } }, a_common);
+			programs->secondBlur = LoadProgram<BlurBlock>(a_device, kBlurShader, {}, a_common);
+			if (!programs->extraction || !programs->blur || !programs->secondBlur)
+				return nullptr;
+		}
 		return programs;
 	}
 
-	/** @brief Imported once. */
+	/** @brief The engine targets the passes import. Slots, so a new version of one is not a change here. */
 	struct Targets
 	{
 		FrameAnchors::Texture main, mask, albedo, normal, depth;
@@ -132,22 +173,34 @@ namespace
 			FrameAnchors::EngineTarget(NORMALROUGHNESS), FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY) };
 	}
 
-	/** @brief Changed on the render thread only, between builds. */
-	struct ScatterState
+	/** @brief Made at setup and kept. The working textures follow the display size through the frame revisions. */
+	struct Fixed
 	{
-		int mode = kSeparable;
-		std::shared_ptr<const Programs> programs;
-		Targets targets;
-		std::unique_ptr<GraphResources::Texture2D> diffuseNoAlbedo, blurTemp;
+		RenderGraph::Frame::DeclaredTexture2D diffuseNoAlbedo, blurTemp;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding pointSampler;
 	};
 
+	/** @brief What a registration is made for: the mode's programs and the imported targets. */
+	struct Shape
+	{
+		std::shared_ptr<const ModePrograms> programs;
+		Targets targets;
+
+		bool operator==(const Shape&) const = default;
+	};
+
+	/** @brief A declared twin as passes declare it: its slot. */
+	FrameAnchors::Texture SlotOf(const RenderGraph::Frame::DeclaredTexture2D& a_texture)
+	{
+		return FrameAnchors::Texture(a_texture->Name(), a_texture->Versioned());
+	}
+
 	/** @brief Kept for the build, so the recording can be submitted again. */
 	struct PassFrame
 	{
-		std::shared_ptr<const Programs> programs;
+		std::shared_ptr<const ModePrograms> programs;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		const ComputeProgram* program = nullptr;
@@ -164,13 +217,13 @@ namespace
 	class ExtractionPass final : public org::TypedRenderGraphPass<ExtractionPass, PassFrame, ExtractionBindings>
 	{
 	public:
-		explicit ExtractionPass(const ScatterState& a_state) :
-			programs(a_state.programs),
-			program(a_state.mode == kBurley ? a_state.programs->extractionBurley.get() : a_state.programs->extraction.get()),
-			latch(a_state.latch),
-			gate(a_state.gate),
-			output(a_state.diffuseNoAlbedo->Graph()),
-			targets(a_state.targets) {}
+		ExtractionPass(const Fixed& a_fixed, const Shape& a_shape) :
+			programs(a_shape.programs),
+			program(a_shape.programs->extraction.get()),
+			latch(a_fixed.latch),
+			gate(a_fixed.gate),
+			output(SlotOf(a_fixed.diffuseNoAlbedo)),
+			targets(a_shape.targets) {}
 
 		ExtractionBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -204,11 +257,11 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<const Programs> programs;
+		std::shared_ptr<const ModePrograms> programs;
 		const ComputeProgram* program;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
-		std::shared_ptr<org::Resource> output;
+		FrameAnchors::Texture output;
 		Targets targets;
 	};
 
@@ -222,15 +275,15 @@ namespace
 	class BlurPass final : public org::TypedRenderGraphPass<BlurPass, PassFrame, BlurBindings>
 	{
 	public:
-		BlurPass(const ScatterState& a_state, const Program& a_program, FrameAnchors::Texture a_color, FrameAnchors::Texture a_output) :
-			programs(a_state.programs),
+		BlurPass(const Fixed& a_fixed, const Shape& a_shape, const Program& a_program, FrameAnchors::Texture a_color, FrameAnchors::Texture a_output) :
+			programs(a_shape.programs),
 			program(a_program.get()),
-			latch(a_state.latch),
-			gate(a_state.gate),
-			pointSampler(a_state.pointSampler.Index()),
+			latch(a_fixed.latch),
+			gate(a_fixed.gate),
+			pointSampler(a_fixed.pointSampler.Index()),
 			color(std::move(a_color)),
 			output(std::move(a_output)),
-			targets(a_state.targets) {}
+			targets(a_shape.targets) {}
 
 		BlurBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -268,7 +321,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<const Programs> programs;
+		std::shared_ptr<const ModePrograms> programs;
 		const ComputeProgram* program;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
@@ -278,123 +331,81 @@ namespace
 		Targets targets;
 	};
 
-	using MakePass = std::function<std::shared_ptr<org::RenderPass>()>;
-
-	/** @brief Null in builds without the engine targets or in the other mode. */
-	MakePass InMode(const std::shared_ptr<ScatterState>& a_state, int a_mode, std::function<std::shared_ptr<org::RenderPass>(const ScatterState&)> a_make)
+	[[noreturn]] void FailSubsurfaceScattering(std::string_view a_why)
 	{
-		return [a_state, a_mode, make = std::move(a_make)]() -> std::shared_ptr<org::RenderPass> {
-			return a_state->targets && (a_mode == kAnyMode || a_state->mode == a_mode) ? make(*a_state) : nullptr;
-		};
+		const auto message = fmt::format("Community Shaders: Subsurface Scattering's render graph path failed: {}", a_why);
+		logger::critical("[ORG] Subsurface Scattering: {}", message);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
 	}
 
-	const char* ModeName(int a_mode) { return a_mode == kBurley ? "Burley" : "separable"; }
-}
-
-struct ORGSubsurfaceScattering::Impl
-{
-	std::shared_ptr<ScatterState> state;
-	bool programsDirty = false;
-	// Whether this frame's DeferredPasses epoch ran the passes.
-	bool ranThisFrame = false;
-	// Logged once.
-	bool targetsLogged = false;
-
-	/** @brief A build without the engine targets has no passes and opens nothing, so the D3D11 path draws those frames. */
-	static FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<ScatterState>& state)
+	/** @brief The registration for a new shape, when a revision starts. Only the shape's mode has passes. */
+	bool MakeClient(const std::shared_ptr<const Fixed>& a_fixed, const Shape& a_shape, FrameAnchors::ClientDesc& a_client)
 	{
-		const auto main = [](const ScatterState& a_state) { return a_state.targets.main; };
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
-		client.sharedConstants = true;
-		client.gates = { state->gate };
-		// After SSGI's passes, below 200, and before the composite, as the D3D11 path runs.
-		const auto pass = [](const char* a_name, std::int32_t a_order, MakePass a_make, bool a_atExecution = false) {
-			// Every pass waits on the gate entry, so the anchor can run in a frame phase.
-			return FrameAnchors::PassDesc{ .name = a_name,
+		a_client.id = kClientId;
+		a_client.sharedConstants = true;
+		a_client.gates = { a_fixed->gate };
+		const int mode = a_shape.programs->mode;
+		// After SSGI's passes, below 200, and before the composite, as the D3D11 path runs. Every pass waits on the gate entry, so
+		// the anchor can run in a frame phase.
+		const auto pass = [&a_client](const char* a_name, std::int32_t a_order, std::function<std::shared_ptr<org::RenderPass>()> a_make,
+							  bool a_atExecution = false) {
+			a_client.passes.push_back({ .name = a_name,
 				.anchor = FrameAnchors::Anchor::DeferredPasses,
 				.order = a_order,
 				.kind = FrameAnchors::PassKind::Compute,
 				.make = std::move(a_make),
-				.atExecution = a_atExecution };
+				.atExecution = a_atExecution });
 		};
-		client.passes.push_back(pass("cs.subsurface.extract", 200, InMode(state, kAnyMode, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
-			return std::make_shared<ExtractionPass>(a_state);
-		})));
-		client.passes.push_back(pass("cs.subsurface.horizontal", 201, InMode(state, kSeparable, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
-			return std::make_shared<BlurPass>(a_state, a_state.programs->horizontal, a_state.diffuseNoAlbedo->Graph(), a_state.blurTemp->Graph());
-		})));
-		client.passes.push_back(pass("cs.subsurface.vertical", 202, InMode(state, kSeparable, [main](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
-			return std::make_shared<BlurPass>(a_state, a_state.programs->vertical, a_state.blurTemp->Graph(), main(a_state));
-		})));
-		// Burley's extraction writes only masked pixels. D3D11 reads stale values elsewhere, but the graph clears to zero, which also keeps it aliasable.
-		client.passes.push_back(pass("cs.subsurface.clear", 199, InMode(state, kBurley, [](const ScatterState& a_state) {
-			return GraphPasses::MakeUavClear(a_state.diffuseNoAlbedo->Graph(), { 0.0f, 0.0f, 0.0f, 0.0f }, { a_state.gate, kGateEntry });
-		}), true));
-		client.passes.push_back(pass("cs.subsurface.burley", 201, InMode(state, kBurley, [main](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
-			return std::make_shared<BlurPass>(a_state, a_state.programs->burley, a_state.diffuseNoAlbedo->Graph(), main(a_state));
-		})));
-		client.registerResources = [state](org::RenderGraph& a_graph) {
-			state->diffuseNoAlbedo->Register(a_graph);
-			state->blurTemp->Register(a_graph);
+		pass("cs.subsurface.extract", 200, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ExtractionPass>(*a_fixed, a_shape); });
+		if (mode == kBurley) {
+			// Burley's extraction writes only masked pixels. D3D11 reads stale values elsewhere, but the graph clears to zero, which
+			// also keeps it aliasable.
+			pass(
+				"cs.subsurface.clear", 199,
+				[a_fixed]() { return GraphPasses::MakeUavClear(*a_fixed->diffuseNoAlbedo, { 0.0f, 0.0f, 0.0f, 0.0f }, { a_fixed->gate, kGateEntry }); }, true);
+			pass("cs.subsurface.burley", 201, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, SlotOf(a_fixed->diffuseNoAlbedo), a_shape.targets.main);
+			});
+		} else {
+			pass("cs.subsurface.horizontal", 201, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, SlotOf(a_fixed->diffuseNoAlbedo), SlotOf(a_fixed->blurTemp));
+			});
+			pass("cs.subsurface.vertical", 202, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->secondBlur, SlotOf(a_fixed->blurTemp), a_shape.targets.main);
+			});
+		}
+		a_client.registerResources = [a_fixed](org::RenderGraph& a_graph) {
+			a_fixed->diffuseNoAlbedo->Register(a_graph);
+			a_fixed->blurTemp->Register(a_graph);
 		};
-		client.commit = [state](const FrameAnchors::Point&) {
-			// The targets were set before this run's build, so it has no passes either.
-			if (!state->targets)
-				return;
+		a_client.commit = [a_fixed, mode](const FrameAnchors::Point&) {
 			auto& feature = globals::features::subsurfaceScattering;
-			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, feature.BuildBlurConstants(state->mode));
+			a_fixed->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, feature.BuildBlurConstants(mode));
 			// Only when the frame drew skin, as DrawSSS checks.
 			if (feature.validMaterials) {
 				const auto groups = Util::GetScreenDispatchCount();
-				state->gate->OpenDispatch(kGateEntry, groups.x, groups.y, 1);
+				a_fixed->gate->OpenDispatch(kGateEntry, groups.x, groups.y, 1);
 			}
-			if (auto& self = Get(); self.impl)
-				self.impl->ranThisFrame = true;
+			ORGSubsurfaceScattering::Get().NoteRan();
 		};
-		return client;
+		logger::info("[ORG] Subsurface Scattering: a client for the next revision ({} blur)", ModeName(mode));
+		return true;
 	}
+}
 
-	/** @brief Null on failure, each logged by name. The feature then stays on D3D11. */
-	static std::shared_ptr<ScatterState> Build(const D3D11_TEXTURE2D_DESC& a_desc)
-	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		auto next = std::make_shared<ScatterState>();
-		next->mode = CurrentMode();
-		bool ok = true;
-		const auto fail = [&](const char* a_what) {
-			logger::warn("[ORG] Subsurface Scattering stays on D3D11: {} could not be made", a_what);
-			ok = false;
-		};
-		next->programs = LoadPrograms(host->Device());
-		if (!next->programs)
-			fail("its programs");
-		// Deferred::pointSampler's description.
-		next->pointSampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
-			.magFilter = rhi::Filter::Nearest,
-			.mipFilter = rhi::MipFilter::Nearest,
-			.addressU = rhi::AddressMode::Clamp,
-			.addressV = rhi::AddressMode::Clamp,
-			.addressW = rhi::AddressMode::Clamp });
-		if (!next->pointSampler)
-			fail("its point sampler");
-		// Transient and aliasable. CS_ORG_SSGI_DEBUG=16 keeps it out of the pool to test whether it overwrites SSGI's memory.
-		const bool keepApart = Switches::Number("CS_ORG_SSGI_DEBUG", 0) == 16;
-		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::DiffuseNoAlbedo",
-			GraphResources::Options{ .lifetime = keepApart ? GraphResources::Lifetime::History : GraphResources::Lifetime::Transient });
-		if (!*next->diffuseNoAlbedo)
-			fail("its albedo-free texture");
-		next->blurTemp = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::BlurHorizontalTemp");
-		if (!*next->blurTemp)
-			fail("its blur texture");
-		next->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
-		next->gate = RenderGraph::RunGate::Create("cs.subsurface.dispatch");
-		if (!next->gate)
-			fail("its run gate");
-		return ok ? next : nullptr;
-	}
-
-	static int CurrentMode() { return globals::features::subsurfaceScattering.settings.SSMode == kBurley ? kBurley : kSeparable; }
+struct ORGSubsurfaceScattering::Impl
+{
+	std::shared_ptr<const Fixed> fixed;
+	// Declared at Setup and kept. A new mode is a program built off the render thread and a new client, in one revision.
+	RenderGraph::Frame::DeclaredProgram<ModePrograms> program;
+	RenderGraph::Frame::DeclaredClient client;
+	// What the last DeferredPasses found that is not a variable yet. The client's key reads it.
+	Targets observed;
+	// Whether this frame's DeferredPasses epoch ran the passes.
+	bool ranThisFrame = false;
+	// Logged once.
+	bool targetsLogged = false;
 };
 
 ORGSubsurfaceScattering::~ORGSubsurfaceScattering() = default;
@@ -412,30 +423,81 @@ bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 	if (!Requested())
 		return false;
 	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.Host() || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
+	auto* host = runtime.Host();
+	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredPasses)) {
 		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the render graph or its DeferredPasses anchor is not available");
 		return false;
 	}
-	std::shared_ptr<ScatterState> state;
 	try {
-		state = Impl::Build(a_desc);
+		using namespace RenderGraph::Frame;
+		const auto& settings = globals::features::subsurfaceScattering.settings;
+		auto fixed = std::make_shared<Fixed>();
+		// Deferred::pointSampler's description.
+		fixed->pointSampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
+			.magFilter = rhi::Filter::Nearest,
+			.mipFilter = rhi::MipFilter::Nearest,
+			.addressU = rhi::AddressMode::Clamp,
+			.addressV = rhi::AddressMode::Clamp,
+			.addressW = rhi::AddressMode::Clamp });
+		// kMAIN's description on the display size (decision 6a): a new size is a new version, adopted with a frame revision.
+		// Before the display size is known, kMAIN's.
+		const auto onDisplay = [a_desc](const Inputs& a_in) {
+			const auto display = a_in.Get(Vars::DisplaySize());
+			D3D11_TEXTURE2D_DESC desc = a_desc;
+			desc.Width = display.width ? display.width : a_desc.Width;
+			desc.Height = display.height ? display.height : a_desc.Height;
+			return desc;
+		};
+		// Transient and aliasable. CS_ORG_SSGI_DEBUG=16 keeps it out of the pool to test whether it overwrites SSGI's memory.
+		const bool keepApart = Switches::Number("CS_ORG_SSGI_DEBUG", 0) == 16;
+		fixed->diffuseNoAlbedo = DeclareTexture2D("SSS::DiffuseNoAlbedo", DependsOn(Vars::DisplaySize()), onDisplay,
+			GraphResources::Options{ .lifetime = keepApart ? GraphResources::Lifetime::History : GraphResources::Lifetime::Transient });
+		fixed->blurTemp = DeclareTexture2D("SSS::BlurHorizontalTemp", DependsOn(Vars::DisplaySize()), onDisplay, GraphResources::Options{});
+		fixed->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
+		fixed->gate = RenderGraph::RunGate::Create("cs.subsurface.dispatch");
+		if (!fixed->pointSampler || !fixed->diffuseNoAlbedo || !*fixed->diffuseNoAlbedo || !fixed->diffuseNoAlbedo->Versioned() || !fixed->blurTemp ||
+			!*fixed->blurTemp || !fixed->blurTemp->Versioned() || !fixed->gate) {
+			logger::warn("[ORG] Subsurface Scattering stays on D3D11: its sampler, textures or gate could not be made");
+			return false;
+		}
+		auto made = std::make_unique<Impl>();
+		// The engine targets may not exist yet. The client then joins at the first revision after they can be imported.
+		made->observed = ImportTargets();
+		// The mode picks the programs. Its first programs are built here; the other mode's on the programs lane, before the
+		// revision that needs them starts.
+		made->program = DeclareProgram(
+			"SubsurfaceScattering::Programs", DependsOn(settings.SSMode),
+			[](const Inputs& a_in) { return ModeOf(a_in.Get(globals::features::subsurfaceScattering.settings.SSMode)); },
+			[device = host->Device(), common = ResolveCommonDefines()](const int& a_mode) { return LoadModePrograms(device, a_mode, common); });
+		if (!made->program) {
+			logger::warn("[ORG] Subsurface Scattering stays on D3D11: its programs could not be made");
+			return false;
+		}
+		const std::shared_ptr<const Fixed> shared = fixed;
+		auto* self = made.get();
+		// The anchors hold the client until the shared constants first upload. D3D11 draws until the commit runs.
+		made->client = DeclareClient<Shape>(
+			kClientId, DependsOn(settings.SSMode),
+			[self](const Inputs& a_in) -> std::optional<Shape> {
+				if (!self->observed)
+					return std::nullopt;
+				return Shape{ self->program.For(a_in), self->observed };
+			},
+			[shared](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return MakeClient(shared, a_shape, a_client); });
+		if (!made->client) {
+			logger::warn("[ORG] Subsurface Scattering stays on D3D11: its client could not be declared");
+			return false;
+		}
+		made->fixed = shared;
+		impl = std::move(made);
+		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur); its textures, programs and client follow the frame revisions",
+			a_desc.Width, a_desc.Height, ModeName(RenderGraph::Frame::Revision::Adopted().Program(impl->program)->mode));
+		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Subsurface Scattering setup failed, staying on D3D11: {}", e.what());
-	}
-	if (!state)
-		return false;
-	// The engine targets may not exist yet. The passes then join at the first frame they can be imported.
-	if (auto targets = ImportTargets())
-		state->targets = std::move(targets);
-	// The anchors hold the client until the shared constants first upload. D3D11 draws until the commit runs.
-	if (!FrameAnchors::Register(Impl::MakeClient(state))) {
-		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the anchor client could not be registered");
+		Stop();
 		return false;
 	}
-	impl = std::make_unique<Impl>();
-	impl->state = std::move(state);
-	logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur)", a_desc.Width, a_desc.Height, ModeName(impl->state->mode));
-	return true;
 }
 
 bool ORGSubsurfaceScattering::IsActive() const
@@ -449,55 +511,33 @@ void ORGSubsurfaceScattering::Stop()
 	impl.reset();
 }
 
+void ORGSubsurfaceScattering::NoteRan()
+{
+	if (impl)
+		impl->ranThisFrame = true;
+}
+
 bool ORGSubsurfaceScattering::AfterDeferredPasses()
 {
 	if (!IsActive())
 		return false;
-	const auto giveUp = [this](const char* a_why) {
-		logger::error("[ORG] Subsurface Scattering returns to D3D11: {}", a_why);
-		Stop();
-	};
-	auto& state = *impl->state;
 	const bool ran = std::exchange(impl->ranThisFrame, false);
-	bool changed = false;
-	if (const int mode = Impl::CurrentMode(); mode != state.mode) {
-		state.mode = mode;
-		logger::info("[ORG] Subsurface Scattering: {} blur", ModeName(mode));
-		changed = true;
-	}
-	if (impl->programsDirty) {
-		impl->programsDirty = false;
-		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
-		if (!programs) {
-			giveUp("its programs could not be built again");
-			return ran;
-		}
-		state.programs = std::move(programs);
-		changed = true;
-	}
-	if (auto targets = ImportTargets(); !(targets == state.targets)) {
+	// The engine targets imported for the first time: not a variable yet, so the next revision makes the client for them.
+	if (auto targets = ImportTargets(); !(targets == impl->observed)) {
 		if (targets) {
-			if (!state.targets)
-				logger::info("[ORG] Subsurface Scattering: the engine targets are imported; the passes join the graph");
-			state.targets = std::move(targets);
-			changed = true;
-		} else if (state.targets) {
-			giveUp("an engine target could not be imported");
-			return ran;
+			if (!impl->observed)
+				logger::info("[ORG] Subsurface Scattering: the engine targets are imported; the passes join the graph at the next revision");
+			impl->observed = std::move(targets);
+			impl->client.Invalidate();
+		} else if (impl->observed) {
+			// The engine makes its targets once a session, so losing one is an error, not a state to wait out.
+			FailSubsurfaceScattering("an engine target could not be imported any more");
 		} else if (!std::exchange(impl->targetsLogged, true)) {
 			logger::info("[ORG] Subsurface Scattering: waiting for the engine targets (main {}, masks {}, albedo {}, normals {}, depth {})",
 				targets.main != nullptr, targets.mask != nullptr, targets.albedo != nullptr, targets.normal != nullptr, targets.depth != nullptr);
 		}
 	}
-	if (changed)
-		FrameAnchors::Refresh(kClientId);
 	return ran;
-}
-
-void ORGSubsurfaceScattering::ClearShaderCache()
-{
-	if (impl)
-		impl->programsDirty = true;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -511,7 +551,7 @@ void ORGSubsurfaceScattering::Reserve() {}
 bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC&) { return false; }
 bool ORGSubsurfaceScattering::IsActive() const { return false; }
 bool ORGSubsurfaceScattering::AfterDeferredPasses() { return false; }
-void ORGSubsurfaceScattering::ClearShaderCache() {}
+void ORGSubsurfaceScattering::NoteRan() {}
 void ORGSubsurfaceScattering::Stop() {}
 
 #endif
