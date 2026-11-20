@@ -1,0 +1,100 @@
+# Riverwood's river with the global time multiplier at 4 (sgtm), then back at 1. The water update then runs up to four times the
+# wading heightmap steps a frame, so the EngineImageSpace variable's heightmap bound changes and the start stage's water client
+# registers again with a frame revision, then once more on the way back. Compose it: native-vulkan+river-sgtm, native-d3d12+river-sgtm.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 390
+do = "shot"
+arg = "river"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "sgtm 4"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "river-fast"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "sgtm 1"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "river-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["river", "river-fast", "river-back"]

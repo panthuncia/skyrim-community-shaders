@@ -1,13 +1,43 @@
 // The start stage's water effects as CS passes, for native mode. Included by ImageSpace.cpp after WorldSteps.inl and ChainSteps.inl.
 //
 // Main::RenderWaterEffects runs the displacement simulation and the flow copies inside the start stage's window.
-// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a fixed set of
+// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a set of
 // instances, all on, and the k-th draw of its kind is instance k. Unused instances stay closed in the run gate.
+// The heightmap steps' count is the engine's bound from its timer settings (HeightmapStepBound), part of the shape.
 
 /** @brief Instances of each repeated water step a frame. More in one frame is a mismatch. */
-constexpr std::uint16_t kRippleInstances = 8;    // per target of the pair
-constexpr std::uint16_t kHeightmapInstances = 4;  // 0.025 s each, so a 0.1 s frame makes four
+constexpr std::uint16_t kRippleInstances = 8;  // per target of the pair
 constexpr std::uint16_t kFlowInstances = 32;
+
+/** @brief The water update's heightmap step in seconds (0x3ccccccd, set by ImageSpaceEffectWaterDisplacement's Render). */
+constexpr double kHeightmapStep = 0.025;
+
+/**
+* @brief The most heightmap steps one water update can run (ImageSpaceEffectWaterDisplacement's Render, SE 0x141303da0,
+* AE 0x1414ef370). The update adds the frame's game delta to its clock, then steps while the clock is more than one step
+* ahead of the steps. So it carries at most one step into a frame and runs at most ceil(delta / step) steps.
+* The delta comes from BSTimer::Update (66987 / 68244), the same on SE and AE:
+* - each sample is the fixed step in fixed mode (iFPSClamp), else the frame's time, set to 1/6 s past 166.7 ms;
+* - with bCompensateUnstableFrameTime (on by default), the delta is the mean of the last samples without the smallest,
+*   and without the largest clamped to 0.05 s. With all samples at the largest value s, that is ((n - 1) s - min(s, 0.05)) / (n - 2);
+* - the global time multiplier then scales it.
+* One step more covers the float rounding of the update's clock.
+*/
+std::uint32_t HeightmapStepBound()
+{
+	const auto* timer = RE::BSTimer::GetSingleton();
+	const double sample = timer->clamp > 0.0f ? static_cast<double>(timer->clamp) * 0.001 : 1.0 / 6.0;
+	double delta = sample;
+	const std::uint32_t history = timer->smoothingSampleCount;
+	if (history >= 3)
+		delta = ((history - 1) * sample - std::min(sample, 0.05)) / (history - 2);
+	// The game only slows time. A faster multiplier counts as its next whole multiple, so ramps do not change the bound.
+	const float multiplier = std::max({ 1.0f, RE::BSTimer::QGlobalTimeMultiplier(), RE::BSTimer::QGlobalTimeMultiplierTarget() });
+	delta *= std::ceil(static_cast<double>(multiplier));
+	// Past the gate's entries the build reports it. The clamp only keeps the cast defined.
+	const double steps = std::min(std::ceil(delta / kHeightmapStep) + 1.0, static_cast<double>(kGateEntries));
+	return static_cast<std::uint32_t>(steps);
+}
 
 /** @brief What the start steps' registration is a function of. Its client is declared on these variables (Frame/Declare.h). */
 struct StartKey
@@ -15,6 +45,7 @@ struct StartKey
 	std::uint32_t displacementSize = 0, flowCopySize = 0;
 	std::uint64_t flowMap = 0;
 	std::uint32_t effects = 0, states = 0;
+	std::uint32_t heightmaps = 0;
 	friend bool operator==(const StartKey&, const StartKey&) = default;
 };
 
@@ -26,6 +57,7 @@ struct StartSteps
 	std::array<std::optional<FrameAnchors::ClientDesc>, 1> descs;
 	Frame::DeclaredClient client;
 	std::uint32_t displacementSize = 0, flowSize = 0;
+	std::uint16_t heightmapInstances = 0;  // per target, from the key
 	std::map<StepKey, std::uint32_t> entries;
 	std::array<bool, kGateEntries> made{};
 	std::uint32_t count = 0;
@@ -57,7 +89,13 @@ std::optional<StartKey> StartKeyOf(const Values& a_values)
 	const auto shape = ReadyShape(a_values);
 	if (!shape || !Start().on || !shape->displacementSize)
 		return std::nullopt;
-	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states };
+	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states, shape->heightmapSteps };
+}
+
+/** @brief Whether the engine draws for another start registration than the frame's (WorldSteps.inl's Lagging). */
+bool StartLagging()
+{
+	return Lagging(Start().built, [](const auto& a_values) { return StartKeyOf(a_values); });
 }
 
 void BuildStartSteps(const StartKey& a_key);
@@ -107,6 +145,7 @@ void BuildStartSteps(const StartKey& a_key)
 	using T = RE::RENDER_TARGET;
 	start.displacementSize = a_key.displacementSize;
 	start.flowSize = a_key.flowCopySize;
+	start.heightmapInstances = static_cast<std::uint16_t>(a_key.heightmaps);
 	// Another texture in the flow map's slot (Unified Water's) is published in its place, for the water draws.
 	// A new resource under the id rebuilds every graph once (step 9 makes it a declared import).
 	if (state.publishedFlowMap && a_key.flowMap && a_key.flowMap != reinterpret_cast<std::uint64_t>(state.publishedFlowMap)) {
@@ -139,7 +178,7 @@ void BuildStartSteps(const StartKey& a_key)
 		for (std::uint16_t r = 0; r < kRippleInstances; ++r)
 			add(WorldScope::WaterDisplacement, E::ISWaterDisplacementWadingRipple, static_cast<std::uint16_t>(high | r),
 				StepDesc{ .name = fmt::format("water.ripple.{}.{}", out, r), .output = engine(out) });
-		for (std::uint16_t h = 0; h < kHeightmapInstances; ++h) {
+		for (std::uint16_t h = 0; h < start.heightmapInstances; ++h) {
 			StepDesc d{ .name = fmt::format("water.heightmap.{}.{}", out, h), .output = engine(out) };
 			d.inputs[0] = engine(in);
 			d.samplers[0] = kLinear;
@@ -157,8 +196,11 @@ void BuildStartSteps(const StartKey& a_key)
 	std::vector<FrameAnchors::PassDesc> passes;
 	for (auto& step : steps) {
 		const auto entry = start.count;
-		if (entry >= kGateEntries)
+		if (entry >= kGateEntries) {
+			logger::error("[ORG] ImageSpace: the start steps do not fit the gate's {} entries ({} heightmap steps per target); {} and later have no pass",
+				kGateEntries, start.heightmapInstances, step.desc.name);
 			break;
+		}
 		std::string error;
 		auto spec = MakeStepSpec(step.desc, entry, error);
 		if (!spec) {
@@ -203,7 +245,7 @@ void BuildStartSteps(const StartKey& a_key)
 	start.registered = true;
 	logger::info("[ORG] ImageSpace: the water effects are start stage passes: {} passes ({} ripples and {} heightmap steps per target, {} flow copies), "
 				 "displacement {}x{}, flow map {}x{}, registered for the revision starting now",
-		start.count, kRippleInstances, kHeightmapInstances, start.flowSize ? kFlowInstances : 0, start.displacementSize, start.displacementSize, start.flowSize,
+		start.count, kRippleInstances, start.heightmapInstances, start.flowSize ? kFlowInstances : 0, start.displacementSize, start.displacementSize, start.flowSize,
 		start.flowSize);
 }
 
@@ -281,7 +323,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 				start.target = other(start.target);
 			}
 			instance = start.heightmaps++;
-			limit = kHeightmapInstances;
+			limit = start.heightmapInstances;
 			variant = static_cast<std::uint16_t>((start.target << 8) | instance);
 			start.target = other(start.target);
 			break;
@@ -302,6 +344,11 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			logger::error("[ORG] ImageSpace: the water update's {} writes rt{}, and CS planned rt{}", kEffects[a_effect].effectName, bound, planned);
 	}
 	if (instance >= limit) {
+		// The engine may run more heightmap steps for new timer settings before the revision with them is adopted.
+		if (id == E::ISWaterWadingHeightmap && StartLagging()) {
+			Frame::Driver::NoteLaggedWork(segment);
+			return true;
+		}
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
 			fmt::format("{} instance {} of the frame is past the start stage's {} instances; it draws nothing", kEffects[a_effect].effectName, instance, limit));
 		return true;

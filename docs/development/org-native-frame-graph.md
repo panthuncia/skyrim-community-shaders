@@ -3982,9 +3982,16 @@ end). RenderWaterEffects runs after the last face's sky in every world frame (fr
   writes the other target and swaps again. The hook keys each draw by effect, the target it writes (that plan) and its instance. A check
   compares the plan with the target the engine binds, once a session: no difference in the final runs.
 - **The flow copies**: the k-th copy of the frame is instance k; its loaded texture is a frame input by heap index (the latch's Source).
-- **Fixed instances** (the counts are the engine's late decisions): 8 ripples per target, 4 heightmap steps per target, 32 flow copies;
-  58 passes. All are on in every description and gated: an instance the engine does not use stays closed and does nothing on the GPU. More
+- **Instances** (the counts are the engine's late decisions): 8 ripples per target, 32 flow copies, and per target the engine's bound on
+  heightmap steps (below); 68 passes with the default timer settings. All are on in every description and gated: an instance the engine does not use stays closed and does nothing on the GPU. More
   in one frame is `NoPass`. The client `repeats`: a tap per update and per copy, each opening only its own instances' entries.
+- **The heightmap bound** (2026-11-19). The update adds the frame's game delta to its clock and steps every 0.025 s, so it runs at most
+  ceil(delta / 0.025) steps. BSTimer::Update (66987 / 68244) sets each sample to 1/6 s past 166.7 ms (or the iFPSClamp step), and
+  bCompensateUnstableFrameTime (on by default, 8 samples) averages the samples without the smallest and with the largest clamped to
+  0.05 s, so the delta reaches ((n - 1) s - min(s, 0.05)) / (n - 2): 0.186 s by default. The global time multiplier scales it (counted
+  as its next whole multiple when above 1). `HeightmapStepBound` adds one step for float rounding: 9 by default. It is a field of the
+  EngineImageSpace variable and of the start key, so a settings change registers the client again; a step past the bound while that
+  revision lags is lag, otherwise `NoPass`. The old fixed 4 assumed a 0.1 s frame: a Riverwood load after Solstheim ran 5.
 - Not built: the rain ripple, rain heightmap, blend, smooth and normals steps and the clear (shaders 86, 89, 91 to 94). The decompiled
   Render does not draw them and no session's manifest has them. A draw of one is `NoPass`.
 
@@ -4806,7 +4813,7 @@ ledger keeps their state (Cleanup A5). A stage's commit copies only the latch by
 Present in every build of their stage, recorded at execution with the CPU's gate answers (a pass that does not run skips, its barriers
 folded), because the engine decides them late or a lagging build would lose them:
 - start: the decal tests' 4 instances (8 draws each), the face tint, the six reflection faces' sky, the water effects' instances (8
-  ripples and 4 heightmap steps per target, 32 flow copies), the shadow maps' clears DCLF's shadow view does not host;
+  ripples and the timer's bound on heightmap steps per target, 32 flow copies), the shadow maps' clears DCLF's shadow view does not host;
 - pre-depth: the main depth's clear DCLF's Z-prepass does not host;
 - post: the screenshot copy, the frozen background's copy (`capture.menubg`), refraction and the radial blur after the tonemap, both tonemap
   forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the

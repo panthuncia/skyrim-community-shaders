@@ -107,6 +107,7 @@ namespace RenderGraph::Frame::Vars
 		std::uint64_t flowMap = 0;           // the water's flow map texture, 0 for none
 		std::uint32_t effects = 0;           // the covered effects the engine has made, 0 before its ImageSpace manager exists
 		std::uint32_t states = 0;            // the engine blend states the steps use that it has made
+		std::uint32_t heightmapSteps = 0;    // the most wading heightmap steps one water update runs, from the engine timer
 		friend bool operator==(const ImageSpaceShape&, const ImageSpaceShape&) = default;
 	};
 

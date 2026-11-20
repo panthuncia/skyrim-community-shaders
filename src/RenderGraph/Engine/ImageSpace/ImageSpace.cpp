@@ -1508,6 +1508,7 @@ namespace RenderGraph::Engine::ImageSpace
 				shape.flowCopySize = desc.Width;
 			}
 			shape.flowMap = reinterpret_cast<std::uint64_t>(FlowMapTexture());
+			shape.heightmapSteps = HeightmapStepBound();
 			// The manager makes some effects after the first lookups, and each one it makes can take its pass.
 			for (std::size_t i = 0; i < kEffects.size(); ++i)
 				shape.effects += state.enabled[i] && ShaderOf(i) ? 1u : 0u;
