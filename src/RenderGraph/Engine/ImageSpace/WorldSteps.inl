@@ -84,6 +84,7 @@ struct StepDesc
 	std::uint32_t blend = PackBlend(0, 0, 2, 0);  // no blending, all channels written
 	StepArea area = StepArea::Full;
 	std::uint32_t latched = 0;
+	std::uint32_t permutation = 0;  // Spec::permutation
 };
 
 std::int32_t EffectIndexOf(Effects::ImageSpaceEffectEnum a_effect)
@@ -119,6 +120,7 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 	auto spec = std::make_shared<Spec>();
 	spec->entry = a_entry;
 	spec->name = a_desc.name;
+	spec->permutation = a_desc.permutation;
 	auto& key = spec->key;
 	key.effect = static_cast<std::uint32_t>(effect);
 	key.compute = info.compute;
@@ -193,6 +195,7 @@ struct WorldKey
 	Frame::Vars::Extent2D display{};
 	Frame::Vars::Ratios ratios{};  // the render-size viewports are baked at registration until step 8
 	std::uint32_t saoLevels = 0, effects = 0, states = 0;
+	std::uint32_t ssr = 0;  // Dynamic Cubemaps' EnabledSSR: the SSR raymarch's ENABLESSR permutation
 	friend bool operator==(const WorldKey&, const WorldKey&) = default;
 };
 
@@ -440,7 +443,10 @@ std::optional<WorldKey> WorldKeyOf(const Values& a_values)
 	const auto shape = ReadyShape(a_values);
 	if (!shape || !World().on)
 		return std::nullopt;
-	return WorldKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::DynamicRatios()), shape->saoLevels, shape->effects, shape->states };
+	// ENABLESSR is in the engine's SSR defines only while Dynamic Cubemaps is loaded.
+	const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
+	const std::uint32_t ssr = dynamicCubemaps.loaded && a_values.Get(dynamicCubemaps.settings.EnabledSSR) ? 1u : 0u;
+	return WorldKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::DynamicRatios()), shape->saoLevels, shape->effects, shape->states, ssr };
 }
 
 bool WorldLagging()
@@ -469,7 +475,9 @@ bool DeclareWorldSteps()
 	if (!DeclareKept(world.sao, RE::RENDER_TARGET::kSAO, "ImageSpace::SAO") || !DeclareKept(world.saoHistory[0], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO0") ||
 		!DeclareKept(world.saoHistory[1], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO1"))
 		return false;
-	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace());
+	// EnabledSSR picks the SSR raymarch's program, so its change registers the clients again with a revision.
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace(),
+		globals::features::dynamicCubemaps.settings.EnabledSSR);
 	for (std::size_t part = 0; part < world.clients.size(); ++part)
 		world.clients[part] = DeclareStepClient<WorldKey>(part ? PostPart::WorldWater : PostPart::WorldScopes, dependencies,
 			[](const Frame::Inputs& a_in) { return WorldKeyOf(a_in); }, [part](const WorldKey& a_key) { return WorldDescFor(a_key, part); });
@@ -619,6 +627,7 @@ void BuildWorldSteps(const WorldKey& a_key)
 		d.inputs[4] = reflections;
 		d.samplers[1] = { 0, 1 };
 		d.samplers[3] = { 0, 1 };
+		d.permutation = a_key.ssr ? kSsrPermutation : 0u;
 		add(WorldScope::Reflections, E::ISReflectionsRayTracing, v, std::move(d));
 	}
 	{

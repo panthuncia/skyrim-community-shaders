@@ -17,6 +17,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "Deferred.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#	include "Features/DynamicCubemaps.h"
 #	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #	include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
 #	include "Features/HDRDisplay.h"
@@ -368,6 +369,8 @@ namespace RenderGraph::Engine::ImageSpace
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			// The output's extent in this registration. A kept output's twin may hold the last version's until the revision adopts.
 			std::uint32_t width = 0, height = 0;
+			// The feature defines its program is built with, from its registration's key (kSsrPermutation), not the live settings.
+			std::uint32_t permutation = 0;
 		};
 
 		/** @brief Mirrors OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
@@ -836,8 +839,14 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr std::uint32_t kSamplerAddressModes = 6;
 		constexpr std::uint32_t kSamplerFilterModes = 5;
 
-		/** @brief Effect, output formats, packed blend, depth-stencil format (Unknown for none) and depth-stencil table index. */
-		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t>;
+		/**
+		* @brief Effect, output formats, packed blend, depth-stencil format (Unknown for none), depth-stencil table index and the
+		* feature define permutation (Spec::permutation).
+		*/
+		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t, std::uint32_t>;
+
+		/** @brief ISReflectionsRayTracing with ENABLESSR (Dynamic Cubemaps' EnabledSSR). The only feature define an effect's key carries. */
+		constexpr std::uint32_t kSsrPermutation = 1;
 
 		/** @brief Queued at Setup. A pass made at a graph build takes its own with GetNow. */
 		ProgramCache<RasterProgram, ProgramKey>& Programs()
@@ -1000,7 +1009,20 @@ namespace RenderGraph::Engine::ImageSpace
 			return defines;
 		}
 
-		std::vector<std::pair<std::wstring, std::wstring>> DefinesOf(std::size_t a_effect) { return AnchorPasses::Defines(LiveDefinesOf(a_effect)); }
+		/**
+		* @brief LiveDefinesOf with the feature defines a registration's key carries in place of the live ones. ENABLESSR comes from
+		* a_permutation for the SSR raymarch, so its program is the one its revision's EnabledSSR selects.
+		*/
+		std::vector<std::pair<std::wstring, std::wstring>> DefinesOf(std::size_t a_effect, std::uint32_t a_permutation = 0)
+		{
+			auto defines = LiveDefinesOf(a_effect);
+			if (kEffects[a_effect].id == Effects::ISReflectionsRayTracing) {
+				std::erase_if(defines, [](const auto& a_define) { return a_define.first == "ENABLESSR"; });
+				if (a_permutation & kSsrPermutation)
+					defines.emplace_back("ENABLESSR", "");
+			}
+			return AnchorPasses::Defines(defines);
+		}
 
 		/** @brief Made on first use. UINT32_MAX if it could not be made. Render thread. */
 		std::uint32_t NoFogVolume()
@@ -1104,7 +1126,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief Needs the engine's effect object. Blend and depth-stencil must already be checked. */
 		RasterProgram::Desc DescribeRaster(const ProgramKey& a_key)
 		{
-			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex] = a_key;
+			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex, permutation] = a_key;
 			const auto& effect = kEffects[effectIndex];
 			std::array<rhi::BlendAttachment, 2> blend{};
 			std::string error;
@@ -1118,7 +1140,7 @@ namespace RenderGraph::Engine::ImageSpace
 			// Shared (4), SRVs, samplers, feature handles, latch (2), sources' latch (2).
 			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(effect.latched)) + effect.samplers +
 			                     (effect.features ? kFeatureWords : 0) + 2 + (effect.latched ? 2 : 0);
-			desc.defines = DefinesOf(effectIndex);
+			desc.defines = DefinesOf(effectIndex, permutation);
 			desc.targets = { { .format = format, .blend = blend[0] } };
 			if (format1 != rhi::Format::Unknown)
 				desc.targets.push_back({ .format = format1, .blend = blend[1] });
@@ -1154,7 +1176,8 @@ namespace RenderGraph::Engine::ImageSpace
 		ProgramKey KeyOf(const Spec& a_spec)
 		{
 			const auto depthIndex = a_spec.depth ? a_spec.key.depthMode * kStencilModes + a_spec.key.stencilMode : 0u;
-			return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend, a_spec.depth ? a_spec.depthFormat : rhi::Format::Unknown, depthIndex };
+			return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend, a_spec.depth ? a_spec.depthFormat : rhi::Format::Unknown, depthIndex,
+				a_spec.permutation };
 		}
 
 		/** @brief Whether the blend and depth-stencil states are known yet. a_error says which is not. */

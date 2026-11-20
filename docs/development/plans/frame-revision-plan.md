@@ -868,6 +868,11 @@ revisions.
     the first adoption); anything else is fatal. `AdoptedClusterGrid` clamps to it. The "larger than at setup" warning is gone.
 - **Histogram Auto Exposure's two buffers** are declared buffers of a fixed size, made at the effect's `Declare`. Only their
   creation changed; the passes, the reset gate and the readback are as 6.9 left them.
+- **ImageSpace's world clients depend on `DynamicCubemaps.EnabledSSR`** (6.18's open item). `WorldKey::ssr` holds it (while Dynamic
+  Cubemaps is loaded), so a toggle registers both world clients again with a revision. The SSR raymarch steps carry it as their
+  spec's `permutation`, which is part of the ImageSpace program key, and `DefinesOf` sets `ENABLESSR` from it in place of the live
+  define. So the revision that switches the clients in also switches the program. The engine's own shader-cache clear stays for
+  plain D3D11.
 
 ---
 
@@ -1864,6 +1869,9 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   resources (`Bind::Uav(Graph())`, the readback's `AddBuffer`, Composite's `Image` of the adaptation). A new version would leave
   those bindings on the old one. Binding a buffer slot there needs `AnchorPasses::Bind`, `RunReadback` and the chain's `Image` to
   take a `VersionedBuffer`, which is the post chain's code (6.20). The buffers are 1 KB.
+- **The new SSR permutation compiles at the world clients' build**, on first use, as any ImageSpace program not built before
+  (`GetNow`, logged as built at the graph's build). Setup builds neither permutation ahead. `DeclareProgram` would move the compile
+  before the revision starts; it was not used, since the ImageSpace program cache keys every pass shape, not only defines.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
