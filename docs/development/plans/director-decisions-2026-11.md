@@ -237,3 +237,18 @@ final until the user confirms it.
     - **Last section 8 hits in its files:** the capture client in `ORGScreenshot.cpp` (`Scheduled`, plus a mid-frame
       re-registration in `SetSource`).
     - **Still left:** 7a (the deletions) and 7d (the check made fatal), then steps 8 to 10.
+47. **Batch 3 result:** 24 of 28 runs passed. The four that did not:
+    - `guest+llf-local-shadows`: guest without DCLF, now fatal by design (item 45);
+    - `ibl` in two modes: the recipe finding, fixed;
+    - `post-effects` in three modes: the configs' `no_log` "missed settings writer" matched the startup line, so the
+      pattern is now "missed settings writer:". All 13 shots were taken.
+
+    `native-vulkan+terrain-shadows` now passes with the wading bound.
+48. **Merged into batch 4:** 6.10/6.11, 6.19, 6.20, 6.22, 7a, 7b with 6.15 and 6.23, 7c, the step 6 follow-ups, the
+    graph modes requiring DCLF, the IBL recipe and published-snapshot fix, and the Effects11 fix (programs lane, fatal
+    errors). The director renamed two shadowing locals in Effects11.
+    - **Effects11 can't be tested on this machine:** no Effects11 preset (`enbseries/enbeffect.fx`) is installed. The user
+      should run `effects11` and `effects11-programs` with a preset.
+    - **7a kept, with owners:** the one-shot passes (5 users), the settings shims for fields that aren't `Setting<T>`
+      (strings and a few toggles), and two `FrameAnchors::Refresh` calls (ImGuiRenderer for step 9b, and a DCLF stress
+      command).
