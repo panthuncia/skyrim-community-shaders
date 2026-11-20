@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 /**
@@ -11,7 +12,9 @@
 * - late attaches: graph builds attached or staged graphs switched in outside the adoption point;
 * - refusals: builds ORG refused at their staging, attach or switch, by site and reason, on any thread (plan Q9);
 * - version lags: stage schedules that lagged behind a version published outside a frame revision, by slot, on any thread.
-* Adoptions under an allowed caller tag (dclf, until step 10a) are counted apart. Counted, never fatal: step 7 makes it fatal.
+* Late versions and late attaches are tap errors (TapError::OutsideAdoption), fatal in development builds, unless an Allow scope
+* names an Exception. Exceptions are counted apart, by name. A new resource's first version is counted, not an error.
+* Late changes and the counts below them stay counted, not fatal, until step 10c.
 * One "[ORG] boundary:" line per statistics window and one at a test run's exit, in development builds only (not CS_RELEASE_PROFILE).
 * The render thread is the one that last opened a Scope. Other threads are not counted.
 */
@@ -41,6 +44,27 @@ namespace RenderGraph::Frame::Boundary
 
 	private:
 		std::string_view outer;
+	};
+
+	/** @brief The exceptions to rule R1 allowed for now. Each is deleted by the step that names it. */
+	enum class Exception : std::uint8_t
+	{
+		Dclf,           // DCLF adopts its snapshot's versions and attaches its own epochs' builds at its build points (step 10a)
+		EngineImports,  // engine targets, engine imports and the native back buffer take versions when the engine makes them (step 9)
+		Count
+	};
+
+	/** @brief Allows late versions and late attaches as a_exception on the calling thread while it lives. They are counted by name. */
+	class Allow
+	{
+	public:
+		explicit Allow(Exception a_exception);
+		~Allow();
+		Allow(const Allow&) = delete;
+		Allow& operator=(const Allow&) = delete;
+
+	private:
+		Exception outer;
 	};
 
 	/** @brief Sets ORG's adoption observer. Development builds only. */

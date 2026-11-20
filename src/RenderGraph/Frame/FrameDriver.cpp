@@ -396,6 +396,8 @@ namespace RenderGraph::Frame::Driver
 			return "own epoch";
 		case TapError::MissedSettingsWriter:
 			return "missed settings writer";
+		case TapError::OutsideAdoption:
+			return "outside the adoption point";
 		default:
 			return "?";
 		}

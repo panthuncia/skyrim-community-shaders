@@ -70,6 +70,7 @@ namespace RenderGraph::Frame::Driver
 		NotExecuted,          // a skeleton clear or copy run did not execute what it took (nothing draws it another way)
 		OwnEpoch,             // an anchor would run an epoch of its own
 		MissedSettingsWriter,  // a feature's size settings changed with no settings event (the missed-writer check)
+		OutsideAdoption,       // a version adopted or a build attached outside the frame's adoption point with no named exception (rule R1)
 		Count
 	};
 

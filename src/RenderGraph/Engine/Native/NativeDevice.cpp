@@ -28,6 +28,7 @@
 #	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #	include "RenderGraph/ExternalWork.h"
+#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Transients.h"
 #	include "RenderGraph/Frame/Variables.h"
@@ -1961,6 +1962,8 @@ namespace RenderGraph::Engine::Native
 				if (graph.versions.size() < 2)
 					return;
 				graph.current = (graph.current + 1) % static_cast<uint32_t>(graph.versions.size());
+				// The back buffer takes its version at the present, an allowed exception until step 9a makes it an event.
+				const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
 				graph.slot->Adopt(graph.versions[graph.current]);
 				Rename(*backBufferRecord, graph.records[graph.current]);
 				if (auto* host = RenderGraphRuntime::Get().Host())
