@@ -345,12 +345,11 @@ void TerrainShadows::SetupResources()
 	CompileComputeShaders();
 
 	// The render graph's update, when requested and a heightmap is installed. Each heightmap gets textures of its own size there.
-	// If a heightmap switch fails, EarlyPrepass loads the heightmap again on D3D11.
 	if (ORGTerrainShadows::Requested()) {
 		if (heightmaps.empty())
 			logger::info("[ORG] Terrain Shadows: no heightmap is installed; it stays on D3D11");
 		else
-			ORGTerrainShadows::Get().Setup([] { UnbindShadowHeight(); });
+			ORGTerrainShadows::Get().Setup();
 	}
 }
 
@@ -439,7 +438,7 @@ void TerrainShadows::LoadHeightmap()
 		heightMapWidth = static_cast<uint>(metadata.width);
 		heightMapHeight = static_cast<uint>(metadata.height);
 
-		// The ORG path takes the heightmap when it is on: it makes both textures. D3D11 makes them otherwise, or when it fails.
+		// The ORG path takes the heightmap when it is on: it makes both textures. D3D11 makes them otherwise.
 		auto& orgShadows = ORGTerrainShadows::Get();
 		if (orgShadows.IsActive()) {
 			UnbindShadowHeight();
@@ -690,12 +689,6 @@ void TerrainShadows::ReflectionsPrepass()
 
 void TerrainShadows::EarlyPrepass()
 {
-	// The heightmap's textures went with the render graph: it is loaded again on the D3D11 path.
-	if (cachedHeightmap && !texHeightMap && !ORGTerrainShadows::Get().ShadowHeightSRV()) {
-		UnbindShadowHeight();
-		cachedHeightmap = nullptr;
-	}
-
 	LoadHeightmap();
 
 	const auto requestedRefreshGeneration = Util::GetCompletedCelestialTransitionGeneration();
@@ -703,7 +696,7 @@ void TerrainShadows::EarlyPrepass()
 	if (!settings.EnableTerrainShadow)
 		return;
 
-	// The render graph asks for refreshes until one ran with the new heightmap's passes (its graphs switch in a few frames later).
+	// The render graph asks for refreshes until one ran with the new heightmap's client (its revision is adopted a few frames later).
 	const bool refreshImmediately = needPrecompute || timeJumpRefresh || ORGTerrainShadows::Get().NeedsRefresh();
 	if (needPrecompute)
 		Precompute();

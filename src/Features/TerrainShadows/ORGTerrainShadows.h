@@ -17,11 +17,12 @@ namespace DirectX
 /**
 * @brief Terrain Shadows' shadow update as an EarlyPrepass pass, with CS_ORG_TERRAIN_SHADOWS=1.
 *
-* The feature decides the stripes and their constants, and this class only runs them. The shadow height map is a persistent,
-* versioned, published texture exported for t60. Each heightmap resizes it as a new version, which readers follow with no build.
-* Each heightmap registers the client again with its own texture, upload and gate. Until a full refresh has run in a graph holding
-* the new registration, NeedsRefresh stays true and the feature keeps terrain shadows off, so nothing reads unwritten contents.
-* On any failure the ORG path stops for good and the heightmap loads again on D3D11. Render thread. Free of ORG/Vulkan includes.
+* The feature decides the stripes and their constants, and this class only runs them. Each heightmap is a new value of the
+* HeightMap frame variable (its id and size). The shadow height map is declared on it: a persistent, versioned, published texture
+* exported for t60, whose size is a new version made by the frame revision. The client is declared on it too, with the heightmap's
+* own texture, upload and gate. Both switch in at the Begin that adopts the revision. Until a full refresh has run in a graph
+* holding the new client, NeedsRefresh stays true and the feature keeps terrain shadows off, so nothing reads unwritten contents.
+* A failure after Setup is fatal. Render thread. Free of ORG/Vulkan includes.
 */
 class ORGTerrainShadows
 {
@@ -37,18 +38,17 @@ public:
 	static ORGTerrainShadows& Get();
 
 	/**
-	* @brief At SetupResources with the runtime active and a heightmap installed.
-	* @param a_onFailed Called once if a heightmap switch fails later.
+	* @brief At SetupResources with the runtime active and a heightmap installed. Declares the shadow height map and the client.
 	* @return False keeps Terrain Shadows on D3D11.
 	*/
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	bool IsActive() const;
 
 	/**
-	* @brief Stages a new heightmap. It switches in at the next frame boundary.
+	* @brief Stages a new heightmap and writes the HeightMap variable. It switches in with the frame revision that carries it.
 	* @param a_image Mip 0 of the DDS, copied before this returns.
-	* @return False, logged, on failure. The ORG path is then off for good.
+	* @return False when the ORG path is not active. A heightmap it cannot take is fatal.
 	*/
 	bool SetHeightmap(const DirectX::Image& a_image);
 
@@ -58,7 +58,7 @@ public:
 	*/
 	bool Submit(std::span<const TerrainShadows::ShadowUpdateCB> a_dispatches, std::uint32_t a_groups, bool a_refresh);
 
-	/** @brief True from SetHeightmap until a full refresh ran in a graph holding that heightmap. */
+	/** @brief True from SetHeightmap until a full refresh ran in a graph holding that heightmap's client. */
 	bool NeedsRefresh() const;
 
 	/** @brief t60. Null while no heightmap is on the graph. */
@@ -71,12 +71,6 @@ public:
 
 private:
 	ORGTerrainShadows() = default;
-
-	/** @brief For good. */
-	void Stop();
-
-	/** @brief At a frame boundary. Resizes for the staged heightmap and registers it. */
-	void Switch();
 
 	std::shared_ptr<Impl> impl;
 };

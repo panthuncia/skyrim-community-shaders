@@ -1342,6 +1342,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
   drag adopts variables-only revisions and never a new version.
 
+**Decided by the agent (step 6.3, 2026-11-19), to confirm:**
+- **`HeightMap` is a frame variable** (`Vars::HeightMap()`, `HeightMapIdentity { id, size }` in `Frame/Variables.h`, an additive
+  change). The id counts `ORGTerrainShadows::SetHeightmap` calls in the session, so a worldspace visited again is a new value.
+- **Only the shadow height map is a declared texture.** The heightmap itself (its contents, R16 or BC4 as the file has them) stays
+  a plain Persistent texture made per heightmap and held by that heightmap's client, which uploads it once. A declared texture may
+  change only its extent, and a new heightmap is a new client anyway.
+- **The client's make takes the heightmap its key names** from a map of staged heightmaps, and drops the older ones. A revision
+  that started with an older value registers that one, and the next revision registers the newest.
+- **Failures after Setup are fatal.** The mid-session fall-back to D3D11 (`Stop`, the `onFailed` callback, the reload block in
+  `TerrainShadows::EarlyPrepass`) is gone: it unregistered the client and withdrew the published id outside a revision.
+- **The shaders' scale and offset still read the live heightmap size.** `NeedsRefresh` keeps terrain shadows off until a refresh
+  ran in a graph holding the new client, which is adopted with the new version, so the two sizes agree whenever shadows are on.
+- **The heightmap upload stays a one-shot pass** (`PassDesc::once`). The one-shot machinery is step 7a's.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's
