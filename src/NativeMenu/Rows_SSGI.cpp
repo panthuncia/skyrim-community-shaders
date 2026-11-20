@@ -92,7 +92,6 @@ namespace
 			s.ResolutionMode = *preset.resolutionMode;
 		s.EnableBlur = preset.enableBlur;
 		s.EnableGI = preset.enableGI;
-		globals::features::screenSpaceGI.recompileFlag = true;
 		globals::features::screenSpaceGI.SettingsWritten("native menu");
 	}
 

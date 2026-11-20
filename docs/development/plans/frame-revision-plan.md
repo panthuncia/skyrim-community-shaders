@@ -669,6 +669,29 @@ outside it. The light copy always moves the whole capacity. So no pass revision 
 `ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
 culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
 
+**As built (2026-11-19, 6.6, `org-native/rev-step6-6`).** Screen Space GI's textures, programs and client follow the revisions.
+- `Enabled`, `EnableGI`, `EnableExperimentalSpecularGI`, `EnableTemporalDenoiser`, `EnableBlur` and `ResolutionMode` are
+  `CS::Setting`. The menu's preset buttons call `ScreenSpaceGI::ApplyPreset`, whose writes are `Setting` writes. The
+  `ProjectSizeSettings` entry and `recompileFlag` are gone. The D3D11 path recompiles when the settings its defines come from differ
+  from the compiled ones (`CompiledDefines`, checked in `DrawSSGI`).
+- Ten History textures are declared on `DisplaySize` and `Enabled` (the specular pair also on the specular and temporal
+  settings), one texel while they do not exist: the accumulation count, the previous geometry, and two textures per composite input.
+  The four outputs are exported and published once at Setup under the composite's ids; their partners are not exported. At full
+  resolution an output is also the history and its partner the scratch; below it the partner is the history and the upsample
+  writes the output. So the resolution mode swaps roles in the client and makes no texture change. The working textures (depth,
+  normals, radiance, accumulation scratch, blur inputs) are transients made at each registration at the key's display size.
+- One `DeclareProgram` (`ScreenSpaceGI::Chain`) on the define settings builds the seven step programs for a define set. Every step's
+  defines with the common ones are resolved at Setup (`ResolveDefines`), so a build reads no State.
+- The client `cs.ssgi` is declared on `DisplaySize` and the six settings; its key adds the engine inputs the last Prepass found
+  (`Invalidate` on a change). While SSGI is off, or before the inputs are found, the client holds only the history clears.
+- `cs.ssgi.reset`, `RegisterReset`, `RegisterChain`, `Rearm`, `PublishOutputs`, `RequestSize`, the program prebuild and the D3D11
+  fallback after Setup are gone. A history reset is a clear of every declared texture behind one gate entry, which the commit opens
+  on a loading screen or shader reload (`queuedResetHistory`), on `FirstFrame` of any declared texture, and on the first run of a
+  registration made for another configuration or size. Dispatches, `TexDim` and the clamp read `Adopted().Extent`.
+- The composite always gets the published outputs while the graph path runs (zero while off), and takes the specular texture by
+  the adopted `EnableExperimentalSpecularGI` (`ScreenSpaceGI::FrameSpecularGI`).
+- cs-test: `ssgi` config and the feature's `ssgi-preset` command. EHF's client key reads no SSGI state.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1499,6 +1522,27 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   registration, driven by the flow map's identity in `EngineImageSpace`; it still rebuilds every graph once (step 9 makes it a
   declared import).
 - **Missing engine targets and texture failures at a registration are fatal**, not a later retry.
+
+**Decided by the agent (step 6.6, Screen Space GI, 2026-11-19), to confirm:**
+- **No texture depends on `ResolutionMode`.** Every texture keeps the display size, as before (the chain uses the top-left part below
+  full resolution, and the shaders' `TexDim` is the full size). The mode swaps which texture of each output pair is the history, so
+  a mode change is a new client only, and each composite input keeps one slot. The cost: at full resolution the partners are
+  History, not aliased scratch, about 14 bytes a pixel more (22 with the specular pair), about 115 to 180 MB at 4K. Below full
+  resolution the memory is as before.
+- **The history reset is a gated clear, not only `FirstFrame`.** `FirstFrame` covers new versions. A new configuration (which makes no
+  version), the first version (not born cleared, and its client may come a revision later) and the loading-screen reset need a
+  clear too, so the commit opens one gate entry for all of them. New engine inputs keep the history, as before.
+- **The composite's inputs are always the published outputs on the graph path.** Off, they are one zero texel each (exported
+  versions are zeroed at adoption, and the clear runs too), which reads as no SSGI. So the composite's registration no longer follows
+  the toggle. Its t11-t13 choice reads the adopted specular setting.
+- **Programs build on demand.** The setup prebuild of all 24 define sets is gone. A define set used for the first time compiles on
+  the programs lane before its revision starts, so the change shows a few frames later. Shader reload does not rebuild the graph
+  programs (step 7c).
+- **Failures after Setup are fatal.** A missing input at Prepass or a client that cannot be made ends the process; the fall-back to
+  D3D11 is gone.
+- **The preset test step is a feature command** (`ssgi-preset`, registered in `ScreenSpaceGI::PostPostLoad`), since cs-test has no
+  menu click. It calls the same `ApplyPreset` as the buttons.
+- **`cs.ssgi.reset` is removed from `RecipeTable.h`.**
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

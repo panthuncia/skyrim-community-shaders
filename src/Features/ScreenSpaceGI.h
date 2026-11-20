@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 struct ScreenSpaceGI : Feature
 {
@@ -8,6 +9,9 @@ private:
 	static constexpr std::string_view MOD_ID = "130375";
 
 public:
+	/** @brief Binds the shape settings to their frame variables. The global is the only instance. */
+	ScreenSpaceGI();
+
 	virtual inline std::string GetName() override { return "Screen Space GI"; }
 	virtual std::string GetDisplayName() override { return T("feature.screen_space_gi.name", "Screen Space GI"); }
 	virtual inline std::string GetShortName() override { return "ScreenSpaceGI"; }
@@ -26,7 +30,7 @@ public:
 				T("feature.screen_space_gi.key_feature_5", "Configurable quality and performance settings") } };
 	}
 
-	/** @brief Resets all settings to their default values and flags shaders for recompilation. */
+	/** @brief Resets all settings to their default values. */
 	virtual void RestoreDefaultSettings() override;
 	/** @brief Draws the ImGui settings UI with quality presets, visual parameters, and denoising options. */
 	virtual void DrawSettings() override;
@@ -34,22 +38,49 @@ public:
 	virtual void DrawDebugSection() override;
 
 	virtual void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 
-	/** @brief Registers the loading screen listener that resets the temporal history. */
+	/** @brief The quality presets of the menu's buttons. */
+	enum class Preset
+	{
+		AOOnly,
+		Low,
+		Standard,
+		Extreme,
+		Reference,
+	};
+
+	/** @brief Writes a preset's settings, as its menu button does. */
+	void ApplyPreset(Preset a_preset);
+
+	/** @brief Whether this frame's composite takes the specular GI texture: the adopted value on the graph path, else the setting. */
+	bool FrameSpecularGI() const;
+
+	/** @brief Registers the loading screen listener that resets the temporal history, and the ssgi-preset test command. */
 	virtual void PostPostLoad() override;
 	/** @brief Creates GPU textures, samplers, constant buffers, and compiles compute shaders. */
 	virtual void SetupResources() override;
-	/** @brief Creates the D3D11 path's textures, sized as kMAIN (SetupResources, or the first D3D11 frame after the graph path failed). */
+	/** @brief Creates the D3D11 path's textures, sized as kMAIN (SetupResources, or the first D3D11 frame). */
 	void CreateTextures();
-	/** @brief Before the DeferredPasses anchor: keeps the graph path's programs, textures and inputs current (CS_ORG_SCREEN_SPACE_GI=1). */
+	/** @brief Before the DeferredPasses anchor: the graph path notes new engine inputs. Its programs, textures and client follow the frame revisions. */
 	virtual void Prepass() override;
 	/** @brief Releases and recompiles all SSGI compute shaders. */
 	virtual void ClearShaderCache() override;
 	/** @brief Compiles all SSGI compute shaders with current resolution and feature defines. */
 	void CompileComputeShaders();
+
+	/** @brief The settings the D3D11 shaders' defines come from. DrawSSGI recompiles when they differ from the compiled ones. */
+	struct CompiledDefines
+	{
+		int resolutionMode = -1;
+		bool temporal = false;
+		bool gi = false;
+		bool specular = false;
+
+		bool operator==(const CompiledDefines&) const = default;
+	};
+	CompiledDefines CurrentDefines() const;
+	CompiledDefines compiledDefines;
 	/** @brief Checks whether all required compute shaders and the noise texture loaded successfully. */
 	bool ShadersOK();
 
@@ -67,7 +98,6 @@ public:
 
 	//////////////////////////////////////////////////////////////////////////////////
 
-	bool recompileFlag = false;
 	uint outputAoIdx = 0;
 	uint outputIlIdx = 0;
 
@@ -83,16 +113,17 @@ public:
 		static bool Register();
 	};
 
+	/** @brief The shape settings are CS::Setting (frame revision plan 6.6): they set the graph path's programs, textures and client. */
 	struct Settings
 	{
-		bool Enabled = true;
-		bool EnableGI = true;
-		bool EnableExperimentalSpecularGI = false;
+		CS::Setting<bool> Enabled = true;
+		CS::Setting<bool> EnableGI = true;
+		CS::Setting<bool> EnableExperimentalSpecularGI = false;
 		bool EnableVanillaSSAO = false;
 		// performance/quality
 		uint NumSlices = 4u;
 		uint NumSteps = 8u;
-		int ResolutionMode = 1;  // 0-full, 1-half, 2-quarter - DBF default
+		CS::Setting<int> ResolutionMode = 1;  // 0-full, 1-half, 2-quarter - DBF default
 		// visual
 		float MinScreenRadius = 0.01f;
 		float AORadius = 256.f;
@@ -106,8 +137,8 @@ public:
 		float AOPower = 1.0f;
 		float GIStrength = 1.0f;
 		// denoise
-		bool EnableTemporalDenoiser = true;
-		bool EnableBlur = true;
+		CS::Setting<bool> EnableTemporalDenoiser = true;
+		CS::Setting<bool> EnableBlur = true;
 		float DepthDisocclusion = .1f;
 		float NormalDisocclusion = .1f;
 		uint MaxAccumFrames = 16;
