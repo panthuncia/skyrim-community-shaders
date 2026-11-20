@@ -326,6 +326,9 @@ namespace RenderGraph::Frame
 			RequireSizes(a_dependencies, declaration->dependencies, a_name);
 			// Versions are what a revision changes.
 			a_options.versioned = true;
+			// A transient that is not exported aliases memory and cannot take a version, so a declared one keeps its own.
+			if (a_options.lifetime == GraphResources::Lifetime::Transient && a_options.d3d11 == GraphResources::Export::None)
+				a_options.lifetime = GraphResources::Lifetime::Persistent;
 			const auto desc = a_desc(Inputs(nullptr));
 			auto twin = std::make_shared<Twin>(desc, a_name, a_options);
 			if (!*twin) {
