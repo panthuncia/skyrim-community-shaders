@@ -371,3 +371,16 @@ final until the user confirms it.
     - **Failure paths now fatal:** paths that unregister mid-frame (Bink, ImGui, Upscaling release, Dynamic Cubemaps'
       give-up) are now tap errors too.
     - **Batch 9** runs the full set. Any guest source the census never named will stop with its file:line.
+67. **Late changes passed a targeted set**, cut down from the full 25 at the user's request (2026-11-20):
+    - `guest-quick`, `native-quick`, `menu` and `guest+fg`;
+    - `terrain-shadows`, `dynamic-cubemaps`, `screenshot-clean` and `shader-reload` in native Vulkan;
+    - `guest+dclf-toggles` and `latch-census-short`.
+
+    All 10 passed, with `late changes 0` and no tap errors. The other runs cover paths this change doesn't touch, and
+    they passed on the 10c build.
+
+    **Open:** the glints noise logged "filled" once in the shader-reload run, where the lead expected a refill after the
+    reload. Either the refill doesn't run or it doesn't log. Check it in glints' `ClearShaderCache` path.
+
+    **The frame revision plan (steps 1–10 plus the late-changes follow-up) is merged and tested on integ/hard-ports.**
+    Nothing is pushed. Local-only submodule commits: ORG `bfd13bb`, OMS `d48c924`, and those in item 13.
