@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils/Setting.h"
+
 /** @brief Simulates realistic ambient lighting by calculating sky occlusion via a 3D probe array. */
 struct Skylighting : Feature
 {
@@ -7,6 +9,9 @@ private:
 	static constexpr std::string_view MOD_ID = "139352";
 
 public:
+	/** @brief Binds the reset count the probe volumes are declared on. */
+	Skylighting();
+
 	virtual inline std::string GetName() override { return "Skylighting"; }
 	virtual std::string GetDisplayName() override { return T("feature.skylighting.name", "Skylighting"); }
 	virtual inline std::string GetShortName() override { return "Skylighting"; }
@@ -118,6 +123,9 @@ public:
 
 	// cached variables
 	bool queuedResetSkylighting = true;
+	// Raised by each reset on the render graph: the probe volumes are declared on it, so a reset is a new version of each.
+	// Not a saved setting.
+	CS::Setting<std::uint32_t> resets = 0;
 	bool inOcclusion = false;
 	// World height of the probe grid's bottom layer, from the snapped grid origin.
 	float probeGridBottomZ = -FLT_MAX;

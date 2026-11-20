@@ -1,0 +1,81 @@
+# Image Based Lighting toggled after world-ready: on, static IBL off, the DALC mode switched to one that reads the environment SH
+# (a new IBL client: the env-sh pass joins), back, then IBL off. Each write is a CS::Setting event. The DALC mode switches IBL's
+# client and EnableIBL switches Exponential Height Fog's IBL inputs, each in one frame revision (frame revision plan, 6.16).
+# Compose it: native-vulkan+ibl, native-d3d12+ibl, guest+ibl.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ImageBasedLighting = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ImageBasedLighting.EnableIBL=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ibl-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ImageBasedLighting.UseStaticIBL=0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ImageBasedLighting.DALCMode=0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ibl-env"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ImageBasedLighting.DALCMode=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ImageBasedLighting.UseStaticIBL=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ibl-dalc"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ImageBasedLighting.EnableIBL=0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ibl-off"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["ibl-on", "ibl-env", "ibl-dalc", "ibl-off"]
+no_log = ["frame tap error", "a frame declaration failed"]

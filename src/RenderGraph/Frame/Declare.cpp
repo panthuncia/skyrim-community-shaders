@@ -98,8 +98,10 @@ namespace RenderGraph::Frame
 			DependencyState dependencies;
 			Texture2DDescFn desc2D;
 			Texture3DDescFn desc3D;
+			RenewFn renew;
 			std::shared_ptr<GraphResources::Resource> twin;
 			DeclaredExtent wished{};
+			std::uint64_t renewed = 0;  // the renew count of the last version asked for
 			// For FirstFrame. The version the last Begin found, and the frame it was new in.
 			const void* lastVersion = nullptr;
 			std::uint64_t firstFrame = UINT64_MAX;
@@ -284,7 +286,7 @@ namespace RenderGraph::Frame
 		}
 
 		template <class Twin, class DescFn>
-		DeclaredTexture<Twin> DeclareTexture(std::string a_name, Dependencies a_dependencies, DescFn a_desc, GraphResources::Options a_options)
+		DeclaredTexture<Twin> DeclareTexture(std::string a_name, Dependencies a_dependencies, DescFn a_desc, GraphResources::Options a_options, RenewFn a_renew)
 		{
 			if (!a_desc)
 				FailDeclaration(fmt::format("{} has no description", a_name));
@@ -301,6 +303,9 @@ namespace RenderGraph::Frame
 			}
 			auto* typed = twin.get();
 			declaration->wished = ExtentOfDesc(desc);
+			if (a_renew)
+				declaration->renewed = a_renew(Inputs(nullptr));
+			declaration->renew = std::move(a_renew);
 			declaration->twin = std::move(twin);
 			if constexpr (std::is_same_v<Twin, GraphResources::Texture3D>)
 				declaration->desc3D = std::move(a_desc);
@@ -400,14 +405,16 @@ namespace RenderGraph::Frame
 			FailDeclaration(fmt::format("the setting {} is not bound at {} bytes", CS::SettingRegistry::Name(a_id), a_size));
 	}
 
-	DeclaredTexture2D DeclareTexture2D(std::string a_name, Dependencies a_dependencies, Texture2DDescFn a_desc, const GraphResources::Options& a_options)
+	DeclaredTexture2D DeclareTexture2D(std::string a_name, Dependencies a_dependencies, Texture2DDescFn a_desc, const GraphResources::Options& a_options,
+		RenewFn a_renew)
 	{
-		return DeclareTexture<GraphResources::Texture2D>(std::move(a_name), std::move(a_dependencies), std::move(a_desc), a_options);
+		return DeclareTexture<GraphResources::Texture2D>(std::move(a_name), std::move(a_dependencies), std::move(a_desc), a_options, std::move(a_renew));
 	}
 
-	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options)
+	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options,
+		RenewFn a_renew)
 	{
-		return DeclareTexture<GraphResources::Texture3D>(std::move(a_name), std::move(a_dependencies), std::move(a_desc), a_options);
+		return DeclareTexture<GraphResources::Texture3D>(std::move(a_name), std::move(a_dependencies), std::move(a_desc), a_options, std::move(a_renew));
 	}
 
 	void DeclaredClient::Invalidate() const
@@ -509,10 +516,14 @@ namespace RenderGraph::Frame
 				if (!texture->dependencies.Changed(a_values))
 					continue;
 				const auto extent = EvaluateTexture(*texture, inputs);
-				if (extent == texture->wished)
+				// A new renew count asks for a new version at the same extent.
+				const auto renewed = texture->renew ? texture->renew(inputs) : texture->renewed;
+				const bool renew = renewed != texture->renewed;
+				if (extent == texture->wished && !renew)
 					continue;
 				texture->wished = extent;
-				a_wish(*texture->twin, extent);
+				texture->renewed = renewed;
+				a_wish(*texture->twin, extent, renew);
 			}
 			std::vector<FrameAnchors::StageBuildNeed> needs;
 			std::erase_if(registry.clients, [](const auto& a_weak) { return a_weak.expired(); });
@@ -629,8 +640,8 @@ namespace RenderGraph::Frame
 	template Vars::ImageSpaceShape Inputs::Get(Vars::Var<Vars::ImageSpaceShape>) const;
 
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const { CS::SettingRegistry::RaisedBytes(a_id, a_out, a_size); }
-	DeclaredTexture2D DeclareTexture2D(std::string, Dependencies, Texture2DDescFn, const GraphResources::Options&) { return {}; }
-	DeclaredTexture3D DeclareTexture3D(std::string, Dependencies, Texture3DDescFn, const GraphResources::Options&) { return {}; }
+	DeclaredTexture2D DeclareTexture2D(std::string, Dependencies, Texture2DDescFn, const GraphResources::Options&, RenewFn) { return {}; }
+	DeclaredTexture3D DeclareTexture3D(std::string, Dependencies, Texture3DDescFn, const GraphResources::Options&, RenewFn) { return {}; }
 	void DeclaredClient::Invalidate() const {}
 	bool DeclaredClient::Registered() const { return false; }
 	DeclaredClient Detail::DeclareClient(std::string, Dependencies, ClientFunctions) { return {}; }

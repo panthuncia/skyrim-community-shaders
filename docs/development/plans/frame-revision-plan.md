@@ -694,6 +694,27 @@ culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one 
 - `CS_LLF_LOCAL_SHADOWS=1` (tests) turns local shadows on at PostPostLoad, so their hooks install. The config is
   `llf-local-shadows`.
 
+**As built (2026-11-19, 6.16, `org-native/rev-step6-16`).** IBL's client is declared once, at Setup, on `ReflectionCubemap` and
+IBL's `DALCMode`. Its key holds whether the reflection cubemap exists, whether the DALC mode reads the environment SH (modes 0
+and 1) and whether Dynamic Cubemaps publishes its cubemap (read at evaluation: it is published once, at Dynamic Cubemaps' setup).
+`make` takes the sources from the key. `Refresh`, `declared` and the per-frame source compare in `ORGIBL::Prepass` are gone; the
+scene switch (`IsDisabledForCurrentScene`) stays the client's `active`, a per-frame gate. `EnableIBL`, `UseStaticIBL` and
+`DALCMode` are `CS::Setting<std::uint32_t>`, bound in `IBL::IBL()`; IBL's `ProjectSizeSettings` is gone. Exponential Height Fog's
+key now holds IBL's SH from `EnableIBL` (a dependency) and IBL being on the graph, and Skylighting's probes from Skylighting being
+on the graph. The scene switch is a constant (`ConstantInputs::ibl`), so the fog's client no longer changes at loading screens or
+the map. Test: `ibl` (new).
+
+**As built (2026-11-19, 6.17, `org-native/rev-step6-16`).** Skylighting's five probe volumes are declared at Setup on a reset count,
+`Skylighting::resets` (a `CS::Setting<std::uint32_t>` named `Skylighting.resets`, not saved). `ORGSkylighting::QueueReset` raises it.
+Declare.h gained `RenewFn`, an optional last argument of `DeclareTexture2D/3D`: a new count makes a new version at the same
+extent. The revision's wish path carries it (`RevisionWish::renew`, a serial, so a second reset while one prepares is not lost).
+A new version is born zero, which is not Skylighting's reset state (unit SH, lit history bits, full visibility, unknown coverage),
+so the five clears stay as gated passes (run gate entry 3, recorded at execution) that the commit opens on the first run after
+`FirstFrame` of a volume or a new adopted count. The client is declared on its imports (the key, set by `Update`, `Invalidate` on a
+change: an interim, as EHF's inputs). The one-shot clears, `QueueReset` → `Rearm` and `Refresh` are gone, so SSGI is the last
+`Rearm` user. The zenith copy stays a gate. `FrameAnchors::Scheduled` in `ZenithReady` and the guest map clear became "a commit
+of the client ran". Test: `skylighting-reset` (new).
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1544,6 +1565,34 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   launch. The native modes need DCLF, which blocks local shadows, so only guest and plain D3D11 run the cache.
 - **Before the first adoption of the client, the frame has no cache.** The adopted call sets it, so the engine never binds a cache
   no copy wrote.
+
+**Decided by the agent (step 6.16, 2026-11-19), to confirm:**
+- **IBL's client does not depend on `EnableIBL` or `UseStaticIBL`.** The D3D11 path projects the SH whatever `EnableIBL` says,
+  and with Effects 11 managing IBL the shaders turn IBL on with `EnableIBL` off (`GetCommonBufferData`). `UseStaticIBL` is a shader
+  constant only. Both are ported to `Setting`; `EnableIBL` is a dependency of the fog's key. The client depends on `DALCMode`
+  instead, which decides the environment pass.
+- **Dynamic Cubemaps' published cubemap is read at key evaluation, not as a variable.** It is published once at its setup. Its
+  mid-session D3D11 fallback (`ORGDynamicCubemaps::Fail`) withdraws the id outside a revision, which a built IBL graph then lacks;
+  6.18 should make that failure fatal.
+- **The runtime going down keeps IBL's D3D11 return** (`ORGIBL::Fail`), without unregistering or withdrawing: the state is kept,
+  since the declaration's functions hold it.
+- **The scene switch stays per-frame** (the client's `active`, and a constant for the fog). It is engine menu state, not a
+  setting, and a gate keeps loading screens from rebuilding.
+
+**Decided by the agent (step 6.17, 2026-11-19), to confirm:**
+- **A reset is a new version, as the plan says, plus gated clears.** Born zero is not Skylighting's reset state, so the clears stay,
+  as gated passes on the version's first run. A gate-only reset (no new version) would give the same picture without a revision;
+  the version costs about 120 MB of prepared volumes per reset, briefly twice that during preparation, at every loading screen.
+  Measure it with the VRAM census on the RX 6600 before keeping it.
+- **`RenewFn` in Declare.h and a renew serial in `Revision.cpp`'s wish path.** The smallest change that makes a same-extent
+  version; the rest of the version path (plan, prepare, adopt, `FirstFrame`) is unchanged.
+- **The reset count is a feature `Setting`, not a frame variable,** to keep `Frame/Variables.{h,cpp}` out of this migration.
+- **The reset is detected from the adopted count as well as `FirstFrame`.** `Update` runs only in exteriors, so a version adopted in
+  an interior would miss its one `FirstFrame`. The volumes read zero until the next exterior update clears them.
+- **The client exists from the first frame whose imports resolve**, about one revision after setup, not from Setup. Readers see
+  zero volumes until then.
+- **"The frame's graph holds the client" is a commit having run**, in place of `FrameAnchors::Scheduled`, since an adopted client
+  stays in the graph and only its key changes.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

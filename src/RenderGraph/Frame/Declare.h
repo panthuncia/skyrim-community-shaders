@@ -142,12 +142,20 @@ namespace RenderGraph::Frame
 	using Texture3DDescFn = std::function<D3D11_TEXTURE3D_DESC(const Inputs&)>;
 
 	/**
-	* @brief Render thread, at setup. Makes a versioned twin from a_desc of the newest values and follows a_dependencies from then
-	* on. a_options.versioned is forced on. A description that changes more than the extent is fatal. Null without the graph or
-	* when the twin cannot be made (logged).
+	* @brief A count from the inputs. A new count makes a new version even at the same extent, as a reset does. A History texture's
+	* new version is born cleared, and FirstFrame says so.
 	*/
-	DeclaredTexture2D DeclareTexture2D(std::string a_name, Dependencies a_dependencies, Texture2DDescFn a_desc, const GraphResources::Options& a_options);
-	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options);
+	using RenewFn = std::function<std::uint64_t(const Inputs&)>;
+
+	/**
+	* @brief Render thread, at setup. Makes a versioned twin from a_desc of the newest values and follows a_dependencies from then
+	* on. a_options.versioned is forced on. A description that changes more than the extent is fatal. a_renew, when given, reads
+	* only a_dependencies too. Null without the graph or when the twin cannot be made (logged).
+	*/
+	DeclaredTexture2D DeclareTexture2D(std::string a_name, Dependencies a_dependencies, Texture2DDescFn a_desc, const GraphResources::Options& a_options,
+		RenewFn a_renew = {});
+	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options,
+		RenewFn a_renew = {});
 
 	/**
 	* @brief A declared client. Keep it as long as the client follows its dependencies. Dropping it stops that and leaves the

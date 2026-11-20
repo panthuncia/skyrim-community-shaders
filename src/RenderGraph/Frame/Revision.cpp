@@ -68,6 +68,7 @@ namespace RenderGraph::Frame::Revision
 			GraphResources::Resource* twin = nullptr;
 			Extent extent{};
 			std::uint64_t frame = 0;  // the frame of the first wish since the twin last had its wished size
+			std::uint64_t renew = 0;  // nonzero: a new version even at the twin's extent (a declaration's renew count changed)
 		};
 
 		/** @brief A buffer's newest contents, waiting for the next revision. */
@@ -160,6 +161,7 @@ namespace RenderGraph::Frame::Revision
 			std::vector<std::string> names;
 			std::vector<Extent> from;  // each twin's extent when planned
 			std::vector<Extent> to;
+			std::vector<std::uint64_t> renews;  // each twin's wish renew serial when planned
 			std::vector<BufferWish> bufferWishes;
 			std::vector<TextureWish> textureWishes;  // kept until adoption, so a superseded revision can give them back
 			// The newest variables when it started, and the names of those changed since the revision before.
@@ -223,6 +225,7 @@ namespace RenderGraph::Frame::Revision
 			std::map<GraphResources::Resource*, RevisionWish> wishes;
 			std::map<GraphResources::Resource*, RevisionWish> resizes;  // wishes no version serves
 			std::uint64_t wishSerial = 0;
+			std::uint64_t renewSerial = 0;
 			std::uint64_t plannedSerial = 0;
 			std::uint64_t askedAgainSinceWish = 0;
 			std::uint64_t serials = 0;
@@ -418,8 +421,8 @@ namespace RenderGraph::Frame::Revision
 			return *coordinator.pump;
 		}
 
-		/** @brief The hook RequestSize calls on every change of a twin's wish. Render thread. */
-		void OnSizeWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent)
+		/** @brief A twin's new wish. a_renew asks for a new version even at its current extent. Render thread. */
+		void OnWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent, bool a_renew)
 		{
 			auto& coordinator = GetCoordinator();
 			++coordinator.wishSerial;
@@ -438,7 +441,15 @@ namespace RenderGraph::Frame::Revision
 			}
 			auto& wish = coordinator.wishes[&a_twin];
 			const bool standing = wish.twin == &a_twin && !wish.alive.expired();
-			wish = { a_twin.Alive(), &a_twin, *a_extent, standing ? wish.frame : frame };
+			// A renew no revision served yet stands through a later size wish.
+			const std::uint64_t renew = a_renew ? ++coordinator.renewSerial : (standing ? wish.renew : 0);
+			wish = { a_twin.Alive(), &a_twin, *a_extent, standing ? wish.frame : frame, renew };
+		}
+
+		/** @brief The hook RequestSize calls on every change of a twin's wish. Render thread. */
+		void OnSizeWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent)
+		{
+			OnWish(a_twin, a_extent, false);
 		}
 
 		/** @brief Wishes no version serves take today's path: the twin is made again now, inside the adoption point. */
@@ -510,16 +521,17 @@ namespace RenderGraph::Frame::Revision
 			// The declarations follow the values this revision starts with. Their new extents are wishes, collected below.
 			if (host && a_coordinator.variables) {
 				job->needs = std::exchange(a_coordinator.carriedNeeds, {});
-				auto needs = Declarations::Evaluate(*a_coordinator.variables, [](GraphResources::Resource& a_twin, const std::array<unsigned int, 3>& a_extent) {
-					OnSizeWish(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] });
-				});
+				auto needs = Declarations::Evaluate(*a_coordinator.variables,
+					[](GraphResources::Resource& a_twin, const std::array<unsigned int, 3>& a_extent, bool a_renew) {
+						OnWish(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] }, a_renew);
+					});
 				for (auto& need : needs)
 					job->needs.push_back(std::move(need));
 			}
 			if (host && !a_coordinator.wishes.empty() && a_coordinator.plannedSerial != a_coordinator.wishSerial) {
 				for (auto it = a_coordinator.wishes.begin(); it != a_coordinator.wishes.end();) {
 					auto& [twin, wish] = *it;
-					if (wish.alive.expired() || twin->CurrentExtent() == wish.extent) {
+					if (wish.alive.expired() || (!wish.renew && twin->CurrentExtent() == wish.extent)) {
 						it = a_coordinator.wishes.erase(it);
 						continue;
 					}
@@ -535,6 +547,7 @@ namespace RenderGraph::Frame::Revision
 					job->names.push_back(twin->Name());
 					job->from.push_back(twin->CurrentExtent());
 					job->to.push_back(wish.extent);
+					job->renews.push_back(wish.renew);
 					job->firstWish = (std::min)(job->firstWish, wish.frame);
 					++it;
 				}
@@ -732,7 +745,8 @@ namespace RenderGraph::Frame::Revision
 			if (a_coordinator.adopted)
 				a_coordinator.retiring.emplace_back(DCLF::SubmittedRetirementPoint(), std::move(a_coordinator.adopted));
 			for (std::size_t i = 0; i < revision->twins.size(); ++i)
-				if (const auto it = a_coordinator.wishes.find(revision->twins[i]); it != a_coordinator.wishes.end() && it->second.extent == revision->to[i])
+				if (const auto it = a_coordinator.wishes.find(revision->twins[i]);
+					it != a_coordinator.wishes.end() && it->second.extent == revision->to[i] && it->second.renew == revision->renews[i])
 					a_coordinator.wishes.erase(it);
 			const auto members = revision->recordings ? FrameAnchors::RevisionMembers(*revision->recordings) : std::vector<std::string>{};
 			const std::uint64_t wishFrames = a_frame > revision->firstWish ? a_frame - revision->firstWish : 0;

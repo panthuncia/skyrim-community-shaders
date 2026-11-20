@@ -17,7 +17,8 @@ namespace org
 /**
 * @brief Skylighting's per-frame probe update as a compute pass at the Prepass anchor, with CS_ORG_SKYLIGHTING=1.
 *
-* The five probe volumes are History textures exported to D3D11 for the engine's draws and the composite. Resets are one-shot graph passes.
+* The five probe volumes are History textures exported to D3D11 for the engine's draws and the composite, declared on Skylighting's
+* reset count (Frame/Declare.h): a reset is a new version of each, and its first run clears them.
 * Every ZENITH_INTERVAL-th map is the top-down zenith capture; the update's run copies it into the published zenith map first.
 * The sky occlusion map is a persistent published depth twin, drawn by the engine through its DSV export or by DCLF's shadow epoch.
 * A run gate holds the group counts, so a frame without an update dispatches nothing.
@@ -94,8 +95,11 @@ public:
 	/** @brief Null when inactive. */
 	ID3D11ShaderResourceView* SRV(Volume a_volume) const;
 
-	/** @brief Render thread. Resets the volumes before the next probe update. @return False means the D3D11 volumes are Skylighting's to clear. */
-	bool QueueReset();
+	/**
+	* @brief Any thread. Raises a_feature's reset count, so the next revision makes new versions of the volumes and their first run
+	* clears them. @return False means the D3D11 volumes are Skylighting's to clear.
+	*/
+	bool QueueReset(Skylighting& a_feature);
 
 	~ORGSkylighting();
 

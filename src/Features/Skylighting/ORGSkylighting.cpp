@@ -21,6 +21,7 @@ bool ORGSkylighting::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -29,6 +30,7 @@ bool ORGSkylighting::Requested()
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
+#	include "RenderGraph/UavClearPass.h"
 #	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -53,10 +55,12 @@ namespace
 	// The engine skeleton's clear shader: depth 1.0 from the vertex stage and an Always test.
 	constexpr const char* kClearShader = "RenderGraph/EngineClear.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
-	// The probe update, the occlusion map's clear, and the zenith capture's copy.
+	// The probe update, the occlusion map's clear, the zenith capture's copy, and the volumes' reset clears.
 	constexpr std::uint32_t kUpdateEntry = 0;
 	constexpr std::uint32_t kClearEntry = 1;
 	constexpr std::uint32_t kZenithEntry = 2;
+	constexpr std::uint32_t kResetEntry = 3;
+	constexpr std::uint32_t kGateEntries = 4;
 
 	/** @brief Null when Skylighting made a D3D11 one. */
 	std::unique_ptr<GraphResources::Texture2D>& OcclusionTwin()
@@ -79,13 +83,22 @@ namespace
 		return s_format;
 	}
 
-	/** @brief The published volumes' readers return to D3D11. */
+	/** @brief The published volumes' readers return to D3D11. Only before the client is declared. */
 	void WithdrawVolumes()
 	{
 		PublishedResources::Withdraw(ORGSkylighting::kProbeArrayId);
 		PublishedResources::Withdraw(ORGSkylighting::kShadowVisibilityId);
 		PublishedResources::Withdraw(ORGSkylighting::kCoverageId);
 	}
+
+	/** @brief The probe update's imports: the client's key. Another texture registers the client again with the next revision. */
+	struct Imports
+	{
+		FrameAnchors::Texture occlusion, shadowCascades, esramShadows;
+
+		explicit operator bool() const { return occlusion && shadowCascades && esramShadows; }
+		bool operator==(const Imports&) const = default;
+	};
 
 	/** @brief As UpdateProbesShadows in UpdateProbesCS.hlsl: float4 rows, tightly packed. */
 	struct Shadows
@@ -152,17 +165,16 @@ namespace
 
 	constexpr std::uint32_t kGroupX = 8, kGroupY = 8;
 
-	/** @brief Built on the render thread. The pass copies what it uses when it is made. */
+	/** @brief Made at Setup and kept. The pass copies what it uses when it is made. */
 	struct Resources
 	{
 		std::uint32_t groups[3]{};
 		std::shared_ptr<const ComputeProgram> program;
 		org::OwnedDescriptorBinding sampler;
-		std::array<std::unique_ptr<GraphResources::Texture3D>, kVolumes> volumes;
+		// Declared on the reset count: a reset is a new version of each, adopted with its revision.
+		std::array<RenderGraph::Frame::DeclaredTexture3D, kVolumes> volumes;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
-		// Null until the first frame that updates. Replaced, refreshing the client, when D3D11 gives others.
-		FrameAnchors::Texture occlusion, shadowCascades, esramShadows;
 		FrameAnchors::Texture zenith;
 		// Only for the twin. Null keeps the D3D11 clear.
 		std::shared_ptr<const RasterProgram> clearProgram;
@@ -181,6 +193,15 @@ namespace
 		bool copyZenith = false;
 		// Native mode: a run with the clear executed, so the map holds no unwritten memory and the update may read it.
 		bool mapCleared = false;
+		// The next run clears the volumes before the update. Their version is new and born zero, which is not the reset state.
+		// The first version too.
+		bool reset = true;
+		// The reset count of the adopted revision, as the last Update saw it.
+		std::uint32_t resetsSeen = 0;
+		// A commit ran, so the frame's graph holds the client. The zenith copy and the map's clear are in it from then on.
+		bool committed = false;
+		// What the last Update imported. The client's key reads it, and a change invalidates the key.
+		std::optional<Imports> imports;
 	};
 
 	struct ProbeBindings
@@ -202,13 +223,12 @@ namespace
 	class UpdateProbesPass final : public org::TypedRenderGraphPass<UpdateProbesPass, ProbeFrame, ProbeBindings>
 	{
 	public:
-		// At the build, on the render thread, so it sees the resources as they are now.
-		explicit UpdateProbesPass(const Resources& a_resources) :
-			occlusion(a_resources.occlusion), shadowCascades(a_resources.shadowCascades), esramShadows(a_resources.esramShadows),
-			zenith(a_resources.zenith)
+		// At the build, on the render thread. The volumes are declared through their slots, so a new version needs no build.
+		UpdateProbesPass(const Resources& a_resources, const Imports& a_imports) :
+			occlusion(a_imports.occlusion), shadowCascades(a_imports.shadowCascades), esramShadows(a_imports.esramShadows), zenith(a_resources.zenith)
 		{
 			for (std::size_t i = 0; i < kVolumes; ++i)
-				volumes[i] = a_resources.volumes[i]->Graph();
+				volumes[i] = RenderGraph::AnchorPasses::TextureOf(*a_resources.volumes[i]);
 			frame.program = a_resources.program;
 			frame.latch = a_resources.latch;
 			frame.gate = a_resources.gate;
@@ -261,7 +281,7 @@ namespace
 
 	private:
 		FrameAnchors::Texture occlusion, shadowCascades, esramShadows, zenith;
-		std::array<std::shared_ptr<org::Resource>, kVolumes> volumes;
+		std::array<FrameAnchors::Texture, kVolumes> volumes;
 		ProbeFrame frame;
 	};
 
@@ -365,8 +385,9 @@ struct ORGSkylighting::Impl
 {
 	std::shared_ptr<Resources> resources;
 	std::shared_ptr<ClientState> state;
+	RenderGraph::Frame::DeclaredClient client;
 
-	/** @brief False when one is missing. Refreshes the client when one changed. */
+	/** @brief This frame's imports. False when one is missing. A change registers the client again with the next revision. */
 	bool ResolveInputs(const Inputs& a_inputs)
 	{
 		FrameAnchors::Texture occlusion = ORGSkylighting::Get().OcclusionMap();
@@ -377,67 +398,87 @@ struct ORGSkylighting::Impl
 			occlusionTarget.depthSRV = a_inputs.occlusionSRV;
 			occlusion = FrameAnchors::ImportDepth(occlusionTarget, "cs.skylighting.occlusion");
 		}
-		auto shadowCascades = ImportShadowMap(a_inputs.shadowCascades, "cs.skylighting.shadow-cascades");
-		auto esramShadows = ImportShadowMap(a_inputs.esramShadows, "cs.skylighting.esram-shadows");
-		if (!occlusion || !shadowCascades || !esramShadows)
+		Imports seen{ std::move(occlusion), ImportShadowMap(a_inputs.shadowCascades, "cs.skylighting.shadow-cascades"),
+			ImportShadowMap(a_inputs.esramShadows, "cs.skylighting.esram-shadows") };
+		if (!seen)
 			return false;
-		auto& r = *resources;
-		if (r.occlusion != occlusion || r.shadowCascades != shadowCascades || r.esramShadows != esramShadows) {
-			r.occlusion = std::move(occlusion);
-			r.shadowCascades = std::move(shadowCascades);
-			r.esramShadows = std::move(esramShadows);
-			FrameAnchors::Refresh(kClientId);
+		if (!state->imports || !(*state->imports == seen)) {
+			state->imports = std::move(seen);
+			client.Invalidate();
 		}
 		return true;
 	}
 
-	/** @brief One-shot volume resets before the gated probe update. A step that cannot be made fails a_builder. */
-	FrameAnchors::ClientDesc MakeClient(RenderGraph::AnchorPasses::Builder& a_builder) const
+	/**
+	* @brief The registration for a_imports: the gated reset clears, the zenith copy, the gated probe update and the occlusion
+	* map's clear. False, logged, when a step cannot be made, which the declaration makes fatal.
+	*/
+	bool MakeClient(const Imports& a_imports, FrameAnchors::ClientDesc& a_client) const
 	{
 		namespace AnchorPasses = RenderGraph::AnchorPasses;
-		const auto volume = [&](ORGSkylighting::Volume a_volume) { return resources->volumes[static_cast<std::size_t>(a_volume)]->Graph(); };
-		// As ResetSkylighting: unit SH (fully unoccluded), no accumulated frames, all 32 history bits lit so a reset does not fade in, full visibility.
+		// Five reset clears and the zenith copy, then the update at -1, before IBL. The clear at 0 touches nothing IBL uses.
+		AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -7, {}, resources->gate);
+		// As ResetSkylighting: unit SH (fully unoccluded), no accumulated frames, all 32 history bits lit so a reset does not fade in,
+		// full visibility. They clear on the runs whose commit opened the reset entry, so they are recorded at execution.
+		const GraphPasses::ClearGate reset{ resources->gate, kResetEntry };
+		const auto clear = [&](const char* a_name, ORGSkylighting::Volume a_volume, std::array<float, 4> a_value) {
+			builder.Add(
+				a_name, FrameAnchors::PassKind::Compute,
+				[resources = resources, index = static_cast<std::size_t>(a_volume), a_value, reset] {
+					return GraphPasses::MakeUavClear(*resources->volumes[index], a_value, reset);
+				},
+				false, true);
+		};
+		const auto clearUint = [&](const char* a_name, ORGSkylighting::Volume a_volume, std::array<std::uint32_t, 4> a_value) {
+			builder.Add(
+				a_name, FrameAnchors::PassKind::Compute,
+				[resources = resources, index = static_cast<std::size_t>(a_volume), a_value, reset] {
+					return GraphPasses::MakeUavClearUint(AnchorPasses::TextureOf(*resources->volumes[index]), a_value, reset);
+				},
+				false, true);
+		};
 		const float unitSH = std::sqrt(4.0f * std::numbers::pi_v<float>);
-		constexpr std::array<std::uint32_t, 4> none{ 0, 0, 0, 0 };
-		constexpr std::array<std::uint32_t, 4> lit{ 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
-		a_builder.Add(AnchorPasses::Clear{ .name = "reset-probes", .target = volume(Volume::ProbeArray), .value = { unitSH, 0.0f, 0.0f, 0.0f } });
-		a_builder.Add(AnchorPasses::Clear{ .name = "reset-accum-frames", .target = volume(Volume::AccumFrames), .uintValue = none });
-		a_builder.Add(AnchorPasses::Clear{ .name = "reset-shadow-bitmask", .target = volume(Volume::ShadowBitmask), .uintValue = lit });
-		a_builder.Add(AnchorPasses::Clear{ .name = "reset-shadow-visibility", .target = volume(Volume::ShadowVisibility), .value = { 1.0f, 1.0f, 1.0f, 1.0f } });
-		constexpr std::array<std::uint32_t, 4> unknown{ Skylighting::COVERAGE_UNKNOWN, Skylighting::COVERAGE_UNKNOWN, Skylighting::COVERAGE_UNKNOWN,
-			Skylighting::COVERAGE_UNKNOWN };
-		a_builder.Add(AnchorPasses::Clear{ .name = "reset-coverage", .target = volume(Volume::Coverage), .uintValue = unknown });
-		// The zenith frame's map, copied before the update reads it and before the clear empties it.
+		constexpr std::uint32_t lit = 0xFFFFFFFFu;
+		constexpr std::uint32_t unknown = Skylighting::COVERAGE_UNKNOWN;
+		clear("reset-probes", Volume::ProbeArray, { unitSH, 0.0f, 0.0f, 0.0f });
+		clearUint("reset-accum-frames", Volume::AccumFrames, { 0u, 0u, 0u, 0u });
+		clearUint("reset-shadow-bitmask", Volume::ShadowBitmask, { lit, lit, lit, lit });
+		clear("reset-shadow-visibility", Volume::ShadowVisibility, { 1.0f, 1.0f, 1.0f, 1.0f });
+		clearUint("reset-coverage", Volume::Coverage, { unknown, unknown, unknown, unknown });
+		// The zenith frame's map, copied before the update reads it and before the clear empties it. A gate, not a revision.
 		const auto& occlusionTwin = *OcclusionTwin();
 		auto zenithCopy = AnchorPasses::CopyOf("copy-zenith", occlusionTwin, *ZenithTwin(), occlusionTwin.Desc().Width, occlusionTwin.Desc().Height);
 		zenithCopy.gate = kZenithEntry;
-		a_builder.Add(std::move(zenithCopy));
-		// Left out of a build until the first frame's inputs are imported.
-		a_builder.Add("update-probes", FrameAnchors::PassKind::Compute, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
-			if (!resources->occlusion || !resources->shadowCascades || !resources->esramShadows || !resources->zenith)
-				return nullptr;
-			return std::make_shared<UpdateProbesPass>(*resources);
+		builder.Add(std::move(zenithCopy));
+		builder.Add("update-probes", FrameAnchors::PassKind::Compute, [resources = resources, a_imports]() -> std::shared_ptr<org::RenderPass> {
+			return std::make_shared<UpdateProbesPass>(*resources, a_imports);
 		});  // counts from the gate's update entry
 		// Left out without a twin or program.
-		a_builder.Add("clear-occlusion", FrameAnchors::PassKind::Render, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
+		builder.Add("clear-occlusion", FrameAnchors::PassKind::Render, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
 			auto map = ORGSkylighting::Get().OcclusionMap();
 			if (!map || !resources->clearProgram)
 				return nullptr;
 			return std::make_shared<OcclusionClearPass>(std::move(map), *resources);
 		});  // count from the gate's clear entry, depth loaded
+		if (builder.Failed()) {
+			logger::critical("[ORG] Skylighting: its client could not be made: {}", builder.Failure());
+			return false;
+		}
 
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
-		client.passes = a_builder.Take();
-		client.sharedConstants = true;
-		client.gates = { resources->gate };
-		client.registerResources = [resources = resources](org::RenderGraph& a_graph) {
+		a_client.id = kClientId;
+		a_client.passes = builder.Take();
+		a_client.sharedConstants = true;
+		a_client.gates = { resources->gate };
+		a_client.registerResources = [resources = resources](org::RenderGraph& a_graph) {
 			for (const auto& volume : resources->volumes)
 				volume->Register(a_graph);
 		};
 		// Every run closes the gate first, so other frames dispatch and draw nothing.
-		client.active = [state = state] { return state->pending.has_value() || state->clearOcclusion || state->copyZenith; };
-		client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
+		a_client.active = [state = state] { return state->pending.has_value() || state->clearOcclusion || state->copyZenith || state->reset; };
+		a_client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
+			state->committed = true;
+			if (std::exchange(state->reset, false))
+				resources->gate->OpenDispatch(kResetEntry, 1);
 			if (std::exchange(state->copyZenith, false))
 				resources->gate->OpenDraw(kZenithEntry);
 			if (std::exchange(state->clearOcclusion, false)) {
@@ -451,7 +492,9 @@ struct ORGSkylighting::Impl
 			resources->gate->OpenDispatch(kUpdateEntry, resources->groups[0], resources->groups[1], resources->groups[2]);
 			state->pending.reset();
 		};
-		return client;
+		logger::info("[ORG] Skylighting: a client for the next revision (occlusion {}, shadow cascades {}, ESRAM shadows {})", a_imports.occlusion.Id(),
+			a_imports.shadowCascades.Id(), a_imports.esramShadows.Id());
+		return true;
 	}
 };
 
@@ -491,7 +534,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 	resources->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<UpdateProbesBlock>() });
 	resources->sampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
 	resources->latch = std::make_shared<org::LatchBlock>("cs.skylighting.latch", static_cast<std::uint32_t>(sizeof(Shadows)));
-	resources->gate = RenderGraph::RunGate::Create("cs.skylighting.gate", 3);
+	resources->gate = RenderGraph::RunGate::Create("cs.skylighting.gate", kGateEntries);
 	if (!resources->program || !resources->sampler || !resources->gate) {
 		logger::warn("[ORG] Skylighting: the probe update's program, sampler or gate could not be made; it stays on D3D11");
 		return false;
@@ -511,7 +554,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 		if (!resources->clearProgram)
 			logger::warn("[ORG] Skylighting: the occlusion map's clear program could not be made; the map is cleared on D3D11");
 	}
-	// D3D11 reads them, so the SRV is exported.
+	// D3D11 reads them, so the SRV is exported. History: a new version is born cleared, and the reset clears run on its first run.
 	constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
 	constexpr std::pair<DXGI_FORMAT, std::string_view> volumeInfo[kVolumes] = {
 		{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayId },
@@ -520,36 +563,49 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 		{ DXGI_FORMAT_R8_UNORM, kShadowVisibilityId },
 		{ DXGI_FORMAT_R8_UINT, kCoverageId },
 	};
+	// Declared on the reset count (Skylighting::resets): each reset is a new version of every volume, adopted with its revision.
+	namespace RF = RenderGraph::Frame;
+	const auto& resets = a_feature.resets;
+	const std::array<std::uint32_t, 3> extent{ dims[0], dims[1], dims[2] };
 	for (std::size_t i = 0; i < kVolumes; ++i) {
-		auto& volume = resources->volumes[i];
-		volume = std::make_unique<GraphResources::Texture3D>(VolumeDesc(dims, volumeInfo[i].first), std::string(volumeInfo[i].second), volumeOptions);
-		if (!*volume || !volume->SRV()) {
+		const DXGI_FORMAT format = volumeInfo[i].first;
+		resources->volumes[i] = RF::DeclareTexture3D(
+			std::string(volumeInfo[i].second), RF::DependsOn(resets),
+			[extent, format](const RF::Inputs&) {
+				const std::uint32_t size[3]{ extent[0], extent[1], extent[2] };
+				return VolumeDesc(size, format);
+			},
+			volumeOptions, [&resets](const RF::Inputs& a_in) -> std::uint64_t { return a_in.Get(resets); });
+		const auto& volume = resources->volumes[i];
+		if (!volume || !volume->SRV()) {
 			logger::warn("[ORG] Skylighting: {} could not be made and exported; the probe update stays on D3D11", volumeInfo[i].second);
 			return false;
 		}
 	}
 	next->resources = resources;
 
-	// Five reset clears and the zenith copy, then the update at -1, before IBL. The clear at 0 touches nothing IBL uses.
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -7, {}, resources->gate);
-	auto client = next->MakeClient(builder);
-	if (builder.Failed()) {
-		logger::warn("[ORG] Skylighting: {}; the probe update stays on D3D11", builder.Failure());
-		return false;
-	}
-	if (!FrameAnchors::Register(std::move(client)))
-		return false;
-	// DCLF's colour passes read them by name, ordered after the update.
+	// DCLF's colour passes read them by name, ordered after the update. Published once, for the session: readers follow the versions.
 	if (!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ProbeArray)]) ||
 		!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ShadowVisibility)]) ||
 		!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::Coverage)])) {
 		logger::warn("[ORG] Skylighting: the probe volumes could not be published; the probe update stays on D3D11");
-		FrameAnchors::Unregister(kClientId);
+		WithdrawVolumes();
+		return false;
+	}
+	// The client follows the imports the last Update found (an interim until they are variables). Before the first, there is none.
+	auto* made = next.get();
+	next->client = RF::DeclareClient<Imports>(
+		kClientId, RF::DependsOn(),
+		[state = next->state](const RF::Inputs&) -> std::optional<Imports> { return state->imports; },
+		[made](const Imports& a_imports, FrameAnchors::ClientDesc& a_client) { return made->MakeClient(a_imports, a_client); });
+	if (!next->client) {
+		logger::warn("[ORG] Skylighting: the client could not be declared; the probe update stays on D3D11");
 		WithdrawVolumes();
 		return false;
 	}
 	impl = std::move(next);
-	logger::info("[ORG] Skylighting: the probe update runs on the render graph at the Prepass anchor ({}x{}x{})", dims[0], dims[1], dims[2]);
+	logger::info("[ORG] Skylighting: the probe update runs on the render graph at the Prepass anchor ({}x{}x{}); its client and volumes follow the frame revisions",
+		dims[0], dims[1], dims[2]);
 	return true;
 }
 
@@ -630,8 +686,8 @@ Texture2D* ORGSkylighting::MakeZenithMap()
 bool ORGSkylighting::ZenithReady() const
 {
 	// Native mode: the map holds unwritten memory until a run with the clear has executed.
-	return IsActive() && (!RenderGraph::Engine::Native::Active() || impl->state->mapCleared) &&
-	       FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass);
+	// The copy is in the frame's graph once a commit of the client ran: an adopted client stays in it.
+	return IsActive() && (!RenderGraph::Engine::Native::Active() || impl->state->mapCleared) && impl->state->committed;
 }
 
 std::shared_ptr<org::ExternalTextureResource> ORGSkylighting::OcclusionMap() const
@@ -645,6 +701,16 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 	if (!IsActive())
 		return false;
 	auto& state = *impl->state;
+	// A reset is a new version of the volumes, adopted with the reset count (QueueReset). Born zero, so the next run clears them.
+	// The count catches a version adopted while no Update ran (interiors, the map).
+	const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+	bool firstFrame = false;
+	for (const auto& volume : impl->resources->volumes)
+		firstFrame |= adopted.FirstFrame(volume);
+	const std::uint32_t resets = adopted.Get(a_feature.resets);
+	if (firstFrame || resets != state.resetsSeen)
+		state.reset = true;
+	state.resetsSeen = resets;
 	// Native mode: until a run with the clear has executed, the map holds unwritten memory, so the update waits.
 	const bool native = RenderGraph::Engine::Native::Active();
 	// Without an input the gate stays closed and the volumes hold this frame.
@@ -656,8 +722,8 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 		state.clearOcclusion = impl->resources->clearProgram != nullptr;
 		return true;
 	}
-	// Clear the map DCLF drew after the update reads it, when the schedule holds the clear.
-	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass)) {
+	// Clear the map DCLF drew after the update reads it, once the frame's graph holds the clear.
+	if (state.occlusionDrawn && impl->resources->clearProgram && state.committed) {
 		state.occlusionDrawn = false;
 		state.occlusionCleared = false;
 		state.clearOcclusion = true;
@@ -686,12 +752,13 @@ ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume a_volume) const
 	return IsActive() && a_volume < Volume::Count ? impl->resources->volumes[static_cast<std::size_t>(a_volume)]->SRV() : nullptr;
 }
 
-bool ORGSkylighting::QueueReset()
+bool ORGSkylighting::QueueReset(Skylighting& a_feature)
 {
 	if (!IsActive())
 		return false;
-	FrameAnchors::Rearm(kClientId);
-	logger::info("[ORG] Skylighting: the probe volumes reset on the render graph (cs.skylighting.reset-* at the next Prepass)");
+	// A new reset count: the next revision makes new versions of the volumes, and their first run clears them.
+	a_feature.resets = a_feature.resets.Get() + 1u;
+	logger::info("[ORG] Skylighting: the probe volumes reset on the render graph (reset {}: new versions with the next revision)", a_feature.resets.Get());
 	return true;
 }
 
@@ -719,6 +786,6 @@ void ORGSkylighting::NoteOcclusionDrawn() {}
 bool ORGSkylighting::TakeOcclusionCleared() { return false; }
 bool ORGSkylighting::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume) const { return nullptr; }
-bool ORGSkylighting::QueueReset() { return false; }
+bool ORGSkylighting::QueueReset(Skylighting&) { return false; }
 
 #endif

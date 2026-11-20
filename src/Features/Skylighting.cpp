@@ -17,6 +17,11 @@
 
 #define I18N_KEY_PREFIX "feature.skylighting."
 
+Skylighting::Skylighting()
+{
+	resets.Bind(CS::SettingRegistry::Declare("Skylighting.resets"));
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Skylighting::Settings,
 	MaxZenith,
@@ -45,8 +50,8 @@ void Skylighting::ResetSkylighting()
 	zenithValid = false;
 	zenithEyePending = false;
 
-	// While the probe update runs on the render graph, a graph pass clears its volumes, ordered with the graph's reads.
-	if (ORGSkylighting::Get().QueueReset()) {
+	// While the probe update runs on the render graph, the next revision gives the volumes new versions and their first run clears them.
+	if (ORGSkylighting::Get().QueueReset(*this)) {
 		probeGridBottomZ = -FLT_MAX;
 		queuedResetSkylighting = false;
 		return;

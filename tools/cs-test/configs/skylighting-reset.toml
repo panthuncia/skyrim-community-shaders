@@ -1,0 +1,53 @@
+# Skylighting's probe volumes reset by loading screens: coc into Dragonsreach (an interior, where no probe update runs) and back
+# out to Whiterun. Each loading screen raises Skylighting's reset count, so the next frame revision gives the five volumes new
+# versions and their first run clears them (frame revision plan, 6.17). The interior checks that a reset adopted while no update
+# runs still clears before the next one. Compose it: native-vulkan+skylighting-reset, native-d3d12+skylighting-reset,
+# guest+skylighting-reset.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+Skylighting = true
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "interior", "exterior"]
+no_log = ["frame tap error", "a frame declaration failed"]
