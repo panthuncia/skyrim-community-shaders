@@ -2,6 +2,7 @@
 
 #if defined(CS_HAS_RENDER_GRAPH) && defined(CS_HAS_ORG_MODULE_SERVICES)
 
+#	include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #	include "RenderGraph/Frame/DeclareLane.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/VariablesLane.h"
@@ -9,9 +10,13 @@
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
+#	include <ORGModuleServices/Async/SerializedTaskPump.h>
 #	include <ORGModuleServices/Variables.h>
 
+#	include <atomic>
+#	include <chrono>
 #	include <cstring>
+#	include <deque>
 #	include <mutex>
 
 namespace RenderGraph::Frame
@@ -109,6 +114,31 @@ namespace RenderGraph::Frame
 			bool registered = false;
 			bool invalid = true;  // evaluated at the next revision. A new declaration is.
 		};
+
+		/** @brief One build of a program for a key, on the programs lane. The lane writes the result, then done. */
+		struct ProgramBuild
+		{
+			std::string name;
+			ErasedKey key;
+			std::function<ErasedProgram(const void*)> build;
+			ErasedProgram program;
+			std::string error;
+			double milliseconds = 0.0;
+			std::atomic<bool> done{ false };
+		};
+
+		struct ProgramDeclaration
+		{
+			std::string name;
+			DependencyState dependencies;
+			ProgramFunctions functions;
+			// Render thread only. Every key built, kept for the session.
+			std::vector<std::pair<ErasedKey, ErasedProgram>> built;
+			std::vector<std::shared_ptr<ProgramBuild>> building;
+			ErasedKey wanted;  // the key of the newest values checked
+			ErasedProgram adopted;
+			std::shared_ptr<const void> adoptedValues;  // the snapshot adopted was looked up for
+		};
 	}
 
 	namespace
@@ -118,8 +148,113 @@ namespace RenderGraph::Frame
 			// Render thread only.
 			std::vector<std::weak_ptr<Detail::TextureDeclaration>> textures;
 			std::vector<std::weak_ptr<Detail::ClientDeclaration>> clients;
+			std::vector<std::weak_ptr<Detail::ProgramDeclaration>> programs;
 			bool dirty = false;
 		};
+
+		/** @brief The programs lane's queue. The render thread posts builds, the lane runs them one at a time. */
+		struct ProgramLaneState
+		{
+			std::mutex mutex;
+			std::deque<std::shared_ptr<Detail::ProgramBuild>> queue;
+			org::async::SerializedTaskPump* pump = nullptr;
+		};
+
+		ProgramLaneState& ProgramLaneOf()
+		{
+			// Never destroyed: a build may still finish during process teardown.
+			static auto* s_lane = new ProgramLaneState;
+			return *s_lane;
+		}
+
+		/** @brief The lane's work: every queued build, one at a time. Never on the render thread. */
+		void DrainProgramLane()
+		{
+			auto& lane = ProgramLaneOf();
+			for (;;) {
+				std::shared_ptr<Detail::ProgramBuild> job;
+				{
+					const std::lock_guard lock(lane.mutex);
+					if (lane.queue.empty())
+						return;
+					job = std::move(lane.queue.front());
+					lane.queue.pop_front();
+				}
+				ZoneScopedN("CS.Frame.Program.Build");
+				const auto start = std::chrono::steady_clock::now();
+				try {
+					job->program = job->build(job->key.get());
+					if (!job->program)
+						job->error = "its build returned nothing";
+				} catch (const std::exception& e) {
+					job->error = e.what();
+				}
+				job->milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+				job->build = {};
+				job->done.store(true, std::memory_order_release);
+			}
+		}
+
+		/**
+		* @brief The programs lane. Builds compile synchronously, so it runs on the executor's streaming class, whose threads take
+		* blocking work, not on the preparation pool the compiles themselves may run on.
+		*/
+		org::async::SerializedTaskPump& ProgramLane()
+		{
+			auto& lane = ProgramLaneOf();
+			if (!lane.pump) {
+				static const org::async::Scope scope = DCLF::SceneScheduler::Executor().CreateScope("CS frame programs");
+				lane.pump = DCLF::SceneScheduler::MakeLanePump(DCLF::SceneScheduler::Executor(), scope, DCLF::SceneExecutor::Streaming,
+					org::async::TaskDispatch::Cpu, "CS frame programs", [] { DrainProgramLane(); },
+					[] { logger::critical("[ORG] frame declaration: the programs lane stopped (its task was refused)"); });
+			}
+			return *lane.pump;
+		}
+
+		/** @brief The build of a_key, or null when it is not built. Render thread. */
+		const Detail::ErasedProgram* FindProgram(const Detail::ProgramDeclaration& a_program, const Detail::ErasedKey& a_key)
+		{
+			for (const auto& [key, program] : a_program.built)
+				if (a_program.functions.equal(key.get(), a_key.get()))
+					return &program;
+			return nullptr;
+		}
+
+		/** @brief Moves finished builds into the built set. Fatal when one failed. Render thread. */
+		void CollectProgramBuilds(Detail::ProgramDeclaration& a_program)
+		{
+			std::erase_if(a_program.building, [&](const std::shared_ptr<Detail::ProgramBuild>& a_build) {
+				if (!a_build->done.load(std::memory_order_acquire))
+					return false;
+				if (!a_build->error.empty())
+					FailDeclaration(fmt::format("the program {} could not be built: {}", a_program.name, a_build->error));
+				a_program.built.emplace_back(a_build->key, a_build->program);
+				logger::info("[ORG] frame declaration: program {} built on the programs lane in {:.1f} ms ({} kept)", a_program.name, a_build->milliseconds,
+					a_program.built.size());
+				return true;
+			});
+		}
+
+		/** @brief Posts a build of a_key unless one is running. Render thread. */
+		void StartProgramBuild(Detail::ProgramDeclaration& a_program, const Detail::ErasedKey& a_key)
+		{
+			for (const auto& running : a_program.building)
+				if (a_program.functions.equal(running->key.get(), a_key.get()))
+					return;
+			auto job = std::make_shared<Detail::ProgramBuild>();
+			job->name = a_program.name;
+			job->key = a_key;
+			job->build = a_program.functions.build;
+			a_program.building.push_back(job);
+			{
+				auto& lane = ProgramLaneOf();
+				const std::lock_guard lock(lane.mutex);
+				lane.queue.push_back(std::move(job));
+			}
+			logger::info("[ORG] frame declaration: program {} is built for new values; the next revision starts once it is", a_program.name);
+			if (!ProgramLane().Notify())
+				FailDeclaration(fmt::format("the programs lane refused the build of {}", a_program.name));
+		}
 
 		DeclarationRegistry& DeclarationsOf()
 		{
@@ -297,6 +432,42 @@ namespace RenderGraph::Frame
 		return DeclaredClient(std::move(declaration));
 	}
 
+	std::shared_ptr<Detail::ProgramDeclaration> Detail::DeclareProgram(std::string a_name, Dependencies a_dependencies, ProgramFunctions a_functions)
+	{
+		if (!a_functions.key || !a_functions.equal || !a_functions.build)
+			FailDeclaration(fmt::format("program {} has no key or build function", a_name));
+		auto declaration = std::make_shared<ProgramDeclaration>();
+		declaration->name = std::move(a_name);
+		declaration->dependencies.Resolve(a_dependencies, declaration->name);
+		declaration->functions = std::move(a_functions);
+		// The first key is built here, at setup, so the frame has a program before the first revision.
+		declaration->wanted = declaration->functions.key(Inputs(nullptr));
+		auto program = declaration->functions.build(declaration->wanted.get());
+		if (!program) {
+			logger::error("[ORG] frame declaration: program {} could not be built", declaration->name);
+			return nullptr;
+		}
+		declaration->built.emplace_back(declaration->wanted, program);
+		declaration->adopted = std::move(program);
+		DeclarationsOf().programs.push_back(declaration);
+		return declaration;
+	}
+
+	Detail::ErasedProgram Detail::ProgramFor(const ProgramDeclaration* a_program, const Inputs& a_values)
+	{
+		if (!a_program)
+			return nullptr;
+		const auto key = a_program->functions.key(a_values);
+		if (const auto* found = FindProgram(*a_program, key))
+			return *found;
+		FailDeclaration(fmt::format("program {} has no build for this revision's values", a_program->name));
+	}
+
+	Detail::ErasedProgram Detail::AdoptedProgram(const ProgramDeclaration* a_program)
+	{
+		return a_program ? a_program->adopted : nullptr;
+	}
+
 	Inputs AdoptedRevision::Values() const
 	{
 		return Inputs(Vars::Lane::Adopted().get());
@@ -352,15 +523,48 @@ namespace RenderGraph::Frame
 			return needs;
 		}
 
+		bool ProgramsReady(const org::services::VariableSnapshot& a_values)
+		{
+			auto& registry = DeclarationsOf();
+			std::erase_if(registry.programs, [](const auto& a_weak) { return a_weak.expired(); });
+			const Inputs inputs(&a_values);
+			bool ready = true;
+			for (const auto& weak : registry.programs) {
+				const auto program = weak.lock();
+				CollectProgramBuilds(*program);
+				if (program->dependencies.Changed(a_values))
+					program->wanted = program->functions.key(inputs);
+				if (FindProgram(*program, program->wanted))
+					continue;
+				// Latest wins: a build for older values keeps running and is kept, and this one is queued behind it.
+				StartProgramBuild(*program, program->wanted);
+				ready = false;
+			}
+			return ready;
+		}
+
 		void NoteBegin(std::uint64_t a_frame)
 		{
-			for (const auto& weak : DeclarationsOf().textures)
+			auto& registry = DeclarationsOf();
+			for (const auto& weak : registry.textures)
 				if (const auto texture = weak.lock()) {
 					const void* version = texture->twin->Graph().get();
 					if (version != texture->lastVersion) {
 						texture->lastVersion = version;
 						texture->firstFrame = a_frame;
 					}
+				}
+			// The programs follow the adopted values. Their builds were done before the revision that carries them started.
+			const auto& adopted = Vars::Lane::Adopted();
+			if (!adopted)
+				return;
+			const Inputs inputs(adopted.get());
+			for (const auto& weak : registry.programs)
+				if (const auto program = weak.lock(); program && program->adoptedValues.get() != adopted.get()) {
+					program->adoptedValues = adopted;
+					// A program declared after the adopted revision started may have no build of its values. It keeps its first.
+					if (const auto* found = FindProgram(*program, program->functions.key(inputs)))
+						program->adopted = *found;
 				}
 		}
 	}
@@ -385,6 +589,8 @@ namespace RenderGraph::Frame
 		{};
 		struct ClientDeclaration
 		{};
+		struct ProgramDeclaration
+		{};
 	}
 
 	template <class T>
@@ -407,6 +613,9 @@ namespace RenderGraph::Frame
 	void DeclaredClient::Invalidate() const {}
 	bool DeclaredClient::Registered() const { return false; }
 	DeclaredClient Detail::DeclareClient(std::string, Dependencies, ClientFunctions) { return {}; }
+	std::shared_ptr<Detail::ProgramDeclaration> Detail::DeclareProgram(std::string, Dependencies, ProgramFunctions) { return nullptr; }
+	Detail::ErasedProgram Detail::ProgramFor(const ProgramDeclaration*, const Inputs&) { return nullptr; }
+	Detail::ErasedProgram Detail::AdoptedProgram(const ProgramDeclaration*) { return nullptr; }
 	Inputs AdoptedRevision::Values() const { return Inputs(nullptr); }
 	std::array<std::uint32_t, 3> AdoptedRevision::ExtentOf(const Detail::TextureDeclaration*) const { return {}; }
 	bool AdoptedRevision::FirstFrameOf(const Detail::TextureDeclaration*) const { return false; }

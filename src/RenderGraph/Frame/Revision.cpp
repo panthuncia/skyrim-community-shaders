@@ -468,6 +468,10 @@ namespace RenderGraph::Frame::Revision
 		{
 			if (a_coordinator.preparing)
 				return;
+			// The programs the newest values need are built first, off the render thread (Frame/Declare.h, DeclareProgram).
+			// Until then no revision starts, and frames keep the adopted one.
+			if (a_coordinator.variables && !Declarations::ProgramsReady(*a_coordinator.variables))
+				return;
 			// Without a graph (plain D3D11, or before the graph is up) a revision carries only variables.
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto job = std::make_shared<PreparedRevision>();
