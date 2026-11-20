@@ -888,6 +888,21 @@ revisions.
   `RaiseHdrVariables` writes every frame.
 - Test: `hdr-resize` (new), and `hdr`. See "Decided by the agent (step 6.15)" in section 9.
 
+**As built (2026-11-19, 6.23, `org-native/rev-step7b`, worker mig623).** The screenshot's clean scene follows the revisions.
+- The texture `Screenshot::CleanScene` and the client `cs.screenshot.clean` are declared once, at `ORGScreenshot::Setup`, on
+  `DisplaySize` and `HdrEnabled`. kFRAMEBUFFER is the back buffer at the snapshot point, and its format is fixed when the swap
+  chain is made, so no format variable is needed: the texture takes kFRAMEBUFFER's format at setup.
+- The clean scene is read only in SDR. With HDR on, the texture is one texel and the key is empty, so there is no client.
+- The key is the display size and kFRAMEBUFFER's import. The import is not a variable yet: `SnapshotCleanScene` calls
+  `Invalidate()` when it changes, as Upscaling's hudless source does.
+- The `adopted` call records the key the adopted revision holds. The frame copies only while that key was made for
+  kFRAMEBUFFER's import at its current size. Otherwise the capture uses the D3D11 snapshot, as before.
+- Every registration shares the gate and the commit and sets `matchesById`. The capture reads the clean scene through its slot,
+  at the adopted size. The readback buffers stay on the Capture anchor's placed epoch.
+- Gone: `const bool same`, the in-frame twin and client (`RegisterCleanClient`) and the `Scheduled` gate in
+  `SnapshotCleanScene`. The first `shot-ui` of a session can already read the clean scene.
+- Test: `screenshot-clean` (new). See "Decided by the agent (step 6.23)" in section 9.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1909,6 +1924,16 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Frames between a new registration and its adoption compose with D3D11**, as before (no wait). That includes the frames after
   HDR is turned off and before that revision is adopted, since the key clears the held registration when it gives no client.
 - **The re-setup `DrainCommandRing` in `HDRDisplay::SetupResources` stays.** It is not a resize drain: `SetupResources` runs once.
+
+**Decided by the agent (step 6.23, Screenshot clean scene, 2026-11-19), to confirm:**
+- **One texture, no format variable** (not 6.14's three). kFRAMEBUFFER is the back buffer at the snapshot, and an HDR toggle
+  changes only its colour space. If the game ever changed its format through `ResizeBuffers`, nothing would check it.
+- **`HdrEnabled` decides existence** (one texel, no client with HDR on). It saves a display-size texture for HDR users.
+- **A per-frame check of the held key against the live import and its size stays.** It is not the old rebuild compare: it stops
+  a copy of the wrong extent in the frames between a resize and its adoption.
+- **The capture client is still registered again in-frame by `SetSource`** when its source or size changes, and `CopyBuilt`
+  still asks `FrameAnchors::Scheduled` for it without a UI stage. Out of this row's scope; it is the section 8 grep's last hit in
+  this file.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
