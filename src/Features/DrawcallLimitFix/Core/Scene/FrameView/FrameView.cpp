@@ -170,9 +170,9 @@ namespace DCLF::Scene
 		frameCatalog = installed ? installed->catalog : nullptr;
 		frameTablesGeneration = installed ? installed->tablesGeneration : 0u;
 		DrawPipelines::Get().HoldCatalog(frameCatalog);
-		// A toggle takes effect for the frames with the first publication committed under it.
+		// A toggle takes effect for the frames with the first publication committed under it, which came with the adopted scene.
 		if (installed) {
-			Toggles::Get().Adopt(installed->toggles);
+			Toggles::Get().InstallFrame(installed->toggles);
 			frameSunCandidates = installed->sunCandidates;
 			frameLightCandidates = installed->lightCandidates;
 			frameLightEntriesAppeared = installed->lightEntriesAppeared;

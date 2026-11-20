@@ -69,6 +69,12 @@ namespace RenderGraph::Frame::Vars::Lane
 	/** @brief The presentation a_values carries. */
 	FrameGen::PresentationConfig PresentationConfigIn(const org::services::VariableSnapshot& a_values);
 
+	/** @brief DCLF's packed toggles a_values carries (DclfToggles). */
+	std::uint64_t DclfTogglesIn(const org::services::VariableSnapshot& a_values);
+
+	/** @brief Whether a_values carries an interior cell (Interior). */
+	bool InteriorIn(const org::services::VariableSnapshot& a_values);
+
 	/**
 	* @brief The names of the variables a_newer changed since a_older, comma separated. Without a_older, the variables written
 	* at least once. Empty when none.

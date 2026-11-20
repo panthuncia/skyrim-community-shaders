@@ -1582,6 +1582,41 @@ Delete `Toggles::BeginFrame`/`Adopt` and `RefreshGraphConditions`' polling at th
 not a graph or a bound resource: its `Setting<T>` event wakes DCLF's scene lane to re-classify, and the result arrives with a
 later `kScene` fragment.
 
+**As built (10c, 2026-11-20, `org-native/rev-step10c`).** Code only, not built or run here. One commit.
+- **The failure.** The `dclf-toggles` hang (`*native-vulkan-dclf-toggles-integ-10a`, forward and both first-person epochs
+  uncovered after `dclf:pipeline gpu`) came from the revision inputs. `PostRevisionInputs` took `cpuPipeline`, `forwardDirect`
+  and `firstPersonForwardDirect` from the attached conditions (CPU), while `build`, the state the recordings were made on, was
+  the new GPU one. The scene recorded on the staged GPU builds then had CPU view batches (`forwardOnly` false). Its adoption
+  attached the GPU conditions. `Direct::FrameStart` keeps a forward slot only for a forward-only set, so `Direct::ForwardBatches()`
+  was null, and `DecideEpochCoverage` left forward and first person uncovered. Now those three fields come from
+  `next.build->conditions` (`Coverage.cpp`), so a scene, its builds and its conditions match by construction. The snapshot's view
+  batches and `Assemble.cpp`'s "CPU pipeline: record only CPU-pipeline epochs" follow the same fields.
+- **A second path to the same mismatch, closed.** The snapshot builder's pass-through (a deltas-only publication posts the last
+  revision again) used the newest inputs. While a new build state's builds were pending, it could post the old recordings with
+  the new state, and `InstallScene` would publish that state's conditions over the old graphs. The pass-through now requires the
+  inputs' build state to be built (`Snapshot.cpp`, `inputsBuilt`). Otherwise the publication takes the make path, which waits.
+- **Toggles are a variable.** `DclfToggles`, the packed word (`Frame/Variables.h`). Writers edit `Toggles::Requested()` and call
+  `Toggles::Commit(writer)`: the menu (after "What DCLF draws"), cs-test's `dclf:` prefix (after every command) and
+  `ApplySavedSettings`. An input producer (`Draws::RegisterConditionInputs`, at install) applies the revision's value at its
+  adoption (`Toggles::ApplyAdopted`: the active set, its generation, and the classification flag that `FrameDriver::BeginFrame`
+  takes with `TakeClassifyChange`). `Toggles::BeginFrame` is deleted. `Toggles::Adopt` is now `InstallFrame`, called where the
+  installed publication is handed over: the frame set is the adopted scene's publication's, so it switches with the scene.
+- **Graph conditions follow variables.** Their inputs are `DclfToggles`, `Interior` (DCLF now writes it at its frame start too,
+  beside Volumetric Lighting) and `DclfPassCuts` (a serial that `SetPassCuts` raises). Each has a producer whose adopt marks the
+  inputs moved. `Draws::UpdateGraphConditions` runs in `IndirectDraws::AfterSceneStep` (main thread, inside the adoption point).
+  Only when the inputs moved does it make the conditions, set the external epochs and ask for DCLF's builds, all there.
+  `RefreshGraphConditions` and its poll at every build point are gone. The first build point still makes the first conditions
+  once (`FirstGraphConditions`), so a main menu Begin never asks for DCLF builds.
+- **Cull modes** take the same path. They passed before because `OcclusionTested` needs both the conditions' `twoPassOcclusion`
+  and the publication's `cullMode`, so a mismatch only skipped occlusion for a scene. Nothing else changed for them.
+- **`dclf:pipeline`.** `RunDclfCommand` edits the requested set, and the prefix handler commits it, which raises `DclfToggles`.
+- **Late changes stay counted, not fatal** (to confirm, section 9). DCLF's own (the guest build point's "graph conditions
+  changed") is gone except at the first build point. The other sources in the 10a census are not DCLF's. In native: "one-shot
+  passes ran" x 13, `cs.scaleform` and `cs.screenshot` registered again, `cs.deferred` registered. In guest also the skeleton depth
+  copies, imports and published resources added, and 16 more the census did not name. The census now logs every session site
+  ("[ORG] boundary: session late changes by site: ..."), so the follow-up has the full list.
+- **Config.** `dclf-toggles` describes 10c and also fails on "is not covered by the snapshot".
+
 **Test.** Everything in step 7's list plus `native-census`, `native-tour` (long), `river` with `native-vulkan`, `rain` with `guest`,
 `flicker-taa`. DCLF-specific: the DCLF settings menu toggles (cull mode, CPU/GPU pipeline) through `setting` steps in a new
 `dclf-toggles` config.
@@ -1915,7 +1950,7 @@ return nothing (or only the stated exception) at the end.
 | DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat\|AdoptSnapshot\|AdoptAtBegin" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
 | `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
-| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes | 10a, 9, 7d (versions and attaches fatal) / 10c | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` |
+| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes (10c moved DCLF's; the other sources are listed by the census, section 9) | 10a, 9, 7d (versions and attaches fatal) / after 10c | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` |
 | Writer shims: `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`, and the wrappers' event calls | 7a | `rg -n "SettingsWritten\|ProjectSizeSettings\|SizeProjection" src` |
 | The lane's `RequestSize` input and the coordinator's "wish" path | 7a | `rg -n "Wish\|wishes" src/RenderGraph/Frame/Revision.*` |
 | Structural rebuilds from publishing under an existing id (EHF, SSGI, LLF, adapt pair, flow map) | 6.x | `rg -n "RequestStructuralRebuild" src` shows only revision-driven shape-class changes; the census shows no `structural rebuild` after `resize` and the toggles |
@@ -2791,6 +2826,30 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   freed is read; the shots may show the old size for those frames. Treating it as uncovered would be fatal by DCLF's rule.
 - **Scene misses count scenes, not frames.** A scene posted on other frame versions while the revision waits, or a held scene
   dropped for its builds, is a drop asked again. A builder that posts nothing while DCLF draws is not caught by it.
+
+**Decided by the agent (step 10c, 2026-11-20, `org-native/rev-step10c`), to confirm:**
+- **Late changes are not made fatal in 10c.** Every run in the 10a batch has 16 (native) to 50 (guest), and only DCLF's belong to
+  this step. Making them fatal now would stop every run. Proposed follow-up: move each source the new session line names into the
+  adoption point (the one-shot rebuild can be asked for at the next Begin, from the latch that saw the pass run), then make
+  `NoteLateChange` a tap error.
+- **The frame set of toggles stays the installed publication's,** not the adopted variable's. The publication was committed under
+  its toggles, so the frame must draw under those. It is installed with the scene the frame revision adopted. `Toggles::Adopt` is
+  renamed `InstallFrame` rather than deleted.
+- **The graph conditions are made from adopted variables, not held as a variable themselves.** They hold a string (the cuts) and
+  read device facts (`CpuPipelineForced`, device-generated commands, which epochs record at execution) that are fixed once the host
+  exists. A derived variable would need a non-trivial type for no gain.
+- **DCLF registers the `Interior` producer.** It had none. A second one (Volumetric Lighting, say) would fail its registration; the
+  two would then have to share one.
+- **The cuts' string is read when the conditions are made,** not from the revision. It is a diagnostic. Its event is what the
+  revision carries.
+- **Adopted toggles may be applied on a loading-screen thread** (`CS_ORG_LOADING_THREAD`). That only stores atomics. The conditions
+  and their builds wait for the next main-thread Begin, as DCLF's adoption does since 10a.
+- **The first build point makes the first conditions and asks for builds** as before. In guest that counts one late change. Before
+  DCLF's first build point a Begin leaves them alone, so a main menu does not build DCLF's epochs.
+- **Record-time reads of the conditions are left (inferred, not fatal).** Pass preparations (`Build.cpp`: `OcclusionTested`,
+  `forwardOnCpu`) run when a staged build is recorded, with no build scope, so they read the attached, old conditions. The first
+  scene after a pipeline or cull change can then record without occlusion, or with an unused forward range, until it is recorded
+  again. Fixing it needs the recording's build state in its host data.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

@@ -48,10 +48,23 @@ namespace DCLF::Draws
 	bool CpuPipelineForCell(const ToggleSet& a_set, bool a_interior);
 
 	/**
-	 * @brief Render thread, at the frame's build point: this frame's conditions. A change requests a rebuild of DCLF's epochs,
-	 * and the frame keeps the attached conditions until those builds attach.
+	 * @brief Main thread, at install, before DCLF's toggles are first committed. The conditions follow frame variables (plan step 10c):
+	 * DclfToggles, Interior and DclfPassCuts. A revision that carries a change of one applies it at its adoption.
 	 */
-	void RefreshGraphConditions(org::GraphHost& a_host);
+	void RegisterConditionInputs();
+
+	/**
+	 * @brief Main thread, inside the adoption point, after the scene step. Makes the conditions again when a revision adopted since the
+	 * last call changed one of their variables. Nothing before DCLF's first build point (FirstGraphConditions). A change requests a
+	 * rebuild of DCLF's epochs here, and frames keep the attached conditions until a scene recorded on those builds is adopted.
+	 */
+	void UpdateGraphConditions(org::GraphHost& a_host);
+
+	/**
+	 * @brief Render thread, at DCLF's build point. The first one makes the first conditions, as the build point did before step 10c.
+	 * Later ones do nothing: the conditions change only at a Begin (UpdateGraphConditions).
+	 */
+	void FirstGraphConditions(org::GraphHost& a_host);
 
 	/** @brief Render thread: the conditions the next builds are for. Immutable. */
 	std::shared_ptr<const GraphConditions> RequestedGraphConditions();
@@ -59,7 +72,7 @@ namespace DCLF::Draws
 	/** @brief Render thread: records the conditions the attached graphs were built for. */
 	void AttachGraphConditions(std::shared_ptr<const GraphConditions> a_conditions);
 
-	/** @brief Any thread, diagnostics: the pass key prefixes the next build point leaves out. */
+	/** @brief Any thread, diagnostics: the pass key prefixes the next conditions leave out. Raises DclfPassCuts. */
 	void SetPassCuts(std::string a_cuts);
 
 	/** @brief Whether the graph's conditions leave the pass a_key out. */

@@ -62,6 +62,9 @@ namespace RenderGraph::Frame::Vars
 			Variable<std::uint64_t> shaderGeneration = set.Declare("ShaderGeneration", std::uint64_t{}, { .sizes = false });
 			// A serial: the engine made its targets again. Their sizes and formats are the shape variables above.
 			Variable<std::uint64_t> engineTargets = set.Declare("EngineTargets", std::uint64_t{});
+			// DCLF's packed toggles and a serial for its diagnostic pass cuts (plan step 10c). They shape DCLF's graphs, sizing nothing.
+			Variable<std::uint64_t> dclfToggles = set.Declare("DclfToggles", std::uint64_t{});
+			Variable<std::uint64_t> dclfPassCuts = set.Declare("DclfPassCuts", std::uint64_t{});
 
 			std::mutex eventsMutex;
 			std::map<std::string, VariableEventCounts, std::less<>> events;
@@ -168,6 +171,17 @@ namespace RenderGraph::Frame::Vars
 		return SetFrameVariable(FrameVariableSet().presentationConfig, a_value, "PresentationConfig", a_writer);
 	}
 	FrameGen::PresentationConfig WrittenPresentationConfig() { return FrameVariableSet().set.Get(FrameVariableSet().presentationConfig); }
+	bool SetDclfToggles(std::uint64_t a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().dclfToggles, a_value, "DclfToggles", a_writer); }
+	void RaiseDclfPassCuts(std::string_view a_writer)
+	{
+		auto& variables = FrameVariableSet();
+		std::uint64_t serial = 0;
+		{
+			const std::lock_guard lock(variables.serialMutex);
+			serial = BumpSerial(variables.dclfPassCuts);
+		}
+		NoteVariableEvent("DclfPassCuts", [&] { return std::format("{} -> {}", serial - 1, serial); }, a_writer);
+	}
 	void RaiseEngineTargets(std::string_view a_writer)
 	{
 		auto& variables = FrameVariableSet();
@@ -338,6 +352,16 @@ namespace RenderGraph::Frame::Vars
 			return a_values.Get(FrameVariableSet().presentationConfig);
 		}
 
+		std::uint64_t DclfTogglesIn(const org::services::VariableSnapshot& a_values)
+		{
+			return a_values.Get(FrameVariableSet().dclfToggles);
+		}
+
+		bool InteriorIn(const org::services::VariableSnapshot& a_values)
+		{
+			return a_values.Get(FrameVariableSet().interior);
+		}
+
 		std::string ChangedNames(const org::services::VariableSnapshot& a_newer, const org::services::VariableSnapshot* a_older)
 		{
 			std::string names;
@@ -400,6 +424,8 @@ namespace RenderGraph::Frame::Vars
 		return g_stubPresentation;
 	}
 	void RaiseEngineTargets(std::string_view) {}
+	bool SetDclfToggles(std::uint64_t, std::string_view) { return false; }
+	void RaiseDclfPassCuts(std::string_view) {}
 
 	Extent2D AdoptedDisplaySize() { return {}; }
 	Extent2D AdoptedRenderSize() { return {}; }

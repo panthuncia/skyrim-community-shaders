@@ -1,7 +1,9 @@
-// Toggles: the flag table with seeds, menu entries and dependencies, the packed active set, and the per-frame apply on the render thread.
+// Toggles: the flag table with seeds, menu entries and dependencies, the packed active set, and its writes through a frame variable.
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 
 #include <algorithm>
 #include <deque>
@@ -387,14 +389,26 @@ namespace DCLF
 		return set;
 	}
 
-	bool Toggles::BeginFrame()
+	void Toggles::Commit(std::string_view a_writer)
 	{
-		const auto next = Normalised(requested);
+		const auto word = Pack(Normalised(requested));
+		// Revisions run once the frame driver is installed, in every mode.
+		if (revisions.load(std::memory_order_acquire) && RenderGraph::Frame::Driver::Installed()) {
+			(void)RenderGraph::Frame::Vars::SetDclfToggles(word, a_writer);
+			return;
+		}
+		ApplyAdopted(word);
+	}
+
+	void Toggles::ApplyAdopted(std::uint64_t a_word)
+	{
+		const auto next = Unpack(a_word);
 		const auto current = Active();
 		if (next == current)
-			return false;
+			return;
 		active.store(Pack(next), std::memory_order_relaxed);
 		generation.fetch_add(1, std::memory_order_relaxed);
-		return EntersClassification(current, next);
+		if (EntersClassification(current, next))
+			classifyChanged.store(true, std::memory_order_release);
 	}
 }

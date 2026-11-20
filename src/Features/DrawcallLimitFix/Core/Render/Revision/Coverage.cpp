@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
@@ -20,8 +21,9 @@ namespace DCLF
 		// A Begin attaches a staged build with the snapshot recorded on it (plan step 10a).
 		rv.explicitBuilds = !failed;
 		impl->RegisterGraphBuilds();
-		// A change in what passes this frame needs asks for new builds. The attached graphs stay until those builds attach.
-		Draws::RefreshGraphConditions(*host);
+		// The graph conditions change at a Begin, with the revision that carried their variables, and ask for builds there (plan
+		// step 10c). Only the first build point makes them. The attached graphs stay until a scene recorded on new builds is adopted.
+		Draws::FirstGraphConditions(*host);
 		impl->BuildIfAsked();
 		// A failed build stops the graph, so nothing more may run on it.
 		if (!RenderGraphRuntime::Get().IsActive())
@@ -112,9 +114,15 @@ namespace DCLF
 			next.asyncEpochs = host->AsyncEpochs();
 			next.uploads = host->RetainUploads();
 		}
-		next.cpuPipeline = Draws::CurrentGraphConditions().cpuPipeline;
-		next.forwardDirect = Draws::CurrentGraphConditions().forwardDirect;
-		next.firstPersonForwardDirect = Draws::CurrentGraphConditions().firstPersonForwardDirect;
+		next.build = CurrentBuildState();
+		// The conditions of the build the recordings are of, not the attached ones: a scene recorded on staged builds is adopted with
+		// them, and the frame then runs their conditions. The view batches' kind and the recorded epochs follow these (plan step 10c).
+		{
+			const auto& conditions = next.build && next.build->conditions ? *next.build->conditions : Draws::CurrentGraphConditions();
+			next.cpuPipeline = conditions.cpuPipeline;
+			next.forwardDirect = conditions.forwardDirect;
+			next.firstPersonForwardDirect = conditions.firstPersonForwardDirect;
+		}
 		auto& drawPipelines = DrawPipelines::Get();
 		next.targetsGeneration = drawPipelines.Generation();
 		next.claims = !IndirectDraws::Get().Failed();
@@ -131,7 +139,6 @@ namespace DCLF
 				target ? (view.resources ? view.resources->height : 0u) : mainEpochInputs.viewport[kColourShape].height, DepthRangeOf(slot.view) };
 		}
 		Extensions::PostSceneResourceInputs(next.resourceInputs);
-		next.build = CurrentBuildState();
 		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs (plan step 10b).
 		{
 			auto frameVersions = RenderGraph::Frame::Revision::SceneFrameVersions();

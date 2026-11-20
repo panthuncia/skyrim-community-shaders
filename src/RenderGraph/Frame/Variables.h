@@ -142,6 +142,8 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<SurfaceFormat> PresenterFormat() { return { "PresenterFormat" }; }
 	constexpr Var<std::uint64_t> ShaderGeneration() { return { "ShaderGeneration" }; }
 	constexpr Var<std::uint64_t> EngineTargets() { return { "EngineTargets" }; }
+	constexpr Var<std::uint64_t> DclfToggles() { return { "DclfToggles" }; }
+	constexpr Var<std::uint64_t> DclfPassCuts() { return { "DclfPassCuts" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -186,6 +188,13 @@ namespace RenderGraph::Frame::Vars
 	* images are pending versions that join the revision this event starts (Engine/Targets/EngineTargets.h).
 	*/
 	void RaiseEngineTargets(std::string_view a_writer);
+	/**
+	* @brief Any thread. Drawcall Limit Fix's toggles, packed as DCLF::Toggles packs them (plan step 10c). The revision that carries
+	* a new value applies it to DCLF's scene side at its adoption, and DCLF's graph conditions follow from it.
+	*/
+	bool SetDclfToggles(std::uint64_t a_value, std::string_view a_writer);
+	/** @brief Any thread. One event on DclfPassCuts, a serial: DCLF's diagnostic pass cuts changed (dclf:cut=). */
+	void RaiseDclfPassCuts(std::string_view a_writer);
 	/** @brief Any thread. The newest written presentation, which no revision may carry yet. For writers that change one field. */
 	FrameGen::PresentationConfig WrittenPresentationConfig();
 

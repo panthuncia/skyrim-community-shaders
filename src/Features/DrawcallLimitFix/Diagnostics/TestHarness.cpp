@@ -421,7 +421,7 @@ namespace DCLF
 				DCLF::Toggles::Get().Requested().cullMode = value == "occlusion" ? 2 : value == "frustum" ? 1 : 0;
 				return true;
 			}
-			// CPU pipeline toggles. "dclf:pipeline=auto|manual|gpu|cpu" applies at the next build point, and pipeline-interior and
+			// CPU pipeline toggles. "dclf:pipeline=auto|manual|gpu|cpu" applies with the revision that carries it, and pipeline-interior and
 			// pipeline-exterior set Manual's choice. Also cpu-record, cpu-cadence[-<view>] and cpu-batch, which applies from the next snapshot.
 			if (command.rfind("dclf:pipeline=", 0) == 0) {
 				if (!DCLF::ApplyPipeline(DCLF::Toggles::Get().Requested(), command.substr(14)))
@@ -481,7 +481,11 @@ namespace DCLF
 	void RegisterTestCommands()
 	{
 		Testing::RegisterCommandPrefix("dclf:", [](const std::string& a_name, const std::string& a_arg, std::string& a_error) {
-			return RunDclfCommand(a_arg.empty() ? a_name : a_name + "=" + a_arg, a_error);
+			const bool ran = RunDclfCommand(a_arg.empty() ? a_name : a_name + "=" + a_arg, a_error);
+			// A toggle command edits the requested set. Committing raises DclfToggles, so it takes effect with its revision (plan step 10c).
+			// Other commands leave the set as it was, which is no event.
+			DCLF::Toggles::Get().Commit("cs-test");
+			return ran;
 		});
 		// "reload" waits until the last reload finished and its pipelines are swapped in.
 		Testing::RegisterWait("reload", [] {

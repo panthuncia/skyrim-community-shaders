@@ -35,7 +35,7 @@ namespace DCLF
 		std::uint8_t cullMode = 0;
 
 		// The pipeline. CPU-driven means draws culled on the CPU and recorded as direct draws into DXVK's command buffer.
-		// Changing it changes the graph's conditions from the next build point. dclf:pipeline=auto|manual|gpu|cpu.
+		// Changing it changes the graph's conditions at the Begin that adopts it (plan step 10c). dclf:pipeline=auto|manual|gpu|cpu.
 		PipelineMode pipelineMode = PipelineMode::Auto;
 		// Manual's choice for interiors and exteriors. true means CPU-driven.
 		bool interiorCpu = true;
@@ -138,9 +138,11 @@ namespace DCLF
 	Api::ToggleId FindToggle(std::string_view a_name);
 
 	/**
-	 * @brief The requested, active and frame toggle sets. The menu edits the requested set, and the render thread copies it to the active set
-	 * once per frame. The scene side commits its next publication under the active set. The frame set is the installed publication's,
-	 * so a toggle never changes under a running frame and only takes effect once a publication is committed under it.
+	 * @brief The requested, active and frame toggle sets (plan step 10c).
+	 * Writers edit the requested set and Commit it, which writes the DclfToggles frame variable. The frame revision that carries the
+	 * new value makes it the active set at its adoption (ApplyAdopted). The scene side commits its next publication under the active set,
+	 * and the graph conditions follow it. The frame set is the installed publication's, set with the scene DCLF adopted, so a toggle
+	 * never changes under a running frame and takes effect with the scene, the builds and the conditions made for it.
 	 * Each set is one packed 64-bit word behind a relaxed atomic, because hooks on engine and DCLF threads read it with a single load.
 	 * Changing a toggle that enters classification invalidates every cached verdict, because the caches witness objects, not switches.
 	 */
@@ -149,8 +151,14 @@ namespace DCLF
 	public:
 		static Toggles& Get();
 
-		/** @brief Render thread. The set the menu edits. */
+		/** @brief Render thread. The set writers edit. Commit makes an edit an event. */
 		ToggleSet& Requested() { return requested; }
+
+		/**
+		 * @brief Render or main thread, after a writer edited the requested set. Writes it to the DclfToggles variable; writing the
+		 * same value is no event. Without frame revisions it is applied at once.
+		 */
+		void Commit(std::string_view a_writer);
 
 		/** @brief Any thread. The newest applied set, which the next publication commits under. */
 		ToggleSet Active() const { return Unpack(active.load(std::memory_order_relaxed)); }
@@ -158,14 +166,17 @@ namespace DCLF
 		/** @brief Any thread. The installed publication's set, or the active one before the first. */
 		ToggleSet Frame() const { return Unpack(frame.load(std::memory_order_relaxed)); }
 
-		/** @brief Render thread, at the frame's start. a_set, from an installed publication, becomes the frame set. */
-		void Adopt(const ToggleSet& a_set) { frame.store(Pack(a_set), std::memory_order_relaxed); }
+		/** @brief Render thread, when DCLF installs the publication of the scene it adopted. a_set becomes the frame set. */
+		void InstallFrame(const ToggleSet& a_set) { frame.store(Pack(a_set), std::memory_order_relaxed); }
 
-		/**
-		 * @brief Render thread, once per frame before anything reads the toggles. Applies the requested set.
-		 * @return Whether a toggle that enters classification changed, so the caches must be dropped.
-		 */
-		bool BeginFrame();
+		/** @brief Inside the adoption point of a revision that carries a new DclfToggles value. a_word becomes the active set. */
+		void ApplyAdopted(std::uint64_t a_word);
+
+		/** @brief Render thread, at DCLF's frame start. Whether an applied change entered classification since the last call. */
+		bool TakeClassifyChange() { return classifyChanged.exchange(false, std::memory_order_acq_rel); }
+
+		/** @brief Main thread, at install. Whether commits go through frame revisions (an input producer is registered). */
+		void UseRevisions(bool a_on) { revisions.store(a_on, std::memory_order_release); }
 
 		/** @brief How many times the active set has changed. A cheap witness for caches. */
 		std::uint32_t Generation() const { return generation.load(std::memory_order_relaxed); }
@@ -189,6 +200,8 @@ namespace DCLF
 		std::atomic<std::uint64_t> active{ 0 };
 		std::atomic<std::uint64_t> frame{ 0 };
 		std::atomic<std::uint32_t> generation{ 0 };
+		std::atomic<bool> classifyChanged{ false };
+		std::atomic<bool> revisions{ false };
 	};
 
 	/**

@@ -1455,11 +1455,13 @@ state catalog is enumerated at setup), not the views a frame happens to have.
 ### Toggles
 
 The menu's toggles (`Core/Settings/Toggles`) change all of this live, applied at adoption.
--   The frame start applies the requested set (`Toggles::BeginFrame`), and the frame inputs carry it to the scene side
+-   A writer edits the requested set and commits it (`Toggles::Commit`) as an event on the `DclfToggles` frame variable. The
+    frame revision that carries it applies it at its Begin (`Toggles::ApplyAdopted`, frame revision plan step 10c), and the frame
+    inputs carry the applied set to the scene side
     (`FrameInputs::toggles`): the whole scene pass evaluates, commits and publishes under that set (a `ToggleSnapshotScope` over
     `RunSceneWork`), and the publication carries it (`ScenePublication::toggles`), its revision made for it
     (`RevisionProducer::toggles`).
--   The frames keep the installed publication's set (`FrameToggles`, `Toggles::Adopt` at `HandOverAtFrameStart`): until one
+-   The frames keep the installed publication's set (`FrameToggles`, `Toggles::InstallFrame` at `HandOverAtFrameStart`): until one
     committed under the new toggles is installed they draw, withhold and cover exactly as the installed one's toggles say, and
     nothing is withdrawn.
 -   `ActiveToggles()` is the pass's set inside a scene pass and the frame's everywhere else; the scene side's producers that run
@@ -3076,8 +3078,8 @@ unwalked light keeps its entry.
 ## The CPU-driven pipeline (experiment)
 
 A second pipeline, switched live against the GPU one (`dclf:pipeline=auto|manual|gpu|cpu`; Auto draws exteriors GPU-driven and interiors
-CPU-driven, Manual takes a choice per kind of cell, `ToggleSet::interiorCpu` and `exteriorCpu`, resolved at the build point by
-`RefreshGraphConditions`), to measure how much of DCLF's GPU overhead goes
+CPU-driven, Manual takes a choice per kind of cell, `ToggleSet::interiorCpu` and `exteriorCpu`, resolved at the Begin that adopts the
+toggles or the cell kind by `UpdateGraphConditions`), to measure how much of DCLF's GPU overhead goes
 when the CPU culls and records instead: the GPU cull (BuildDrawsCS, the HZB, the sorts), the epochs' entry and exit barriers and
 DXVK's list splits at each epoch. The GPU path does not depend on it, but for its forward family, which goes through this pipeline
 ([The forward epoch](#the-forward-epoch), "The forward family on the CPU"). The contract is `Core/Render/Direct/Direct.h`.

@@ -5,6 +5,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
@@ -546,8 +547,10 @@ namespace DCLF
 					return;
 				}
 				// Only deltas moved, so post the last snapshot again for this publication. The deltas still reach the frame through
-				// the change log.
-				if (b.stage == Stage::Make && std::exchange(b.fresh, false) && !snapshotInputsMoved.load(std::memory_order_acquire) &&
+				// the change log. Not while the inputs name a build state whose builds are pending: the snapshot would carry that state
+				// and its conditions with recordings of the old builds, and the frame would run them together (plan step 10c).
+				const bool inputsBuilt = !producer.inputs.build || producer.inputs.build->serial <= Draws::BuiltBuildSerial();
+				if (b.stage == Stage::Make && std::exchange(b.fresh, false) && !snapshotInputsMoved.load(std::memory_order_acquire) && inputsBuilt &&
 					PassesThrough(b.posted, *b.work)) {
 					b.draws = b.posted.draws;
 					b.payload = b.posted.payload;
@@ -929,6 +932,12 @@ namespace DCLF
 		if (!impl)
 			return;
 		auto& s = *impl;
+		// The graph conditions follow the variables this Begin's revision adopted, so their builds are asked for inside the adoption
+		// point, never in the frame (plan step 10c).
+		if (auto* host = RenderGraphRuntime::Get().Host(); host && RenderGraphRuntime::Get().IsActive()) {
+			s.RegisterGraphBuilds();
+			Draws::UpdateGraphConditions(*host);
+		}
 		if (!std::exchange(s.sceneTakenThisBegin, false))
 			++s.snapshotFramesKept;
 		// A shader reload's pipeline swap rebuilt every graph in a Begin, so the adopted snapshot's recordings are of the old builds.

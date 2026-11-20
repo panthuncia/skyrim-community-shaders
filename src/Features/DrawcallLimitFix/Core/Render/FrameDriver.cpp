@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix.h"
 #include "Globals.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Testing/Testing.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
@@ -124,6 +125,10 @@ namespace DCLF
 			LoadHold::OnFrameStart(a_running);
 		Diagnostics::Notify(Diagnostics::FrameBegin{ a_running });
 		occlusionWanted = occlusionDrawn = 0;
+		// The cell kind is a graph condition (plan step 10c). Writing the same value is no event. A change reaches the conditions with
+		// the revision that carries it, at a later Begin.
+		if (const auto* tes = RE::TES::GetSingleton())
+			(void)RenderGraph::Frame::Vars::SetInterior(tes->interiorCell != nullptr, "Drawcall Limit Fix");
 		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
 		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
 		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
@@ -147,11 +152,12 @@ namespace DCLF
 		// The posts below wake the coordinator once, when this scope ends.
 		ScenePassWakeBatch wakes;
 		scene.SetScenePassMode(true, inlinePass);
-		// Apply requested toggles before the frame inputs carry them to the coordinator. Frames keep the installed publication's
-		// toggles until one committed under the new ones is installed. A classify input change also drops the cached verdicts.
+		// The active toggles changed at the adoption of the revision that carried them (plan step 10c), before the frame inputs carry
+		// them to the coordinator. Frames keep the installed publication's toggles until one committed under the new ones is installed.
+		// A classify input change also drops the cached verdicts.
 		static Extensions::ClassifyInputSet inputsSeen = Extensions::SampleClassifyInputs();
 		const auto inputs = Extensions::SampleClassifyInputs();
-		const bool togglesClassify = Toggles::Get().BeginFrame();
+		const bool togglesClassify = Toggles::Get().TakeClassifyChange();
 		if (togglesClassify || inputs != std::exchange(inputsSeen, inputs))
 			view.RequestVerdictsInvalidated();
 		ScopedPerfEvent event("CS DCLF: scene tables");
