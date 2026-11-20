@@ -375,7 +375,8 @@ namespace RenderGraph::Frame::Recipes::Table
 	// and pre-main stages make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their
 	// contents across frames (History/Persistent).
 	// IBL's two SH textures: the sky faces (start) read last frame's, since the projection runs at Prepass (pre-main). Both are History.
-	inline constexpr std::array<std::string_view, 28> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// Dynamic Cubemaps' env: IBL's projection (pre-main) reads last frame's, as on D3D11; it is published (deferred+water) and Persistent.
+	inline constexpr std::array<std::string_view, 29> kPreviousFrame{ "DynamicCubemaps::Env", "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
 		"Engine::kMAIN_COPY", "IBL::EnvIBL", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
 		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow",
