@@ -75,7 +75,10 @@ namespace ORGPostChain
 				} else {
 					if (!lut.texLUT2D || !lut.texLUT2D->resource)
 						return "the LUT is not loaded";
-					source = FrameAnchors::ImmutableTexture("pp.lut", lut.texLUT2D->resource.get(), lut.texLUT2D->srv.get());
+					// Each loaded LUT is an import of its own, never a new texture under one id: that would change an import
+					// mid-frame (step 9b). The key holds the import, so a new LUT registers the chain again.
+					auto* texture = lut.texLUT2D->resource.get();
+					source = FrameAnchors::ImmutableTexture(fmt::format("pp.lut.{:x}", reinterpret_cast<std::uintptr_t>(texture)), texture, lut.texLUT2D->srv.get());
 					if (!source)
 						return "the LUT texture cannot be imported";
 				}

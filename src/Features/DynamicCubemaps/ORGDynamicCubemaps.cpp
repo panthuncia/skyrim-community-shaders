@@ -492,8 +492,9 @@ struct ORGDynamicCubemaps::Impl
 			(*dirty)[entry].store(entry == kFilteredMipZeroEntry);
 		return dirty;
 	}();
-	// What the last update found. Not a variable yet, so a change invalidates the client's key.
-	Imports imports;
+	// The capture's colour source, as the last update found it. Not a variable yet, so a change invalidates the client's key.
+	// The key imports it, so no import is made mid-frame.
+	std::uint32_t captureMain = RE::RENDER_TARGETS::kMAIN;
 	RenderGraph::Frame::DeclaredClient client;
 
 	// Graph-only and read in later frames. The filtered one is a plain array, read through array views.
@@ -804,10 +805,9 @@ bool ORGDynamicCubemaps::Setup()
 		}
 		// The engine made its targets just before CS's setup, and the feature loaded its default cubemap.
 		// Deferred has not chosen the forward targets yet; the first update moves the import to its main target.
-		state->imports = Import(RE::RENDER_TARGETS::kMAIN);
-		if (!state->imports) {
+		if (const auto imports = Import(state->captureMain); !imports) {
 			logger::warn("[ORG] Dynamic Cubemaps: its inputs cannot be imported (depth {}, main {}, reflections {}, default cubemap {}); the cubemaps stay on D3D11",
-				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
+				imports.depth != nullptr, imports.main != nullptr, imports.reflections != nullptr, imports.defaultCubemap != nullptr);
 			return false;
 		}
 		// Black until the first publish, like the D3D11 path's cubemaps. Zeros are copied by the client's one-shot pass.
@@ -843,7 +843,11 @@ bool ORGDynamicCubemaps::Setup()
 					return std::nullopt;
 				// Zero until EngineTargets raised it: the cubemap the textures were made for.
 				const auto cubemap = a_in.Get(RenderGraph::Frame::Vars::ReflectionCubemap());
-				return ClientKey{ cubemap.size ? cubemap.size : current->size, current->imports };
+				// Imported here, when the revision starts, so a new texture joins the revision.
+				auto imports = Import(current->captureMain);
+				if (!imports)
+					FailDynamicCubemaps(fmt::format("its inputs cannot be imported (main target {})", current->captureMain));
+				return ClientKey{ cubemap.size ? cubemap.size : current->size, std::move(imports) };
 			},
 			[self](const ClientKey& a_key, FrameAnchors::ClientDesc& a_client) { return Impl::MakeClient(self, a_key, a_client); });
 		if (!impl->client)
@@ -978,9 +982,9 @@ bool ORGDynamicCubemaps::AfterUpdate()
 	if (!RenderGraphRuntime::Get().IsActive())
 		FailDynamicCubemaps("the render graph is no longer active");
 	// The first update moves the capture's colour source to Deferred's forward target. Not a variable yet, so the next revision
-	// makes the client for it. Old imports stay alive with the builds that hold them.
-	if (auto imports = Import(static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0])); imports && imports != impl->imports) {
-		impl->imports = std::move(imports);
+	// imports it and makes the client for it. Old imports stay alive with the builds that hold them.
+	if (const auto main = static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0]); main != impl->captureMain) {
+		impl->captureMain = main;
 		impl->client.Invalidate();
 	}
 	return true;
