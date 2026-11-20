@@ -57,6 +57,7 @@ The shipped configs:
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `resize` | Exponential Height Fog turned on, its grid settings changed (`setting` steps) and upscale method switches: graph textures that take a new size mid-session; compose it, `native-vulkan+resize` |
+| `llf-parity` | Light Limit Fix's graph culling compared with D3D11's every 300 frames (`[ORG] LLF parity` lines); guest only; compose it, `guest+upscalers+llf-parity` |
 | `clouds`, `clouds-long`, `clouds-off-long` | Physical Sky's volumetric clouds turned on after world-ready, shots 240 frames later and 900 (`clouds-long`: 6000, as plain D3D11 compiles the cloud programs with FXC first); `clouds-off-long` keeps them off, the baseline at the same frames; compose them, `guest+clouds` |
 | `quality-burst` | XeSS, then FSR, with the quality mode changed many times a few frames apart (new SDK contexts while frames are in flight); compose it, `native-d3d12+quality-burst` |
 | `hdr` | HDR Display turned on mid-session (the `hdr` step), shots in HDR with and without the CS menu, then off again; compose it, `native-d3d12+hdr`, `d3d11+hdr` |

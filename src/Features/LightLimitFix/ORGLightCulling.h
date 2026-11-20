@@ -27,7 +27,7 @@ public:
 	{
 		const void* lights = nullptr;
 		uint32_t lightCount = 0;
-		uint32_t clusterSize[3]{};
+		uint32_t clusterSize[3]{};  // the adopted revision's grid, at most the capacity given to Setup
 		float lightsNear = 0.0f;
 		float lightsFar = 0.0f;
 		std::array<float, 16> cameraProjInverse{};  // row-major, as in FrameBuffer
@@ -36,15 +36,21 @@ public:
 
 	static ORGLightCulling& Get();
 
-	/** @brief @return False keeps LLF on D3D11. */
-	bool Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint32_t a_lightStride, uint32_t a_maxLightsPerCluster);
+	/**
+	* @brief a_clusterCapacity is the largest cluster grid the buffers hold, the grid of the display size. The passes dispatch for it,
+	* and each run culls the grid its FrameInputs carry. @return False keeps LLF on D3D11.
+	*/
+	bool Setup(const std::array<uint32_t, 3>& a_clusterCapacity, uint32_t a_maxLights, uint32_t a_lightStride, uint32_t a_maxLightsPerCluster);
 
 	bool Execute(const FrameInputs& a_inputs);
 
 	bool IsActive() const;
 
-	/** @brief Native mode. Applies a new cluster grid at frame start, so revisions change only between frames. Called first by Renderer::Begin. Render thread. */
-	void BeginFrame();
+	/**
+	* @brief Render thread. The cluster grid of the adopted revision: its display size times its dynamic ratios, 64 pixels a
+	* cluster, at most the capacity given to Setup. The culling and every reader of the frame use it. @return False when inactive.
+	*/
+	bool AdoptedClusterGrid(std::array<uint32_t, 3>& a_grid) const;
 
 	/** @brief Null when inactive. */
 	ID3D11ShaderResourceView* GetLightsSRV() const;

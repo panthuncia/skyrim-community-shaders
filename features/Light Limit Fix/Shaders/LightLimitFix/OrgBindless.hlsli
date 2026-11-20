@@ -3,15 +3,15 @@
 
 // Resource and constant bindings for the OpenRenderGraph (Vulkan, bindless) build of
 // the cluster shaders. Buffers are fetched from the descriptor heap by index. The push
-// data holds only what is fixed across executions; the camera, the depth range and the
-// light count are the execution's, read from its region of the latch block
+// data holds only what is fixed across executions; the camera, the depth range, the
+// light count and the cluster grid are the execution's, read from its region of the latch block
 // (org::LatchBlock), which the host writes just before submission - so the recorded
 // dispatch never changes with the frame. Layouts must match OrgClusterConstants and
 // LLFLatch in ORGLightCulling.cpp.
 
 cbuffer LLFOrgConstants : register(b0)
 {
-	uint4 ClusterSize;
+	uint4 ClusterCapacity;  // the largest grid the buffers hold, which the dispatch covers
 	uint ClustersIndex;
 	uint LightsIndex;
 	uint LightIndexCounterIndex;
@@ -27,6 +27,8 @@ static float4x4 LLFCameraMatrix;  // building: CameraProjInverse, culling: Camer
 static float LightsNear;
 static float LightsFar;
 static uint LightCount;
+// The adopted revision's grid. The dispatch covers the largest grid, so threads outside this one return.
+static uint4 ClusterSize;
 
 void LLFLoadLatch()
 {
@@ -38,6 +40,7 @@ void LLFLoadLatch()
 	LightsNear = asfloat(tail.x);
 	LightsFar = asfloat(tail.y);
 	LightCount = tail.z;
+	ClusterSize = min(latch.Load4(LatchOffset + 144), ClusterCapacity);
 }
 
 float3 LLFGetPositionVS(float2 texcoord, float depth)
