@@ -273,3 +273,10 @@ final until the user confirms it.
     - **Visible effect:** dragging the window frame in windowed mode stops the game. The user should know this.
     - **Native HDR:** a colour-space-only switch now happens at adoption. With frame generation on, the old wait stays.
     - **Boundary exceptions:** `EngineImports` is narrowed to `JoinSlot` (9b).
+54. **9b is merged.**
+    - **Import changes:** an import change outside the adoption point is now `TapError::OutsideAdoption`, naming the file
+      and line. Inside the adoption point it becomes a pending version.
+    - **Removed:** the version-lag branch and the `EngineImports` exception. Only `Dclf` is left, until 10a.
+    - **Not audited:** DCLF's `ShareImage`, Scaleform's passes, the skeleton's kMAIN copy and Cloud Shadows. A mid-frame
+      import change there would now stop the game.
+    - **Merges:** 9a and 9b were merged in that order; in BoundaryCheck the director kept 9b's deletions.
