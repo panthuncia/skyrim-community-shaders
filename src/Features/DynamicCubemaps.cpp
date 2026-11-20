@@ -14,9 +14,17 @@
 #include "State.h"
 #include "Utils/D3D.h"
 
-DynamicCubemaps::Settings DynamicCubemaps::GetCommonBufferData() const
+DynamicCubemaps::DynamicCubemaps()
 {
-	auto data = settings;
+	settings.EnabledSSR.Bind(CS::SettingRegistry::Declare("DynamicCubemaps.EnabledSSR"));
+}
+
+DynamicCubemaps::GpuSettings DynamicCubemaps::GetCommonBufferData() const
+{
+	GpuSettings data{};
+	data.EnabledCreator = settings.EnabledCreator;
+	data.EnabledSSR = settings.EnabledSSR.Get();
+	data.CubemapColor = settings.CubemapColor;
 	globals::features::linearLighting.SRGBToWorking(&data.CubemapColor.x);
 	return data;
 }
@@ -33,7 +41,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 std::vector<std::pair<std::string_view, std::string_view>> DynamicCubemaps::GetShaderDefineOptions()
 {
 	std::vector<std::pair<std::string_view, std::string_view>> result;
-	if (settings.EnabledSSR) {
+	if (settings.EnabledSSR.Get()) {
 		result.push_back({ "ENABLESSR", "" });
 	}
 
@@ -42,7 +50,7 @@ std::vector<std::pair<std::string_view, std::string_view>> DynamicCubemaps::GetS
 
 void DynamicCubemaps::DrawSettings()
 {
-	recompileFlag |= ImGui::Checkbox(T(TKEY("enable_ssr"), "Enable Screen Space Reflections"), reinterpret_cast<bool*>(&settings.EnabledSSR));
+	recompileFlag |= Util::Checkbox(T(TKEY("enable_ssr"), "Enable Screen Space Reflections"), settings.EnabledSSR);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_ssr_tooltip"), "Enable Screen Space Reflections on Water"));
 	}
@@ -741,7 +749,7 @@ void DynamicCubemaps::SetupResources()
 
 	// CS_ORG_DYNAMIC_CUBEMAPS=1: the update runs on the render graph, whose exported textures the readers of the D3D11 path's take.
 	auto& graph = ORGDynamicCubemaps::Get();
-	if (graph.Setup([this] { ReturnToD3D11(); })) {
+	if (graph.Setup()) {
 		const auto outputs = graph.Exported();
 		envTexture = WrapExported(outputs.env, outputs.envSRV);
 		envReflectionsTexture = WrapExported(outputs.envReflections, outputs.envReflectionsSRV);
@@ -946,20 +954,6 @@ void DynamicCubemaps::CreateD3D11Textures()
 	}
 }
 
-void DynamicCubemaps::ReturnToD3D11()
-{
-	// The exported textures go once the render graph's resources are released: nothing of this feature may keep them.
-	for (auto** texture : { &envTexture, &envReflectionsTexture, &envTextureBC6H, &envReflectionsTextureBC6H }) {
-		delete *texture;
-		*texture = nullptr;
-	}
-	boundReflectionsView = nullptr;
-	CreateD3D11Textures();
-	resetCapture[0] = resetCapture[1] = true;
-	cubemapValid[0] = cubemapValid[1] = false;
-	nextTask = NextTask::kCaptureInferAndIrradianceA;
-}
-
 void DynamicCubemaps::Reset()
 {
 	activeReflections = globals::state->activeReflections;
@@ -975,10 +969,3 @@ void DynamicCubemaps::Reset()
 	}
 }
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection DynamicCubemaps::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("EnabledSSR", settings.EnabledSSR);
-	return projection;
-}

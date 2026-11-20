@@ -28,13 +28,16 @@ public:
 	/** @brief At SetupResources with the runtime active. @return False keeps the D3D11 dispatches. */
 	bool Setup();
 
-	/** @brief Before the anchor runs. Re-imports replaced shadow maps. The passes are left out while the cascades are missing. */
+	/**
+	* @brief Before the anchor runs. Observes the engine's shadow maps. A change makes the next frame revision register the client
+	* for them. The passes are left out while the cascades are missing. Fatal when the cascades go away once imported.
+	*/
 	void UpdateImports();
 
 	/** @brief Set up, and the runtime still up. */
 	bool IsActive() const;
 
-	/** @brief Checks once that the engine's t4 is the cascade map the passes read. A different view turns the ORG path off. */
+	/** @brief Checks once that the engine's t4 is the cascade map the passes read. A different view is fatal. */
 	void CheckShadowMaskInput(ID3D11ShaderResourceView* a_shadowMap);
 
 	/** @brief Both mips. Null when inactive. */
@@ -47,9 +50,6 @@ public:
 
 private:
 	ORGVolumetricShadows() = default;
-
-	/** @brief For good. */
-	void Stop();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

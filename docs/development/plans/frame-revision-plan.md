@@ -823,6 +823,30 @@ revisions.
   region (`RunReadback::BuildStamp`). DoF's focus resets on a frame that does not follow its last commit, as D3D11 does.
 - Test: `tools/cs-test/configs/post-effects.toml` (needs the profile's Post Processing mode on).
 
+**As built (2026-11-19, 6.18, `org-native/rev-step6-18`).** The setup-only features follow the revisions.
+- Subsurface Scattering: the two working textures are declared on `DisplaySize` (`DeclareTexture2D`, kMAIN's description). The
+  mode's programs are a `DeclareProgram` on `SSMode` (separable: extraction, horizontal, vertical; Burley: its extraction and
+  blur), with the common defines resolved at setup. The client is declared on `SSMode`; its key is the mode's programs and the
+  imported engine targets, which `AfterDeferredPasses` observes (`Invalidate` when they are first imported). Only the mode's
+  passes are in a registration. `programsDirty`, `ClearShaderCache` and `Refresh` are gone; losing a target after import is
+  fatal. `SSMode` and `EnableCharacterLighting` are `CS::Setting`s; `ProjectSizeSettings` is gone. `Util::RadioButton` takes a
+  `CS::Setting<int>`. Test: `sss` (new).
+- Dynamic Cubemaps: the client is declared on `ReflectionCubemap`; its key is the cubemap's edge and the capture's imports
+  (`Invalidate` when the first update moves the colour source to the forward target). The textures stay made once for the
+  engine's cubemap: another edge is fatal at the key's registration. The BC6H copies are in the graph from the start, their gate
+  entries closed until an encode, so the first encodes no longer rebuild it. `programsDirty`, `copying` and `Refresh` are gone.
+  A failure after setup is fatal (the 6.16 note): `Fail`, the `onFailed` callback and `DynamicCubemaps::ReturnToD3D11` are gone.
+  `EnabledSSR` is a `CS::Setting`; the feature buffer takes `DynamicCubemaps::GpuSettings`, built from the settings. Test:
+  `dynamic-cubemaps` (new).
+- Volumetric Shadows (worker): the client is declared on `EngineShadowMap`; its key is the imported cascades, the volumetric copy
+  and the cascades' width, observed at EarlyPrepass (`Invalidate`). The commit's group counts come from the key's width. Losing
+  the cascades after import and a wrong t4 are fatal; `Stop` is gone. The 512 x 512 copies follow nothing. Test:
+  `volumetric-shadows` (new).
+- Cloud Shadows (worker): the occlusion copy's client is declared on `ReflectionCubemap`, keyed on its edge; another edge than the
+  layers' is fatal. The layer client stays registered at setup (no inputs change). Test: `cloud-shadows` (new).
+- Hot reload needs no feature code: `DrawcallLimitFix::ClearShaderCache` asks `RenderGraphRuntime::RequestShaderReload`, which
+  swaps every live pipeline. That is why `programsDirty` could go without a replacement where no define follows a setting.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1783,6 +1807,27 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The scene catalog generator accepts `feat->enabled`** without `&` (Util::Checkbox over the setting) for sub-feature toggles.
 - **Lens Flare in Ultra keeps every spectrum at full size** while on (up to 56 MB at 1024), as the ghosts' kernel groups are no
   variable yet. D3D11 frees the unused ones.
+
+**Decided by the agent (step 6.18, 2026-11-19), to confirm:**
+- **Dynamic Cubemaps' and Cloud Shadows' textures are not declared on `ReflectionCubemap`.** The passes are made for nine mips
+  (256 only) and Cloud Shadows' D3D11 layers and views cannot follow a new edge, so a declared texture could only fail. The client
+  is declared on the variable instead and another edge is fatal there. The engine makes the cubemap once a session (Q4).
+- **Volumetric Shadows' width is read from the cascade texture, not from `EngineShadowMap`.** The variable is raised from
+  `kSHADOWMAPS`, the passes read `kSHADOWMAPS_ESRAM`, so the variable only makes the key evaluate. A cascade variable in
+  `Variables.h` is the fix if they can differ.
+- **SSS's `EnableCharacterLighting` is in no declaration.** It sets the engine's character light each frame (`Reset`), which no
+  graph state depends on. It is a `Setting` so its writes are events.
+- **`EnabledSSR` is a `Setting`, but the engine SSR shader still changes through the shader cache.** ImageSpace's world client
+  should depend on it (its key holding the SSR permutation); that is ImageSpace's file, left to its owner.
+- **Dynamic Cubemaps' zero pass stays a one-shot pass of the client.** A new registration arms it again, and zeroes the published
+  cubemaps until their next publish. The only re-registration is the first update's colour source, before the first publish. A
+  separate setup-only client would register the same twins in a second client of the same graph.
+- **Dynamic Cubemaps' runtime going inactive is fatal too**, unlike IBL's D3D11 return (6.16), since returning would withdraw the
+  published cubemaps outside a revision.
+- **An import Dynamic Cubemaps cannot make at an update is still skipped, not fatal**, as before; a lost import after setup was
+  never seen.
+- **Between setup and the first adopted registration** Volumetric and Cloud Shadows report active with no client, so their maps
+  are unwritten for those frames (as before, until the first build). SSS and Dynamic Cubemaps draw D3D11 or nothing then, as before.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

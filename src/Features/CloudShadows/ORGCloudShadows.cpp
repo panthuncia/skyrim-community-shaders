@@ -26,6 +26,7 @@ ORGCloudShadows& ORGCloudShadows::Get()
 #	include "Features/CloudShadows.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -43,7 +44,9 @@ ORGCloudShadows& ORGCloudShadows::Get()
 #	include <array>
 #	include <cstddef>
 #	include <format>
+#	include <optional>
 #	include <span>
+#	include <string_view>
 #	include <utility>
 #	include <string>
 #	include <vector>
@@ -149,6 +152,24 @@ namespace
 		FrameAnchors::Texture from;
 		std::shared_ptr<org::Resource> to;
 	};
+
+	[[noreturn]] void FailCloudShadows(std::string_view a_why)
+	{
+		const auto message = fmt::format("Community Shaders: Cloud Shadows' render graph path failed: {}", a_why);
+		logger::critical("[ORG] Cloud Shadows: {}", message);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
+	}
+
+	/**
+	* @brief The occlusion copy's client, declared at Setup on the reflection cubemap. Its key is the cubemap's edge. Kept here
+	* and not in Impl, since its functions hold the Impl.
+	*/
+	RenderGraph::Frame::DeclaredClient& CopyClient()
+	{
+		static RenderGraph::Frame::DeclaredClient s_client;
+		return s_client;
+	}
 
 	/** @brief Copies every face and mip on the run after the frame's first reflections prepass. */
 	void Commit(Impl& a_impl)
@@ -262,6 +283,7 @@ void ORGCloudShadows::Stop()
 {
 	FrameAnchors::Unregister(kLayersClientId);
 	layerOps.reset();
+	CopyClient() = {};
 	FrameAnchors::Unregister(kClientId);
 	PublishedResources::Withdraw(kOcclusionId);
 	impl.reset();
@@ -324,30 +346,46 @@ bool ORGCloudShadows::Setup()
 		return false;
 	}
 
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.passes.push_back({ .name = std::string(kClientId) + ".occlusion-copy",
-		.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
-		.order = 0,
-		.kind = FrameAnchors::PassKind::Compute,
-		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
-	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
-	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
-	// The anchor runs at every cubemap render, but only the run after the frame's first reflections prepass copies, as on D3D11.
-	client.active = [next] { return next->pending; };
-	client.gates = { next->gate };
-	impl = next;
-	if (!FrameAnchors::Register(std::move(client))) {
-		impl.reset();
+	// The layers and the occlusion cubemap are sized once, from the engine's reflection cubemap, which the engine makes once a
+	// session (Q4). The client is declared on that cubemap, so a revision that carries another edge is fatal: the D3D11 layers
+	// and their views do not follow it. The first evaluation is at the next revision.
+	const UINT layerEdge = next->width;
+	CopyClient() = RenderGraph::Frame::DeclareClient<std::uint32_t>(
+		kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::ReflectionCubemap()),
+		[layerEdge](const RenderGraph::Frame::Inputs& a_in) -> std::optional<std::uint32_t> {
+			// Zero before the engine's targets raised it: the layers' edge.
+			const std::uint32_t edge = a_in.Get(RenderGraph::Frame::Vars::ReflectionCubemap()).size;
+			return edge ? edge : layerEdge;
+		},
+		[next](const std::uint32_t& a_edge, FrameAnchors::ClientDesc& a_client) {
+			if (a_edge != next->width)
+				FailCloudShadows(fmt::format("the reflection cubemap is {} wide, but the cloud layers were made {} wide", a_edge, next->width));
+			a_client.id = kClientId;
+			a_client.passes.push_back({ .name = std::string(kClientId) + ".occlusion-copy",
+				.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
+				.order = 0,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
+			a_client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
+			a_client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
+			// The anchor runs at every cubemap render, but only the run after the frame's first reflections prepass copies, as on D3D11.
+			a_client.active = [next] { return next->pending; };
+			a_client.gates = { next->gate };
+			return true;
+		});
+	if (!CopyClient()) {
+		logger::error("[ORG] Cloud Shadows: the occlusion copy's client could not be declared; it stays on D3D11");
 		return false;
 	}
+	impl = next;
 	// DCLF's colour passes read it by name, ordered after the copy.
 	if (!PublishedResources::Publish(*next->occlusion)) {
 		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; it stays on D3D11");
 		Stop();
 		return false;
 	}
-	logger::info("[ORG] Cloud Shadows: the occlusion copy runs on the render graph ({}x{}, {} mips)", desc.Width, desc.Height, desc.MipLevels);
+	logger::info("[ORG] Cloud Shadows: the occlusion copy runs on the render graph ({}x{}, {} mips); its client follows the frame revisions", desc.Width,
+		desc.Height, desc.MipLevels);
 	if (!SetupLayerOps())
 		logger::warn("[ORG] Cloud Shadows: the layers' clears and copies stay on D3D11");
 	return true;

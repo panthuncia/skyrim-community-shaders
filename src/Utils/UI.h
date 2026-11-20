@@ -974,14 +974,14 @@ namespace Util
 		return true;
 	}
 
-	/** @brief ImGui::RadioButton over an int setting: selected while it holds a_button, and a click stores a_button. */
-	bool RadioButton(const char* label, CS::Setting<int>& setting, int a_button);
-
 	/** @brief ImGui::Combo over an int setting holding the item index. @return True when the control edited the value. */
 	bool Combo(const char* label, CS::Setting<int>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
 
 	/** @brief ImGui::Combo over an unsigned setting holding the item index. */
 	bool Combo(const char* label, CS::Setting<std::uint32_t>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
+
+	/** @brief ImGui::RadioButton over an int setting: a click stores v_button. @return True when the control edited the value. */
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int v_button);
 
 	/**
 	 * Draws a 2-4 component float slider. Holding Shift edits all components from the first component.

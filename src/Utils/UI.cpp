@@ -1041,11 +1041,6 @@ namespace Util
 		return EditSettingCopy<bool>(setting, [&](bool& a_value) { return ImGui::Checkbox(label, &a_value); });
 	}
 
-	bool RadioButton(const char* label, CS::Setting<int>& setting, int a_button)
-	{
-		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::RadioButton(label, &a_value, a_button); });
-	}
-
 	bool SliderInt(const char* label, CS::Setting<int>& setting, int min, int max, const char* format, ImGuiSliderFlags flags)
 	{
 		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::SliderInt(label, &a_value, min, max, format, flags); });
@@ -1069,6 +1064,11 @@ namespace Util
 	bool Combo(const char* label, CS::Setting<std::uint32_t>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems)
 	{
 		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::Combo(label, &a_value, items, itemCount, popupMaxHeightInItems); });
+	}
+
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int v_button)
+	{
+		return EditSettingCopy<int>(setting, [&](int& a_value) { return ImGui::RadioButton(label, &a_value, v_button); });
 	}
 
 	ImVec2 GetNativeViewportSizeScaled(float scale)

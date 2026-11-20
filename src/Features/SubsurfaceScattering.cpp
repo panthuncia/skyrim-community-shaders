@@ -9,6 +9,12 @@
 
 #define I18N_KEY_PREFIX "feature.sss."
 
+SubsurfaceScattering::SubsurfaceScattering()
+{
+	settings.EnableCharacterLighting.Bind(CS::SettingRegistry::Declare("SubsurfaceScattering.EnableCharacterLighting"));
+	settings.SSMode.Bind(CS::SettingRegistry::Declare("SubsurfaceScattering.SSMode"));
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(SubsurfaceScattering::DiffusionProfile,
 	BlurRadius, Thickness, Strength, Falloff)
 
@@ -26,19 +32,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 void SubsurfaceScattering::DrawSettings()
 {
-	ImGui::Checkbox(T(TKEY("enable_character_lighting"), "Enable Character Lighting"), (bool*)&settings.EnableCharacterLighting);
+	Util::Checkbox(T(TKEY("enable_character_lighting"), "Enable Character Lighting"), settings.EnableCharacterLighting);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_character_lighting_tooltip"), "Vanilla feature."));
 	}
-	if (settings.EnableCharacterLighting) {
+	if (settings.EnableCharacterLighting.Get()) {
 		ImGui::SliderFloat(T(TKEY("strength"), "Strength"), &settings.CharacterLightingStrength, 0, 5, "%.2f");
 	}
 
-	ImGui::RadioButton(T(TKEY("separable_sss"), "Separable SSS"), &settings.SSMode, 0);
+	Util::RadioButton(T(TKEY("separable_sss"), "Separable SSS"), settings.SSMode, 0);
 	ImGui::SameLine();
-	ImGui::RadioButton(T(TKEY("burley"), "Burley"), &settings.SSMode, 1);
+	Util::RadioButton(T(TKEY("burley"), "Burley"), settings.SSMode, 1);
 
-	if (settings.SSMode == 0) {
+	if (settings.SSMode.Get() == 0) {
 		ImGui::Spacing();
 		ImGui::Text("%s", T(TKEY("albedo_handling"), "Albedo Handling"));
 		ImGui::RadioButton(T(TKEY("pre_scatter"), "Pre-scatter"), &settings.ScatterMode, kPreScatter);
@@ -57,7 +63,7 @@ void SubsurfaceScattering::DrawSettings()
 		}
 	}
 
-	if (settings.SSMode == 0) {
+	if (settings.SSMode.Get() == 0) {
 		ImGui::SeparatorText(T(TKEY("base_profile"), "Base Profile"));
 		ImGui::PushID("BaseProfile");
 		ImGui::SliderFloat(T(TKEY("blur_radius"), "Blur Radius"), &settings.BaseProfile.BlurRadius, 0, 3, "%.2f");
@@ -89,7 +95,7 @@ void SubsurfaceScattering::DrawSettings()
 		updateKernels |= ImGui::ColorEdit3(T(TKEY("strength"), "Strength"), (float*)&settings.HumanProfile.Strength);
 		updateKernels |= ImGui::ColorEdit3(T(TKEY("falloff"), "Falloff"), (float*)&settings.HumanProfile.Falloff);
 		ImGui::PopID();
-	} else if (settings.SSMode == 1) {
+	} else if (settings.SSMode.Get() == 1) {
 		ImGui::SliderInt(T(TKEY("burley_samples"), "Burley Samples"), (int*)&settings.BurleySamples, 1, 64, "%d", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SeparatorText(T(TKEY("base_profile"), "Base Profile"));
 		ImGui::PushID("BaseProfile");
@@ -248,7 +254,7 @@ void SubsurfaceScattering::DrawSSS()
 
 	auto dispatchCount = Util::GetScreenDispatchCount();
 
-	blurCB->Update(BuildBlurConstants(settings.SSMode));
+	blurCB->Update(BuildBlurConstants(settings.SSMode.Get()));
 
 	auto renderer = globals::game::renderer;
 	auto context = globals::d3d::context;
@@ -295,7 +301,7 @@ void SubsurfaceScattering::DrawSSS()
 		views[0] = diffuseNoAlbedoTex->srv.get();
 		context->CSSetShaderResources(0, 1, views);
 
-		if (settings.SSMode == 0) {
+		if (settings.SSMode.Get() == 0) {
 			// Horizontal pass: diffuseNoAlbedoTex -> blurHorizontalTemp
 			{
 				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Horizontal");
@@ -331,7 +337,7 @@ void SubsurfaceScattering::DrawSSS()
 				context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
 				globals::profiler->EndPass();
 			}
-		} else if (settings.SSMode == 1) {
+		} else if (settings.SSMode.Get() == 1) {
 			// Burley pass: diffuseNoAlbedoTex -> main (SSS pixels only)
 			{
 				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Burley");
@@ -416,7 +422,7 @@ void SubsurfaceScattering::Reset()
 {
 	auto shaderManager = globals::game::smState;
 	auto shaderCache = globals::shaderCache;
-	shaderManager->characterLightEnabled = shaderCache->IsEnabled() ? settings.EnableCharacterLighting : true;
+	shaderManager->characterLightEnabled = shaderCache->IsEnabled() ? settings.EnableCharacterLighting.Get() != 0 : true;
 	if (shaderManager->characterLightEnabled) {
 		if (CharacterLightingStrengthOriginal == -1.0f) {
 			CharacterLightingStrengthOriginal = shaderManager->characterLightParams[2];
@@ -451,7 +457,7 @@ void SubsurfaceScattering::SaveSettings(json& o_json)
 
 void SubsurfaceScattering::ClearShaderCache()
 {
-	ORGSubsurfaceScattering::Get().ClearShaderCache();
+	// The render graph's programs reload with every live pipeline (RenderGraphRuntime::RequestShaderReload).
 	if (prepassSS) {
 		prepassSS->Release();
 		prepassSS = nullptr;
@@ -476,7 +482,7 @@ void SubsurfaceScattering::ClearShaderCache()
 
 ID3D11ComputeShader* SubsurfaceScattering::GetComputeShaderPrepass()
 {
-	if (settings.SSMode == 1) {
+	if (settings.SSMode.Get() == 1) {
 		if (!prepassBurleySS)
 			prepassBurleySS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\SubsurfaceScattering\\DiffuseExtractionCS.hlsl", { { "BURLEY", "" } }, "cs_5_0");
 		return prepassBurleySS;
@@ -563,10 +569,3 @@ void SubsurfaceScattering::Hooks::BSLightingShader_SetupGeometry::thunk(RE::BSSh
 }
 
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection SubsurfaceScattering::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("SSMode", settings.SSMode).Add("EnableCharacterLighting", settings.EnableCharacterLighting);
-	return projection;
-}

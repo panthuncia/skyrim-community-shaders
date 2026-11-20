@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 /**
  * Handles menu open and close events.
@@ -33,6 +34,9 @@ public:
 struct DynamicCubemaps : Feature
 {
 public:
+	/** @brief Binds the settings the frame revisions follow (EnabledSSR). */
+	DynamicCubemaps();
+
 	const std::string defaultDynamicCubeMapSavePath = "Data\\textures\\DynamicCubemaps";
 
 	// Specular irradiance
@@ -152,13 +156,23 @@ public:
 	struct Settings
 	{
 		uint EnabledCreator = false;
+		// A shader define of the engine's SSR shader (ENABLESSR), so a change clears that shader from the cache.
+		CS::Setting<std::uint32_t> EnabledSSR = 1;
+		float4 CubemapColor{ 1.0f, 1.0f, 1.0f, 0.0f };
+	};
+
+	/** @brief What the shaders read, copied byte for byte into the feature buffer. Built from Settings. */
+	struct GpuSettings
+	{
+		uint EnabledCreator = false;
 		uint EnabledSSR = true;
 		uint pad0[2];
 		float4 CubemapColor{ 1.0f, 1.0f, 1.0f, 0.0f };
 	};
+	static_assert(sizeof(GpuSettings) == 32);
 
 	Settings settings;
-	Settings GetCommonBufferData() const;
+	GpuSettings GetCommonBufferData() const;
 	void UpdateCubemap();
 
 	/** @brief One frame's work of the update pipeline, the step of its state machine (nextTask). */
@@ -212,8 +226,6 @@ public:
 
 	virtual void SaveSettings(json&) override;
 	virtual void LoadSettings(json&) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void RestoreDefaultSettings() override;
 	virtual void DrawSettings() override;
 	virtual void DataLoaded() override;
@@ -243,9 +255,6 @@ public:
 
 	/** @brief The D3D11 path's textures, views and buffers (the render-graph path makes its own: ORGDynamicCubemaps). */
 	void CreateD3D11Textures();
-
-	/** @brief The render-graph path failed: drops its exported views, makes the D3D11 textures, and restarts the state machine. */
-	void ReturnToD3D11();
 
 	virtual bool IsCore() const override { return true; };
 };

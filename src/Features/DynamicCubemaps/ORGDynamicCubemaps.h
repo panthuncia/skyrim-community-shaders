@@ -1,7 +1,6 @@
 #pragma once
 
 #include <d3d11.h>
-#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -13,7 +12,9 @@
 * It runs at DeferredPasses, not DeferredComposite. The ORG composite reads the cubemaps through descriptors the graph does not
 * track, so writing them in its epoch would race the read.
 * A BC6H copy cannot be a dispatch, since there is no UAV of a block-compressed format.
-* Render thread throughout. Free of ORG/Vulkan includes.
+* The client is declared on the engine's reflection cubemap, so a change of it goes through a frame revision. The textures are made
+* once for its size, and another size is fatal. A setup failure keeps D3D11; a failure after setup is fatal, since withdrawing the
+* published cubemaps would change what built graphs read outside a revision. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGDynamicCubemaps
 {
@@ -33,10 +34,9 @@ public:
 
 	/**
 	* @brief Call at SetupResources with the runtime active and the default cubemap loaded.
-	* @param a_onFailed Called once if the path stops later. The feature must drop its views of the outputs.
 	* @return False keeps the D3D11 path.
 	*/
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	bool IsActive() const;
 
@@ -55,12 +55,12 @@ public:
 	Outputs Exported() const;
 
 	/**
-	* @brief Call after the anchor ran. Follows shader reloads, new engine targets and first encodes, each of which rebuilds the graph.
+	* @brief Call after the anchor ran. Notes a new capture colour source for the next revision.
 	* @return False means the D3D11 update runs.
 	*/
 	bool AfterUpdate();
 
-	/** @brief Programs rebuild at the next AfterUpdate. No cubemap counts as encoded until its next publish. */
+	/** @brief No cubemap counts as encoded until its next publish. The programs reload with every live pipeline. */
 	void ClearShaderCache();
 
 	~ORGDynamicCubemaps();
@@ -68,14 +68,8 @@ public:
 private:
 	ORGDynamicCubemaps() = default;
 
-	/** @brief For good. Unregisters, withdraws outputs, returns to D3D11, then releases the resources. */
-	void Fail(const char* a_reason);
-
-	/** @brief Graph readers return to their D3D11 views. */
+	/** @brief At setup, when it fails: graph readers return to their D3D11 views. */
 	void Withdraw();
-
-	/** @brief False, logged by FrameAnchors, when it cannot be. */
-	bool RegisterClient();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;
