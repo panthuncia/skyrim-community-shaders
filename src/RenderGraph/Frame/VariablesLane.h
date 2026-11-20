@@ -37,6 +37,12 @@ namespace RenderGraph::Frame::Vars::Lane
 	std::uint32_t IndexOf(std::string_view a_name);
 
 	/**
+	* @brief Whether the variable at a_index holds constants only (VariableTraits::sizes false: RenderSize, DynamicRatios,
+	* ShaderGeneration). Such a variable may not size a texture or a buffer (decision 6a). Any thread.
+	*/
+	bool ConstantsOnly(std::uint32_t a_index);
+
+	/**
 	* @brief The index of a CS::Setting's variable, declared now with a_bytes when it has none yet. Any thread.
 	* a_name is the setting's registry name. With null a_bytes nothing is declared, and UINT32_MAX means none.
 	*/

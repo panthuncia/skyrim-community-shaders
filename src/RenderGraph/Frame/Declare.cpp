@@ -90,6 +90,19 @@ namespace RenderGraph::Frame
 		};
 
 		using DeclaredExtent = std::array<unsigned int, 3>;
+
+		/**
+		* @brief Fatal when a size depends on a constants-only variable (decision 6a). Render-size content lives in a texture sized
+		* for the display, and the dynamic part reaches constants and viewports only.
+		*/
+		void RequireSizes(const Dependencies& a_dependencies, const DependencyState& a_state, std::string_view a_owner)
+		{
+			for (std::size_t i = 0; i < a_state.indices.size() && i < a_dependencies.size(); ++i)
+				if (!a_dependencies[i].frameVariable.empty() && Vars::Lane::ConstantsOnly(a_state.indices[i]))
+					FailDeclaration(fmt::format("{} depends on {}, which holds constants only and may not size a texture or a buffer; size it for the "
+												"display and pass the dynamic part as constants and viewports",
+						a_owner, a_dependencies[i].frameVariable));
+		}
 	}
 
 	namespace Detail
@@ -310,6 +323,7 @@ namespace RenderGraph::Frame
 			auto declaration = std::make_shared<Detail::TextureDeclaration>();
 			declaration->name = a_name;
 			declaration->dependencies.Resolve(a_dependencies, a_name);
+			RequireSizes(a_dependencies, declaration->dependencies, a_name);
 			// Versions are what a revision changes.
 			a_options.versioned = true;
 			const auto desc = a_desc(Inputs(nullptr));
@@ -455,6 +469,7 @@ namespace RenderGraph::Frame
 		auto declaration = std::make_shared<Detail::BufferDeclaration>();
 		declaration->name = a_name;
 		declaration->dependencies.Resolve(a_dependencies, a_name);
+		RequireSizes(a_dependencies, declaration->dependencies, a_name);
 		const auto desc = a_desc(Inputs(nullptr));
 		if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) || !desc.StructureByteStride)
 			FailDeclaration(fmt::format("{} is no structured buffer", a_name));
