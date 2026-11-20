@@ -207,10 +207,10 @@ namespace RenderGraph::AnchorPasses
 		void Add(Dispatch a_dispatch);
 		void Add(Copy a_copy);
 
-		/** @brief A clear; a_once (the default) makes it a one-shot pass (PassDesc::once), run again by FrameAnchors::Rearm. */
+		/** @brief A clear; a_once (the default) makes it a one-shot pass (PassDesc::once). */
 		void Add(Clear a_clear, bool a_once = true);
 
-		/** @brief An upload, always a one-shot pass: it runs at the anchor's next run, and again after FrameAnchors::Rearm. */
+		/** @brief An upload, always a one-shot pass: it runs at the anchor's next run. */
 		void Add(Upload a_upload);
 
 		/** @brief A custom pass, made at each graph build of the anchor. a_atExecution records it after the run's commit. */

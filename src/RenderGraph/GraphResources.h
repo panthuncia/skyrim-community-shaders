@@ -30,10 +30,16 @@ namespace org
 * Each twin owns an ORG resource named "Feature::Name". Passes declare Graph(), or Versioned() for a versioned texture.
 * While a D3D11 reader remains, the twin also exports D3D11 views of the same memory, and an exported resource is never aliased.
 * A transient's first use each frame must be a write, and nothing may read it in a later frame.
-* Teardown and Resize release the D3D11 side first, then free the graph resource after D3D11's last use.
-* A same-shape Resize of a versioned texture is a new version. Any other Resize triggers a graph rebuild by itself.
-* New versions are published only at a frame boundary, so during a frame use RequestSize. Everything runs on the render thread,
-* except Prepare and Preparable (any thread). Prepare from a plan never touches the twin.
+* Teardown releases the D3D11 side first, then frees the graph resource after D3D11's last use.
+*
+* Revisions (docs/development/plans/frame-revision-plan.md):
+* - A twin keeps its size for life unless it is declared (Frame/Declare.h). There is no resize call.
+* - A declared texture's new extent is a new version of the same slot, in the same shape class (format, mips, slices). The
+*   revision lane makes it off the render thread (PlanPrepare, then Prepare from the plan), and the revision's adoption at a
+*   frame's Begin makes it current (the slot's Adopt, then AdoptPrepared). An extent no version can serve is fatal.
+* - Passes that follow a declared texture declare its slot, never Graph(), so a new version needs no build.
+* - Nothing here publishes a version inside a frame.
+* Everything runs on the render thread, except Prepare and Preparable (any thread). Prepare from a plan never touches the twin.
 */
 namespace GraphResources
 {
@@ -66,7 +72,7 @@ namespace GraphResources
 		Export d3d11 = Export::None;
 		// A transient's own alias pool, aliased only with resources naming the same pool. Unset means the shared pool. A diagnostic.
 		std::optional<std::uint64_t> aliasPool;
-		// Passes declare only the slot or published id, so a same-shape Resize is a new version, not a graph build. Not for transients.
+		// Passes declare only the slot or published id, so a new extent is a new version, not a graph build. Not for transients.
 		bool versioned = false;
 		// A 2D texture that shaders read and write as an array, so it has array views even with one slice.
 		bool array = false;
@@ -177,7 +183,7 @@ namespace GraphResources
 		/** @brief The graph resource passes declare; null when the twin could not be created. */
 		const std::shared_ptr<org::Resource>& Graph() const { return graph; }
 
-		/** @brief The slot a versioned texture's passes declare, the same across same-shape Resizes. Null otherwise. */
+		/** @brief The slot a versioned texture's passes declare, the same across its versions. Null otherwise. */
 		const std::shared_ptr<org::VersionedTexture>& Versioned() const { return slot; }
 
 		/** @brief The slot a versioned structured buffer's passes declare, the same across element counts. Null otherwise. */
@@ -207,21 +213,11 @@ namespace GraphResources
 		/** @brief A token that expires when the twin is destroyed, for holders of a pointer to it. */
 		std::weak_ptr<const void> Alive() const { return alive; }
 
-		/** @brief Bumped by every Resize of any twin: what the anchors and PublishedResources compare to notice one. */
-		static std::uint64_t ResizeGeneration();
-
-		/** @brief What bumped the resize generation past a_since, for the log. Only the last few are kept. */
-		static std::string ResizeCauses(std::uint64_t a_since);
-
 		/** @brief The texture's current extent; zeros for a buffer. Render thread. */
 		virtual Extent CurrentExtent() const { return {}; }
 
-		/** @brief Texture2D::Resize or Texture3D::Resize at a_extent, for a holder of the base, such as a taker of size wishes
-		*  serving one that is not Preparable. Only at a frame boundary. False for a buffer or an unchanged size. */
-		virtual bool ResizeTo(const Extent&) { return false; }
-
 		/** @brief Whether Prepare makes a version at a_next: a versioned texture, live, whose shape class holds there
-		*  (format, mip count, slice count). False means today's path: Resize at a frame boundary, a new slot and a build. Any thread. */
+		*  (format, mip count, slice count). False means no version can serve a_next. Any thread. */
 		bool Preparable(const Extent& a_next) const;
 
 		/**
@@ -243,20 +239,9 @@ namespace GraphResources
 		/**
 		* @brief Render thread, at a frame boundary, after the slot adopted a_prepared's version. Makes the D3D11 export and views
 		* (exported twins), updates Desc(), Graph() and the made-image registry, and releases the old D3D11 side after D3D11's last use.
-		* Bumps no resize generation and adopts no version. A version prepared for another twin or another slot is fatal.
+		* Adopts no version itself. A version prepared for another twin or another slot is fatal.
 		*/
 		void AdoptPrepared(const PreparedVersion& a_prepared);
-
-		/** @brief The size RequestSize asked for and no boundary applied yet. Render thread. */
-		const std::optional<Extent>& RequestedExtent() const { return requestedSize; }
-
-		/**
-		* @brief Takes every change of a twin's size wish instead of the next frame boundary's Resize. Render thread.
-		* Called with the twin and its new wish (empty when it asks for its own size again). Null restores Resize at the boundary.
-		* The hook holds the twin by its Alive() token, since a twin may go before its wish is served.
-		*/
-		using SizeWishHook = std::function<void(Resource&, const std::optional<Extent>&)>;
-		static void SetSizeWishHook(SizeWishHook a_hook);
 
 	protected:
 		Resource(std::string a_name, Options a_options) :
@@ -282,14 +267,8 @@ namespace GraphResources
 		/** @brief The views' names, as Buffer.h's detail::SetD3DName gives them. */
 		void NameViews() const;
 
-		/** @brief Called by a Resize that made a new resource. a_who names it in the anchors' log line (ResizeCauses). */
-		static void BumpResizeGeneration(std::string_view a_who);
-
-		/** @brief RequestSize's work. a_resize runs at the next frame boundary if the twin lives. a_current drops an earlier request. */
-		void RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize);
-
 		/** @brief After Create, sets up a versioned texture's slot. Returns true when the new texture became a_previous's next version.
-		*  False means the caller must bump the resize generation. */
+		*  False means a new slot, which readers declare only after a build. */
 		bool AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape);
 
 		/** @brief AdoptSlot's work, without telling the made-image registry (RenderGraph::SetMadeImageSlot) about the slot. */
@@ -301,7 +280,6 @@ namespace GraphResources
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
 		std::shared_ptr<org::VersionedBuffer> bufferSlot;  // a versioned structured buffer's (Options::versioned)
-		std::optional<Extent> requestedSize;          // RequestSize's, until the next frame boundary
 		std::uint32_t exportLayout = 0;               // an exported texture's resting VkImageLayout, the same for every version
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
@@ -333,15 +311,7 @@ namespace GraphResources
 		/** @brief Stage of zeros into every subresource: texels or blocks of zero bytes, as DXVK's new images hold. */
 		std::shared_ptr<const StagedUpload> StageZeros() const;
 
-		/** @brief Recreates the texture at a new size. Same-shape versioned textures become a new version, else call FrameAnchors::Refresh.
-		*  Only at a frame boundary. Returns false when the size is unchanged. */
-		bool Resize(UINT a_width, UINT a_height);
-
-		/** @brief The size the texture takes at the next frame boundary. Render thread, at any point of a frame. */
-		void RequestSize(UINT a_width, UINT a_height);
-
 		Extent CurrentExtent() const override;
-		bool ResizeTo(const Extent& a_extent) override;
 
 	protected:
 		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
@@ -364,14 +334,7 @@ namespace GraphResources
 		/** @brief Texture2D::Stage for mip 0 only: one entry per depth slice, in order. Mips past the first are left as they are. */
 		std::shared_ptr<const StagedUpload> Stage(std::span<const SubresourceData> a_depthSlices) const;
 
-		/** @brief Texture2D::Resize with a depth. */
-		bool Resize(UINT a_width, UINT a_height, UINT a_depth);
-
-		/** @brief Texture2D::RequestSize with a depth. */
-		void RequestSize(UINT a_width, UINT a_height, UINT a_depth);
-
 		Extent CurrentExtent() const override;
-		bool ResizeTo(const Extent& a_extent) override;
 
 	protected:
 		bool ShapeAt(const Extent& a_extent, ExportDesc& a_out) const override;
@@ -428,7 +391,7 @@ namespace GraphResources
 		bool CreateUAV(const D3D11_UNORDERED_ACCESS_VIEW_DESC& a_desc);
 	};
 
-	/** @brief The twins' self-test, CS_ORG_GRAPHRES_SELFTEST=1. Writes, reads back, resizes and checks an exported texture. */
+	/** @brief The twins' self-test, CS_ORG_GRAPHRES_SELFTEST=1. Writes, reads back and checks an exported texture, and the setting pilot. */
 	namespace SelfTest
 	{
 		/** @brief Whether CS_ORG_GRAPHRES_SELFTEST=1 is set. */

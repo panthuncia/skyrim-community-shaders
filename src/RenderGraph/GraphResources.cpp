@@ -31,7 +31,6 @@
 #	include <atomic>
 #	include <bit>
 #	include <chrono>
-#	include <deque>
 #	include <map>
 #	include <mutex>
 #	include <shared_mutex>
@@ -586,15 +585,9 @@ namespace GraphResources
 
 	namespace
 	{
-		std::atomic<std::uint64_t> resizeGeneration{ 0 };
-
-		// The last resize generation bumps with their causes, named when the anchors build again.
-		constexpr std::size_t kResizeCauses = 16;
-		std::mutex resizeCauseLock;
-		std::deque<std::pair<std::uint64_t, std::string>> resizeCauses;
 		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
 
-		/** @brief Register may run on the build thread while Resize replaces a twin on the render thread. Register holds it shared. */
+		/** @brief Register may run on the build thread while adoption replaces a twin's resource on the render thread. Register holds it shared. */
 		std::shared_mutex& RegisterMutex()
 		{
 			static std::shared_mutex s_mutex;
@@ -691,36 +684,8 @@ namespace GraphResources
 			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph));
 		}
 		if (a_previous)
-			logger::info("[ORG] {}: another shape class after a resize; a new slot, built again", name);
+			logger::info("[ORG] {}: another shape class; a new slot, built again", name);
 		return false;
-	}
-
-	std::uint64_t Resource::ResizeGeneration()
-	{
-		return resizeGeneration.load(std::memory_order_acquire);
-	}
-
-	void Resource::BumpResizeGeneration(std::string_view a_who)
-	{
-		std::scoped_lock lock(resizeCauseLock);
-		const auto generation = resizeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
-		resizeCauses.emplace_back(generation, std::string(a_who));
-		if (resizeCauses.size() > kResizeCauses)
-			resizeCauses.pop_front();
-	}
-
-	std::string Resource::ResizeCauses(std::uint64_t a_since)
-	{
-		std::scoped_lock lock(resizeCauseLock);
-		std::string causes;
-		for (const auto& [generation, who] : resizeCauses) {
-			if (generation <= a_since)
-				continue;
-			if (!causes.empty())
-				causes += ", ";
-			causes += who;
-		}
-		return causes.empty() ? std::string("unknown") : causes;
 	}
 
 	void Resource::Register(org::RenderGraph& a_graph) const
@@ -929,8 +894,6 @@ namespace GraphResources
 		}
 		RenderGraph::SetMadeImageSlot(graph.get(), slot);
 		NameViews();
-		if (requestedSize == extent)
-			requestedSize.reset();
 		if (a_prepared.exported)
 			logger::info("[ORG] {}: adopted its prepared version at {}x{}x{} (D3D11 export {:.3f} ms)", name, extent[0], extent[1], extent[2], exportMs);
 		else
@@ -939,21 +902,10 @@ namespace GraphResources
 
 	namespace
 	{
-		Resource::SizeWishHook& TwinSizeWishHook()
-		{
-			static Resource::SizeWishHook s_hook;
-			return s_hook;
-		}
-
 		UINT TwinMipsOf3D(const D3D11_TEXTURE3D_DESC& a_desc)
 		{
 			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
 		}
-	}
-
-	void Resource::SetSizeWishHook(SizeWishHook a_hook)
-	{
-		TwinSizeWishHook() = std::move(a_hook);
 	}
 
 	Extent Texture2D::CurrentExtent() const
@@ -980,11 +932,6 @@ namespace GraphResources
 		a_out.miscFlags = desc.MiscFlags;
 		a_out.array = options.array;
 		return true;
-	}
-
-	bool Texture2D::ResizeTo(const Extent& a_extent)
-	{
-		return a_extent[2] == 1 && Resize(a_extent[0], a_extent[1]);
 	}
 
 	void Texture2D::SetExtent(const Extent& a_extent)
@@ -1017,11 +964,6 @@ namespace GraphResources
 		a_out.bindFlags = desc.BindFlags;
 		a_out.miscFlags = desc.MiscFlags;
 		return true;
-	}
-
-	bool Texture3D::ResizeTo(const Extent& a_extent)
-	{
-		return Resize(a_extent[0], a_extent[1], a_extent[2]);
 	}
 
 	void Texture3D::SetExtent(const Extent& a_extent)
@@ -1091,100 +1033,11 @@ namespace GraphResources
 		return Stage(subresources);
 	}
 
-	bool Texture2D::Resize(UINT a_width, UINT a_height)
-	{
-		if (a_width == desc.Width && a_height == desc.Height)
-			return false;
-		std::unique_lock lock(RegisterMutex());
-		const UINT mips = MipsOf(desc);
-		auto previous = slot;
-		Reset();
-		desc.Width = a_width;
-		desc.Height = a_height;
-		Create();
-		if (AdoptSlot(std::move(previous), MipsOf(desc) == mips)) {
-			logger::info("[ORG] {}: resized to {}x{} as a new version", name, a_width, a_height);
-			return true;
-		}
-		BumpResizeGeneration(name);
-		return true;
-	}
-
-	namespace
-	{
-		struct SizeRequest
-		{
-			std::weak_ptr<const void> alive;
-			std::function<void()> apply;
-		};
-
-		std::vector<SizeRequest>& SizeRequests()
-		{
-			static std::vector<SizeRequest> s_requests;
-			return s_requests;
-		}
-
-		/** @brief Applies every waiting resize at the frame boundary. A twin destroyed since has none. */
-		void ApplySizeRequests()
-		{
-			for (auto& request : std::exchange(SizeRequests(), {}))
-				if (const auto alive = request.alive.lock())
-					request.apply();
-		}
-	}
-
-	void Resource::RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize)
-	{
-		if (a_current) {
-			if (std::exchange(requestedSize, std::nullopt) && TwinSizeWishHook())
-				TwinSizeWishHook()(*this, requestedSize);
-			return;
-		}
-		if (requestedSize == a_size)
-			return;
-		const bool queued = requestedSize.has_value();
-		requestedSize = a_size;
-		// A taker of wishes serves them instead of the next frame boundary.
-		if (TwinSizeWishHook()) {
-			TwinSizeWishHook()(*this, requestedSize);
-			return;
-		}
-		if (queued)
-			return;
-		auto apply = [this, resize = std::move(a_resize)] {
-			const auto size = std::exchange(requestedSize, std::nullopt);
-			if (!size)
-				return;
-			resize(*size);
-			if (!graph || (Exported() && !d3d11)) {
-				const auto message = fmt::format("Community Shaders: {} could not be made again at {}x{}x{} at a frame boundary", name, (*size)[0], (*size)[1], (*size)[2]);
-				logger::critical("[ORG] {}", message);
-				stl::report_and_fail(message);
-			}
-		};
-		auto& requests = SizeRequests();
-		requests.push_back({ alive, std::move(apply) });
-		if (requests.size() == 1)
-			RenderGraph::Frame::Driver::AtNextBegin(ApplySizeRequests);
-	}
-
-	void Texture2D::RequestSize(UINT a_width, UINT a_height)
-	{
-		RequestExtent({ a_width, a_height, 1 }, a_width == desc.Width && a_height == desc.Height,
-			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1]); });
-	}
-
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		Create();
 		AdoptSlot(nullptr, false);
-	}
-
-	void Texture3D::RequestSize(UINT a_width, UINT a_height, UINT a_depth)
-	{
-		RequestExtent({ a_width, a_height, a_depth }, a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth,
-			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1], a_size[2]); });
 	}
 
 	void Texture3D::Create()
@@ -1210,29 +1063,6 @@ namespace GraphResources
 	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData> a_depthSlices) const
 	{
 		return StageTexture(graph, name, desc.Format, desc.Width, desc.Height, desc.Depth, 1, 1, a_depthSlices);
-	}
-
-	bool Texture3D::Resize(UINT a_width, UINT a_height, UINT a_depth)
-	{
-		if (a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth)
-			return false;
-		std::unique_lock lock(RegisterMutex());
-		const auto mipsOf = [](const D3D11_TEXTURE3D_DESC& a_desc) {
-			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
-		};
-		const UINT mips = mipsOf(desc);
-		auto previous = slot;
-		Reset();
-		desc.Width = a_width;
-		desc.Height = a_height;
-		desc.Depth = a_depth;
-		Create();
-		if (AdoptSlot(std::move(previous), mipsOf(desc) == mips)) {
-			logger::info("[ORG] {}: resized to {}x{}x{} as a new version", name, a_width, a_height, a_depth);
-			return true;
-		}
-		BumpResizeGeneration(name);
-		return true;
 	}
 
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options) :
@@ -1399,18 +1229,12 @@ namespace GraphResources
 	std::shared_ptr<const PreparePlan> Resource::PlanPrepare(const Extent&) const { return nullptr; }
 	PreparedVersion Resource::Prepare(const PreparePlan&) { return {}; }
 	void Resource::AdoptPrepared(const PreparedVersion&) {}
-	void Resource::SetSizeWishHook(SizeWishHook) {}
 	Extent Texture2D::CurrentExtent() const { return { desc.Width, desc.Height, 1u }; }
 	bool Texture2D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
 	void Texture2D::SetExtent(const Extent&) {}
-	bool Texture2D::ResizeTo(const Extent&) { return false; }
 	Extent Texture3D::CurrentExtent() const { return { desc.Width, desc.Height, desc.Depth }; }
 	bool Texture3D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
 	void Texture3D::SetExtent(const Extent&) {}
-	bool Texture3D::ResizeTo(const Extent&) { return false; }
-	std::uint64_t Resource::ResizeGeneration() { return 0; }
-	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }
-	void Resource::BumpResizeGeneration(std::string_view) {}
 	void Resource::Register(org::RenderGraph&) const {}
 	void Resource::Reset() {}
 	void Resource::NameViews() const {}
@@ -1422,14 +1246,10 @@ namespace GraphResources
 	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>>) { return nullptr; }
 	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData>, UINT, UINT) const { return nullptr; }
 	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const { return nullptr; }
-	bool Texture2D::Resize(UINT, UINT) { return false; }
-	void Texture2D::RequestSize(UINT, UINT) {}
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture3D::Create() {}
 	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData>) const { return nullptr; }
-	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
-	void Texture3D::RequestSize(UINT, UINT, UINT) {}
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), count(a_count), stride(a_desc.StructureByteStride), bindFlags(a_desc.BindFlags) {}
 	bool StructuredBuffer::Export(org::Resource&, UINT, winrt::com_ptr<ID3D11Resource>&, winrt::com_ptr<ID3D11ShaderResourceView>&,

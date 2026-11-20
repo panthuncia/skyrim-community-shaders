@@ -552,7 +552,6 @@ namespace FrameAnchors
 			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports; // by graph id. Ids of one image share an entry
 			std::vector<std::weak_ptr<EngineImport>> loose;                             // ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
-			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
 			std::vector<RetiredGates> retired;
 			// Per anchor, runs since the last Present seal, and the most ever in one frame for LogRunStats.
@@ -753,7 +752,7 @@ namespace FrameAnchors
 				snapshot->clients.push_back(client.desc);
 				for (std::size_t i = 0; i < client.desc->passes.size(); ++i) {
 					const auto& pass = client.desc->passes[i];
-					// A one-shot pass that ran is left out until it is armed again.
+					// A one-shot pass that ran is left out until a new registration of its client.
 					if (!pass.once || client.armed[i])
 						snapshot->passes.push_back({ client.desc, &pass });
 				}
@@ -802,11 +801,11 @@ namespace FrameAnchors
 				GraphResources::RequestStructuralRebuild(fmt::format("frame anchors: {}", a_reason), epochs);
 		}
 
-		std::uint32_t AnchorMask(const ClientDesc& a_client, bool a_onceOnly = false)
+		std::uint32_t AnchorMask(const ClientDesc& a_client)
 		{
 			std::uint32_t mask = 0;
 			for (const auto& pass : a_client.passes)
-				if (IndexOf(pass.anchor) < kAnchors && (!a_onceOnly || pass.once))
+				if (IndexOf(pass.anchor) < kAnchors)
 					mask |= 1u << IndexOf(pass.anchor);
 			return mask;
 		}
@@ -1941,27 +1940,15 @@ namespace FrameAnchors
 		return client && index < kAnchors && client->serial <= BuiltSerial(state, index);
 	}
 
-	void Rearm(std::string_view a_id)
+	void RebuildForReplacedImports(std::string_view a_reason)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
-		auto* client = FindClient(state, a_id);
-		if (!client)
-			return;
-		bool armed = false;
-		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
-			if (client->desc->passes[i].once && !client->armed[i]) {
-				client->armed[i] = 1;
-				armed = true;
-			}
-		if (!armed)
-			return;
+		// The imports' new slots go in the snapshot, and every client is current with it.
 		Publish(state);
-		for (std::size_t i = 0; i < client->desc->passes.size(); ++i)
-			if (client->armed[i] == 1)
-				client->armed[i] = state.serial;
-		const RenderGraph::Frame::Boundary::Change change(client->desc->id, "rearm");
-		Rebuild(state, AnchorMask(*client->desc, true), fmt::format("client '{}' armed its one-shot passes", client->desc->id));
+		for (auto& client : state.clients)
+			MarkCurrent(state, client);
+		StructuralRebuild(state, ~0u, a_reason);
 	}
 
 	void SetLateEpochHook(std::function<void()> a_hook)
@@ -1971,7 +1958,7 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/** @brief Before a run, joins clients waiting for the shared constants and rebuilds every anchor graph after a twin resize. */
+		/** @brief Before a run, joins clients waiting for the shared constants. */
 		void Service(State& a_state)
 		{
 			const bool waiting = std::ranges::any_of(a_state.clients, [](const Client& a_client) { return !InGraphs(*a_client.desc); });
@@ -1997,17 +1984,6 @@ namespace FrameAnchors
 				for (const auto& client : failed)
 					RetireGates(a_state, *client);
 				FailClients(fmt::format("the clients [{}] could not join the graphs", IdsOf(failed)), "the shared constants they read could not be made");
-			}
-			const std::uint64_t generation = GraphResources::Resource::ResizeGeneration();
-			if (generation != a_state.resizeGeneration) {
-				// The log names what moved the generation since this state last looked.
-				const auto causes = GraphResources::Resource::ResizeCauses(a_state.resizeGeneration);
-				a_state.resizeGeneration = generation;
-				PublishedResources::Refresh();
-				Publish(a_state);
-				for (auto& client : a_state.clients)
-					MarkCurrent(a_state, client);
-				StructuralRebuild(a_state, ~0u, fmt::format("graph resources resized by {} (a twin that is not versioned, or another shape class)", causes));
 			}
 		}
 
@@ -4469,7 +4445,7 @@ namespace FrameAnchors
 	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&) { return {}; }
 	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view) { return {}; }
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
-	void Rearm(std::string_view) {}
+	void RebuildForReplacedImports(std::string_view) {}
 	void SetLateEpochHook(std::function<void()>) {}
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }

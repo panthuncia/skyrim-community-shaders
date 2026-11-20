@@ -61,13 +61,13 @@ namespace RenderGraph::Frame::Revision
 		// The starvation rule (plan 7.8): recordings dropped and asked for again this often with no new input is a schedule bug.
 		constexpr std::uint64_t kRevisionStarvedAfter = 4 * RenderGraphRuntime::kGameFramesInFlight;
 
-		/** @brief A twin's newest size wish, held by its Alive() token since the twin may go first. */
-		struct RevisionWish
+		/** @brief A declared texture's newest extent, held by its twin's Alive() token since the twin may go first. */
+		struct ExtentRequest
 		{
 			std::weak_ptr<const void> alive;
 			GraphResources::Resource* twin = nullptr;
 			Extent extent{};
-			std::uint64_t frame = 0;  // the frame of the first wish since the twin last had its wished size
+			std::uint64_t frame = 0;  // the frame of the first extent since the twin last had the one asked for
 			std::uint64_t renew = 0;  // nonzero: a new version even at the twin's extent (a declaration's renew count changed)
 		};
 
@@ -75,7 +75,7 @@ namespace RenderGraph::Frame::Revision
 		* @brief A buffer's newest contents, waiting for the next revision. A declared buffer's (Frame::DeclareBuffer) has no bytes:
 		* its new element count needs no upload, and its twin takes the version at adoption.
 		*/
-		struct BufferWish
+		struct BufferRequest
 		{
 			std::weak_ptr<org::VersionedBuffer> buffer;
 			std::uint32_t elements = 0;
@@ -86,7 +86,7 @@ namespace RenderGraph::Frame::Revision
 		};
 
 		/** @brief A texture the caller made, waiting to become its slot's next version (PublishTexture). */
-		struct TextureWish
+		struct TextureRequest
 		{
 			std::weak_ptr<org::VersionedTexture> texture;
 			std::shared_ptr<org::GloballyIndexedResource> image;
@@ -168,9 +168,9 @@ namespace RenderGraph::Frame::Revision
 			std::vector<std::string> names;
 			std::vector<Extent> from;  // each twin's extent when planned
 			std::vector<Extent> to;
-			std::vector<std::uint64_t> renews;  // each twin's wish renew serial when planned
-			std::vector<BufferWish> bufferWishes;
-			std::vector<TextureWish> textureWishes;  // kept until adoption, so a superseded revision can give them back
+			std::vector<std::uint64_t> renews;  // each twin's renew serial when planned
+			std::vector<BufferRequest> bufferRequests;
+			std::vector<TextureRequest> textureRequests;  // kept until adoption, so a superseded revision can give them back
 			// The newest variables when it started, and the names of those changed since the revision before.
 			std::shared_ptr<const org::services::VariableSnapshot> variables;
 			std::string changedVariables;
@@ -179,14 +179,14 @@ namespace RenderGraph::Frame::Revision
 			std::shared_ptr<org::async::RevisionFragment> inputWaitsFragment;
 			// The stage builds its declared clients' registrations need (Frame/Declare.h).
 			std::vector<FrameAnchors::StageBuildNeed> needs;
-			std::uint64_t firstWish = 0;
+			std::uint64_t firstInput = 0;
 			std::uint64_t planned = 0;  // the frame it was handed to the lane
 			std::shared_ptr<org::runtime::IUploadService> uploads;
 			org::GraphHost* host = nullptr;
 			// Written on the lane, then done.
 			std::vector<GraphResources::PreparedVersion> versions;
 			std::shared_ptr<const org::services::TextureVersionsMade> made;
-			std::vector<std::shared_ptr<org::VersionedTexture>> published;  // the slots of textureWishes still alive
+			std::vector<std::shared_ptr<org::VersionedTexture>> published;  // the slots of textureRequests still alive
 			std::vector<std::string> publishedNames;
 			std::shared_ptr<const RevisionBuffers> buffers;
 			std::shared_ptr<org::async::RevisionFragment> buffersFragment;
@@ -206,9 +206,9 @@ namespace RenderGraph::Frame::Revision
 
 		struct RevisionStats
 		{
-			std::uint64_t prepared = 0, adopted = 0, superseded = 0, resized = 0, askedAgain = 0, builds = 0, buffers = 0, variableRevisions = 0;
+			std::uint64_t prepared = 0, adopted = 0, superseded = 0, askedAgain = 0, builds = 0, buffers = 0, variableRevisions = 0;
 			std::uint32_t maxMembers = 0, maxRecordings = 0, maxBuilds = 0;
-			std::vector<std::uint64_t> wishFrames;
+			std::vector<std::uint64_t> inputFrames;
 		};
 
 		struct Coordinator
@@ -220,21 +220,20 @@ namespace RenderGraph::Frame::Revision
 			org::async::SerializedTaskPump* pump = nullptr;
 			// Buffer contents, from any thread.
 			std::mutex bufferMutex;
-			std::map<const void*, BufferWish> bufferWishes;
-			std::uint64_t bufferFirstWish = 0;
+			std::map<const void*, BufferRequest> bufferRequests;
+			std::uint64_t bufferFirstInput = 0;
 			// Textures the callers made, from any thread.
 			std::mutex textureMutex;
-			std::map<const void*, TextureWish> textureWishes;
-			std::uint64_t textureFirstWish = 0;
-			std::atomic<std::uint64_t> beginFrame{ 0 };  // the frame of the last Begin, for wishes from other threads
+			std::map<const void*, TextureRequest> textureRequests;
+			std::uint64_t textureFirstInput = 0;
+			std::atomic<std::uint64_t> beginFrame{ 0 };  // the frame of the last Begin, for extents from other threads
 			std::map<const void*, std::shared_ptr<const void>> adoptedPayloads;
 			// Render thread from here.
-			std::map<GraphResources::Resource*, RevisionWish> wishes;
-			std::map<GraphResources::Resource*, RevisionWish> resizes;  // wishes no version serves
-			std::uint64_t wishSerial = 0;
+			std::map<GraphResources::Resource*, ExtentRequest> extents;
+			std::uint64_t extentSerial = 0;
 			std::uint64_t renewSerial = 0;
 			std::uint64_t plannedSerial = 0;
-			std::uint64_t askedAgainSinceWish = 0;
+			std::uint64_t askedAgainSinceInput = 0;
 			std::uint64_t serials = 0;
 			// The variables: the newest snapshot taken at Begin and the one the last started revision carries.
 			std::shared_ptr<const org::services::VariableSnapshot> variables;
@@ -307,13 +306,13 @@ namespace RenderGraph::Frame::Revision
 		{
 			std::vector<RevisionBuffer> entries;
 			std::vector<std::shared_ptr<org::TrackedUploadTicket>> tickets;
-			for (auto& wish : a_job.bufferWishes) {
-				auto buffer = wish.buffer.lock();
+			for (auto& input : a_job.bufferRequests) {
+				auto buffer = input.buffer.lock();
 				if (!buffer)
 					continue;
-				RevisionBuffer entry{ .key = buffer->Key(), .buffer = buffer, .elements = wish.elements, .payload = std::move(wish.payload), .bytes = std::move(wish.bytes),
-					.twinAlive = wish.twinAlive, .twin = wish.twin };
-				entry.version = buffer->MakeStructured(wish.elements);
+				RevisionBuffer entry{ .key = buffer->Key(), .buffer = buffer, .elements = input.elements, .payload = std::move(input.payload), .bytes = std::move(input.bytes),
+					.twinAlive = input.twinAlive, .twin = input.twin };
+				entry.version = buffer->MakeStructured(input.elements);
 				entry.name = entry.version->buffer ? entry.version->buffer->GetName() : std::string("a buffer");
 				if (!entry.bytes) {
 					entries.push_back(std::move(entry));
@@ -330,7 +329,7 @@ namespace RenderGraph::Frame::Revision
 				tickets.push_back(std::move(ticket));
 				entries.push_back(std::move(entry));
 			}
-			a_job.bufferWishes.clear();
+			a_job.bufferRequests.clear();
 			if (entries.empty())
 				return;
 			auto buffers = std::make_shared<const RevisionBuffers>(std::move(entries));
@@ -389,17 +388,17 @@ namespace RenderGraph::Frame::Revision
 					job->versions.push_back(std::move(prepared));
 				}
 				// The callers' textures: their passes write them once adopted, so nothing fills them.
-				for (const auto& wish : job->textureWishes) {
-					auto texture = wish.texture.lock();
+				for (const auto& input : job->textureRequests) {
+					auto texture = input.texture.lock();
 					if (!texture)
 						continue;
 					org::services::TextureVersionRequest request;
 					request.slot = texture;
-					request.image = wish.image;
+					request.image = input.image;
 					request.contents = org::services::TextureContents::Undefined;
-					request.owner = wish.owner;
+					request.owner = input.owner;
 					requests.push_back(std::move(request));
-					job->publishedNames.push_back(wish.image->GetName());
+					job->publishedNames.push_back(input.image->GetName());
 					job->published.push_back(std::move(texture));
 				}
 				if (!requests.empty())
@@ -438,62 +437,34 @@ namespace RenderGraph::Frame::Revision
 			return *coordinator.pump;
 		}
 
-		/** @brief A twin's new wish. a_renew asks for a new version even at its current extent. Render thread. */
-		void OnWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent, bool a_renew)
+		/** @brief A declared texture's new extent. a_renew asks for a new version even at its current extent. Render thread. */
+		void OnExtent(GraphResources::Resource& a_twin, const Extent& a_extent, bool a_renew)
 		{
 			auto& coordinator = GetCoordinator();
-			++coordinator.wishSerial;
+			++coordinator.extentSerial;
 			// A new event: drops asked again before it are not starvation.
-			coordinator.askedAgainSinceWish = 0;
-			coordinator.resizes.erase(&a_twin);
-			if (!a_extent) {
-				coordinator.wishes.erase(&a_twin);
-				return;
-			}
+			coordinator.askedAgainSinceInput = 0;
+			// A declared texture changes only its extent, so another shape class is a declaration error.
+			if (!a_twin.Preparable(a_extent))
+				FailRevision(fmt::format("{} has no version at {}: the extent changes its shape class (mips or slices)", a_twin.Name(), ExtentText(a_extent)));
 			const auto frame = Driver::Current().frame;
-			if (!a_twin.Preparable(*a_extent)) {
-				coordinator.wishes.erase(&a_twin);
-				coordinator.resizes[&a_twin] = { a_twin.Alive(), &a_twin, *a_extent, frame };
-				return;
-			}
-			auto& wish = coordinator.wishes[&a_twin];
-			const bool standing = wish.twin == &a_twin && !wish.alive.expired();
-			// A renew no revision served yet stands through a later size wish.
-			const std::uint64_t renew = a_renew ? ++coordinator.renewSerial : (standing ? wish.renew : 0);
-			wish = { a_twin.Alive(), &a_twin, *a_extent, standing ? wish.frame : frame, renew };
+			auto& input = coordinator.extents[&a_twin];
+			const bool standing = input.twin == &a_twin && !input.alive.expired();
+			// A renew no revision served yet stands through a later extent.
+			const std::uint64_t renew = a_renew ? ++coordinator.renewSerial : (standing ? input.renew : 0);
+			input = { a_twin.Alive(), &a_twin, a_extent, standing ? input.frame : frame, renew };
 		}
 
 		/** @brief A declared buffer's new element count, a version for the next revision. Latest wins. Render thread. */
-		void OnBufferWish(Coordinator& a_coordinator, GraphResources::StructuredBuffer& a_buffer, std::uint32_t a_elements, std::uint64_t a_frame)
+		void OnBufferElements(Coordinator& a_coordinator, GraphResources::StructuredBuffer& a_buffer, std::uint32_t a_elements, std::uint64_t a_frame)
 		{
 			const auto& slot = a_buffer.BufferVersions();
 			if (!slot)
 				FailRevision(fmt::format("{} has a new element count but no versions", a_buffer.Name()));
 			const std::lock_guard lock(a_coordinator.bufferMutex);
-			if (a_coordinator.bufferWishes.empty())
-				a_coordinator.bufferFirstWish = a_frame;
-			a_coordinator.bufferWishes[slot->Key()] = { slot, a_elements, nullptr, nullptr, a_buffer.Alive(), &a_buffer };
-		}
-
-		/** @brief The hook RequestSize calls on every change of a twin's wish. Render thread. */
-		void OnSizeWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent)
-		{
-			OnWish(a_twin, a_extent, false);
-		}
-
-		/** @brief Wishes no version serves take today's path: the twin is made again now, inside the adoption point. */
-		void ApplyResizes(Coordinator& a_coordinator)
-		{
-			for (auto& [twin, wish] : std::exchange(a_coordinator.resizes, {})) {
-				if (wish.alive.expired() || twin->CurrentExtent() == wish.extent)
-					continue;
-				twin->ResizeTo(wish.extent);
-				if (!*twin)
-					FailRevision(fmt::format("{} could not be made again at {} at a frame boundary", twin->Name(), ExtentText(wish.extent)));
-				const std::lock_guard lock(a_coordinator.statsMutex);
-				++a_coordinator.window.resized;
-				++a_coordinator.session.resized;
-			}
+			if (a_coordinator.bufferRequests.empty())
+				a_coordinator.bufferFirstInput = a_frame;
+			a_coordinator.bufferRequests[slot->Key()] = { slot, a_elements, nullptr, nullptr, a_buffer.Alive(), &a_buffer };
 		}
 
 		/** @brief The variables a_newer changed since a_older. Without a_older, the variables written at least once. */
@@ -532,7 +503,7 @@ namespace RenderGraph::Frame::Revision
 		}
 
 		/**
-		* @brief Hands the standing inputs to the lane as the next revision: size wishes and buffer contents. With none of those, a
+		* @brief Hands the standing inputs to the lane as the next revision: declared extents and buffer contents. With none of those, a
 		* staged stage build makes a revision of its own. Only one is prepared at a time.
 		*/
 		void StartPreparation(Coordinator& a_coordinator, std::uint64_t a_frame)
@@ -546,69 +517,66 @@ namespace RenderGraph::Frame::Revision
 			// Without a graph (plain D3D11, or before the graph is up) a revision carries only variables.
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto job = std::make_shared<PreparedRevision>();
-			job->firstWish = UINT64_MAX;
-			// The declarations follow the values this revision starts with. Their new extents are wishes, collected below.
+			job->firstInput = UINT64_MAX;
+			// The declarations follow the values this revision starts with. Their new extents are collected below.
 			if (host && a_coordinator.variables) {
 				job->needs = std::exchange(a_coordinator.carriedNeeds, {});
 				auto needs = Declarations::Evaluate(
 					*a_coordinator.variables,
 					[](GraphResources::Resource& a_twin, const std::array<unsigned int, 3>& a_extent, bool a_renew) {
-						OnWish(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] }, a_renew);
+						OnExtent(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] }, a_renew);
 					},
 					[&a_coordinator, a_frame](GraphResources::StructuredBuffer& a_buffer, std::uint32_t a_elements) {
-						OnBufferWish(a_coordinator, a_buffer, a_elements, a_frame);
+						OnBufferElements(a_coordinator, a_buffer, a_elements, a_frame);
 					});
 				for (auto& need : needs)
 					job->needs.push_back(std::move(need));
 			}
-			if (host && !a_coordinator.wishes.empty() && a_coordinator.plannedSerial != a_coordinator.wishSerial) {
-				for (auto it = a_coordinator.wishes.begin(); it != a_coordinator.wishes.end();) {
-					auto& [twin, wish] = *it;
-					if (wish.alive.expired() || (!wish.renew && twin->CurrentExtent() == wish.extent)) {
-						it = a_coordinator.wishes.erase(it);
+			if (host && !a_coordinator.extents.empty() && a_coordinator.plannedSerial != a_coordinator.extentSerial) {
+				for (auto it = a_coordinator.extents.begin(); it != a_coordinator.extents.end();) {
+					auto& [twin, input] = *it;
+					if (input.alive.expired() || (!input.renew && twin->CurrentExtent() == input.extent)) {
+						it = a_coordinator.extents.erase(it);
 						continue;
 					}
-					auto plan = twin->PlanPrepare(wish.extent);
-					if (!plan) {
-						a_coordinator.resizes[twin] = wish;
-						it = a_coordinator.wishes.erase(it);
-						continue;
-					}
+					auto plan = twin->PlanPrepare(input.extent);
+					if (!plan)
+						FailRevision(fmt::format("{} has no version at {}: it is not a live versioned texture of that shape class", twin->Name(), ExtentText(input.extent)));
 					job->plans.push_back(std::move(plan));
 					job->twins.push_back(twin);
-					job->alive.push_back(wish.alive);
+					job->alive.push_back(input.alive);
 					job->names.push_back(twin->Name());
 					job->from.push_back(twin->CurrentExtent());
-					job->to.push_back(wish.extent);
-					job->renews.push_back(wish.renew);
-					job->firstWish = (std::min)(job->firstWish, wish.frame);
+					job->to.push_back(input.extent);
+					job->renews.push_back(input.renew);
+					job->firstInput = (std::min)(job->firstInput, input.frame);
 					++it;
 				}
-				a_coordinator.plannedSerial = a_coordinator.wishSerial;
+				a_coordinator.plannedSerial = a_coordinator.extentSerial;
 			}
 			if (host) {
 				const std::lock_guard lock(a_coordinator.bufferMutex);
-				for (auto& [key, wish] : std::exchange(a_coordinator.bufferWishes, {}))
-					job->bufferWishes.push_back(std::move(wish));
-				if (!job->bufferWishes.empty())
-					job->firstWish = (std::min)(job->firstWish, a_coordinator.bufferFirstWish);
+				for (auto& [key, input] : std::exchange(a_coordinator.bufferRequests, {}))
+					job->bufferRequests.push_back(std::move(input));
+				if (!job->bufferRequests.empty())
+					job->firstInput = (std::min)(job->firstInput, a_coordinator.bufferFirstInput);
 			}
 			if (host) {
 				const std::lock_guard lock(a_coordinator.textureMutex);
-				for (auto& [key, wish] : std::exchange(a_coordinator.textureWishes, {}))
-					job->textureWishes.push_back(std::move(wish));
-				if (!job->textureWishes.empty())
-					job->firstWish = (std::min)(job->firstWish, a_coordinator.textureFirstWish);
+				for (auto& [key, input] : std::exchange(a_coordinator.textureRequests, {}))
+					job->textureRequests.push_back(std::move(input));
+				if (!job->textureRequests.empty())
+					job->firstInput = (std::min)(job->firstInput, a_coordinator.textureFirstInput);
 			}
 			// The variables changed since the last revision started. Every revision carries the newest snapshot.
 			const bool variablesChanged = a_coordinator.variables && a_coordinator.variables != a_coordinator.startedVariables;
 			if (variablesChanged)
-				job->firstWish = (std::min)(job->firstWish, a_coordinator.variablesFirstChange);
-			const bool lane = !job->plans.empty() || !job->bufferWishes.empty() || !job->textureWishes.empty();
+				job->firstInput = (std::min)(job->firstInput, a_coordinator.variablesFirstChange);
+			const bool lane = !job->plans.empty() || !job->bufferRequests.empty() || !job->textureRequests.empty();
 			if (!lane && !(host && FrameAnchors::StagedStages()) && !variablesChanged && job->needs.empty())
 				return;
-			if (job->firstWish == UINT64_MAX)
-				job->firstWish = a_frame;
+			if (job->firstInput == UINT64_MAX)
+				job->firstInput = a_frame;
 			if (variablesChanged)
 				job->changedVariables = Vars::Lane::ChangedNames(*a_coordinator.variables, a_coordinator.startedVariables.get());
 			job->serial = ++a_coordinator.serials;
@@ -664,15 +632,15 @@ namespace RenderGraph::Frame::Revision
 			if (revision->buffers) {
 				const std::lock_guard lock(a_coordinator.bufferMutex);
 				for (const auto& entry : revision->buffers->buffers)
-					if (const auto buffer = entry.buffer.lock(); buffer && !a_coordinator.bufferWishes.contains(entry.key))
-						a_coordinator.bufferWishes[entry.key] = { buffer, entry.elements, entry.bytes, entry.payload, entry.twinAlive, entry.twin };
+					if (const auto buffer = entry.buffer.lock(); buffer && !a_coordinator.bufferRequests.contains(entry.key))
+						a_coordinator.bufferRequests[entry.key] = { buffer, entry.elements, entry.bytes, entry.payload, entry.twinAlive, entry.twin };
 			}
 			// So do its published textures.
 			{
 				const std::lock_guard lock(a_coordinator.textureMutex);
-				for (auto& wish : revision->textureWishes)
-					if (const auto texture = wish.texture.lock(); texture && !a_coordinator.textureWishes.contains(texture->Key()))
-						a_coordinator.textureWishes[texture->Key()] = std::move(wish);
+				for (auto& input : revision->textureRequests)
+					if (const auto texture = input.texture.lock(); texture && !a_coordinator.textureRequests.contains(texture->Key()))
+						a_coordinator.textureRequests[texture->Key()] = std::move(input);
 			}
 			const std::lock_guard lock(a_coordinator.statsMutex);
 			++a_coordinator.window.superseded;
@@ -792,11 +760,11 @@ namespace RenderGraph::Frame::Revision
 			if (a_coordinator.adopted)
 				a_coordinator.retiring.emplace_back(DCLF::SubmittedRetirementPoint(), std::move(a_coordinator.adopted));
 			for (std::size_t i = 0; i < revision->twins.size(); ++i)
-				if (const auto it = a_coordinator.wishes.find(revision->twins[i]);
-					it != a_coordinator.wishes.end() && it->second.extent == revision->to[i] && it->second.renew == revision->renews[i])
-					a_coordinator.wishes.erase(it);
+				if (const auto it = a_coordinator.extents.find(revision->twins[i]);
+					it != a_coordinator.extents.end() && it->second.extent == revision->to[i] && it->second.renew == revision->renews[i])
+					a_coordinator.extents.erase(it);
 			const auto members = revision->recordings ? FrameAnchors::RevisionMembers(*revision->recordings) : std::vector<std::string>{};
-			const std::uint64_t wishFrames = a_frame > revision->firstWish ? a_frame - revision->firstWish : 0;
+			const std::uint64_t inputFrames = a_frame > revision->firstInput ? a_frame - revision->firstInput : 0;
 			const std::uint32_t bufferCount = buffers ? static_cast<std::uint32_t>(buffers->buffers.size()) : 0;
 			{
 				const std::lock_guard lock(a_coordinator.statsMutex);
@@ -808,7 +776,7 @@ namespace RenderGraph::Frame::Revision
 					stats->maxMembers = (std::max)(stats->maxMembers, static_cast<std::uint32_t>(members.size()));
 					stats->maxRecordings = (std::max)(stats->maxRecordings, revision->recordingCount);
 					stats->maxBuilds = (std::max)(stats->maxBuilds, static_cast<std::uint32_t>(stagedEpochs.size()));
-					stats->wishFrames.push_back(wishFrames);
+					stats->inputFrames.push_back(inputFrames);
 				}
 			}
 			if (++a_coordinator.adoptedLines <= 64 || a_coordinator.adoptedLines % 100 == 0) {
@@ -834,7 +802,7 @@ namespace RenderGraph::Frame::Revision
 					"[ORG] frame revision {}: adopted at frame {} with every member stage, {} frames after its first input (prepared in {:.2f} ms "
 					"on the lane); twins [{}]; buffers [{}]; variables [{}]; inputs [{}]; staged builds {}; member stages [{}] with {} recordings; not "
 					"members [{}]",
-					revision->serial, a_frame, wishFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, waits, stagedEpochs.size(),
+					revision->serial, a_frame, inputFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, waits, stagedEpochs.size(),
 					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others);
 			}
 			a_coordinator.adopted = std::move(revision);
@@ -943,21 +911,21 @@ namespace RenderGraph::Frame::Revision
 			const auto progress = FrameAnchors::AdvanceRevisionRecordings(*revision.recordings, a_frame);
 			// A staged build found first is a new input: drops before it are not starvation.
 			if (progress.newBuilds)
-				a_coordinator.askedAgainSinceWish = 0;
+				a_coordinator.askedAgainSinceInput = 0;
 			revision.askedAgain += progress.askedAgain;
-			a_coordinator.askedAgainSinceWish += progress.askedAgain;
+			a_coordinator.askedAgainSinceInput += progress.askedAgain;
 			if (progress.askedAgain) {
 				const std::lock_guard lock(a_coordinator.statsMutex);
 				a_coordinator.window.askedAgain += progress.askedAgain;
 				a_coordinator.session.askedAgain += progress.askedAgain;
 			}
-			if (!progress.ready && a_coordinator.askedAgainSinceWish > kRevisionStarvedAfter) {
+			if (!progress.ready && a_coordinator.askedAgainSinceInput > kRevisionStarvedAfter) {
 				Driver::NoteTapError(Driver::TapError::Starved, static_cast<SegmentId>(progress.missing),
 					fmt::format("frame revision {} (inputs from frame {}, {} staged builds) has not been adopted: {} of its recordings were asked for again "
 								"after they were dropped with no new input since (last: {}); still missing [{}]",
-						revision.serial, revision.firstWish, progress.builds, a_coordinator.askedAgainSinceWish,
+						revision.serial, revision.firstInput, progress.builds, a_coordinator.askedAgainSinceInput,
 						progress.dropReasons.empty() ? "none" : progress.dropReasons, progress.waiting));
-				a_coordinator.askedAgainSinceWish = 0;
+				a_coordinator.askedAgainSinceInput = 0;
 			}
 			if (!progress.ready || !inputsReady)
 				return;
@@ -980,14 +948,13 @@ namespace RenderGraph::Frame::Revision
 	{
 		auto& coordinator = GetCoordinator();
 		coordinator.installed = true;
-		GraphResources::Resource::SetSizeWishHook(&OnSizeWish);
 		// Bound settings raise their variable from here on.
 		CS::SettingRegistry::SetRaiseHook(&Vars::RaiseSetting);
 #	if !defined(CS_RELEASE_PROFILE)
 		Testing::RegisterExitReport([] { LogStats(); });
 #	endif
-		logger::info("[ORG] frame revision: size wishes, buffer contents, staged stage builds and variable changes are prepared off the render thread "
-					 "and adopted whole at a frame's Begin");
+		logger::info("[ORG] frame revision: declared extents, buffer contents, staged stage builds and variable changes are prepared off the render "
+					 "thread and adopted whole at a frame's Begin");
 	}
 
 	bool RegisterInputProducer(std::string_view a_variable, InputProducer a_producer)
@@ -1016,9 +983,8 @@ namespace RenderGraph::Frame::Revision
 			if (previous == coordinator.startedVariables)
 				coordinator.variablesFirstChange = frame;
 			// A new event: drops asked again before it are not starvation.
-			coordinator.askedAgainSinceWish = 0;
+			coordinator.askedAgainSinceInput = 0;
 		}
-		ApplyResizes(coordinator);
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
 		// A revision of builds alone needs no lane, so it is advanced in the Begin that starts it.
@@ -1038,9 +1004,9 @@ namespace RenderGraph::Frame::Revision
 		auto& coordinator = GetCoordinator();
 		const auto frame = coordinator.beginFrame.load(std::memory_order_relaxed);
 		const std::lock_guard lock(coordinator.bufferMutex);
-		if (coordinator.bufferWishes.empty())
-			coordinator.bufferFirstWish = frame;
-		coordinator.bufferWishes[a_buffer->Key()] = { a_buffer, a_elements, std::make_shared<std::vector<std::byte>>(std::move(a_bytes)), std::move(a_payload) };
+		if (coordinator.bufferRequests.empty())
+			coordinator.bufferFirstInput = frame;
+		coordinator.bufferRequests[a_buffer->Key()] = { a_buffer, a_elements, std::make_shared<std::vector<std::byte>>(std::move(a_bytes)), std::move(a_payload) };
 	}
 
 	void PublishTexture(const std::shared_ptr<org::VersionedTexture>& a_texture, std::shared_ptr<org::GloballyIndexedResource> a_image,
@@ -1051,9 +1017,9 @@ namespace RenderGraph::Frame::Revision
 		auto& coordinator = GetCoordinator();
 		const auto frame = coordinator.beginFrame.load(std::memory_order_relaxed);
 		const std::lock_guard lock(coordinator.textureMutex);
-		if (coordinator.textureWishes.empty())
-			coordinator.textureFirstWish = frame;
-		coordinator.textureWishes[a_texture->Key()] = { a_texture, std::move(a_image), std::move(a_owner) };
+		if (coordinator.textureRequests.empty())
+			coordinator.textureFirstInput = frame;
+		coordinator.textureRequests[a_texture->Key()] = { a_texture, std::move(a_image), std::move(a_owner) };
 	}
 
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer& a_buffer)
@@ -1073,12 +1039,12 @@ namespace RenderGraph::Frame::Revision
 		const auto& w = coordinator.window;
 		const auto& s = coordinator.session;
 		logger::info("[ORG] frame revision: prepared {}, adopted {}, superseded {}, members per revision (max {}), recordings per revision (max {}), builds "
-					 "per revision (max {}, {} in all), buffers {}, frames from first input to adoption (p50/p95/max) {}; recordings asked again {}, resized "
-					 "at Begin without a version {}; session: prepared {}, adopted {}, superseded {}, members (max {}), recordings (max {}), builds (max {}, "
-					 "{} in all), buffers {}, input to adoption {}, asked again {}, resized {}; with variable changes {} (session {})",
-			w.prepared, w.adopted, w.superseded, w.maxMembers, w.maxRecordings, w.maxBuilds, w.builds, w.buffers, Percentiles(w.wishFrames), w.askedAgain,
-			w.resized, s.prepared, s.adopted, s.superseded, s.maxMembers, s.maxRecordings, s.maxBuilds, s.builds, s.buffers, Percentiles(s.wishFrames),
-			s.askedAgain, s.resized, w.variableRevisions, s.variableRevisions);
+					 "per revision (max {}, {} in all), buffers {}, frames from first input to adoption (p50/p95/max) {}; recordings asked again {}; session: "
+					 "prepared {}, adopted {}, superseded {}, members (max {}), recordings (max {}), builds (max {}, {} in all), buffers {}, input to "
+					 "adoption {}, asked again {}; with variable changes {} (session {})",
+			w.prepared, w.adopted, w.superseded, w.maxMembers, w.maxRecordings, w.maxBuilds, w.builds, w.buffers, Percentiles(w.inputFrames), w.askedAgain,
+			s.prepared, s.adopted, s.superseded, s.maxMembers, s.maxRecordings, s.maxBuilds, s.builds, s.buffers, Percentiles(s.inputFrames),
+			s.askedAgain, w.variableRevisions, s.variableRevisions);
 		coordinator.window = {};
 		Vars::LogStats();
 	}

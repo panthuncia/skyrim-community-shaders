@@ -379,13 +379,14 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
     -   The image has no mutable format, so D3D11 views use the texture's own typed format. 3D textures take no RTV.
 -   **Rule: exported means not aliasable**, whatever the lifetime. D3D11's use is outside the graph, which would otherwise reuse
     the memory across it. A resource becomes aliasable when its last D3D11 reader is ported and the export goes.
--   **Teardown and resize.** `Reset`, the destructor and `Resize` release the D3D11 views and resource first. Then
+-   **Teardown and new versions.** `Reset`, the destructor and a new version's adoption release the D3D11 views and resource first. Then
     `RenderGraphRuntime::ReleaseAfterD3D11` holds the graph resource until an event query issued after that release completes
     (checked every frame). When D3D11 cannot make the query then, the owner is parked and a later frame issues it: nothing waits,
     and the query still follows the release in the stream. DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
-    A `Resize` bumps the twins' resize generation (`Resource::ResizeGeneration`). At their next run the anchors see it, build
-    their graphs again with the new resource, and `PublishedResources::Refresh` publishes it again under the twin's id: the owner
-    calls nothing. A pass reads `Graph()` when it is made, never across builds.
+    A twin keeps its size for life. A texture whose size follows a variable is declared (`Frame::DeclareTexture2D`,
+    `src/RenderGraph/Frame/Declare.h`): a new extent is a new version of the same slot, made on the revision lane and adopted
+    at a frame's Begin with every stage that declares it (docs/development/plans/frame-revision-plan.md). Passes declare the
+    slot (`Versioned()`), so no build follows. A pass reads `Graph()` when it is made, never across builds.
 
 ```cpp
 // A transient output written at DeferredPasses and bound by engine draws as a PS SRV until P5.
@@ -398,13 +399,11 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 // Later in the frame, the D3D11 reader:
 ID3D11ShaderResourceView* srv = out.SRV();
 context->PSSetShaderResources(45, 1, &srv);
-// At a resolution change: the anchors build again and the published id follows by themselves.
-out.Resize(width, height);
 ```
 
 `CS_ORG_GRAPHRES_SELFTEST=1` proves the path: a compute pass at DeferredPasses writes an exported texture, D3D11 copies it into
-a staging texture right after the epoch and reads one texel back, then the texture is resized (the first one released through
-`ReleaseAfterD3D11`) and checked again.
+a staging texture right after the epoch and reads one texel back. It also runs the `CS::Setting` pilot. Declared textures'
+new versions are covered by the `resize` tests.
 
 ### Publishing a graph resource to other epochs
 
@@ -421,9 +420,8 @@ colour passes reading a feature's output), the producer publishes it (`src/Rende
 -   The host extension `cs.org.published-resources` is added once and registers the latest entries at every build. A new id
     rebuilds only the graphs that looked it up (`GraphHost::RequestRebuildFor`); a reader that registers with it builds its own
     epoch. A pass that skips an id until it is published declares it through `PublishedResources::IsDeclarable`: its publish
-    then rebuilds every graph once, since the skipping build never looked it up. A new resource under a known id (after a
-    `Resize`) rebuilds every graph, since each holds the old one. After a twin's `Resize` the anchors do it
-    (`PublishedResources::Refresh`); the producer need not publish again.
+    then rebuilds every graph once, since the skipping build never looked it up. A new resource under a known id rebuilds
+    every graph, since each holds the old one. A versioned twin is published as its slot, so its new versions need nothing.
 -   `Withdraw(id)` when the producer leaves its ORG path (a setting that turns it off, a runtime that stopped). Readers then go back to D3D11.
     The resource stays registered until the next `Publish` under that id, because a graph built earlier may still declare it.
 -   `ShaderResourceIndex(id, index)` gives the bindless index of the whole-resource SRV (every mip; a cube's `TextureCube` view, a 2D
@@ -700,11 +698,11 @@ fill and clear frame counts). A pass's revision stays a function of what it was 
     no work, and never repeats an older run's counts. A copy has no indirect form: one that runs on some runs only is a raster
     copy through a gate, or a separate one-shot pass.
 -   **One-shot passes** (`PassDesc::once`). A clear, an upload or a fill. The pass is in its anchor's graph until one run with it
-    has been submitted, then the graph is built again without it. `FrameAnchors::Rearm(id)` makes the client's one-shot passes
-    pending again (a reset, a resize that needs a clear). The anchor runs while one is pending, even with no active client. Its
+    has been submitted, then the graph is built again without it. A new registration of the client has them pending again.
+    A reset is a declared texture's renew count instead (a History version is born cleared). The anchor runs while one is pending, even with no active client. Its
     work must give the same result if it ran twice. The helpers in "Pass helpers" below make the clear and the upload.
 -   **The executed signal** (`ClientDesc::executed`). Called on the render thread after a run whose epoch was submitted with this
-    registration's passes in its graph (built from this registration, or from a later `Refresh` or resize) and whose commit ran.
+    registration's passes in its graph (built from this registration, or from a later `Refresh`) and whose commit ran.
     What that commit wrote is then in a submitted execution, and every later GPU use of the client's resources is ordered after
     it. Use it for work that counts as done once it ran (a regenerated table, a history reset), instead of counting frames.
 
