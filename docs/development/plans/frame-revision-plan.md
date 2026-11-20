@@ -1393,6 +1393,57 @@ target as the import from the start, with Dynamic Cubemaps' "first update done" 
   revision at this point, 10a stops and that source is moved first.
 - **Intermediate:** DCLF's snapshot is still its own `LatestSlot`, adopted in the same call. Deleted in 10b.
 
+**As found (10a, 2026-11-19, `org-native/rev-step10a`): stopped at the correction 5 check.** Code read only; no code changed.
+All three generations can still change outside a revision. Each is an observation of engine D3D11 state in the middle of a
+frame, and no event carries it. So 10a stops here, as its rule says, and these sources move first (10a-0 below).
+- **`kStaleTargets`.** `MainViewPoints.cpp:CaptureMainPass` calls `DrawPipelines::SetTargetFormats` with the formats bound at
+  the main pass's opaque start. Any change after the first one bumps `DrawPipelines::generation`. The catalog for the new
+  formats then arrives from the pipeline lane (the 120 s wait). Since 9a the engine targets are made once, so this changes
+  only if the engine binds other targets there **(not measured)**.
+- **`kStaleShadowFormat`.** `MaterialLookups.cpp:PostLookupInputs` calls `DrawPipelines::SetShadowInputs` each frame with the
+  shadow views' DSV format from the last frame (`lastShadow.dsvFormat`), or an occlusion map's format while no shadow view has
+  drawn. A change remakes the shadow pipeline set (`RecreateShadowSet`). The switch from the occlusion format to the DSV format
+  can come after DCLF first draws **(inferred; whether the two formats differ is not known)**.
+- **`kStaleMain`.** `Resources.cpp:Impl::Setup` makes the main resources again when, at the colour capture, any of these differ:
+  the target formats or size, the CPU-written structured buffers bound at t16 and up (`FrameSlots.cpp:FrameBuffersOf`, compared
+  by register, stride, first element and count), or which registered frame graph buffers have indices
+  (`FrameBindings.cpp:FrameGraphBufferIndices`). The buffers are CS features' D3D11 buffers, so a feature that grows or binds
+  one changes it. `MainEpochs.cpp:RunEpoch` then builds DCLF's epochs on the render thread mid-frame (`BuildOwnerEpochsNow`)
+  and attaches them, so the frame's colour epoch draws with the new resources. That attach is the `Dclf` exception's.
+- **Census to read first** (existing lines, step 9 baseline runs of the step 10 set): `[DCLF] scene snapshots (T6b3b): ...
+  passed over as stale: build N, targets N, shadow format N, main resources N`, the count of `[DCLF] Main-pass graph
+  resources:` lines (more than one per session is a remake), `[DCLF] Main pass targets changed`, and `[DCLF] frame N waited`.
+
+**Also blocking 10a, not in its list above:**
+- **Shader reload.** `BuildManager::SwapPipelines` (7c) rebuilds every graph inside the adoption, DCLF's too. Afterwards the
+  adopted DCLF snapshot's recordings are of the old build, so no DCLF epoch is covered until a new snapshot is recorded. Today
+  the next frame waits for it. Without the wait the frame is uncovered, which is fatal once DCLF draws. Q5 rules out keeping
+  the old recordings (they bind replaced pipelines). So 10a needs a decision here: a recording that names its pipelines (Q5's
+  end state), or shader reload with DCLF drawing becomes unsupported.
+- **`CS_DCLF_ASYNC_BUILDS=0`.** Its epochs are `ownerBuilt`: built and attached on the render thread at every poll. Either a
+  synchronous build stages too (`BuildManager::Impl::Finish` skips staging for `a_synchronous`), or the switch goes.
+- **"From `external` to `staged`" should be "`external` and `staged`".** The external builder runs DCLF's builds on its scene
+  worker inside a `Draws::BuildScope` of the build state made at the poll. On the build manager's thread there is no scope,
+  and `Draws::SetBuildStateSource`'s fallback reads `CurrentBuildState()`, render-thread state. So DCLF's epochs stay built by
+  the external builder and are staged at any poll: `AttachFinished` must collect a staged external group at `Attach::Live`.
+- **Recording on the staged generation.** `GraphHost::StagedGeneration` is owner-thread only, so the render thread must carry
+  it to the snapshot builder in `RevisionInputs::epochBuilds` (staged when one is staged, else attached), and
+  `Assemble.cpp:RequestRecordings` must pass it as `RequestEpochRecording`'s `generation`. ORG sets a staged recording's
+  `buildGeneration` to the staged generation (`GraphHost.cpp`, the recording result), so `RecordingCompleted`'s check holds.
+  `SettleBuildState` must then publish the build serial once DCLF's builds are staged, not attached, and `StaleKindOf` must
+  accept, per epoch, the attached or the staged generation and return the staged epochs for `Builds::AttachStaged`.
+
+**10a-0. Move the three sources (proposed, to confirm).** Rule: "Remove the trigger", and decision 3a ("any discovered mid-frame
+import is fatal until its source is found").
+- Targets: since 9a they are fixed for the session. A change after DCLF first draws is a tap error naming the old and new formats.
+- Shadow format: take it from the engine's shadow map and occlusion targets when they are made (engine targets are fixed since 9a;
+  Q6, where they are made, is still open), not from the views each frame. Then it cannot change.
+- Main resources: each CPU structured buffer the main pass binds at t16 and up becomes a registered frame graph buffer of its
+  feature, made at setup (a 1-element stand-in while the feature is off), growing through `kBuffers` fragments. Then
+  `FrameBuffersOf` sees none, the graph buffer bits are fixed, and a remake after DCLF first draws is a tap error. Which
+  features bind such buffers is the first thing to list (log the registers in `Setup`'s line).
+- Then 10a as written, with the four items above.
+
 **10b. The snapshot as a fragment.** DCLF's `RevisionAssembler` sealing moves into the frame revision: `kScene` (publication, draws,
 payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembler.
 - DCLF recordings name `ComposedVersions{DCLF buffers, frame textures}`, so a CS texture change has DCLF epochs in its closure and they
@@ -1782,7 +1833,7 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | **Answered (9a, 2026-11-19, from the code): yes, so a pending version cannot serve the engine's own objects.** (1) The `Create` thunk (`Hooks.cpp`) runs `globals::ReInit` and `State::Setup` right after `EndSet`, and they read the new targets (`HDRDisplay::SetupResources` takes kMAIN's description; HDR and Deferred call `Targets::Recreate`). (2) The engine fills its own fields, so it binds the new D3D11 objects from its next draw. (3) The 3D targets are made inside the frame, when volumetric lighting first renders (`Create3DRenderTarget`), and drawn at once. (4) In native mode `ResizeBuffers` comes from `Renderer::WindowSizeChanged`, which then calls `Create`. No CS code calls it alone, and `WndProc_Hook` keeps the window size unless the user drags the frame. So the first set is made before the graph exists (`State::Setup` initializes the graph after `Create`), and `TakeOver` makes first versions. A second set while the graph runs is now fatal at `BeginSet` (decision of 2026-11-18). What is left in a session: targets the engine remakes outside a set (the volumes, guest only, read by no graph) and a native `ResizeBuffers`. Both become pending versions that join the next revision. In the frames before the adoption the graph reads the old version while the engine writes the new one. That is accepted, since no graph declares the volumes and a native resize is followed by the fatal `Create`. `EndSet` is not made a boundary. |
 | Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | **Answered (7c, 2026-11-19): not as a swap of slots alone.** The swap now runs inside `AdoptLatest`, but as a render-thread build of every graph (`BuildManager::SwapPipelines`). Why, from the code: (1) `ComputeProgram`/`RasterProgram::Pipeline()` read the slot (`LivePipelineSlot::Peek`) when a pass records, and keep no reference. (2) A revision's recordings are made before its adoption, on the host's thread, so they would bind the old payloads. (3) `Publish` retires a replaced payload at `SubmissionsMade()`, and a kept recording made before the swap may replay after it: a freed pipeline. (4) `AttachStagedEpochGraphs` holds the host's thread, but gives no hook to publish inside the hold. Making it safe needs pipelines named by the revision: the registry's staged set as host data (`IResourceVersions`-like, OMS), a recording that can read its host data or retains its payloads (ORG `RecordingContext`), and programs that bind through it. |
 | Q6 | Where the engine shadow map's size and format are created and whether they change in a session. | Read `LightLimitFix.cpp:EnsureLocalShadowResources` (it reads `kSHADOWMAPS`) and the engine target plan in `docs/development/p4/render-targets.md`. |
-| Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | Read `FrameDriver.cpp:OnBegin`'s comment and `DCLF/Core/Render/FrameDriver.cpp:BeginFrame`'s caller in guest; check the epoch order in a `guest-quick` census. |
+| Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | **Answered (10a, 2026-11-19, from the code; to confirm with a `guest-quick` census): yes, safe, with three conditions.** In guest every CS stage step and every DCLF epoch is an engine draw hook inside `Main::Draw`, after DCLF's `BeginFrame` (the start stage's first anchors are `DecalQueries`, `ReflectionsPrepass`, `SkyReflections`) **(inferred: the anchors' hook sites were not read one by one)**. So nothing submits between `Renderer::Begin` and the build point, and adopting at Begin changes what no CS stage reads mid-frame. Conditions: (1) no DCLF epoch may attach between Begin and `Main::Draw`. That holds once DCLF's builds are staged, since the guest build point's `Poll(Live)` then only stages; the synchronous paths in 10a's "As found" must go first. (2) `AdoptSnapshot`'s frame bookkeeping (`snapshotTakenFrame` for the publication gate, `adoptionLatency`, `growthAdoptedFrame`, `SnapshotAdopted`) reads `Scene::FrameView::GetFrame()`, which DCLF's `BeginFrame` increments (`FrameView.cpp:53`). At Begin it is still last frame's number, so these need `GetFrame() + 1` there. This applies to native too, whose adoption is also in `BeginFrame` today. (3) `AdoptLatest` returns early unless the coordinator is installed and the thread is the render owner; DCLF's adoption must run at every render-owner Begin, also with no frame revision to adopt. |
 | Q8 | TextureStreaming `BaseSize` and WetnessEffects `RaindropGridSize`: size-relevant or not. | Read `TextureStreaming.cpp:SetSettings` and the wetness shaders. Port only if a texture size follows them. |
 | Q9 | How often `AttachStagedEpochGraph` is refused in practice. | Step 3's counter over the full test set. Any refusal after step 4 is fatal by design; if refusals occur in normal runs, find the configuration change that causes them. |
 | Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | A7 landed 2026-11-19 (`org-native/fg-a7`): the hudless copy, the clean scene copy and HDR output are UI steps, and no anchor runs an epoch of its own. 7b is left with `SwitchStaged` and FrameDriver's mid-frame build comment. |
@@ -2546,6 +2597,17 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **A refused change keeps the old slot** in builds where tap errors are not fatal (`CS_ORG_MISMATCH_FATAL=0`, Release profile).
 - **Each loaded LUT is its own import.** Old LUT imports stay in the import table for the session (one entry per file loaded).
 - **ImGui's key holds the observed format,** read at the draw that observed the texture, so the adopted call's key matches.
+
+**Decided by the agent (step 10a, 2026-11-19), to confirm:**
+- **10a stopped at the correction 5 check, with no code change.** The targets, shadow format and main resources generations all
+  come from mid-frame observations (step 10a, "As found"). The step's own rule says to stop, and a partial 10a that kept the wait
+  for those three would still need the `Dclf` exception for that wait's adoptions and for the main-resource attach.
+- **The three are not moved yet.** Each move is a design call, and the main-resources one spans features. Moving them takes a
+  run first: the census lines in "As found" show which ones change in practice. 10a-0 holds the proposed moves.
+- **Q7 answered yes, with three conditions** (the Q7 row). Any CS stage between `Renderer::Begin` and `Main::Draw` is inferred
+  from the stage table, not checked against a census.
+- **Shader reload is a fourth blocker.** Q5 leaves no wait-free way to keep DCLF covered after `SwapPipelines`. Proposed: say
+  shader reload with DCLF drawing is unsupported until recordings name their pipelines, and make it a clear fatal error.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
