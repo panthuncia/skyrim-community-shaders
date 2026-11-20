@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Utils/AsyncShaderSet.h"
+#include "Utils/Setting.h"
 #include "Utils/TexturePreview.h"
 
 #include "PhysicalSky/Aerosol.h"
@@ -13,6 +14,9 @@
 
 struct PhysicalSky final : public Feature
 {
+	/** @brief Binds the toggles to their frame variables. The global is the only instance. */
+	PhysicalSky();
+
 	////////////////////////////////////////////////// Boilerplate
 
 	// Metadata
@@ -42,16 +46,27 @@ struct PhysicalSky final : public Feature
 	void DataLoaded() override;
 	void RestoreDefaultSettings() override;
 	void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	SizeProjection ProjectSizeSettings() const override;
 	void SaveSettings(json& o_json) override;
 
-	/** @brief Whether Physical Sky is loaded, enabled, and not owned by Effects 11 (unless handed back through the Scene Manager). */
+	/**
+	* @brief Whether Physical Sky is loaded, enabled, and not owned by Effects 11 (unless handed back through the Scene Manager).
+	* On the render graph "enabled" is the adopted revision's, so the frame and the graph's clients switch together.
+	*/
 	bool IsActive() const;
 	/** @brief Whether Physical Sky rendered this frame. */
 	bool IsRendering() const { return loaded && cbData.enabled; }
-	/** @brief Whether volumetric clouds are enabled and their screen targets have not failed to allocate. */
+	/** @brief Whether volumetric clouds are enabled (the adopted revision's on the render graph) and their screen targets have not failed to allocate. */
 	bool VolumetricCloudsEnabled() const;
+	/**
+	* @brief Whether the sky would render this frame if it were enabled: everything Reset checks but the toggle.
+	* Atmosphere and Fog's composite key reads it with the toggle. Render thread.
+	*/
+	bool RendersWhenEnabled() const { return rendersWhenEnabled; }
+	/**
+	* @brief Render thread. Takes the toggles' values for this frame (ORGPhysicalSky::FrameValue), which IsActive and
+	* VolumetricCloudsEnabled read on the render graph from any thread. At Reset, and again after the frame's Begin.
+	*/
+	void FollowFrameToggles();
 
 	void DrawSettings() override;
 	bool HasDebugSection() const override { return true; }
@@ -115,9 +130,10 @@ struct PhysicalSky final : public Feature
 		float zBottom = -14500.f;
 	};
 
+	/** @brief The CPU settings. The toggles change which graph clients and textures exist, so they are CS::Setting. */
 	struct Settings
 	{
-		bool enabled = true;
+		CS::Setting<bool> enabled = true;
 		bool enableAllExteriorCells = false;
 		bool forceEnableAllInteriorCells = false;
 		bool overrideDirLight = true;
@@ -181,7 +197,7 @@ struct PhysicalSky final : public Feature
 		float silverLiningSpread = 0.f;
 
 		// VOLUMETRIC CLOUDS
-		bool enableVolumetricClouds = false;
+		CS::Setting<bool> enableVolumetricClouds = false;
 		float lightningIntensity = 0.f;  // zero restores vanilla weather lightning
 		struct LightningSettings
 		{
@@ -635,9 +651,15 @@ struct PhysicalSky final : public Feature
 		kMainViewAndCubemap
 	};
 	void SetupVolumetricResources();
-	/** @brief Creates the full-resolution cloud targets on first use; on failure disables volumetric clouds for the session. @return True when they exist. */
+	/**
+	* @brief Creates the full-resolution cloud targets on first use; on failure disables volumetric clouds for the session. @return True when they exist.
+	* On the render graph they are made at SetupVolumetricResources, declared one texel while the clouds are off (ORGVolumetricClouds).
+	*/
 	bool EnsureVolumetricScreenResources();
 	bool volumetricScreenResourcesFailed = false;
+	bool rendersWhenEnabled = false;  ///< Reset's checks but the toggle, for RendersWhenEnabled
+	bool frameEnabled = true;         ///< The adopted toggle on the render graph (FollowFrameToggles)
+	bool frameClouds = false;         ///< The adopted clouds toggle on the render graph (FollowFrameToggles)
 	/** @brief Clears every cloud output to white transmittance and black luminance. */
 	void ClearVolumetricToNeutral();
 	bool volumetricNeutralCleared = false;  ///< Disabled-cloud targets already hold neutral values.

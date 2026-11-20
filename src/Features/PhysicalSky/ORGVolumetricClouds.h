@@ -26,6 +26,9 @@ namespace ORGCloudInputs
 * step; the commit opens the ones the frame takes. Histories are fixed targets that a copy at the end of the frame
 * refreshes, so every reader reads one resource under one id. The lightning query reads its candidates back through a
 * RunReadback. The cloud textures are graph twins exported to D3D11, so the feature's binds for engine draws name them.
+* The client is declared on the sky's and the clouds' toggles and the display size (Frame/Declare.h); its key adds the inputs
+* the last Stage found. The full-resolution targets are declared at setup on the same variables, one texel while the clouds
+* are off, so their ids are published from the start (the existence rule).
 * In the graph modes the D3D11 cloud dispatches never run. Render thread throughout.
 */
 class ORGVolumetricClouds
@@ -52,8 +55,9 @@ public:
 	static ORGVolumetricClouds& Get();
 
 	/**
-	* @brief Whether the client has run: its first run clears the outputs to neutral, so readers may read the published ids from
-	* this frame on. Before that nothing has written them, and a graph must not read them. Render thread.
+	* @brief Whether a run of the client wrote the bound versions of the outputs: a run clears new versions to neutral first, so
+	* readers may read the published ids from then on. Before that nothing has written them, and a graph must not read them.
+	* False again from the frame a new version is bound, and while the clouds are off. Render thread.
 	*/
 	static bool OutputsWritten();
 
@@ -64,6 +68,19 @@ public:
 	*/
 	static Texture2D* MakeTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, std::string_view a_publishedId = {});
 	static Texture3D* MakeTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name, std::string_view a_publishedId = {});
+
+	/**
+	* @brief In place of a full-resolution target's creation (EnsureVolumetricScreenResources), at setup. A twin declared on the
+	* display size and the sky's and the clouds' toggles: the display size while both are on, one texel otherwise. a_desc's size
+	* stands in before the display size is known. Null means make a D3D11 texture.
+	*/
+	static Texture2D* MakeScreenTarget(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, std::string_view a_publishedId = {});
+
+	/**
+	* @brief ORGPhysicalSky::BeginFrame's. Points the screen targets' D3D11 wrappers at their bound versions. A new version asks
+	* for the neutral clears and drops the history, as new D3D11 targets do.
+	*/
+	void FollowVersions(PhysicalSky& a_feature);
 
 	/** @brief The cloud inputs' source (ORGCloudInputs::Gather). Without one the clouds render nothing, logged once. */
 	using InputSource = std::function<bool(const PhysicalSky&, ORGCloudInputs::Inputs&)>;
@@ -88,7 +105,8 @@ public:
 	/**
 	* @brief In place of both of RenderVolumetricClouds' D3D11 passes, at the shadow volume pass in Prepass.
 	* Stages the frame's steps for the client's commit and updates the feature's cloud state as the D3D11 passes do.
-	* Before the client is scheduled the frame renders nothing, and the targets hold their neutral clears.
+	* Notes the inputs the client's key reads. Until the adopted revision holds a registration the frame renders nothing, and the
+	* targets hold their neutral clears.
 	*/
 	void Stage(PhysicalSky& a_feature, const Frame& a_frame);
 

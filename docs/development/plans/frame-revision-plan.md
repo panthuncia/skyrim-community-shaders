@@ -949,6 +949,50 @@ build is fatal.
   (`PostProcessing::PhysicalLens::GenerateMips`), built at Setup.
 - Tests: `post-lens` (new), `post-programs` (new), `post-effects`. All need the profile's Post Processing mode on.
 
+**As built (2026-11-19, 6.22, `org-native/rev-step6-22`).** Physical Sky's textures and clients follow the revisions.
+- `enabled` and `enableVolumetricClouds` are `CS::Setting<bool>`, bound in the new `PhysicalSky::PhysicalSky()`. Physical Sky's
+  `ProjectSizeSettings` is gone. `halfResApShadow` stays a plain field: it picks a dispatch, not a size.
+- On the graph the frame runs the adopted toggles: `IsActive()` and `VolumetricCloudsEnabled()` read a copy that
+  `PhysicalSky::FollowFrameToggles` takes from `ORGPhysicalSky::FrameValue` (the adopted revision's value) at Reset and again
+  after the frame's Begin. Reset runs before the Begin that adopts, so `ORGPhysicalSky::BeginFrame`, at the feature's first hook
+  of the frame, clears the shader flags (`cbData`) when that adoption switched the sky or its clouds off. An on switch shows one
+  frame later, with its clients already in the graph.
+- The LUTs are `DeclareTexture2D/3D` with no dependencies (one version each, published once). Their client
+  `cs.physical-sky.luts` is `DeclareClient` with no dependencies, registered from the first revision on; its gate keeps a frame
+  with the sky off idle, so a toggle changes nothing in the pre-depth stage. The `FrameAnchors::Scheduled` gate and the D3D11
+  fallback in `GenerateLuts` are gone.
+- The AP shadow is `DeclareTexture2D` on `DisplaySize` (decision 6a), published once. The dispatch covers the dynamic region,
+  clamped to `Adopted().Extent`. A new version is exported, so not born cleared: a gated clear runs once per version in place
+  of the one-shot `ap-shadow.init`. It is in the LUT client (`cs.physical-sky.luts.ap-shadow.clear`, entry 5), which is in the
+  graph from the first revision on, so the first sky-on frame clears it before the Prepass and the draws.
+- `cs.physical-sky` (AP shadow and sky tail) is `DeclareClient` on `enabled`; its key adds the inputs the last Prepass found
+  (shadow map import, Terrain Shadows' heights, Cloud Shadows' layer, the clouds' shadow volume), with `Invalidate()` on a
+  change. `matchesById`, so the adopted registration keeps running until a new one is adopted. `cs.physical-sky.composite` is
+  `DeclareClient` on `enabled` and `enableVolumetricClouds`, key: the main target, Dynamic Cubemaps loaded (depth) and the
+  clouds (observed, and the toggle); its `adopted` call records the registration its commit checks the frame's target against.
+  The in-frame registrations (`RegisterPrepass`, `RegisterComposite`), the `Scheduled` gate and the D3D11 fallbacks for the AP
+  shadow and the sky tail are gone. A missing Terrain Shadows or Cloud Shadows input is left out (logged); a shadow map that
+  cannot be imported is fatal.
+- `cs.physical-sky.clouds` is `DeclareClient` on `DisplaySize`, `enabled` and `enableVolumetricClouds`. Its key is what the last
+  `Stage` found plus the screen targets' extent, which its copies bake in. `matchesById`; `Stage` renders once an `adopted`
+  call saw a registration, and stops while there is none. `cs.physical-sky.cloud-maps` is `DeclareClient` on the two toggles;
+  its key is the newest registration `EndFrame` built, and the managers' work waits until the adopted revision holds it. Both
+  `Scheduled` gates and the in-frame `FrameAnchors::Register` calls are gone.
+- **Existence rule for the cloud targets.** The twelve full-resolution targets (`kScreenTargets`) are made at setup on the graph
+  (`ORGVolumetricClouds::MakeScreenTarget`), declared on `DisplaySize`, `enabled` and `enableVolumetricClouds`: the display size
+  while both are on, one texel otherwise. Their ids are published from the start, so the first clouds-on no longer publishes
+  new ids. The other cloud textures were already made at setup. `OutputsWritten()` now means "a commit opened the neutral
+  clears of the bound versions": false from the frame a new version is bound and while the clouds are off.
+- The D3D11 wrappers of declared textures (`texApShadow`, the screen targets) follow the bound version in place at
+  `BeginFrame` (`resource`, `desc`, views), so D3D11 binds and DCLF's `IsExportOf` checks see the adopted export. A new screen
+  target version asks for the neutral clears and drops the cloud history, as new D3D11 targets do.
+- Atmosphere and Fog's composite key reads Physical Sky's `enabled` (a dependency) with what the last Prepass found
+  (`PhysicalSky::RendersWhenEnabled`: worldspace, interior and shaders, the toggle left out), so it switches in the same revision
+  as the sky's clients, and keeps today's behaviour in cells the sky does not render.
+- The lightning readback ring is already `RenderGraph::RunReadback` inside `cs.physical-sky.clouds` (Q11's (b)); unchanged.
+- Linear Lighting's handling in Physical Sky is unchanged.
+- The config is `physical-sky`.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1138,7 +1182,7 @@ display size wherever a texture followed it.
 | 6.19 | DCLF family clients' `Refresh` (Sky, DecalOcclusion, BloodSplatter, ShadowMask) and Bink | their targets, `HdrOutputTarget` | `CanTake`/`MakeClient` `Refresh`, `BinkGraph.cpp:UpdateTargets` (+ `BuildPending`) | `Refresh`, a build between frames | clients on target variables | Bink's `BuildPending` goes. These run in CS stages, so they are step 6, not step 10. |
 | 6.20 | Physical Lens and Camera FX (post chain, with 6.9) | Lens: `ImageEffects`, `Diffraction`, ghosts on (derived: `Intensity > 0`), the lens model (preset, f-number, focus, zoom, coating: CPU inputs, not variables). Camera FX: its effect `enabled`. Composite: `HAS_PHYSICAL_LENS` while the lens publishes outputs; linear lighting (Composite always draws then, `eb71d2e7f`) | `ORGPhysicalLens.cpp` Commit compares cache inputs each frame (gates, not builds); `StagedBuffer::Poll` each frame; focus readback each camera frame | chain rebuild when Diffraction or ghosts toggle; a new paths version per lens model; Composite's permutation | per-effect `DeclareClient` on those fields and on linear lighting; ghost paths as a `kBuffers` fragment (4e); Camera FX's transient lens image is a frame transient of the chain, no declaration | The caches stay gates (an on-change pass is late-bound work, not a revision). The focus and adaptation readbacks need Q11's answer before the post stage can be a revision member. The ghosts keep the model of the adopted paths version, read from `Adopted()`. |
 | 6.21 | ViewAtmosphere (medium and post-water composite) | medium: `enabled`, `{near,middle,distant}{PixelSize,Slices}` (atlas size, at most 8 M texels), `DisplaySize`; composite: EHF on, Physical Sky off (until its media are on the graph), program built, inputs published (`CompositeActive`) | `ViewAtmosphere::Prepare` → `ORGViewAtmosphere::Prepass` (latches parameters each frame); atlas through `RequestSize` (planned); `CompositeActive()` re-registers the composite inside the frame; `CompositeAfterWater` skips frames while `FrameAnchors::Scheduled` is false | versioned Texture3D medium; composite client registered again on an input change | atlas declared on the size settings and `DisplaySize`; composite `DeclareClient` on those variables; `PostWaterComposite` is `Adopted().Get(...)` | Today `PostWaterComposite` (read by Lighting, Effect, Water, Sky and the SSAO composite to skip their own fog) turns on with the registration, while the composite waits for its build: those frames have no fog at all (`view-atmosphere-port.md` open question 4). In a revision both switch together; delete the `Scheduled` gate. The shared volume's switch (`SharedVolumeActive`, planned) withdraws the fog's ids: use the existence rule (keep slots, 1-texel versions) instead. Reflections: per-epoch frame-texture views, bound per epoch (10b). Baselines: see the fog defects above. |
-| 6.22 | Physical Sky | `enabled`, `enableVolumetricClouds` (native reports clouds off until phase 4), `halfResApShadow` (use only, not size), `DisplaySize` (AP shadow), Dynamic Cubemaps loaded (AP depth, decision 7 of the port) | LUTs every enabled frame at EarlyPrepass (gated); disk phase LUT only when its 12 constants change (gate); AP shadow `RequestSize` on a resolution change (planned, phase 2) | nothing yet: LUTs are fixed-size History/Persistent twins | LUTs declared at setup (no dependency); AP shadow on `DisplaySize`; `cs.physical-sky.composite` (phase 2, after `cs.deferred`) and `cs.physical-sky` (clouds) `DeclareClient` on `enabled`, clouds and Dynamic Cubemaps | Previous-frame reads (7.12): the reflection faces read the LUTs before this frame writes them. A newly enabled sky's first frame gives the faces born-cleared LUTs (decision 5a: one frame of black sky in reflections) unless the faces take `FirstFrame` and skip. Guest frame textures read captured D3D11 views (late-bound); native gets zero views of the declared kind, so phase 4 switches a register's source from a zero view to a graph resource: give the cloud targets their slots from the start (existence rule). The lightning readback ring (planned) is a readback in the pre-main CS stage: Q11. |
+| 6.22 | Physical Sky (done 2026-11-19, see Step 6's "As built") | `enabled`, `enableVolumetricClouds` (native reports clouds off until phase 4), `halfResApShadow` (use only, not size), `DisplaySize` (AP shadow), Dynamic Cubemaps loaded (AP depth, decision 7 of the port) | LUTs every enabled frame at EarlyPrepass (gated); disk phase LUT only when its 12 constants change (gate); AP shadow `RequestSize` on a resolution change (planned, phase 2) | nothing yet: LUTs are fixed-size History/Persistent twins | LUTs declared at setup (no dependency); AP shadow on `DisplaySize`; `cs.physical-sky.composite` (phase 2, after `cs.deferred`) and `cs.physical-sky` (clouds) `DeclareClient` on `enabled`, clouds and Dynamic Cubemaps | Previous-frame reads (7.12): the reflection faces read the LUTs before this frame writes them. A newly enabled sky's first frame gives the faces born-cleared LUTs (decision 5a: one frame of black sky in reflections) unless the faces take `FirstFrame` and skip. Guest frame textures read captured D3D11 views (late-bound); native gets zero views of the declared kind, so phase 4 switches a register's source from a zero view to a graph resource: give the cloud targets their slots from the start (existence rule). The lightning readback ring (planned) is a readback in the pre-main CS stage: Q11. |
 | 6.23 | Screenshot clean scene | kFRAMEBUFFER size and format (`DisplaySize`, `HdrEnabled`/presenter format) | `ORGScreenshot.cpp` compares kFRAMEBUFFER's size and format with its texture on every capture; then `FrameAnchors::Scheduled` | a new Persistent twin and a new client inside the frame; the capture falls back to the D3D11 snapshot until its build switches in | texture and client declared once on `DisplaySize` and the format variable | Moves with the hudless copy in 7b (same FrameGeneration ticket). The capture's own readback buffers are on the Capture anchor's placed epoch, outside the UI stage's recording. |
 
 ---
@@ -1876,6 +1920,38 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The composite's program stays on `ProgramCache`**, not `DeclareProgram`: its defines are fixed for the session, and only
   `ClearShaderCache` builds it again. The key carries the program, so a rebuild is a new registration with the next revision.
 - **Physical Sky's `enabled` is observed, not a variable**, until 6.22 ports it. Then it joins the composite's dependencies.
+  (6.22 did: see its entry below.)
+
+**Decided by the agent (step 6.22, Physical Sky, 2026-11-19), to confirm:**
+- **Previous-frame reads of the LUTs: decision 5a is accepted, the faces do not skip.** The LUTs have no dependency, so they
+  are never made again. A newly enabled sky's reflection faces read the LUTs its last enabled frame wrote (one frame stale), and
+  only the session's first enabled frame reads LUTs nothing wrote yet, as on D3D11 (which reads them a frame late too).
+  `FirstFrame` of a LUT is true only for the session's first frame, so it could not express "newly enabled" anyway. The same
+  holds for the AP shadow's new version after a display size change: the faces read it once before its clear.
+- **The LUT client has no dependencies**, not "declared on `enabled`" as 7.12 says. The gate already keeps a disabled frame
+  idle, and a client that never changes takes the toggle out of the pre-depth stage's builds (remove the trigger).
+- **The frame reads the adopted toggles, copied per frame.** `Revision::Adopted()` is render-thread only, and `IsActive()` is
+  also read by game-thread hooks (Interior Sun, Sky Sync), so they read the copy. An off switch clears `cbData` at
+  `BeginFrame`, since its clients left at the revision's start and its targets shrink at the adoption; an on switch shows a frame
+  late. Interim until Reset runs after the adoption point.
+- **Observed inputs in the keys** (`Invalidate()`), as EHF and ViewAtmosphere do, until Terrain Shadows, Cloud Shadows, the
+  deferred composite's target and the cloud managers' maps are variables. An input that changes on every frame would keep a
+  client from being adopted (starvation would report it).
+- **The cloud readers keep their `clouds` key field.** They bind the cloud ids only once a run wrote the bound versions
+  (`OutputsWritten`). The composite reads screen targets, so its key also takes the clouds toggle: its bindings switch in with
+  their versions. So after the clouds go on the shader flag is on for a few frames while readers bind no cloud outputs, the
+  window the clouds had at startup (physical-sky-port.md open question 24). Binding the ids always would need the one-texel
+  versions written while the clouds are off, which no client does.
+- **The screen targets are one texel while the clouds are off** (the existence rule), rather than full size from setup, which
+  would cost about 150 MB at 1080p with the clouds off by default.
+- **D3D11 wrappers follow in place at the feature's first hook of the frame.** A D3D11 or DCLF read between the Begin and that
+  hook would see the old version, which the graph frees after D3D11's last use. DCLF's shadow epochs run there; they read no
+  Physical Sky texture, to confirm in a run.
+- **A missing Terrain Shadows or Cloud Shadows input is left out of the AP shadow** (warned once) instead of falling back to
+  D3D11 for the frame. Both are on the graph in the graph modes, so it should not happen.
+- **The sky tail stays a plain twin** (fixed shape, not declared), and **Atmosphere and Fog's composite** reads Physical Sky's
+  toggle with `RendersWhenEnabled` (everything Reset checks but the toggle), so cells the sky does not render keep the
+  composite as before.
 
 **Decided by the agent (step 6.6, Screen Space GI, 2026-11-19), to confirm:**
 - **No texture depends on `ResolutionMode`.** Every texture keeps the display size, as before (the chain uses the top-left part below

@@ -36,12 +36,15 @@ ORGPhysicalSky& ORGPhysicalSky::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UavClearPass.h"
 #	include "State.h"
 #	include "Utils/Game.h"
 
@@ -51,9 +54,11 @@ ORGPhysicalSky& ORGPhysicalSky::Get()
 
 #	include <algorithm>
 #	include <cstddef>
+#	include <format>
 #	include <optional>
 #	include <span>
 #	include <string>
+#	include <type_traits>
 #	include <utility>
 
 namespace
@@ -98,7 +103,7 @@ namespace
 	static_assert(sizeof(Deferred::DirectionalShadowLightData) == 272 && offsetof(ShadowLatch, lightCount) == 272 && sizeof(ShadowLatch) == 288,
 		"PhysicalSky/ApShadow.hlsli's latch layout");
 
-	/** @brief What the AP shadow reads besides its own textures. A change registers the Prepass client again. */
+	/** @brief What the AP shadow and the sky tail read besides their own textures: the Prepass client's key. */
 	struct ShadowInputs
 	{
 		FrameAnchors::Texture shadowMap;  // null when the frame drew no shadow mask
@@ -109,7 +114,7 @@ namespace
 		bool operator==(const ShadowInputs&) const = default;
 	};
 
-	/** @brief What the AP composite reads. A change registers the composite client again. */
+	/** @brief What the AP composite reads: the composite client's key. */
 	struct CompositeInputs
 	{
 		std::uint32_t main = 0;  // the engine target the graph composite writes
@@ -143,11 +148,11 @@ namespace
 
 	/**
 	* @brief Whether this frame's readers bind the volumetric clouds' outputs: the clouds are on, and their targets are the
-	* published twins. The cloud client clears them to neutral until it first runs.
+	* published twins. The cloud client clears the bound versions to neutral before they count as written.
 	*/
 	bool CloudsOnGraph(const PhysicalSky& a_feature)
 	{
-		// Nothing may read them before the cloud client's first run writes them.
+		// Nothing may read them before a run of the cloud client wrote the bound versions.
 		if (!a_feature.VolumetricCloudsEnabled() || !a_feature.texShadowVolume || !a_feature.texVolTr || !ORGVolumetricClouds::OutputsWritten())
 			return false;
 		const bool published = PublishedResources::IsExportOf(a_feature.texShadowVolume->srv.get(), ORGVolumetricClouds::kShadowVolumeId) &&
@@ -160,11 +165,35 @@ namespace
 		return published;
 	}
 
+	/** @brief Fatal: a graph input of Physical Sky is missing. */
+	void PhysSkyFail(std::string_view a_why)
+	{
+		const auto message = std::format("Community Shaders: Physical Sky on the render graph: {}", a_why);
+		logger::critical("[ORG] {}", message);
+		stl::report_and_fail(message);
+	}
+
+	/** @brief Points a D3D11 wrapper at the twin's bound version. True when it was another one. */
+	bool PhysSkyFollowTwin(::Texture2D& a_wrapper, const GraphResources::Texture2D& a_twin)
+	{
+		auto* d3d11 = a_twin.D3D11();
+		if (!d3d11 || a_wrapper.resource.get() == d3d11)
+			return false;
+		a_wrapper.resource.copy_from(d3d11);
+		d3d11->GetDesc(&a_wrapper.desc);
+		a_wrapper.srv.copy_from(a_twin.SRV());
+		a_wrapper.uav.copy_from(a_twin.UAV());
+		a_wrapper.rtv.copy_from(a_twin.RTV());
+		return true;
+	}
+
 	using Lut = ORGPhysicalSky::Lut;
 	constexpr auto kLutCount = static_cast<std::size_t>(Lut::Count);
-	// Gate entries: the four LutGen dispatches in LUTGEN order, then the disk phase LUT.
+	// Gate entries: the four LutGen dispatches in LUTGEN order, the disk phase LUT, then the AP shadow's clear.
 	constexpr std::uint32_t kLutGenEntries = 4;
 	constexpr std::uint32_t kDiskPhaseEntry = 4;
+	constexpr std::uint32_t kApShadowClearEntry = 5;
+	constexpr std::uint32_t kLutEntries = 6;
 	// The disk phase LUT's 12 floats (DiskPhaseFrame), at the latch's start.
 	constexpr std::uint32_t kDiskPhaseBytes = 12 * sizeof(float);
 	// LutGen's push block: the shared handles, three SRVs, the output and three samplers.
@@ -189,27 +218,27 @@ namespace
 		}
 	}
 
-	/** @brief The 2D twins by Lut, null for the 3D AP LUT or a D3D11 texture. */
-	std::array<std::unique_ptr<GraphResources::Texture2D>, kLutCount>& Twins2D()
+	/** @brief The 2D LUTs by Lut, empty for the 3D AP LUT or a D3D11 texture. Declared with no dependencies: one version each. */
+	std::array<RenderGraph::Frame::DeclaredTexture2D, kLutCount>& Twins2D()
 	{
-		static std::array<std::unique_ptr<GraphResources::Texture2D>, kLutCount> s_twins;
+		static std::array<RenderGraph::Frame::DeclaredTexture2D, kLutCount> s_twins;
 		return s_twins;
 	}
 
-	std::unique_ptr<GraphResources::Texture3D>& ApTwin()
+	RenderGraph::Frame::DeclaredTexture3D& ApTwin()
 	{
-		static std::unique_ptr<GraphResources::Texture3D> s_twin;
+		static RenderGraph::Frame::DeclaredTexture3D s_twin;
 		return s_twin;
 	}
 
-	/** @brief The AP shadow's twin. History: the next frame's reflection faces read it. */
-	std::unique_ptr<GraphResources::Texture2D>& ApShadowTwin()
+	/** @brief The AP shadow, declared on the display size. History: the next frame's reflection faces read it. */
+	RenderGraph::Frame::DeclaredTexture2D& ApShadowTwin()
 	{
-		static std::unique_ptr<GraphResources::Texture2D> s_twin;
+		static RenderGraph::Frame::DeclaredTexture2D s_twin;
 		return s_twin;
 	}
 
-	/** @brief The sky tail's twin. History: the next frame's reflection faces read it. */
+	/** @brief The sky tail's twin, the sky-view LUT's fixed shape. History: the next frame's reflection faces read it. */
 	std::unique_ptr<GraphResources::Texture2D>& SkyTailTwin()
 	{
 		static std::unique_ptr<GraphResources::Texture2D> s_twin;
@@ -219,8 +248,8 @@ namespace
 	const GraphResources::Resource* TwinOf(Lut a_lut)
 	{
 		if (a_lut == Lut::AerialPerspective)
-			return ApTwin().get();
-		return Twins2D()[static_cast<std::size_t>(a_lut)].get();
+			return ApTwin().Get();
+		return Twins2D()[static_cast<std::size_t>(a_lut)].Get();
 	}
 
 	// D3D11 writes them only on frames the graph does not, read them always, and the next frame's reflection faces read them.
@@ -290,10 +319,17 @@ struct ORGPhysicalSky::Impl
 	// The null descriptor, for inputs D3D11 binds null: it reads zero and has zero size, as a null SRV does.
 	std::uint32_t nullIndex = DCLF::GpuTextures::kInvalid;
 	std::shared_ptr<const void> nullOwner;
-	std::optional<ShadowInputs> shadowRegistered;
-	std::optional<CompositeInputs> compositeRegistered;
-	bool prepassFailed = false, compositeFailed = false;
-	std::string shadowFallback;  // why the last frame's AP shadow ran on D3D11, logged when it changes
+
+	// The declared clients. The Prepass and composite keys add what the last Prepass found, which is not a variable yet:
+	// a change invalidates the key, and the next revision registers the client for it.
+	RenderGraph::Frame::DeclaredClient lutClient, prepassClient, compositeClient;
+	std::optional<ShadowInputs> shadowObserved;
+	std::optional<CompositeInputs> compositeObserved;
+	// The composite registration the adopted revision holds. Its commit opens the pass only for that one's target.
+	std::optional<CompositeInputs> compositeHeld;
+	const void* shadowCleared = nullptr;  // the AP shadow version the last clear was opened for
+	std::string inputNote;                // the last missing AP shadow input, logged when it changes
+	std::uint32_t beganFrame = UINT32_MAX;
 
 	// Render thread. Set at the feature's Prepass, taken by the next commit.
 	std::optional<ShadowLatch> shadow;
@@ -314,6 +350,13 @@ struct ORGPhysicalSky::Impl
 			gate->OpenDispatch(kDiskPhaseEntry, (PhysicalSky::kDiskPhaseLutSize + 63u) / 64u, 3, 1);
 			diskPhase.reset();
 		}
+		// A new version of the AP shadow is not born cleared (it is exported). The first run of a sky-on frame clears it, before
+		// the Prepass writes it and the frame's draws read it: no shadow.
+		if (ApShadowTwin())
+			if (const void* version = ApShadowTwin()->Graph().get(); version != shadowCleared) {
+				gate->OpenDispatch(kApShadowClearEntry, 1);
+				shadowCleared = version;
+			}
 	}
 
 	void CommitPrepass()
@@ -330,11 +373,11 @@ struct ORGPhysicalSky::Impl
 	/** @brief Opens the AP composite only when the graph composite writes kMAIN this frame, into the target the pass declares. */
 	void CommitComposite()
 	{
-		if (compositeFrame != globals::state->frameCount || !compositeRegistered)
+		if (compositeFrame != globals::state->frameCount || !compositeHeld)
 			return;
 		const auto frame = ORGDeferredComposite::Get().GraphComposite();
 		// The D3D11 interior composite is built without PHYSICAL_SKY, so interiors get no AP there either.
-		if (!frame || frame->interior || frame->main != compositeRegistered->main)
+		if (!frame || frame->interior || frame->main != compositeHeld->main)
 			return;
 		// A composite whose schedule does not hold it yet writes nothing this frame.
 		if (!FrameAnchors::HeldNow(kDeferredClientId, FrameAnchors::Anchor::DeferredComposite).scheduled)
@@ -358,76 +401,129 @@ struct ORGPhysicalSky::Impl
 		return true;
 	}
 
-	/** @brief The Prepass client for these inputs. False, logged, when it cannot be made. */
-	bool RegisterPrepass(const ShadowInputs& a_inputs, const std::shared_ptr<Impl>& a_self)
+	/** @brief The LUT client's registration. It has no dependencies, so it is made once, at the first revision. */
+	bool MakeLutClient(FrameAnchors::ClientDesc& a_client, const std::shared_ptr<Impl>& a_self)
 	{
 		namespace AnchorPasses = RenderGraph::AnchorPasses;
 		using Bind = AnchorPasses::Bind;
+		const auto& tr = *TwinOf(Lut::Transmittance);
+		const auto& ms = *TwinOf(Lut::Multiscatter);
+		const auto& diskPhaseLut = *TwinOf(Lut::DiskPhase);
+		const std::array samplerBinds{ Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()), Bind::Handle(samplers[2].Index()) };
+		// Before IBL's and other EarlyPrepass clients, which read nothing of these.
+		AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kLutsClientId, -20, latch, gate);
+		builder.Add(AnchorPasses::Dispatch{ .name = "disk-phase",
+			.program = diskPhaseProgram,
+			.bindings = { Bind::Uav(diskPhaseLut), Bind::Latch(0) },
+			.gate = kDiskPhaseEntry });
+		constexpr std::array<const char*, kLutGenEntries> names{ "transmittance", "multiscatter", "sky-view", "aerial-perspective" };
+		for (std::uint32_t i = 0; i < kLutGenEntries; ++i) {
+			const auto lut = static_cast<Lut>(i);
+			// The transmittance LUT reads none, the multiscatter LUT only the transmittance one.
+			const bool readsTr = lut != Lut::Transmittance;
+			const bool readsMs = lut == Lut::SkyView || lut == Lut::AerialPerspective;
+			std::vector<Bind> bindings{ Bind::Shared(), readsTr ? Bind::Srv(tr) : Bind::Unused(), readsMs ? Bind::Srv(ms) : Bind::Unused(),
+				readsMs ? Bind::Srv(diskPhaseLut) : Bind::Unused(), Bind::Uav(*TwinOf(lut)) };
+			bindings.insert(bindings.end(), samplerBinds.begin(), samplerBinds.end());
+			builder.Add(AnchorPasses::Dispatch{ .name = names[i], .program = lutPrograms[i], .bindings = std::move(bindings), .gate = i });
+		}
+		// The AP shadow's clear, once per version. This client is registered from the first revision on, so the clear is in the
+		// graph before any frame with the sky on.
+		if (ApShadowTwin()) {
+			const auto gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate);
+			builder.Add("ap-shadow.clear", FrameAnchors::PassKind::Compute,
+				[twin = ApShadowTwin().Get(), gateRef] {
+					return GraphPasses::MakeUavClear(*twin, std::array<float, 4>{}, GraphPasses::ClearGate{ gateRef, kApShadowClearEntry });
+				},
+				false, true);
+		}
+		if (builder.Failed()) {
+			logger::error("[ORG] Physical Sky: the LUT passes: {}", builder.Failure());
+			return false;
+		}
+		a_client.id = kLutsClientId;
+		a_client.sharedConstants = builder.ReadsSharedConstants();
+		a_client.passes = builder.Take();
+		a_client.gates = { gate };
+		a_client.registerResources = [](org::RenderGraph& a_graph) {
+			for (std::size_t i = 0; i < kLutCount; ++i)
+				TwinOf(static_cast<Lut>(i))->Register(a_graph);
+			if (ApShadowTwin())
+				ApShadowTwin()->Register(a_graph);
+		};
+		// Every run closes the gate first, so a frame without the feature dispatches nothing.
+		a_client.active = [state = a_self] { return state->luts || state->diskPhase.has_value(); };
+		a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->Commit(); };
+		logger::info("[ORG] Physical Sky: the LUTs run on the render graph at the EarlyPrepass anchor ({})", kLutsClientId);
+		return true;
+	}
+
+	/** @brief The Prepass client's registration for a key, when a revision starts. */
+	bool MakePrepass(const ShadowInputs& a_inputs, FrameAnchors::ClientDesc& a_client, const std::shared_ptr<Impl>& a_self)
+	{
+		namespace AnchorPasses = RenderGraph::AnchorPasses;
+		using Bind = AnchorPasses::Bind;
+		if (!MakeNull())
+			return false;
 		const auto depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 		if (!depth) {
-			logger::error("[ORG] Physical Sky: the depth copy cannot be imported; the AP shadow stays on D3D11");
+			logger::error("[ORG] Physical Sky: the depth copy cannot be imported for the AP shadow");
 			return false;
 		}
 		const auto& output = *ApShadowTwin();
 		const auto null = Bind::Handle(nullIndex);
-		const auto cube = static_cast<std::uint32_t>(org::SRVViewType::TextureCube);
-		// In ShadowAccum's resource list order. The shadow volume is D3D11's until the clouds are ported (phase 4), so it is null.
+		// In ShadowAccum's resource list order.
 		const std::vector<Bind> bindings{ Bind::Shared(), Bind::Srv(depth), a_inputs.shadowMap ? Bind::SrvArray(a_inputs.shadowMap) : null, Bind::Latch(0),
-			a_inputs.terrain.empty() ? null : Bind::Published(a_inputs.terrain), a_inputs.cloud.empty() ? null : Bind::Published(a_inputs.cloud, cube),
-			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
-			Bind::Uav(output), Bind::Handle(samplers[0].Index()) };
+			a_inputs.terrain.empty() ? null : Bind::Published(a_inputs.terrain),
+			a_inputs.cloud.empty() ? null : Bind::Published(a_inputs.cloud, static_cast<std::uint32_t>(org::SRVViewType::TextureCube)),
+			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null, Bind::Uav(output), Bind::Handle(samplers[0].Index()) };
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kPrepassClientId, kPrepassOrder, prepassLatch, prepassGate);
-		// The twin starts out as no shadow, for readers on frames no AP shadow ran.
-		auto clear = AnchorPasses::ClearOf("ap-shadow.init", output);
-		builder.Add(std::move(clear));
+		// A new version starts out cleared by the LUT client, for readers on frames no AP shadow ran.
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow", .program = shadowFull, .bindings = bindings, .gate = kShadowFullEntry });
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow.half", .program = shadowHalf, .bindings = bindings, .gate = kShadowHalfEntry });
-		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. The cloud shadow volume, its mean and ViewAtmosphere's cloud diffuse transport are
-		// D3D11's until the clouds are ported, so they are null, which the shader reads only with the clouds on.
+		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. ViewAtmosphere's cloud
+		// diffuse transport is not published, so it is null, which the shader reads only with the clouds on.
 		const auto& tailOutput = *SkyTailTwin();
 		builder.Add(AnchorPasses::Dispatch{ .name = "sky-tail",
 			.program = skyTail,
 			.bindings = { Bind::Shared(), Bind::Published(ORGPhysicalSky::kTransmittanceLutId), Bind::Published(ORGPhysicalSky::kMultiscatterLutId),
-				Bind::Published(ORGPhysicalSky::kDiskPhaseLutId),
-				Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()), Bind::Handle(samplers[2].Index()),
-				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
+				Bind::Published(ORGPhysicalSky::kDiskPhaseLutId), Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()),
+				Bind::Handle(samplers[2].Index()), a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
 				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kCloudShadowMeanId) : null, null },
 			.gate = kSkyTailEntry });
 		if (builder.Failed()) {
-			logger::error("[ORG] Physical Sky: {}; the AP shadow stays on D3D11", builder.Failure());
+			logger::error("[ORG] Physical Sky: the AP shadow's passes: {}", builder.Failure());
 			return false;
 		}
-		FrameAnchors::ClientDesc client{};
-		client.id = kPrepassClientId;
-		client.sharedConstants = builder.ReadsSharedConstants();
-		client.passes = builder.Take();
-		client.gates = { prepassGate };
-		client.registerResources = [](org::RenderGraph& a_graph) {
+		a_client.id = kPrepassClientId;
+		a_client.sharedConstants = builder.ReadsSharedConstants();
+		a_client.passes = builder.Take();
+		a_client.gates = { prepassGate };
+		a_client.registerResources = [](org::RenderGraph& a_graph) {
 			ApShadowTwin()->Register(a_graph);
 			SkyTailTwin()->Register(a_graph);
 		};
-		client.active = [state = a_self] { return state->shadow.has_value() || state->tail; };
-		client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitPrepass(); };
-		if (!FrameAnchors::Register(std::move(client))) {
-			logger::error("[ORG] Physical Sky: the AP shadow client could not be registered; it stays on D3D11");
-			return false;
-		}
-		shadowRegistered = a_inputs;
-		logger::info("[ORG] Physical Sky: the AP shadow runs on the render graph ({}; shadow map {}, terrain heights {}, cloud layer {})", kPrepassClientId,
-			a_inputs.shadowMap ? "imported" : "none", a_inputs.terrain.empty() ? "none" : a_inputs.terrain, a_inputs.cloud.empty() ? "none" : a_inputs.cloud);
+		a_client.active = [state = a_self] { return state->shadow.has_value() || state->tail; };
+		a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitPrepass(); };
+		// Every registration commits the same run, so the one the adopted revision holds keeps running until a newer one is adopted.
+		a_client.matchesById = true;
+		logger::info("[ORG] Physical Sky: an AP shadow for the next revision ({}; shadow map {}, terrain heights {}, cloud layer {}, clouds {})", kPrepassClientId,
+			a_inputs.shadowMap ? "imported" : "none", a_inputs.terrain.empty() ? "none" : a_inputs.terrain, a_inputs.cloud.empty() ? "none" : a_inputs.cloud,
+			a_inputs.clouds);
 		return true;
 	}
 
-	/** @brief The composite client for these inputs. False, logged, when it cannot be made. */
-	bool RegisterComposite(const CompositeInputs& a_inputs, const std::shared_ptr<Impl>& a_self)
+	/** @brief The composite client's registration for a key, when a revision starts. */
+	bool MakeComposite(const CompositeInputs& a_inputs, FrameAnchors::ClientDesc& a_client, const std::shared_ptr<Impl>& a_self)
 	{
 		namespace AnchorPasses = RenderGraph::AnchorPasses;
 		using Bind = AnchorPasses::Bind;
+		if (!MakeNull())
+			return false;
 		const auto main = FrameAnchors::EngineTarget(a_inputs.main);
 		const auto depth = a_inputs.depth ? FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY) : FrameAnchors::Texture{};
 		if (!main || (a_inputs.depth && !depth)) {
-			logger::error("[ORG] Physical Sky: the main target {} or the depth copy cannot be imported; no aerial perspective on the graph composite",
-				a_inputs.main);
+			logger::error("[ORG] Physical Sky: the main target {} or the depth copy cannot be imported for the aerial perspective", a_inputs.main);
 			return false;
 		}
 		const auto null = Bind::Handle(nullIndex);
@@ -436,33 +532,88 @@ struct ORGPhysicalSky::Impl
 		std::vector<Bind> bindings{ Bind::Shared(), Bind::Uav(main), srvOr(depth), Bind::Published(ORGPhysicalSky::kApLutId),
 			Bind::Published(ORGPhysicalSky::kApShadowId), a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kVolTrCurrentId) : null,
 			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kVolLumCurrentId) : null,
-			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kLightningChannelsId) : null,
-			Bind::Handle(samplers[1].Index()) };
+			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kLightningChannelsId) : null, Bind::Handle(samplers[1].Index()) };
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredComposite, kCompositeClientId, kCompositeOrder, {}, compositeGate);
 		builder.Add(AnchorPasses::Dispatch{ .name = "apply", .program = applyAp, .bindings = std::move(bindings), .gate = 0 });
 		if (builder.Failed()) {
-			logger::error("[ORG] Physical Sky: {}; no aerial perspective on the graph composite", builder.Failure());
+			logger::error("[ORG] Physical Sky: the aerial perspective's pass: {}", builder.Failure());
 			return false;
 		}
-		FrameAnchors::ClientDesc client{};
-		client.id = kCompositeClientId;
-		client.sharedConstants = builder.ReadsSharedConstants();
-		client.passes = builder.Take();
-		client.gates = { compositeGate };
-		client.active = [state = a_self] { return state->compositeFrame == globals::state->frameCount; };
-		client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitComposite(); };
-		if (!FrameAnchors::Register(std::move(client))) {
-			logger::error("[ORG] Physical Sky: the AP composite client could not be registered; no aerial perspective on the graph composite");
-			return false;
-		}
-		compositeRegistered = a_inputs;
-		logger::info("[ORG] Physical Sky: the aerial perspective runs after the graph composite ({}; main target {}, depth {}, clouds {})",
+		a_client.id = kCompositeClientId;
+		a_client.sharedConstants = builder.ReadsSharedConstants();
+		a_client.passes = builder.Take();
+		a_client.gates = { compositeGate };
+		a_client.active = [state = a_self] { return state->compositeFrame == globals::state->frameCount; };
+		a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitComposite(); };
+		logger::info("[ORG] Physical Sky: an aerial perspective after the graph composite for the next revision ({}; main target {}, depth {}, clouds {})",
 			kCompositeClientId, a_inputs.main, a_inputs.depth ? "the depth copy" : "none (no Dynamic Cubemaps)", a_inputs.clouds ? "the graph's" : "none");
 		return true;
+	}
+
+	/** @brief The three clients, declared at Setup. */
+	void DeclareClients(const std::shared_ptr<Impl>& a_self)
+	{
+		using namespace RenderGraph::Frame;
+		const std::weak_ptr<Impl> weak = a_self;
+		const auto& settings = globals::features::physicalSky.settings;
+		lutClient = DeclareClient<bool>(
+			kLutsClientId, Dependencies{}, [](const Inputs&) -> std::optional<bool> { return true; },
+			[weak](const bool&, FrameAnchors::ClientDesc& a_client) {
+				const auto state = weak.lock();
+				return state && state->MakeLutClient(a_client, state);
+			});
+		if (!lutClient)
+			PhysSkyFail("the LUT client could not be declared");
+		if (!shadowFull || !applyAp)
+			return;
+		// While the sky is on, with what the last Prepass found.
+		prepassClient = DeclareClient<ShadowInputs>(
+			kPrepassClientId, DependsOn(settings.enabled),
+			[weak](const Inputs& a_in) -> std::optional<ShadowInputs> {
+				const auto state = weak.lock();
+				if (!state || !a_in.Get(globals::features::physicalSky.settings.enabled))
+					return std::nullopt;
+				return state->shadowObserved;
+			},
+			[weak](const ShadowInputs& a_inputs, FrameAnchors::ClientDesc& a_client) {
+				const auto state = weak.lock();
+				return state && state->MakePrepass(a_inputs, a_client, state);
+			});
+		// The clouds' screen targets are one texel while the clouds are off, so the composite reads them only with the clouds on in
+		// the same revision. Dynamic Cubemaps is loaded or not for the session.
+		compositeClient = DeclareClient<CompositeInputs>(
+			kCompositeClientId, DependsOn(settings.enabled, settings.enableVolumetricClouds),
+			[weak](const Inputs& a_in) -> std::optional<CompositeInputs> {
+				const auto state = weak.lock();
+				const auto& sky = globals::features::physicalSky.settings;
+				if (!state || !state->compositeObserved || !a_in.Get(sky.enabled))
+					return std::nullopt;
+				auto inputs = *state->compositeObserved;
+				inputs.depth = globals::features::dynamicCubemaps.loaded;
+				inputs.clouds = inputs.clouds && a_in.Get(sky.enableVolumetricClouds);
+				return inputs;
+			},
+			[weak](const CompositeInputs& a_inputs, FrameAnchors::ClientDesc& a_client) {
+				const auto state = weak.lock();
+				return state && state->MakeComposite(a_inputs, a_client, state);
+			},
+			[weak](const CompositeInputs& a_inputs) {
+				if (const auto state = weak.lock())
+					state->compositeHeld = a_inputs;
+			});
+		if (!prepassClient || !compositeClient)
+			PhysSkyFail("the AP shadow's or the aerial perspective's client could not be declared");
 	}
 };
 
 ORGPhysicalSky::~ORGPhysicalSky() = default;
+
+bool ORGPhysicalSky::FrameValue(const CS::Setting<bool>& a_setting)
+{
+	if (!Requested() || !RenderGraph::Frame::Driver::Installed() || !RenderGraphRuntime::Get().IsActive())
+		return a_setting.Get();
+	return RenderGraph::Frame::Revision::Adopted().Get(a_setting);
+}
 
 void ORGPhysicalSky::Reserve()
 {
@@ -474,6 +625,37 @@ void ORGPhysicalSky::Reserve()
 		logger::error("[ORG] Physical Sky: the Prepass or DeferredComposite anchor could not be reserved; the AP shadow stays on D3D11");
 }
 
+namespace
+{
+	/** @brief A D3D11 wrapper of a twin's export. The twin keeps the image, the wrapper the D3D11 texture and its views. */
+	template <class Wrapper, class Twin>
+	Wrapper* PhysSkyWrap(const Twin& a_twin, const char* a_name)
+	{
+		auto* d3d11 = a_twin.D3D11();
+		d3d11->AddRef();
+		Wrapper* wrapper = nullptr;
+		if constexpr (std::is_same_v<Wrapper, ::Texture3D>)
+			wrapper = new ::Texture3D(d3d11);
+		else
+			wrapper = new ::Texture2D(d3d11, a_name);
+		wrapper->srv.copy_from(a_twin.SRV());
+		wrapper->uav.copy_from(a_twin.UAV());
+		return wrapper;
+	}
+
+	/** @brief The description a twin exported for D3D11 SRV and UAV takes. */
+	template <class Desc>
+	Desc PhysSkyTwinDesc(const Desc& a_desc)
+	{
+		Desc desc = a_desc;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		desc.MiscFlags = 0;
+		desc.CPUAccessFlags = 0;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		return desc;
+	}
+}
+
 Texture2D* ORGPhysicalSky::MakeLut2D(Lut a_lut, const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	if (a_lut == Lut::AerialPerspective || a_lut >= Lut::Count || !Requested() || !RenderGraphRuntime::Get().IsActive())
@@ -481,26 +663,18 @@ Texture2D* ORGPhysicalSky::MakeLut2D(Lut a_lut, const D3D11_TEXTURE2D_DESC& a_de
 	auto& twin = Twins2D()[static_cast<std::size_t>(a_lut)];
 	if (twin)
 		return nullptr;
-	D3D11_TEXTURE2D_DESC desc = a_desc;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	desc.MiscFlags = 0;
-	desc.CPUAccessFlags = 0;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(IdOf(a_lut)), LutOptions(a_lut));
-	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->UAV()) {
+	const auto desc = PhysSkyTwinDesc(a_desc);
+	// A fixed shape: declared with no dependencies, so it has one version for the session.
+	auto declared = RenderGraph::Frame::DeclareTexture2D(
+		std::string(IdOf(a_lut)), RenderGraph::Frame::Dependencies{}, [desc](const RenderGraph::Frame::Inputs&) { return desc; }, LutOptions(a_lut));
+	if (!declared || !*declared || !declared->D3D11() || !declared->SRV() || !declared->UAV()) {
 		logger::error("[ORG] Physical Sky: {} could not be made on the render graph; it is a D3D11 texture", IdOf(a_lut));
 		return nullptr;
 	}
-	if (!PublishTwin(*texture, a_lut))
+	if (!PublishTwin(*declared, a_lut))
 		return nullptr;
-	// The twin keeps the image, the wrapper keeps the D3D11 texture and its views.
-	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture2D(d3d11, IdOf(a_lut).data());
-	wrapper->srv.copy_from(texture->SRV());
-	wrapper->uav.copy_from(texture->UAV());
-	twin = std::move(texture);
-	return wrapper;
+	twin = std::move(declared);
+	return PhysSkyWrap<::Texture2D>(*twin, IdOf(a_lut).data());
 }
 
 Texture3D* ORGPhysicalSky::MakeLut3D(Lut a_lut, const D3D11_TEXTURE3D_DESC& a_desc)
@@ -510,25 +684,17 @@ Texture3D* ORGPhysicalSky::MakeLut3D(Lut a_lut, const D3D11_TEXTURE3D_DESC& a_de
 	auto& twin = ApTwin();
 	if (twin)
 		return nullptr;
-	D3D11_TEXTURE3D_DESC desc = a_desc;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	desc.MiscFlags = 0;
-	desc.CPUAccessFlags = 0;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	auto texture = std::make_unique<GraphResources::Texture3D>(desc, std::string(IdOf(a_lut)), LutOptions(a_lut));
-	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->UAV()) {
+	const auto desc = PhysSkyTwinDesc(a_desc);
+	auto declared = RenderGraph::Frame::DeclareTexture3D(
+		std::string(IdOf(a_lut)), RenderGraph::Frame::Dependencies{}, [desc](const RenderGraph::Frame::Inputs&) { return desc; }, LutOptions(a_lut));
+	if (!declared || !*declared || !declared->D3D11() || !declared->SRV() || !declared->UAV()) {
 		logger::error("[ORG] Physical Sky: {} could not be made on the render graph; it is a D3D11 texture", IdOf(a_lut));
 		return nullptr;
 	}
-	if (!PublishTwin(*texture, a_lut))
+	if (!PublishTwin(*declared, a_lut))
 		return nullptr;
-	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture3D(d3d11);
-	wrapper->srv.copy_from(texture->SRV());
-	wrapper->uav.copy_from(texture->UAV());
-	twin = std::move(texture);
-	return wrapper;
+	twin = std::move(declared);
+	return PhysSkyWrap<::Texture3D>(*twin, nullptr);
 }
 
 Texture2D* ORGPhysicalSky::MakeSkyTail(const D3D11_TEXTURE2D_DESC& a_desc)
@@ -538,14 +704,9 @@ Texture2D* ORGPhysicalSky::MakeSkyTail(const D3D11_TEXTURE2D_DESC& a_desc)
 	auto& twin = SkyTailTwin();
 	if (twin)
 		return nullptr;
-	D3D11_TEXTURE2D_DESC desc = a_desc;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	desc.MiscFlags = 0;
-	desc.CPUAccessFlags = 0;
-	desc.Usage = D3D11_USAGE_DEFAULT;
 	// D3D11 writes it on frames the graph does not, and the next frame's reflection faces read it.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV };
-	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(kSkyTailId), options);
+	auto texture = std::make_unique<GraphResources::Texture2D>(PhysSkyTwinDesc(a_desc), std::string(kSkyTailId), options);
 	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->UAV()) {
 		logger::error("[ORG] Physical Sky: {} could not be made on the render graph; it is a D3D11 texture", kSkyTailId);
 		return nullptr;
@@ -554,13 +715,8 @@ Texture2D* ORGPhysicalSky::MakeSkyTail(const D3D11_TEXTURE2D_DESC& a_desc)
 		logger::error("[ORG] Physical Sky: {} could not be published; it is a D3D11 texture", kSkyTailId);
 		return nullptr;
 	}
-	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture2D(d3d11, kSkyTailId.data());
-	wrapper->srv.copy_from(texture->SRV());
-	wrapper->uav.copy_from(texture->UAV());
 	twin = std::move(texture);
-	return wrapper;
+	return PhysSkyWrap<::Texture2D>(*twin, kSkyTailId.data());
 }
 
 Texture2D* ORGPhysicalSky::MakeApShadow(const D3D11_TEXTURE2D_DESC& a_desc)
@@ -570,29 +726,34 @@ Texture2D* ORGPhysicalSky::MakeApShadow(const D3D11_TEXTURE2D_DESC& a_desc)
 	auto& twin = ApShadowTwin();
 	if (twin)
 		return nullptr;
-	D3D11_TEXTURE2D_DESC desc = a_desc;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	desc.MiscFlags = 0;
-	desc.CPUAccessFlags = 0;
-	desc.Usage = D3D11_USAGE_DEFAULT;
+	using namespace RenderGraph::Frame;
+	// Sized for the display (decision 6a): the pass covers the dynamic-resolution region. Before the display size is known,
+	// the main target's, which D3D11 sizes it by.
+	const auto desc = PhysSkyTwinDesc(a_desc);
 	// D3D11 writes it on frames the graph does not, every reader reads it, and the next frame's reflection faces read it.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::UAV };
-	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(kApShadowId), options);
-	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->UAV()) {
+	auto declared = DeclareTexture2D(
+		std::string(kApShadowId), DependsOn(Vars::DisplaySize()),
+		[desc](const Inputs& a_in) {
+			auto next = desc;
+			if (const auto display = a_in.Get(Vars::DisplaySize()); display.width && display.height) {
+				next.Width = display.width;
+				next.Height = display.height;
+			}
+			return next;
+		},
+		options);
+	if (!declared || !*declared || !declared->D3D11() || !declared->SRV() || !declared->UAV()) {
 		logger::error("[ORG] Physical Sky: {} could not be made on the render graph; it is a D3D11 texture", kApShadowId);
 		return nullptr;
 	}
-	if (!PublishedResources::Publish(kApShadowId, *texture)) {
+	// Published once, for the session. Readers follow the versions.
+	if (!PublishedResources::Publish(kApShadowId, *declared)) {
 		logger::error("[ORG] Physical Sky: {} could not be published; it is a D3D11 texture", kApShadowId);
 		return nullptr;
 	}
-	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture2D(d3d11, kApShadowId.data());
-	wrapper->srv.copy_from(texture->SRV());
-	wrapper->uav.copy_from(texture->UAV());
-	twin = std::move(texture);
-	return wrapper;
+	twin = std::move(declared);
+	return PhysSkyWrap<::Texture2D>(*twin, kApShadowId.data());
 }
 
 bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
@@ -619,7 +780,7 @@ bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 	}
 	next->diskPhaseProgram = ComputeProgram::Load(host->Device(), { .source = kDiskPhaseShader, .constantWords = kDiskPhaseWords });
 	next->samplers = { SamplerOf(a_feature.sampTr.get()), SamplerOf(a_feature.sampSv.get()), SamplerOf(a_feature.sampNoise.get()) };
-	next->gate = RenderGraph::RunGate::Create("cs.physical-sky.luts.gate", kLutGenEntries + 1);
+	next->gate = RenderGraph::RunGate::Create("cs.physical-sky.luts.gate", kLutEntries);
 	next->latch = std::make_shared<org::LatchBlock>("cs.physical-sky.luts.latch", kDiskPhaseBytes);
 	const bool programs = std::ranges::all_of(next->lutPrograms, [](const auto& a_program) { return a_program != nullptr; }) && next->diskPhaseProgram;
 	const bool samplers = std::ranges::all_of(next->samplers, [](const auto& a_sampler) { return static_cast<bool>(a_sampler); });
@@ -628,58 +789,7 @@ bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 		return false;
 	}
 
-	namespace AnchorPasses = RenderGraph::AnchorPasses;
-	using Bind = AnchorPasses::Bind;
-	const auto& tr = *TwinOf(Lut::Transmittance);
-	const auto& ms = *TwinOf(Lut::Multiscatter);
-	const auto& diskPhase = *TwinOf(Lut::DiskPhase);
-	const auto samplerBinds = [&next] {
-		return std::array{ Bind::Handle(next->samplers[0].Index()), Bind::Handle(next->samplers[1].Index()), Bind::Handle(next->samplers[2].Index()) };
-	}();
-	// Before IBL's and other EarlyPrepass clients, which read nothing of these.
-	AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kLutsClientId, -20, next->latch, next->gate);
-	builder.Add(AnchorPasses::Dispatch{ .name = "disk-phase",
-		.program = next->diskPhaseProgram,
-		.bindings = { Bind::Uav(diskPhase), Bind::Latch(0) },
-		.gate = kDiskPhaseEntry });
-	constexpr std::array<const char*, kLutGenEntries> names{ "transmittance", "multiscatter", "sky-view", "aerial-perspective" };
-	for (std::uint32_t i = 0; i < kLutGenEntries; ++i) {
-		const auto lut = static_cast<Lut>(i);
-		// The transmittance LUT reads none, the multiscatter LUT only the transmittance one.
-		const bool readsTr = lut != Lut::Transmittance;
-		const bool readsMs = lut == Lut::SkyView || lut == Lut::AerialPerspective;
-		std::vector<Bind> bindings{ Bind::Shared(), readsTr ? Bind::Srv(tr) : Bind::Unused(), readsMs ? Bind::Srv(ms) : Bind::Unused(),
-			readsMs ? Bind::Srv(diskPhase) : Bind::Unused(), Bind::Uav(*TwinOf(lut)) };
-		bindings.insert(bindings.end(), samplerBinds.begin(), samplerBinds.end());
-		builder.Add(AnchorPasses::Dispatch{ .name = names[i], .program = next->lutPrograms[i], .bindings = std::move(bindings), .gate = i });
-	}
-	if (builder.Failed()) {
-		logger::error("[ORG] Physical Sky: {}; the LUTs stay on D3D11", builder.Failure());
-		return false;
-	}
-
-	FrameAnchors::ClientDesc client{};
-	client.id = kLutsClientId;
-	client.sharedConstants = builder.ReadsSharedConstants();
-	client.passes = builder.Take();
-	client.gates = { next->gate };
-	client.registerResources = [](org::RenderGraph& a_graph) {
-		for (std::size_t i = 0; i < kLutCount; ++i)
-			TwinOf(static_cast<Lut>(i))->Register(a_graph);
-	};
-	// Every run closes the gate first, so a frame without the feature dispatches nothing.
-	client.active = [state = next] { return state->luts || state->diskPhase.has_value(); };
-	client.commit = [state = next](const FrameAnchors::Point&) { state->Commit(); };
-	impl = next;
-	if (!FrameAnchors::Register(std::move(client))) {
-		impl.reset();
-		logger::error("[ORG] Physical Sky: the LUT client could not be registered; the LUTs stay on D3D11");
-		return false;
-	}
-	logger::info("[ORG] Physical Sky: the LUTs run on the render graph at the EarlyPrepass anchor ({})", kLutsClientId);
-
-	// The AP shadow, the sky tail and the AP composite register at their first frame, once their inputs are known. A program
-	// build blocks, so here.
+	// The AP shadow, the sky tail and the AP composite. A program build blocks, so here.
 	if (!ApShadowTwin() || !SkyTailTwin()) {
 		logger::error("[ORG] Physical Sky: {} or {} is a D3D11 texture; the AP shadow and sky tail stay on D3D11 (no graph AP)", kApShadowId, kSkyTailId);
 	} else if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass) || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredComposite)) {
@@ -698,12 +808,33 @@ bool ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 			next->shadowFull = next->shadowHalf = next->applyAp = next->skyTail = nullptr;
 		}
 	}
+	impl = next;
+	// Every client follows the frame revisions from the first one on.
+	next->DeclareClients(next);
 	return true;
 }
 
 bool ORGPhysicalSky::IsActive() const
 {
 	return impl && RenderGraphRuntime::Get().IsActive();
+}
+
+void ORGPhysicalSky::BeginFrame(PhysicalSky& a_feature)
+{
+	if (!IsActive() || impl->beganFrame == globals::state->frameCount)
+		return;
+	impl->beganFrame = globals::state->frameCount;
+	a_feature.FollowFrameToggles();
+	// A new version of the AP shadow switched in at this frame's Begin. The commit clears it.
+	if (a_feature.texApShadow && ApShadowTwin())
+		PhysSkyFollowTwin(*a_feature.texApShadow, *ApShadowTwin());
+	ORGVolumetricClouds::Get().FollowVersions(a_feature);
+	// Reset ran before the Begin that adopted the newest revision. An off switch in it applies to this frame already, since
+	// its clients and textures went with it. An on switch waits for the next Reset.
+	if (!a_feature.IsActive())
+		a_feature.cbData = {};
+	else if (!a_feature.VolumetricCloudsEnabled())
+		a_feature.cbData.enableVolumetricClouds = 0;
 }
 
 std::uint32_t ORGPhysicalSky::SamplerIndex(Sampler a_sampler, std::shared_ptr<const void>* a_owner) const
@@ -718,11 +849,11 @@ std::uint32_t ORGPhysicalSky::SamplerIndex(Sampler a_sampler, std::shared_ptr<co
 
 bool ORGPhysicalSky::GenerateLuts(PhysicalSky& a_feature)
 {
-	// Until the schedule holds the client the D3D11 dispatches write the exports.
-	if (!IsActive() || !FrameAnchors::Scheduled(kLutsClientId, FrameAnchors::Anchor::EarlyPrepass))
+	// A run of the client takes them. Before the first revision holds it the LUTs are not written, which is before the world.
+	if (!IsActive())
 		return false;
 	impl->luts = true;
-	// As UpdateDiskPhaseLut: only when the constants change.
+	// As UpdateDiskPhaseLut: only when the constants change. Kept until a run takes it.
 	const auto parameters = a_feature.DiskPhaseParameters();
 	if (!a_feature.diskPhaseValid || parameters != a_feature.diskPhaseParameters) {
 		impl->diskPhase = parameters;
@@ -734,21 +865,17 @@ bool ORGPhysicalSky::GenerateLuts(PhysicalSky& a_feature)
 
 bool ORGPhysicalSky::AccumShadow(const PhysicalSky& a_feature)
 {
-	if (!IsActive() || !impl->shadowFull || impl->prepassFailed)
+	if (!IsActive() || !impl->shadowFull)
 		return false;
 	auto& state = *impl;
 	state.shadow.reset();
-	const auto fallback = [&](const char* a_reason) {
-		if (state.shadowFallback != a_reason) {
-			logger::info("[ORG] Physical Sky: the AP shadow runs on D3D11 this frame ({})", a_reason);
-			state.shadowFallback = a_reason;
+	const auto note = [&](const std::string& a_missing) {
+		if (state.inputNote != a_missing) {
+			if (!a_missing.empty())
+				logger::warn("[ORG] Physical Sky: the AP shadow reads no {}: it is not on the render graph", a_missing);
+			state.inputNote = a_missing;
 		}
-		return false;
 	};
-	if (!state.MakeNull()) {
-		state.prepassFailed = true;
-		return false;
-	}
 
 	// As PhysicalSky::AccumShadow binds them.
 	ShadowInputs inputs;
@@ -759,84 +886,74 @@ bool ORGPhysicalSky::AccumShadow(const PhysicalSky& a_feature)
 		if (auto* shadowMap = globals::deferred ? globals::deferred->GetDirectionalShadowMap() : nullptr; shadowMap && hasLight) {
 			inputs.shadowMap = PhysSkyImportShadowMap(shadowMap, "cs.physical-sky.directional-shadow-map");
 			if (!inputs.shadowMap)
-				return fallback("the directional shadow map cannot be imported");
+				PhysSkyFail("the directional shadow map cannot be imported for the AP shadow");
 		}
+		std::string missing;
 		auto& terrainShadows = globals::features::terrainShadows;
 		if (terrainShadows.IsShadowMapReady()) {
-			if (!terrainShadows.texShadowHeight || !PublishedResources::IsExportOf(terrainShadows.texShadowHeight->srv.get(), ORGTerrainShadows::kShadowHeightId))
-				return fallback("Terrain Shadows' heights are not on the render graph");
-			inputs.terrain = ORGTerrainShadows::kShadowHeightId;
+			if (terrainShadows.texShadowHeight && PublishedResources::IsExportOf(terrainShadows.texShadowHeight->srv.get(), ORGTerrainShadows::kShadowHeightId))
+				inputs.terrain = ORGTerrainShadows::kShadowHeightId;
+			else
+				missing = "Terrain Shadows heights";
 		}
 		if (globals::features::cloudShadows.loaded) {
 			inputs.cloud = ORGCloudShadows::PublishedLayerId(CloudShadows::kMaxCloudLayers - 1);
 			if (inputs.cloud.empty())
-				return fallback("Cloud Shadows' layers are not on the render graph");
+				missing = "Cloud Shadows layer";
 		}
+		note(missing);
 		inputs.clouds = CloudsOnGraph(a_feature);
 	} else {
 		// As D3D11 clears it in the map menu.
 		latch.clear = 1;
-		if (state.shadowRegistered)
-			inputs = *state.shadowRegistered;
+		if (state.shadowObserved)
+			inputs = *state.shadowObserved;
 	}
-
-	if (!state.shadowRegistered || !(*state.shadowRegistered == inputs)) {
-		if (!state.RegisterPrepass(inputs, impl)) {
-			state.prepassFailed = true;
-			return false;
-		}
+	// What the AP shadow reads is not a variable yet. A change registers the client again with the next revision.
+	if (!state.shadowObserved || !(*state.shadowObserved == inputs)) {
+		state.shadowObserved = inputs;
+		state.prepassClient.Invalidate();
 	}
-	// Until the schedule holds this registration, D3D11 writes the export.
-	if (!FrameAnchors::Scheduled(kPrepassClientId, FrameAnchors::Anchor::Prepass))
-		return fallback("the client is not scheduled yet");
 
 	const bool half = a_feature.settings.halfResApShadow && !latch.clear;
-	std::uint32_t width = static_cast<std::uint32_t>(a_feature.cbData.frameDim.x);
-	std::uint32_t height = static_cast<std::uint32_t>(a_feature.cbData.frameDim.y);
+	// The dynamic-resolution region, inside the bound version.
+	const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(ApShadowTwin());
+	std::uint32_t width = (std::min)(static_cast<std::uint32_t>(a_feature.cbData.frameDim.x), extent[0]);
+	std::uint32_t height = (std::min)(static_cast<std::uint32_t>(a_feature.cbData.frameDim.y), extent[1]);
 	if (half) {
 		width = (width + 1u) / 2u;
 		height = (height + 1u) / 2u;
 	}
 	state.shadowEntry = half ? kShadowHalfEntry : kShadowFullEntry;
 	state.shadowGroups = { (width + 7u) >> 3, (height + 7u) >> 3 };
+	// A run of the registration the frame holds takes it. Before the first one is adopted, nothing does.
 	state.shadow = latch;
-	state.shadowFallback.clear();
 	return true;
 }
 
 bool ORGPhysicalSky::GenerateSkyTail(const PhysicalSky& a_feature)
 {
-	if (!IsActive() || !impl->skyTail || impl->prepassFailed)
+	if (!IsActive() || !impl->skyTail)
 		return false;
 	auto& state = *impl;
-	if (!state.MakeNull()) {
-		state.prepassFailed = true;
-		return false;
+	// The tail shares the AP shadow's client. Without an AP shadow seen yet, it registers with no shadow inputs.
+	if (!state.shadowObserved) {
+		state.shadowObserved = ShadowInputs{ .clouds = CloudsOnGraph(a_feature) };
+		state.prepassClient.Invalidate();
 	}
-	// The tail shares the AP shadow's client. Without an AP shadow this frame, it registers with no shadow inputs.
-	if (!state.shadowRegistered && !state.RegisterPrepass({ .clouds = CloudsOnGraph(a_feature) }, impl)) {
-		state.prepassFailed = true;
-		return false;
-	}
-	if (!FrameAnchors::Scheduled(kPrepassClientId, FrameAnchors::Anchor::Prepass))
-		return false;
 	state.tail = true;
 	return true;
 }
 
 void ORGPhysicalSky::StageComposite(const PhysicalSky& a_feature)
 {
-	if (!IsActive() || !impl->applyAp || impl->compositeFailed)
+	if (!IsActive() || !impl->applyAp)
 		return;
 	auto& state = *impl;
 	// SetFrame of this frame comes later, so this is the last frame's target. The commit checks this frame's.
 	const auto frame = ORGDeferredComposite::Get().GraphComposite();
 	if (!frame)
 		return;
-	if (!state.MakeNull()) {
-		state.compositeFailed = true;
-		return;
-	}
 	// ViewAtmosphere's medium replaces the aerial perspective (ViewAtmosphere::Enabled() in the shader), and this pass has no medium.
 	if (globals::features::viewAtmosphere.IsPrepared())
 		return;
@@ -844,12 +961,13 @@ void ORGPhysicalSky::StageComposite(const PhysicalSky& a_feature)
 	inputs.main = frame->main;
 	inputs.depth = globals::features::dynamicCubemaps.loaded;
 	inputs.clouds = CloudsOnGraph(a_feature);
-	if (!state.compositeRegistered || !(*state.compositeRegistered == inputs)) {
-		if (!state.RegisterComposite(inputs, impl)) {
-			state.compositeFailed = true;
-			return;
-		}
+	// Not variables yet: a change registers the client again with the next revision.
+	if (!state.compositeObserved || !(*state.compositeObserved == inputs)) {
+		state.compositeObserved = inputs;
+		state.compositeClient.Invalidate();
 	}
+	if (!state.compositeClient.Registered())
+		state.compositeHeld.reset();
 	state.compositeFrame = globals::state->frameCount;
 }
 
@@ -863,8 +981,10 @@ ORGPhysicalSky::~ORGPhysicalSky() = default;
 void ORGPhysicalSky::Reserve() {}
 Texture2D* ORGPhysicalSky::MakeLut2D(Lut, const D3D11_TEXTURE2D_DESC&) { return nullptr; }
 Texture3D* ORGPhysicalSky::MakeLut3D(Lut, const D3D11_TEXTURE3D_DESC&) { return nullptr; }
+bool ORGPhysicalSky::FrameValue(const CS::Setting<bool>& a_setting) { return a_setting.Get(); }
 bool ORGPhysicalSky::Setup(const PhysicalSky&) { return false; }
 bool ORGPhysicalSky::IsActive() const { return false; }
+void ORGPhysicalSky::BeginFrame(PhysicalSky&) {}
 std::uint32_t ORGPhysicalSky::SamplerIndex(Sampler, std::shared_ptr<const void>*) const { return kNoSampler; }
 bool ORGPhysicalSky::GenerateLuts(PhysicalSky&) { return false; }
 Texture2D* ORGPhysicalSky::MakeApShadow(const D3D11_TEXTURE2D_DESC&) { return nullptr; }

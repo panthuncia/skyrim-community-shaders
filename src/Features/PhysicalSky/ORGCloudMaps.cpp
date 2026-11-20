@@ -29,6 +29,7 @@ ORGCloudMaps::~ORGCloudMaps() = default;
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
@@ -173,7 +174,19 @@ struct ORGCloudMaps::Impl
 	// The steps every registration holds, by name.
 	std::map<std::string, StepDesc> steps;
 	bool dirty = false;
-	std::shared_ptr<Registration> registered;
+
+	/** @brief One registration as EndFrame built it: the client's key. */
+	struct Built
+	{
+		std::shared_ptr<Registration> registration;
+		FrameAnchors::ClientDesc client;
+		std::unordered_set<const Twin*> twins;  // what its graphs register
+	};
+	// The client is declared on the sky's and the clouds' toggles. Its key is the newest registration built, which is not a
+	// variable: a new one invalidates the key. held is the one the adopted revision holds.
+	RenderGraph::Frame::DeclaredClient client;
+	std::shared_ptr<const Built> built;
+	std::shared_ptr<const Built> held;
 
 	// This frame's view of the schedule, and the work waiting for a commit.
 	std::uint64_t frame = UINT64_MAX;
@@ -508,6 +521,33 @@ bool ORGCloudMaps::Setup(const PhysicalSky& a_feature)
 		logger::error("[ORG] Physical Sky cloud maps: the mip program, the samplers or the null descriptor could not be made; the cloud maps are not generated");
 		return false;
 	}
+	using namespace RenderGraph::Frame;
+	using BuiltKey = std::shared_ptr<const Impl::Built>;
+	const auto& settings = a_feature.settings;
+	const std::weak_ptr<Impl> weak = next;
+	next->client = DeclareClient<BuiltKey>(
+		kClientId, DependsOn(settings.enabled, settings.enableVolumetricClouds),
+		[weak](const Inputs& a_in) -> std::optional<BuiltKey> {
+			const auto state = weak.lock();
+			const auto& sky = globals::features::physicalSky.settings;
+			if (!state || !state->built || !a_in.Get(sky.enabled) || !a_in.Get(sky.enableVolumetricClouds))
+				return std::nullopt;
+			return state->built;
+		},
+		[](const BuiltKey& a_built, FrameAnchors::ClientDesc& a_client) {
+			a_client = a_built->client;
+			// A graph built from now on registers these.
+			s_registeredTwins = a_built->twins;
+			return true;
+		},
+		[weak](const BuiltKey& a_built) {
+			if (const auto state = weak.lock())
+				state->held = a_built;
+		});
+	if (!next->client) {
+		logger::error("[ORG] Physical Sky cloud maps: the client could not be declared; the cloud maps are not generated");
+		return false;
+	}
 	impl = std::move(next);
 	logger::info("[ORG] Physical Sky cloud maps: the generators run on the render graph ({}, Prepass)", kClientId);
 	return true;
@@ -523,8 +563,10 @@ void ORGCloudMaps::BeginFrame()
 	if (!impl || impl->frame == Frame())
 		return;
 	impl->frame = Frame();
-	// Asked once a frame, so every manager's work this frame meets the same schedule.
-	impl->scheduled = impl->registered && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass);
+	// Asked once a frame, so every manager's work this frame meets the same registration: the newest one, once adopted.
+	if (!impl->client.Registered())
+		impl->held.reset();
+	impl->scheduled = impl->built && impl->held == impl->built;
 }
 
 bool ORGCloudMaps::Submit(Work a_work)
@@ -605,7 +647,7 @@ bool ORGCloudMaps::Submit(Work a_work)
 		state.Refuse("a map or file texture is not on the render graph");
 		return false;
 	}
-	// New or changed steps register the client again at EndFrame. The work waits until that registration is scheduled.
+	// New or changed steps register the client again with the revision after EndFrame. The work waits until it is adopted.
 	bool known = true;
 	for (auto& step : needed) {
 		step.used = Frame();
@@ -622,7 +664,7 @@ bool ORGCloudMaps::Submit(Work a_work)
 		return false;
 	}
 	if (!state.scheduled) {
-		state.Refuse("the client is not scheduled yet");
+		state.Refuse("the adopted revision does not hold the newest registration yet");
 		return false;
 	}
 	if ((!state.pending.dispatches.empty() || !state.pending.mips.empty()) && state.pendingFrame != Frame()) {
@@ -735,14 +777,15 @@ void ORGCloudMaps::EndFrame()
 	};
 	client.active = [self = impl] { return !self->pending.dispatches.empty() || !self->pending.mips.empty(); };
 	client.commit = [self = impl, registration](const FrameAnchors::Point&) { self->Commit(*registration); };
-	if (!FrameAnchors::Register(std::move(client))) {
-		logger::error("[ORG] Physical Sky cloud maps: the client could not be registered; the cloud maps are not generated");
-		state.failed = true;
-		return;
-	}
-	state.registered = registration;
-	s_registeredTwins = std::move(registeredTwins);
-	logger::info("[ORG] Physical Sky cloud maps: {} registered with {} steps ({} gated dispatches, {} latch bytes)", kClientId, ordered.size(), entries, bytes);
+	// The next revision registers it (the client's key).
+	auto next = std::make_shared<Impl::Built>();
+	next->registration = registration;
+	next->client = std::move(client);
+	next->twins = std::move(registeredTwins);
+	state.built = std::move(next);
+	state.client.Invalidate();
+	logger::info("[ORG] Physical Sky cloud maps: {} built with {} steps ({} gated dispatches, {} latch bytes) for the next revision", kClientId, ordered.size(), entries,
+		bytes);
 }
 
 bool ORGCloudInputs::Gather(const PhysicalSky& a_feature, Inputs& a_out)

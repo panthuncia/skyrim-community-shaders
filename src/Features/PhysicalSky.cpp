@@ -519,6 +519,12 @@ namespace
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+PhysicalSky::PhysicalSky()
+{
+	settings.enabled.Bind(CS::SettingRegistry::Declare("PhysicalSky.enabled"));
+	settings.enableVolumetricClouds.Bind(CS::SettingRegistry::Declare("PhysicalSky.enableVolumetricClouds"));
+}
+
 void PhysicalSky::DataLoaded()
 {
 	cloudStormManager.LoadInstances();
@@ -580,13 +586,21 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 
 bool PhysicalSky::VolumetricCloudsEnabled() const
 {
-	// In the graph modes, native too, the clouds are the render graph's (ORGVolumetricClouds).
-	return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed;
+	// In the graph modes, native too, the clouds are the render graph's (ORGVolumetricClouds), and the toggle is the adopted one.
+	const bool clouds = ORGPhysicalSky::Requested() ? frameClouds : settings.enableVolumetricClouds.Get();
+	return clouds && !volumetricScreenResourcesFailed;
 }
 
 bool PhysicalSky::IsActive() const
 {
-	return loaded && settings.enabled && !globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky);
+	const bool enabled = ORGPhysicalSky::Requested() ? frameEnabled : settings.enabled.Get();
+	return loaded && enabled && !globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky);
+}
+
+void PhysicalSky::FollowFrameToggles()
+{
+	frameEnabled = ORGPhysicalSky::FrameValue(settings.enabled);
+	frameClouds = ORGPhysicalSky::FrameValue(settings.enableVolumetricClouds);
 }
 
 void PhysicalSky::DrawSettings()
@@ -662,7 +676,7 @@ void PhysicalSky::SettingsGeneral()
 		ImGui::EndTable();
 	}
 
-	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.enabled);
+	Util::Checkbox(T(TKEY("enabled"), "Enabled"), settings.enabled);
 	ImGui::SameLine();
 	ImGui::Checkbox(T(TKEY("enable_all_exterior_cells"), "Enable All Exterior Cells"), &settings.enableAllExteriorCells);
 	ImGui::SameLine();
@@ -979,7 +993,7 @@ void PhysicalSky::DrawCloudStatus()
 {
 	const bool scene = SceneWidgetInterceptor::IsArmed();
 
-	ImGui::Checkbox(T(TKEY("enable_volumetric_clouds"), "Enable Volumetric Clouds"), &settings.enableVolumetricClouds);
+	Util::Checkbox(T(TKEY("enable_volumetric_clouds"), "Enable Volumetric Clouds"), settings.enableVolumetricClouds);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("enable_volumetric_clouds_tooltip"), "Enable ray-marched volumetric clouds with NDF-based cloud shapes."));
 
@@ -1894,6 +1908,7 @@ bool PhysicalSky::SetLocalCloudState(const LocalNdfState& state)
 
 void PhysicalSky::Reset()
 {
+	FollowFrameToggles();
 	UpdateShaders();
 	const auto worldspaceID = GetCurrentWorldspaceEditorID();
 	if (cloudAmbientWorldspace != worldspaceID) {
@@ -1934,7 +1949,10 @@ void PhysicalSky::Reset()
 
 	auto& linearLighting = globals::features::linearLighting;
 
-	bool allGood = IsActive() && ShadersOK() && skySync.loaded && skySync.settings.Enabled;
+	// What the sky needs besides its toggle, for Atmosphere and Fog's composite (RendersWhenEnabled).
+	const bool usable = loaded && !globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky) && ShadersOK() && skySync.loaded &&
+	                    skySync.settings.Enabled;
+	bool allGood = IsActive() && usable;
 
 	// check worldspace
 	bool worldspaceEnabled = false;
@@ -1961,7 +1979,9 @@ void PhysicalSky::Reset()
 		}
 	}
 	bool allowForcedInterior = inInterior && settings.forceEnableAllInteriorCells;
-	allGood &= (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
+	const bool here = (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
+	allGood &= here;
+	rendersWhenEnabled = usable && here;
 
 	if (!allGood) {
 		lightning.Update(*this, worldspaceID, false);
@@ -2132,6 +2152,8 @@ void PhysicalSky::PostPostLoad()
 
 void PhysicalSky::EarlyPrepass()
 {
+	// The adopted revision may have switched the sky or its clouds since Reset.
+	ORGPhysicalSky::Get().BeginFrame(*this);
 	if (!cbData.enabled)
 		return;
 	// On the render graph the LUTs run at the EarlyPrepass anchor; D3D11's cloud passes still read the disk phase LUT at t106.
@@ -2146,6 +2168,7 @@ void PhysicalSky::EarlyPrepass()
 
 void PhysicalSky::ReflectionsPrepass()
 {
+	ORGPhysicalSky::Get().BeginFrame(*this);
 	if (cbData.enabled) {
 		auto* phaseSrv = texDiskPhaseLut->srv.get();
 		globals::d3d::context->PSSetShaderResources(106, 1, &phaseSrv);
@@ -2197,6 +2220,7 @@ void PhysicalSky::ClearVolumetricToNeutral()
 
 void PhysicalSky::Prepass()
 {
+	ORGPhysicalSky::Get().BeginFrame(*this);
 	if (IsActive() && VolumetricCloudsEnabled() && cloudProfileLutSrv && importedAdjustmentLutSrv) {
 		const bool generatedShape = settings.cloudNoise.procedural || !importedShapeNoiseSrv;
 		const bool generatedAdjustment = settings.cloudNoise.procedural;
@@ -2638,9 +2662,3 @@ void PhysicalSky::Hooks::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* This
 	globals::features::physicalSky.RestoreWaterSampler();
 }
 
-Feature::SizeProjection PhysicalSky::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("enabled", settings.enabled).Add("enableVolumetricClouds", settings.enableVolumetricClouds);
-	return projection;
-}
