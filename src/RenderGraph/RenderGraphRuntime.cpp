@@ -2515,8 +2515,8 @@ bool RenderGraphRuntime::Initialize()
 		}
 	}
 	{
-		// DCLF builds its epochs on its scene worker and attaches them at a frame's end.
-		// Until it registers, or with CS_DCLF_ASYNC_BUILDS=0, they build on the render thread.
+		// DCLF builds its epochs on its scene worker. Until it registers, or with CS_DCLF_ASYNC_BUILDS=0, they build on the render thread.
+		// Either way they are staged, and attach with the snapshot recorded on them at a Begin (plan step 10a).
 		RenderGraph::BuildManager::Desc builds{};
 		builds.host = state->host.get();
 		const bool dclfAsync = !Switches::Equals("CS_DCLF_ASYNC_BUILDS", "0");
@@ -2529,6 +2529,9 @@ bool RenderGraphRuntime::Initialize()
 			}
 		// A finished stage build is staged and recorded on the host's thread, then switched in whole at a frame boundary, so it never blanks a stage.
 		builds.staged = FrameAnchors::SegmentEpochs();
+		for (const auto epoch : dclfAsync ? builds.external : builds.ownerBuilt)
+			if (std::ranges::find(builds.staged, epoch) == builds.staged.end())
+				builds.staged.push_back(epoch);
 		builds.label = [](std::uint32_t a_epoch) -> std::string {
 			return a_epoch < static_cast<std::uint32_t>(Segment::Count) ? std::string(Impl::SegmentLabel(static_cast<Segment>(a_epoch))) :
 			                                                              fmt::format("epoch {}", a_epoch);
@@ -2826,20 +2829,6 @@ bool RenderGraphRuntime::BuildIfRequested(std::string_view a_caller)
 	return GuardedBuild([&] { return impl->builds->Poll(a_caller); });
 }
 
-bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view a_caller)
-{
-	if (!IsActive())
-		return false;
-	return GuardedBuild([&] { return impl->builds->BuildOwnerEpochsNow(a_caller); });
-}
-
-bool RenderGraphRuntime::AttachDclfBuilds(std::string_view a_caller)
-{
-	if (!IsActive())
-		return false;
-	return GuardedBuild([&] { return impl->builds->Poll(a_caller, RenderGraph::BuildManager::Attach::External); });
-}
-
 bool RenderGraphRuntime::DclfBuildsSettled() const
 {
 	return !impl || !impl->builds || impl->builds->Settled();
@@ -3001,11 +2990,11 @@ void RenderGraphRuntime::SealPresented()
 			logger::info("[ORG native] host state after {} presents: {}", s_presents, impl->host->DescribeAsyncState());
 	}
 	// The build point for frames DCLF does not run. Render owner only, since a loading screen's thread presents too.
-	// DCLF's finished builds also attach here, since its epochs were submitted by now.
+	// DCLF's finished builds are staged here like at any poll. They attach with a snapshot at a Begin.
 	if (impl && impl->builds && IsActive() && FrameAnchors::IsRenderOwner()) {
 		if (buildPoints == buildPointsAtSeal)
 			++buildPoints;
-		(void)GuardedBuild([&] { return impl->builds->Poll("frame end", RenderGraph::BuildManager::Attach::All); });
+		(void)GuardedBuild([&] { return impl->builds->Poll("frame end"); });
 		buildPointsAtSeal = buildPoints;
 		impl->builds->NoteFrameEnd();
 	}
@@ -3642,6 +3631,7 @@ void RenderGraphRuntime::SwapStagedPipelines(std::string_view a_reason)
 	if (!IsActive() || !impl->builds)
 		return;
 	const auto begin = std::chrono::steady_clock::now();
+	++pipelineSwaps;
 	const bool built = GuardedBuild([&] { return impl->builds->SwapPipelines(a_reason); });
 	logger::info("[ORG] shader reload: {}: every graph built on the render thread for the pipeline swap ({}, {:.2f} ms)", a_reason,
 		built ? "built" : "nothing built", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
@@ -4143,8 +4133,6 @@ void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
 bool RenderGraphRuntime::BuildIfRequested(std::string_view) { return false; }
-bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view) { return false; }
-bool RenderGraphRuntime::AttachDclfBuilds(std::string_view) { return false; }
 bool RenderGraphRuntime::DclfBuildsSettled() const { return true; }
 bool RenderGraphRuntime::RebuildRequestedUnstaged() const { return false; }
 bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }

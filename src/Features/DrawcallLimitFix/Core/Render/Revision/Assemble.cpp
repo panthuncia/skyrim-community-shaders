@@ -36,7 +36,7 @@ namespace DCLF
 			std::atomic<std::uint32_t> remaining = 0;
 			std::atomic<bool> failed = false;
 			std::uint32_t hosted = 0;
-			// A recording made on any other graph build does not belong to this revision.
+			// The build it is recorded on (RevisionInputs::epochBuilds). A recording made on any other does not belong to this revision.
 			std::uint64_t buildGeneration = 0;
 			std::atomic<std::uint64_t>*recorded = nullptr, *failedCount = nullptr, *droppedCount = nullptr, *shapes = nullptr;
 			std::atomic<std::uint32_t>* logged = nullptr;
@@ -234,9 +234,13 @@ namespace DCLF
 			bool refused = false;
 			for (std::size_t i = 0; i < requests.size() && !refused; ++i) {
 				a_outstanding.fetch_add(1, std::memory_order_acq_rel);
-				refused = !a_host.RequestEpochRecording(epoch, requests[i], [work, i](std::shared_ptr<const org::GraphHost::EpochRecording> a_recording, std::exception_ptr a_error) {
-					RecordingCompleted(work, i, std::move(a_recording), std::move(a_error));
-				});
+				// Recorded on the build the inputs name, the staged one while one is staged. It attaches with the snapshot (plan step 10a).
+				refused = !a_host.RequestEpochRecording(
+					epoch, requests[i],
+					[work, i](std::shared_ptr<const org::GraphHost::EpochRecording> a_recording, std::exception_ptr a_error) {
+						RecordingCompleted(work, i, std::move(a_recording), std::move(a_error));
+					},
+					org::RunRef::kNoCopy, work->buildGeneration);
 				if (refused)
 					a_outstanding.fetch_sub(1, std::memory_order_acq_rel);
 			}

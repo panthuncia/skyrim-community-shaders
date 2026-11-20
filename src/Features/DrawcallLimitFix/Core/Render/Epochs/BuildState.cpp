@@ -18,6 +18,7 @@ namespace DCLF::Draws
 
 		std::atomic<std::shared_ptr<const BuildState>> attached;
 		std::atomic<std::uint64_t> attachedSerial{ 0 };
+		std::atomic<std::uint64_t> builtSerial{ 0 };
 	}
 
 	ShadowSlotBuffers MakeShadowSlotBuffers(const ShadowResources& a_shadow)
@@ -124,6 +125,16 @@ namespace DCLF::Draws
 	std::uint64_t AttachedBuildSerial()
 	{
 		return attachedSerial.load(std::memory_order_acquire);
+	}
+
+	void PublishBuiltBuildState(std::uint64_t a_serial)
+	{
+		builtSerial.store(a_serial, std::memory_order_release);
+	}
+
+	std::uint64_t BuiltBuildSerial()
+	{
+		return builtSerial.load(std::memory_order_acquire);
 	}
 
 	bool AsyncGraphBuilds()

@@ -85,7 +85,11 @@ namespace DCLF
 			bool drawsComplete = false;
 			// Its toggles are its publication's, which become the frame's once installed, so they are never stale.
 			std::uint64_t buildGeneration = 0, mainGeneration = 0;
-			// Stale while newer than the attached build state.
+			// The build each segment's recordings are of: its attached or its staged one when the inputs were posted.
+			std::array<std::uint64_t, static_cast<std::size_t>(RenderGraphRuntime::Segment::Count)> epochBuilds{};
+			// What its graphs are built from. It becomes the attached build state when the snapshot is adopted.
+			std::shared_ptr<const Draws::BuildState> build;
+			// Stale while newer than the built build state.
 			std::uint64_t buildSerial = 0;
 			std::uint32_t targetsGeneration = 0;
 			DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
@@ -102,8 +106,8 @@ namespace DCLF
 		LatestSlot<SceneSnapshot> snapshotSlot;     // the builder -> the frame's start
 		// Polled by a frame waiting for a current snapshot, so it takes the slot only when something new is there.
 		std::atomic<std::uint64_t> snapshotsPosted{ 0 };
-		// The publication gate's scene pass half is open while the frame waits at its start. Its own scene pass only wakes after its start
-		// ends, so a payload held for that pass would never be published.
+		// The publication gate's scene pass half is open while a Begin waits after a pipeline swap. The frame's own scene pass only runs
+		// after its start, so a payload held for that pass would never be published.
 		std::atomic<bool> frameWaiting{ false };
 		// Publication pacing. The builder stores with release and the coordinator loads with acquire.
 		std::atomic<std::uint64_t> snapshotWorkTaken{ 0 };
@@ -145,9 +149,12 @@ namespace DCLF
 			return adoptedSnapshot ? adoptedSnapshot->viewBatches : kNone;
 		}
 		bool snapshotStale = false;
-		// Frame-start waits for a current snapshot since the last report.
-		std::uint64_t snapshotWaits = 0;
+		// Begin waits after a shader reload's pipeline swap since the last report, and in the session.
+		std::uint64_t snapshotWaits = 0, shaderReloadWaits = 0;
 		double snapshotWaitMs = 0.0, snapshotWaitMaxMs = 0.0;
+		// Snapshots adopted with staged builds, and their staged attaches ORG refused, since the last report.
+		std::uint64_t stagedAdoptions = 0, stagedRefusals = 0;
+		std::uint32_t stagedRefusalsLogged = 0;
 		// Commits and latch writes take every versioned buffer's address, SRV index and capacity from this.
 		const NamedVersions* adoptedSet = nullptr;
 		/** @brief The adopted set. Names nothing before the first revision is adopted. */

@@ -255,10 +255,10 @@ namespace DCLF
 		std::shared_ptr<MainPayload> ahead = impl->installedDraws ? impl->installedDraws->payloads[jobIndex] : nullptr;
 		if (!revision || !ahead || ahead->inputs.addresses.identity != resources.get()) {
 			// Only resources made at this frame's Setup lead here. Adopting a new payload mid-frame would mismatch the claims, so this
-			// frame's colour epoch is not DCLF's and the next frame waits for a matching snapshot. Anything else is a defect.
+			// frame's colour epoch is not DCLF's, and a later Begin adopts a matching snapshot. Anything else is a defect.
 			if (newResources)
 				logger::info("[DCLF] main resources made at frame {}'s colour pass ({}x{}): its colour epoch is not drawn (no revision of the frame's is for them); "
-							 "the next frame waits at its start for a snapshot made for them",
+							 "a later Begin adopts a snapshot made for them",
 					Scene::FrameView::Get().GetFrame(), resources->width, resources->height);
 			else if (revision && resources == resourcesBefore && impl->unbuilt[jobIndex]++ == 0)
 				logger::warn("[DCLF] the {} epoch of frame {} has no payload for its resources in the installed publication: not submitted <- UNBUILT",

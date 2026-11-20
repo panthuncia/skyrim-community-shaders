@@ -185,7 +185,7 @@ namespace DCLF
 					});
 				return true;
 			}
-			// "dclf:rebuild" requests a graph rebuild at the next build point. That frame waits at its start for a snapshot on the new build.
+			// "dclf:rebuild" requests a graph rebuild at the next build point. The builds are staged, and attach at a later Begin with the snapshot recorded on them.
 			// "dclf:refresh=<client id>" refreshes one anchor client's epochs only, for stress runs.
 			if (command.rfind("dclf:refresh=", 0) == 0) {
 				FrameAnchors::Refresh(command.substr(13));

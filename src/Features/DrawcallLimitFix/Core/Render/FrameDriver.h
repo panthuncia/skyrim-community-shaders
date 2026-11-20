@@ -23,6 +23,12 @@ namespace DCLF
 	 */
 	void BuildPointAtFrameStart(std::uint64_t a_frame);
 
+	/**
+	 * @brief Every render-owner Begin, from Frame::Revision::AdoptLatest in both modes. Adopts DCLF's newest scene snapshot,
+	 * with the staged builds it was recorded on (plan step 10a). BeginFrame hands its publication over.
+	 */
+	void AdoptSnapshotAtBegin();
+
 	class FrameDriver
 	{
 	public:

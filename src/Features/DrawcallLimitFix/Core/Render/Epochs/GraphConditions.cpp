@@ -82,8 +82,8 @@ namespace DCLF::Draws
 		const auto* tes = RE::TES::GetSingleton();
 		next.interior = tes && tes->interiorCell;
 		next.twoPassOcclusion = Toggles::Get().Active().cullMode >= 2;
-		// A pipeline change makes every recording of the old graph stale, so the frame waits at its start for a snapshot made
-		// for the new graph. Entering or leaving an interior rebuilds the graph anyway.
+		// A pipeline change rebuilds DCLF's graphs. Frames keep the old ones until a Begin adopts a snapshot recorded on the new
+		// ones. Entering or leaving an interior rebuilds the graph anyway.
 		next.cpuPipeline = CpuPipelineForCell(Toggles::Get().Active(), next.interior);
 		// The direct forward families need their epochs' late passes recorded at execution, after the commit.
 		const auto& runtime = RenderGraphRuntime::Get();
@@ -122,9 +122,7 @@ namespace DCLF::Draws
 			a_host.SetExternalEpochs(std::move(external));
 		}
 		requested = std::make_shared<const GraphConditions>(std::move(next));
-		// With CS_DCLF_ASYNC_BUILDS=0 the frame runs the new graphs now, so their conditions are attached now.
-		if (!AsyncGraphBuilds())
-			AttachGraphConditions(requested);
+		// The frame takes the new conditions with the snapshot recorded on the new graphs, at a Begin (PublishAttachedBuildState).
 		// Only DCLF's epochs are rebuilt. A hosted segment has no graph of its own.
 		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
 			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))

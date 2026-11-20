@@ -864,8 +864,9 @@ namespace DCLF
 		buffers.SetUploads(producer.inputs.uploads);
 		const auto& inputs = producer.inputs;
 		auto* host = RenderGraphRuntime::Get().Host();
-		// Wait until the newer build attaches, or recordings would be of the old graphs. The attach posts inputs again.
-		if (inputs.build && inputs.build->serial > AttachedBuildSerial())
+		// Wait until every build of the newer state is staged, or recordings would be of the old graphs. SettleBuildState posts inputs
+		// again then, naming the staged builds to record on (plan step 10a).
+		if (inputs.build && inputs.build->serial > BuiltBuildSerial())
 			return;
 		if (!inputs.claims || !inputs.main || !inputs.main->scene || !host || !a_publication.tables) {
 			reuse.valid = false;

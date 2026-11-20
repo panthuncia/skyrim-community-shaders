@@ -1444,6 +1444,49 @@ import is fatal until its source is found").
   features bind such buffers is the first thing to list (log the registers in `Setup`'s line).
 - Then 10a as written, with the four items above.
 
+**As built (10a-0 and 10a, 2026-11-19, `org-native/rev-step10a2`).** Code only, not built or run here. Two commits.
+- **10a-0** (`fix(dclf): late input changes become tap errors`). A new tap error, `TapError::DclfInputChanged`, fatal in
+  development builds (`IndirectDraws::NoteInputChanged`).
+  - Targets: `MainViewPoints.cpp:CaptureMainPass` refuses a format change once DCLF draws. It is the tap error, and the colour
+    epoch is skipped. `SetTargetFormats` is no longer called with it.
+  - Main resources: `Resources.cpp:Impl::Setup` refuses a remake once DCLF draws, naming what changed (formats, size, t16+
+    buffers, graph buffer bits). `MainEpochs.cpp:RunEpoch`'s `BuildOwnerEpochsNow` after a remake is gone. A remake before DCLF
+    draws builds like any other DCLF build. The t16+ buffers are not registered (director, item 57).
+  - Shadow format: `MaterialLookups.cpp:PostLookupInputs` latches `ShadowEngine::pipelineShadowFormat` from the engine's
+    `kSHADOWMAPS_ESRAM` depth view, or `kPRECIPITATION_OCCLUSION_MAP`'s without one, at the first frame start. It is posted every
+    frame, with shadows on or off. A shadow view that draws into another format (`ShadowEpochs.cpp`) re-latches it before DCLF
+    draws, and is the tap error after. No counted exception was needed.
+- **10a** (`fix(dclf): stage epochs, no frame-start wait`). DCLF's epochs are `external` (or `ownerBuilt`) **and** `staged`
+  (`RenderGraphRuntime.cpp`, the `BuildManager::Desc` setup).
+  - Build manager: `Attach` is gone. Every poll takes every finished group, external ones too, and `Finish` stages a staged
+    epoch's synchronous build as well. So `CS_DCLF_ASYNC_BUILDS=0` stays and stages too (blocker 3). `ExternalBuilder::boundary`
+    runs after every poll, with whether a DCLF build was staged. `BuildOwnerEpochsNow` and `AttachDclfBuilds` are deleted. The
+    frame-end poll is a plain poll.
+  - Build state: `Draws::PublishBuiltBuildState` (all builds of a state staged or attached) is what `MakeRevision` and
+    `StaleKindOf` gate on. `PublishAttachedBuildState`, and so the attached graph conditions, move to the adoption of a snapshot
+    made for that state. Before any DCLF graph exists both are published together. `SettleBuildState` publishes the built serial.
+  - Recording on the staged build (blocker 2): `PostRevisionInputs` puts each segment's staged generation, else its attached one,
+    in `RevisionInputs::epochBuilds`; `buildGeneration` is their sum over DCLF's segments. `RequestRecordings` passes it as
+    `RequestEpochRecording`'s `generation`. The snapshot carries `epochBuilds` and its `BuildState`.
+  - `StaleKindOf(snapshot, &staged)`: per DCLF segment, the recorded build must be the attached or the staged one; the staged
+    epochs come back for the attach. Then the built serial, then targets, shadow format and main resources as before.
+    `AdoptedCurrent` also requires no staged epoch left.
+  - Adoption: `Frame::Revision::AdoptLatest` calls `DCLF::AdoptSnapshotAtBegin` at every render-owner Begin on the main thread,
+    after the frame revision (and its pipeline swap), with or without a revision. `AdoptSnapshot` attaches the snapshot's staged
+    epochs with `Builds::AttachStaged`, publishes its build state, then adopts as before. Its frame bookkeeping uses
+    `FrameView::GetFrame() + 1` (Q7). `BeginFrame` hands `AdoptedPublication()` to the frame view.
+  - `DecideEpochCoverage` requires the adopted snapshot to be current (`AdoptedCurrent`) instead of "the newest taken was not
+    stale". A newer snapshot that was stale leaves the adopted one, recorded on the graphs that run.
+  - Shader reload (blocker 4, director item 57): `RenderGraphRuntime::PipelineSwaps` counts swaps. After one, the first Begin
+    that draws waits in `Impl::WaitAfterPipelineSwap` for a snapshot on the rebuilt graphs. Named "[DCLF] shader-reload wait N:
+    frame F waited X ms at its Begin after the pipeline swap ...", counted (`shaderReloadWaits`, the report's "shader-reload
+    waits" line), zone `CS.DCLF.WaitAfterPipelineSwap`. It polls the build manager while it waits, so a build staged meanwhile
+    attaches with the snapshot inside the wait.
+  - Deleted: `AdoptCurrentSnapshot`, its wait and the "frame N waited" line, `AttachDclfBuilds`, `BuildOwnerEpochsNow`, the
+    frame-end `Attach::All`, and the boundary check's `Exception`/`Allow` (the `Dclf` row was the last).
+  - A staged attach that ORG refuses at the adoption (the host's configuration changed since the build started) leaves the
+    snapshot stale, asks for the refused epochs' builds again and logs "[DCLF] snapshot N's staged builds were refused".
+
 **10b. The snapshot as a fragment.** DCLF's `RevisionAssembler` sealing moves into the frame revision: `kScene` (publication, draws,
 payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembler.
 - DCLF recordings name `ComposedVersions{DCLF buffers, frame textures}`, so a CS texture change has DCLF epochs in its closure and they
@@ -1800,8 +1843,8 @@ return nothing (or only the stated exception) at the end.
 | Version-lag branch in `Schedule` (`versionGeneration` bumps, `frameVersionsCurrent` exception). Gone in 9b | 9b | `rg -n "versionGeneration\|frameVersionsCurrent" src/RenderGraph/FrameAnchors.cpp` |
 | Mid-frame import publishing (`JoinSlot`/`EnsureViews` outside adoption). 9b: both are called from `Import`/`ShareImage`, and refuse outside `Boundary::InAdoptionPoint` | 9b | `rg -n "JoinSlot\|EnsureViews" src/RenderGraph/FrameAnchors.cpp` shows calls only behind `RefusedOutsideAdoption`; `rg -n "EngineImports" src` empty |
 | `EngineTargets` `Settle` builds and generation bump | 9a | `rg -n "Settle\(\|heldReplaced\|heldResized" src/RenderGraph/Engine/Targets` |
-| DCLF frame-start wait | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|kCatalogTimeout" src` |
-| `RenderGraphRuntime::AttachDclfBuilds`, DCLF `external` epochs, frame-end `Attach::All` for DCLF | 10a | `rg -n "AttachDclfBuilds\|Attach::All\|\.external" src` |
+| DCLF frame-start wait (the shader-reload wait stays, director item 57) | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|at its start for a snapshot current" src` |
+| `RenderGraphRuntime::AttachDclfBuilds`, `BuildOwnerEpochsNow`, frame-end `Attach::All` for DCLF (its epochs stay `external`, and are `staged` too) | 10a | `rg -n "AttachDclfBuilds\|BuildOwnerEpochsNow\|Attach::All" src` |
 | DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
 | `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
@@ -2608,6 +2651,31 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   from the stage table, not checked against a census.
 - **Shader reload is a fourth blocker.** Q5 leaves no wait-free way to keep DCLF covered after `SwapPipelines`. Proposed: say
   shader reload with DCLF drawing is unsupported until recordings name their pipelines, and make it a clear fatal error.
+
+**Decided by the agent (step 10a-0 and 10a, 2026-11-19, `org-native/rev-step10a2`), to confirm:**
+- **A new tap error, `DclfInputChanged`,** not `OutsideAdoption`. It names a DCLF input, not a version or attach, and keeps
+  "no `OutsideAdoption`" a clean acceptance grep.
+- **After a refused target or main-resource change, the colour epoch is skipped** (when tap errors are not fatal). Remaking
+  would leave the running graphs and snapshot on the old resources with no revision to switch them.
+- **The shadow format needs no exception.** The engine's shadow map exists before DCLF's first frame start, so the latch is
+  set before DCLF draws. Before then a shadow view's own format may still replace it; after, it is the tap error.
+- **`CS_DCLF_ASYNC_BUILDS=0` stays, and its builds stage too** (one condition in `BuildManager::Impl::Finish`). Removing it
+  touched more files for no gain in 10a.
+- **Every poll takes every finished group,** and the external builder hears of every poll. Staging inside a frame is safe; only
+  attaching is not.
+- **DCLF adopts in `AdoptLatest`, on the main thread only.** With `CS_ORG_LOADING_THREAD`, a loading screen's thread owns
+  rendering, and DCLF's state is the main thread's. DCLF does not draw there.
+- **The attached build state, and so the attached graph conditions, change at the adoption** that attaches the staged builds,
+  not at the staging. So the frame's conditions always match the graphs it runs.
+- **Coverage checks that the adopted snapshot is current,** not that the newest taken one was. Before 10a both meant the same,
+  since a frame-end attach made the adopted one stale too.
+- **A staged attach ORG refuses at the adoption is not fatal.** The snapshot is stale, the refused epochs are built again, and
+  a snapshot is made on the new builds. It is counted and logged ("staged builds were refused"). Frame revisions make the same
+  refusal fatal; DCLF's builds can meet a host configuration change from DCLF's own conditions (`SetExternalEpochs`).
+- **The shader-reload wait** runs at the first Begin that draws after the swap, so a swap made while DCLF does not draw is
+  still waited for, unless a current snapshot is adopted first.
+- **Section 8's 10a rows change:** `.external` stays (decision: `external` and `staged`), and `kCatalogTimeout` stays inside
+  the shader-reload wait. The rows grep for the deleted names instead.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

@@ -117,8 +117,8 @@ namespace DCLF::Scene
 		bool HasInstalled() const { return installed != nullptr; }
 		const ScenePublication* InstalledPublication() const { return installed.get(); }
 		/**
-		 * @brief True before DCLF's first covered frame, whose epochs draw nothing. Once installed the claims are never withdrawn,
-		 * a frame waits for a snapshot it can draw from instead.
+		 * @brief True before DCLF's first covered frame, whose epochs draw nothing. Once installed the claims are never withdrawn:
+		 * the adopted snapshot stays in use until a Begin adopts a newer current one.
 		 */
 		bool NotDrawingYet() const { return !drawingStarted; }
 		/** @brief Render thread, frame start before the culls. The deltas are by component, oldest first, cleared by ClearAdoptedDeltas. */

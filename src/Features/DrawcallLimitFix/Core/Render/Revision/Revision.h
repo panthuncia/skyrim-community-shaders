@@ -22,7 +22,8 @@ namespace DCLF::Draws
 		std::uint64_t mainGeneration = 0;
 		std::shared_ptr<ShadowResources> shadow;
 		std::shared_ptr<SceneBuffers> scene;
-		// epochBuilds is each segment's own build, which is what its recordings are of.
+		// epochBuilds is each segment's own build, which is what its recordings are of: its staged build while one is staged, else its
+		// attached one. buildGeneration is their sum over DCLF's segments.
 		std::uint64_t buildGeneration = 0;
 		std::array<std::uint64_t, static_cast<std::size_t>(RenderGraphRuntime::Segment::Count)> epochBuilds{};
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
@@ -49,7 +50,7 @@ namespace DCLF::Draws
 		bool cpuPipeline = false;
 		bool forwardDirect = false;
 		bool firstPersonForwardDirect = false;
-		// A revision is made only while this build is the attached one. Before that, a recording would be of the old graphs.
+		// A revision is made only once every build of this state is staged or attached. Before that, a recording would be of the old graphs.
 		std::shared_ptr<const BuildState> build;
 	};
 

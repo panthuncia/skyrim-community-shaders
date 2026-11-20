@@ -42,6 +42,12 @@
 #	include <string>
 #	include <vector>
 
+namespace DCLF
+{
+	// DCLF's snapshot adoption, at every render-owner Begin (plan step 10a).
+	void AdoptSnapshotAtBegin();
+}
+
 namespace RenderGraph::Frame::Revision
 {
 	namespace
@@ -992,6 +998,11 @@ namespace RenderGraph::Frame::Revision
 		StartPreparation(coordinator, frame);
 		if (idle && coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
+		// DCLF adopts its newest scene snapshot here in both modes, with or without a frame revision, after a pipeline swap the
+		// revision ran. A snapshot recorded on staged builds attaches them (plan step 10a). DCLF draws on the main thread only, so a
+		// loading screen's thread that owns rendering leaves it to the main thread's next Begin.
+		if (FrameAnchors::IsMainThread())
+			DCLF::AdoptSnapshotAtBegin();
 		// After any adoption, so FirstFrame sees the versions this frame binds.
 		Declarations::NoteBegin(frame);
 	}

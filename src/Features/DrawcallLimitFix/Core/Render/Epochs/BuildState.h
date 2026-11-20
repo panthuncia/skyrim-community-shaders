@@ -4,7 +4,8 @@
 //
 // The render thread makes a new value when its live state changes and posts it with the revision inputs. Builds run on
 // the scene worker while the render thread keeps changing, so a build reads only this value, never the live resources.
-// A finished build attaches at a frame's end, and from then on its value is the attached one.
+// Finished builds are staged. Once every one is, the value is the built one, and snapshots are made for it. The value is
+// the attached one from the Begin that adopts a snapshot made for it, with the staged builds (plan step 10a).
 //
 // Per-frame fields stay on the live resources, since only a pass's preparation or recording reads them.
 // Self-contained so features can include it.
@@ -59,7 +60,7 @@ namespace DCLF::Draws
 	/** @brief What every DCLF epoch graph is built from. Immutable once made. */
 	struct BuildState
 	{
-		// Moves with every new value. A snapshot made from inputs of another serial than the attached one is stale.
+		// Moves with every new value. A snapshot is made only for the built value or an older one.
 		std::uint64_t serial = 0;
 		std::shared_ptr<const GraphConditions> conditions;
 		std::shared_ptr<Resources> main;
@@ -105,13 +106,23 @@ namespace DCLF::Draws
 	/** @brief Render thread, once at install: where BuildingState takes the render thread's newest value from. */
 	void SetBuildStateSource(std::function<std::shared_ptr<const BuildState>()> a_source);
 
-	/** @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions. */
+	/**
+	 * @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions.
+	 * Called when a snapshot made for it is adopted, with the staged builds it was recorded on.
+	 */
 	void PublishAttachedBuildState(std::shared_ptr<const BuildState> a_state);
 	/** @brief Any thread: the attached build state, null before the first. */
 	std::shared_ptr<const BuildState> AttachedBuildState();
 	/** @brief Any thread: the attached build state's serial, 0 before the first. */
 	std::uint64_t AttachedBuildSerial();
+	/** @brief Render thread: every build a_state asked for is staged or attached, so snapshots may be made for it. */
+	void PublishBuiltBuildState(std::uint64_t a_serial);
+	/** @brief Any thread: the built build state's serial, 0 before the first. */
+	std::uint64_t BuiltBuildSerial();
 
-	/** @brief Whether DCLF's epochs build on the scene worker and attach at a frame's end (CS_DCLF_ASYNC_BUILDS, default on). */
+	/**
+	 * @brief Whether DCLF's epochs build on the scene worker (CS_DCLF_ASYNC_BUILDS, default on). Off, they build on the render
+	 * thread at the build point. Either way their builds are staged and attach with a snapshot at a Begin.
+	 */
 	bool AsyncGraphBuilds();
 }

@@ -77,8 +77,12 @@ namespace DCLF
 		 * @brief Builder. Swaps in the render thread's context when a work item was made for older main resources. True when its draws must be rebuilt.
 		 */
 		bool RefreshWorkContext();
-		/** @brief Why a_snapshot is stale for the current graph, targets, shadow format and main resources. kStaleKinds when current. */
-		std::size_t StaleKindOf(const SceneSnapshot& a_snapshot) const;
+		/**
+		 * @brief Why a_snapshot is stale for the graphs, targets, shadow format and main resources. kStaleKinds when current.
+		 * Render thread. Each DCLF epoch's recordings must be of its attached or its staged build. a_staged gets the epochs whose
+		 * staged build the snapshot was recorded on, which attach with its adoption.
+		 */
+		std::size_t StaleKindOf(const SceneSnapshot& a_snapshot, std::vector<std::uint32_t>* a_staged = nullptr) const;
 		/** @brief Render thread. Whether the adopted snapshot is current, with a revision, complete draws and a ready payload. */
 		bool AdoptedCurrent() const;
 
@@ -246,22 +250,24 @@ namespace DCLF
 		std::vector<std::uint32_t> classCountZeros;
 
 		void ServeRevisionRequests();
-		/**
-		 * @brief Render thread. Serves the revision code's requests, builds the graph when an extension changed, and posts moved revision inputs.
-		 * a_ownEpochsOnly builds only DCLF's epochs.
-		 */
-		void BuildIfAsked(bool a_ownEpochsOnly = false);
+		/** @brief Render thread. Serves the revision code's requests, polls the build manager, and posts moved revision inputs. */
+		void BuildIfAsked();
 		/** @brief Render thread. What DCLF's epoch graphs are built from now. A new value only when something changed. */
 		std::shared_ptr<const BuildState> CurrentBuildState();
 		std::shared_ptr<const BuildState> buildState;
-		/** @brief Render thread, frame boundary. Attaches the newest build state once no DCLF epoch is pending a build. */
+		/** @brief Render thread, after each build manager poll. The newest build state is the built one once no DCLF epoch is pending a build. */
 		void SettleBuildState();
-		/** @brief Render thread. Builds DCLF's epoch graphs on the scene worker and attaches them at a frame's end. */
+		/** @brief Render thread. Builds DCLF's epoch graphs on the scene worker. They are staged and attach with a snapshot at a Begin. */
 		void RegisterGraphBuilds();
 		bool graphBuildsRegistered = false;
-		// The frame whose end attached DCLF graphs, so the next frame's wait is logged as a wait for their recordings.
-		std::uint32_t graphsAttachedFrame = ~0u;
-		std::uint64_t graphsAttachWaitLogs = 0;
+		// RenderGraphRuntime::PipelineSwaps at the last Begin's adoption. A new swap is the one case a Begin waits for a snapshot.
+		std::uint64_t pipelineSwapsSeen = 0;
+		bool pipelineSwapPending = false;  // a swap seen, and no current snapshot adopted since
+		/**
+		 * @brief Render thread, at Begin. After a shader reload's pipeline swap, waits for a snapshot recorded on the rebuilt graphs.
+		 * Returns the milliseconds waited.
+		 */
+		double WaitAfterPipelineSwap(std::uint64_t a_postedBefore);
 		/**
 		 * @brief The sum of DCLF's own epochs' build generations. Other epochs' builds do not invalidate DCLF's recordings.
 		 */

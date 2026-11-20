@@ -16,8 +16,8 @@ namespace DCLF
 		if (!host)
 			return;
 		auto& rv = impl->revisions;
-		// Graph builds only happen here, so the graph a frame's revision was recorded on stays for the whole frame.
-		// A build invalidates every recording, and the next frame waits for a snapshot recorded on the new build.
+		// DCLF's builds are only staged here, so the graph a frame's revision was recorded on stays for the whole frame.
+		// A Begin attaches a staged build with the snapshot recorded on it (plan step 10a).
 		rv.explicitBuilds = !failed;
 		impl->RegisterGraphBuilds();
 		// A change in what passes this frame needs asks for new builds. The attached graphs stay until those builds attach.
@@ -39,17 +39,11 @@ namespace DCLF
 		return builds;
 	}
 
-	void IndirectDraws::Impl::BuildIfAsked(bool a_ownEpochsOnly)
+	void IndirectDraws::Impl::BuildIfAsked()
 	{
 		ServeRevisionRequests();
 		// Build through the runtime, so a lost device stops the graph instead of throwing into the frame.
-		// While a frame waits for its snapshot, DCLF's builds must attach here or the wait would never end.
-		const auto ownEpochs = [] {
-			auto& runtime = RenderGraphRuntime::Get();
-			return Draws::AsyncGraphBuilds() ? runtime.AttachDclfBuilds("Drawcall Limit Fix's wait for a snapshot") :
-			                                   runtime.BuildOwnerEpochsNow("Drawcall Limit Fix's wait for a snapshot");
-		};
-		if (revisions.explicitBuilds && (a_ownEpochsOnly ? ownEpochs() : RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point")))
+		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point"))
 			++revisions.builds;
 		PostRevisionInputs();
 	}
@@ -100,9 +94,16 @@ namespace DCLF
 			participant->PostInputs(next);
 		next.scene = scene;
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
-			next.buildGeneration = GraphBuildGeneration(*host);
-			for (std::size_t segment = 0; segment < next.epochBuilds.size(); ++segment)
-				next.epochBuilds[segment] = host->BuildGeneration(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
+			// Each segment records on its staged build when one is staged, else on its attached one. The staged one attaches with the
+			// snapshot (plan step 10a). buildGeneration is their sum over DCLF's segments, so a staging makes every recording again.
+			for (std::size_t segment = 0; segment < next.epochBuilds.size(); ++segment) {
+				const auto kind = static_cast<RenderGraphRuntime::Segment>(segment);
+				const auto epoch = RenderGraphRuntime::EpochOf(kind);
+				const std::uint64_t staged = host->StagedGeneration(epoch);
+				next.epochBuilds[segment] = staged ? staged : host->BuildGeneration(epoch);
+				if (RenderGraphRuntime::IsDclfSegment(kind))
+					next.buildGeneration += next.epochBuilds[segment];
+			}
 			if (auto* descriptors = host->Descriptors()) {
 				next.resourceHeap = descriptors->GetSRVDescriptorHeap().GetHandle();
 				next.samplerHeap = descriptors->GetSamplerDescriptorHeap().GetHandle();
@@ -177,7 +178,7 @@ namespace DCLF
 		std::string epochs;
 		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e)
 			epochs += fmt::format("{}{} {}{}", e ? ", " : "", EpochTraitsOf(e).name, s.revisions.covered[e] ? "covered" : "UNCOVERED", EpochTraitsOf(e).claims ? " (claims)" : "");
-		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, stale kind {} of {}, build generation {} against {}, main generation {} against {}), "
+		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, stale kind {} of {}, build generation {} against {} attached, main generation {} against {}), "
 						   "newest taken stale {}, payload {}, adopted set {}; epochs: {}",
 			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, adopted ? s.StaleKindOf(*adopted) : static_cast<std::size_t>(Impl::kStaleKinds),
 			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
@@ -209,7 +210,8 @@ namespace DCLF
 		const auto& versionsFragment = active ? active->Fragment(R::kVersionsSlot) : nullptr;
 		const auto versions = versionsFragment ? versionsFragment->Value<NamedVersions>() : nullptr;
 		const auto* payload = InstalledScenePayload();
-		bool snapshot = adoptedSnapshot && adoptedSnapshot->drawsComplete && !snapshotStale && payload && PayloadPools::Available() &&
+		// The adopted snapshot must be current. A newer one that was stale leaves it in use: it is recorded on the graphs that run.
+		bool snapshot = adoptedSnapshot && adoptedSnapshot->drawsComplete && AdoptedCurrent() && payload && PayloadPools::Available() &&
 		                FrameValues::Get().Available();
 		const bool current = host && snapshot && versions && versions.get() == adoptedSet;
 		// Records how many frames passed between a growth's adoption and the first draws that use its versions.
