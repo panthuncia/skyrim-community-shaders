@@ -23,13 +23,30 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	BilinearThreshold,
 	ShadowContrast)
 
+ScreenSpaceShadows::ScreenSpaceShadows()
+{
+	bendSettings.Enable.Bind(CS::SettingRegistry::Declare("ScreenSpaceShadows.Enable"));
+	bendSettings.SampleCount.Bind(CS::SettingRegistry::Declare("ScreenSpaceShadows.SampleCount"));
+}
+
+ScreenSpaceShadows::GpuBendSettings ScreenSpaceShadows::GetGpuSettings() const
+{
+	GpuBendSettings data;
+	data.SurfaceThickness = bendSettings.SurfaceThickness;
+	data.BilinearThreshold = bendSettings.BilinearThreshold;
+	data.ShadowContrast = bendSettings.ShadowContrast;
+	data.Enable = bendSettings.Enable;
+	data.SampleCount = bendSettings.SampleCount;
+	return data;
+}
+
 void ScreenSpaceShadows::DrawSettings()
 {
-	ImGui::Checkbox(T(TKEY("enable"), "Enable"), (bool*)&bendSettings.Enable);
+	Util::Checkbox(T(TKEY("enable"), "Enable"), bendSettings.Enable);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("enable_tooltip"), "Enable screen-space contact shadows from the sun/moon direction."));
 
-	ImGui::SliderInt(T(TKEY("sample_count"), "Sample Count Multiplier"), (int*)&bendSettings.SampleCount, 1, 4, "%d", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("sample_count"), "Sample Count Multiplier"), bendSettings.SampleCount, 1, 4, "%d", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("sample_count_tooltip"), "Multiplier for shadow ray sample count. Higher values increase shadow reach at the cost of performance. Adapts to render resolution."));
 
@@ -104,11 +121,16 @@ ID3D11ComputeShader* ScreenSpaceShadows::GetComputeRaymarch()
 
 bool ScreenSpaceShadows::ShouldDraw() const
 {
-	auto sky = globals::game::sky;
-	return sky && bendSettings.Enable && sky->mode.get() == RE::Sky::Mode::kFull;
+	return bendSettings.Enable && SkyFull();
 }
 
-ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches() const
+bool ScreenSpaceShadows::SkyFull()
+{
+	auto sky = globals::game::sky;
+	return sky && sky->mode.get() == RE::Sky::Mode::kFull;
+}
+
+ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_screenSize) const
 {
 	auto accumulator = *globals::game::currentAccumulator.get();
 	auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(accumulator->GetRuntimeData().activeShadowSceneNode->GetRuntimeData().sunLight->light.get());
@@ -122,7 +144,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches() const
 	auto projectedLight = DirectX::SimpleMath::Vector4::Transform(lightProjection, viewProjMat);
 	float lightProjectionF[4] = { projectedLight.x, projectedLight.y, projectedLight.z, projectedLight.w };
 
-	float2 renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	float2 renderSize = Util::ConvertToDynamic(a_screenSize);
 	int viewportSize[2] = { (int)renderSize.x, (int)renderSize.y };
 
 	int minRenderBounds[2] = { 0, 0 };
@@ -154,7 +176,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches() const
 		data.InvDepthTextureSize[0] = 1.0f / (float)viewportSize[0];
 		data.InvDepthTextureSize[1] = 1.0f / (float)viewportSize[1];
 
-		data.settings = bendSettings;
+		data.settings = GetGpuSettings();
 
 		for (int axis = 0; axis < 3; axis++)
 			dispatches.groups[i][axis] = static_cast<uint32_t>(dispatchData.WaveCount[axis]);
@@ -194,7 +216,7 @@ void ScreenSpaceShadows::DrawShadows()
 
 	context->CSSetShader(GetComputeRaymarch(), nullptr, 0);
 
-	const auto dispatches = BuildDispatches();
+	const auto dispatches = BuildDispatches(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
 	for (uint32_t i = 0; i < dispatches.count; i++) {
 		{
 			TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch CB");
@@ -333,10 +355,3 @@ void ScreenSpaceShadows::EnsureShadowTexture()
 	screenSpaceShadowsTexture->CreateUAV(uavDesc);
 }
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection ScreenSpaceShadows::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("Enable", bendSettings.Enable).Add("SampleCount", bendSettings.SampleCount);
-	return projection;
-}

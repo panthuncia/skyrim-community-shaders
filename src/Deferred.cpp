@@ -911,7 +911,7 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 
 		auto& terrainBlending = globals::features::terrainBlending;
 		// Defer terrain rendering until after everything else
-		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
+		if (terrainBlending.loaded && terrainBlending.FrameEnabled()) {
 			terrainBlending.RenderTerrainBlendingPasses();
 		}
 		if (globals::features::drawcallLimitFix.loaded)

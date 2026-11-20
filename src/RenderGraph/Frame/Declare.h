@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -39,7 +40,8 @@ namespace FrameAnchors
 * - a texture whose description changes gets a new version, made off the render thread. A History texture's new version is
 *   born cleared, and FirstFrame says so for its first frame;
 * - a client whose key changes is registered again, or removed when its key is empty. The revision then waits for the stage
-*   builds that hold the change, so the values, the versions and the builds switch in at the same Begin.
+*   builds that hold the change, so the values, the versions and the builds switch in at the same Begin;
+* - a program whose key changes is built off the render thread first. The revision starts once it is built.
 * In the frame, a feature reads sizes and values from Revision::Adopted(), never from its live settings or a twin's Desc().
 *
 * This header includes nothing of ORG or OMS. Without the render graph the declarations are inert: a texture keeps the
@@ -208,10 +210,87 @@ namespace RenderGraph::Frame
 		return Detail::DeclareClient(std::move(a_id), std::move(a_dependencies), std::move(functions));
 	}
 
+	namespace Detail
+	{
+		struct ProgramDeclaration;
+		using ErasedProgram = std::shared_ptr<const void>;
+		struct ProgramFunctions
+		{
+			std::function<ErasedKey(const Inputs&)> key;          // never null
+			std::function<bool(const void*, const void*)> equal;  // two keys
+			std::function<ErasedProgram(const void*)> build;      // any thread. Null is a failed build
+		};
+		std::shared_ptr<ProgramDeclaration> DeclareProgram(std::string a_name, Dependencies a_dependencies, ProgramFunctions a_functions);
+		ErasedProgram ProgramFor(const ProgramDeclaration* a_program, const Inputs& a_values);
+		ErasedProgram AdoptedProgram(const ProgramDeclaration* a_program);
+	}
+
+	/** @brief A declared program. Keep it as long as the feature uses the program. */
+	template <class P>
+	class DeclaredProgram
+	{
+	public:
+		DeclaredProgram() = default;
+		explicit DeclaredProgram(std::shared_ptr<Detail::ProgramDeclaration> a_declaration) :
+			declaration(std::move(a_declaration)) {}
+
+		/**
+		* @brief Render thread. The program for a revision's values, from a client's key or make function or a texture's
+		* description. A revision starts only once its programs are built, so it is there. Fatal when it is missing.
+		*/
+		std::shared_ptr<const P> For(const Inputs& a_values) const
+		{
+			return std::static_pointer_cast<const P>(Detail::ProgramFor(declaration.get(), a_values));
+		}
+
+		const std::shared_ptr<Detail::ProgramDeclaration>& Declaration() const { return declaration; }
+
+		explicit operator bool() const { return declaration != nullptr; }
+
+	private:
+		std::shared_ptr<Detail::ProgramDeclaration> declaration;
+	};
+
+	/**
+	* @brief Render thread, at setup. A program, such as a shader permutation, as a function of a_dependencies. a_key gives what
+	* the program is built from (its defines, a sample count), and a_build builds it for a key. Returns a DeclaredProgram of the
+	* type a_build returns a shared_ptr to.
+	* - The first key is built here, at once, since setup may compile.
+	* - Later keys are built off the render thread, on the programs lane, so a_build must be safe there.
+	* - A revision whose values need a key not built yet does not start until the build is done. Frames keep the adopted
+	*   revision meanwhile, so a compile never blocks a Begin. A client's key or make reads the new program with For().
+	* - Every key built is kept for the session, so going back to one costs nothing. Keys compare with operator==.
+	* - A failed build after the first is fatal.
+	* In the frame, read the program with Revision::Adopted().Program(). Empty without the graph, or when the first build failed
+	* (logged).
+	*/
+	template <class KeyFn, class BuildFn>
+	auto DeclareProgram(std::string a_name, Dependencies a_dependencies, KeyFn a_key, BuildFn a_build)
+	{
+		using Key = std::decay_t<std::invoke_result_t<KeyFn&, const Inputs&>>;
+		using Built = std::decay_t<std::invoke_result_t<BuildFn&, const Key&>>;
+		using Program = std::remove_const_t<typename Built::element_type>;
+		Detail::ProgramFunctions functions;
+		functions.key = [key = std::move(a_key)](const Inputs& a_inputs) mutable -> Detail::ErasedKey { return std::make_shared<const Key>(key(a_inputs)); };
+		functions.equal = [](const void* a_left, const void* a_right) { return *static_cast<const Key*>(a_left) == *static_cast<const Key*>(a_right); };
+		functions.build = [build = std::move(a_build)](const void* a_keyValue) mutable -> Detail::ErasedProgram {
+			std::shared_ptr<const Program> program = build(*static_cast<const Key*>(a_keyValue));
+			return program;
+		};
+		return DeclaredProgram<Program>(Detail::DeclareProgram(std::move(a_name), std::move(a_dependencies), std::move(functions)));
+	}
+
 	/** @brief What the frame reads: the variables of the revision adopted last, and the declared textures as they are bound. */
 	class AdoptedRevision
 	{
 	public:
+		/** @brief The program for the adopted revision's values. Before the first adoption, the one built at declaration. */
+		template <class P>
+		std::shared_ptr<const P> Program(const DeclaredProgram<P>& a_program) const
+		{
+			return std::static_pointer_cast<const P>(Detail::AdoptedProgram(a_program.Declaration().get()));
+		}
+
 		template <class T>
 		T Get(Vars::Var<T> a_variable) const
 		{

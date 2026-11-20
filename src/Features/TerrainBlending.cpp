@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -17,9 +18,35 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	TerrainBlending::Settings,
 	Enabled)
 
+TerrainBlending::TerrainBlending()
+{
+	settings.Enabled.Bind(CS::SettingRegistry::Declare("TerrainBlending.Enabled"));
+}
+
+TerrainBlending::GpuSettings TerrainBlending::GetCommonBufferData() const
+{
+	GpuSettings data;
+	data.Enabled = FrameEnabled() ? 1u : 0u;
+	return data;
+}
+
+bool TerrainBlending::FrameEnabled() const
+{
+	if (!ORGTerrainBlending::Get().Active())
+		return settings.Enabled != 0;
+	// Read once a frame: the draw hook asks for every pass. The revision is adopted at Begin, after State::Reset counted the frame.
+	const auto frame = globals::state->frameCount;
+	if (frame != frameEnabledAt) {
+		frameEnabledAt = frame;
+		frameEnabled = RenderGraph::Frame::Revision::Adopted().Get(settings.Enabled) != 0;
+		lastFrameEnabled.store(frameEnabled, std::memory_order_relaxed);
+	}
+	return frameEnabled;
+}
+
 void TerrainBlending::DrawSettings()
 {
-	ImGui::Checkbox(T(TKEY("enable"), "Enable Terrain Blending"), (bool*)&settings.Enabled);
+	Util::Checkbox(T(TKEY("enable"), "Enable Terrain Blending"), settings.Enabled);
 
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_tooltip"), "Enable seamless blending between terrain and objects."));
@@ -357,8 +384,9 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 	RefreshDepthBackups(singleton);
 	singleton.eyePosition = Util::GetEyePosition();
 
-	if (shaderCache->IsEnabled() && singleton.settings.Enabled) {
+	if (shaderCache->IsEnabled() && singleton.FrameEnabled()) {
 		// Before the depth table names the blended depth: the ORG path imports the main depth through it.
+		ORGTerrainBlending::Get().Observe();
 		if (!ORGTerrainBlending::Get().BeforeDepth())
 			singleton.CreateBlendedDepthTextures();
 		auto* blendedDepth = singleton.GetBlendedDepthSRV();
@@ -384,6 +412,8 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 	} else {
 		mainDepth.depthSRV = singleton.depthSRVBackup;
 		zPrepassCopy.depthSRV = singleton.prepassSRVBackup;
+		// Imported while off too, so the first enable's revision has the inputs for the blend's client.
+		ORGTerrainBlending::Get().Observe();
 
 		{
 			ZoneScopedN("Terrain Depth - Game Render");
@@ -397,7 +427,7 @@ void TerrainBlending::Hooks::BSBatchRenderer__RenderPassImmediately::thunk(RE::B
 	auto& singleton = globals::features::terrainBlending;
 	auto shaderCache = globals::shaderCache;
 
-	if (shaderCache->IsEnabled() && singleton.settings.Enabled) {
+	if (shaderCache->IsEnabled() && singleton.FrameEnabled()) {
 		if (singleton.renderDepth) {
 			// Entering or exiting terrain depth section
 			bool inTerrain = a_pass->shaderProperty && a_pass->shaderProperty->flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape);
@@ -446,7 +476,7 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	ZoneScoped;
 
 	RefreshDepthBackups(*this);
-	if (!settings.Enabled) {
+	if (!FrameEnabled()) {
 		renderDepth = false;
 		renderTerrainDepth = false;
 		renderAltTerrain = false;
@@ -521,10 +551,3 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	zPrepassCopy.depthSRV = prepassSRVBackup;
 }
 #undef I18N_KEY_PREFIX
-
-Feature::SizeProjection TerrainBlending::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("Enabled", settings.Enabled);
-	return projection;
-}

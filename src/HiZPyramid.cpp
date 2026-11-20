@@ -36,7 +36,7 @@ ID3D11ShaderResourceView* HiZPyramid::GetSourceDepthSRV()
 	// The view is bound through DXVK's context. Engine depth fields can be tripwire handles, so this returns the wrapped view.
 	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto& terrainBlending = globals::features::terrainBlending;
-	if (terrainBlending.loaded && terrainBlending.settings.Enabled && terrainBlending.prepassSRVBackup)
+	if (terrainBlending.loaded && terrainBlending.FrameEnabled() && terrainBlending.prepassSRVBackup)
 		return Unwrap(terrainBlending.prepassSRVBackup);
 
 	if (auto* renderer = globals::game::renderer)

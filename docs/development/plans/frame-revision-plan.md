@@ -1422,6 +1422,51 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **A frame without VL after the first one ran logs a warning** (the first 16, "has no volumetric lighting after the first one
   ran"), so a test can show none.
 
+**Decided by the agent (step 6.5, Terrain Blending, 2026-11-19), to confirm:**
+- **The frame follows the adopted `Enabled` on the graph path.** `TerrainBlending::FrameEnabled()` is the adopted value while
+  `ORGTerrainBlending` is active, and the live setting otherwise (plain D3D11 untouched). The depth hook, the draw hook, the deferred
+  terrain passes, `TerrainShaderHacks`, the HiZ source, `Util::GetCurrentSceneDepthSRV`, the GPU `Enabled` and DCLF's
+  `DefersTerrain` all read it, so they switch in the revision that switches the blend's client. It is read once a frame (keyed on
+  `State::frameCount`), since the draw hook asks per pass. DCLF's classification runs off the render thread and reads the last
+  render-thread answer (`LastFrameEnabled`).
+- **The blend's key is its depth imports**, observed at every depth pass while the depth table holds the engine's views (`Observe`,
+  on and off), with `Invalidate` on a change. The first enable after startup can still be one revision late if no depth pass has run.
+  The frames between blend on D3D11, as a missed anchor did before.
+- **Group counts come from the bound version at commit** (`Adopted().Extent`), so a new display size is a new version and no new
+  registration.
+- **The terrain depth twin stays made once.** It is not declared on `DisplaySize`: its D3D11 views live in `terrainDepth`, read by the
+  engine's draws and DCLF's import of the plain resource, which would have to follow a slot first. Guest never changes the display
+  size; native's window resize already left it at its first size. Its clear is now a declared client on `Enabled`.
+- **The GPU block is split** (`GpuSettings`, the same 16 bytes). `ProjectSizeSettings` is gone.
+
+**Decided by the agent (step 6.4, Screen Space Shadows and `DeclareProgram`, 2026-11-19), to confirm:**
+- **`DeclareProgram(name, DependsOn(...), key, build)`** in `Frame/Declare.h`, for 6.6 (SSGI's `recompileFlag`), 6.15 (HDR's
+  `programDirty`), 6.18 (SSS's and Dynamic Cubemaps' `programsDirty`) and Effects11. `key` (render thread) gives what the program is
+  built from, `build` (any thread) makes it, returning a `shared_ptr` to any program type. The first key is built at declaration,
+  since setup may compile. Later keys are built on a programs lane: a `SerializedTaskPump` on DCLF's executor, streaming class,
+  because builds compile synchronously and must not take a preparation thread a compile may need. Every key built is kept. A failed
+  build after the first is fatal.
+- **The revision waits for a program before it starts, not inside it.** `Revision.cpp:StartPreparation` asks
+  `Declarations::ProgramsReady(newest values)` first; while a build runs, no revision starts and frames keep the adopted one. That way
+  a client's key or make reads the new program at the revision's start (`DeclaredProgram::For(inputs)`), and its stage builds hold
+  it, so values, program and builds still adopt together. An in-revision wait would have the client registered before its program
+  exists. The cost: a compile also delays unrelated inputs that arrive meanwhile (latest wins, as always). The frame reads
+  `Revision::Adopted().Program(p)`, found from the adopted values at each Begin (`NoteBegin`).
+- **A build must not read State.** `ProgramBuild::WithCommonDefines` reads State's defines, so SSS resolves them at setup and passes
+  them with `commonDefines = false`. The same permutation as before, so the shader store hits.
+- **The sample count's key is `ScaleSampleCount(SampleCount, Util::ConvertToDynamic(DisplaySize))`**, declared on `DisplaySize`,
+  `DynamicRatios` and `SampleCount`. `ConvertToDynamic` reads the engine's ratio and lock live at the revision's start, as
+  `GetScaledSampleCount` does on D3D11 (Upscaling sets the lock, which returns the full size). Only the program changes with it.
+  Setup no longer builds every count; the others build on the lane.
+- **`Enable` off keeps the client with the clear only.** Readers `Load` t45 by pixel, so a one-texel output or no clear would read
+  zero, a full shadow. The raymarch pass is in the client only while enabled.
+- **The output is declared on `DisplaySize`** (was the shadow mask's size), published once. Dispatches take the bound extent at commit
+  (`BuildDispatches(size)`), the D3D11 path the engine's screen size.
+- **The depth source is in the client's key**: Terrain Blending's published blended depth while its graph path is up and the
+  revision's `TerrainBlending.Enabled` is on, else the z-prepass copy. So it switches in the revision that switches Terrain Blending's
+  blend. The z-prepass import and Terrain Blending's graph state are observed at Prepass, with `Invalidate` on a change.
+- **`BendSettings` is split** (`GpuBendSettings`, 32 bytes, in `RaymarchCB`). `ProjectSizeSettings` is gone.
+
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
   an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's

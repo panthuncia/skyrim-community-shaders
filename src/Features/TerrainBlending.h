@@ -1,6 +1,10 @@
 #pragma once
 
+#include "Utils/Setting.h"
 #include "Utils/VersionedRelocation.h"
+
+#include <atomic>
+#include <cstdint>
 
 /** @brief Provides seamless depth-based blending between terrain and objects to eliminate harsh transitions. */
 struct TerrainBlending : Feature
@@ -9,6 +13,9 @@ private:
 	static constexpr std::string_view MOD_ID = "157076";
 
 public:
+	/** @brief Binds Enabled to its frame variable. The global is the only instance. */
+	TerrainBlending();
+
 	virtual inline std::string GetName() override { return "Terrain Blending"; }
 	virtual std::string GetDisplayName() override { return T("feature.terrain_blending.name", "Terrain Blending"); }
 	/** @brief Returns the short identifier name. */
@@ -29,20 +36,41 @@ public:
 
 	virtual inline bool HasShaderDefine(RE::BSShader::Type) override { return true; }
 
+	/** @brief The settings block the shaders read (the FeatureData copy). Its layout is fixed. */
+	struct GpuSettings
+	{
+		uint32_t Enabled = 1;
+		uint32_t pad[3]{};
+	};
+	STATIC_ASSERT_ALIGNAS_16(GpuSettings);
+
+	/** @brief The CPU settings. Enabled changes the frame's shape (the blend's client, the depth readers' source). */
 	struct Settings
 	{
-		uint32_t Enabled = true;
-		uint32_t pad[3];
+		CS::Setting<std::uint32_t> Enabled = 1;
 	};
-	STATIC_ASSERT_ALIGNAS_16(Settings);
 
 	Settings settings;
+
+	/** @brief The GPU block, with the Enabled the frame follows. */
+	GpuSettings GetCommonBufferData() const;
+
+	/**
+	 * @brief Whether this frame blends. On the render graph path it is the adopted revision's Enabled, so the blend's client,
+	 * the depth table and every reader switch in one frame. Otherwise the setting itself. Render thread.
+	 */
+	bool FrameEnabled() const;
+
+	/** @brief Any thread. FrameEnabled's last answer on the render thread, for readers off it (DCLF's classification). */
+	bool LastFrameEnabled() const { return lastFrameEnabled.load(std::memory_order_relaxed); }
+
+	mutable std::uint64_t frameEnabledAt = UINT64_MAX;
+	mutable bool frameEnabled = false;
+	mutable std::atomic<bool> lastFrameEnabled{ true };
 
 	/** @brief Draws the ImGui settings panel for Terrain Blending configuration. */
 	virtual void DrawSettings() override;
 	virtual void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 
 	/** @brief Creates GPU resources including depth textures, blended depth buffers, and stencil states. */

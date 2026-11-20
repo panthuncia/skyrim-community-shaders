@@ -36,6 +36,16 @@ namespace RenderGraph::Frame::Declarations
 	*/
 	std::vector<FrameAnchors::StageBuildNeed> Evaluate(const org::services::VariableSnapshot& a_values, const Wish& a_wish);
 
-	/** @brief At the end of every Begin, frame a_frame. Notes the textures that bind a new version from this frame on. */
+	/**
+	* @brief Before a revision starts with a_values. Starts the builds of declared programs whose key a_values changed to one not
+	* built yet. True when every declared program has a build for a_values, so the revision may start. Never waits. Fatal when a
+	* build failed.
+	*/
+	bool ProgramsReady(const org::services::VariableSnapshot& a_values);
+
+	/**
+	* @brief At the end of every Begin, frame a_frame. Notes the textures that bind a new version from this frame on, and the
+	* programs of the adopted values.
+	*/
 	void NoteBegin(std::uint64_t a_frame);
 }

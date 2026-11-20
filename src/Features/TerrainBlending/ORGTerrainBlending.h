@@ -19,6 +19,8 @@ namespace org
 * without the depth offset, by DCLF or by the engine through the export. Its clear runs at EarlyPrepass.
 * One compute pass at DepthDone writes min(main, terrain) as R32 and R16 blended depths, and copies the main depth into the mask.
 * All three are exported, because the engine reads the blended depth through the depth table, and published for graph readers.
+* They are declared on the display size and their client on Enabled (Frame/Declare.h), so a resize or a toggle switches in
+* with a frame revision. The terrain depth and its clear are made once; the clear follows Enabled too.
 * On any failure the path stops for good and Terrain Blending blends on D3D11. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGTerrainBlending
@@ -54,7 +56,13 @@ public:
 	bool TerrainDepthCleared() const;
 
 	/**
-	* @brief Call before the depth hook points the depth table at the blended depth. Re-registers after a resize or new import.
+	* @brief At every depth pass, while the depth table holds the engine's own views. Imports the main and the terrain depth;
+	* new ones make the next revision register the blend's client for them.
+	*/
+	void Observe();
+
+	/**
+	* @brief Call before the depth hook points the depth table at the blended depth, in frames that blend.
 	* @return False means the D3D11 path blends this frame.
 	*/
 	bool BeforeDepth();
@@ -82,9 +90,6 @@ public:
 
 private:
 	ORGTerrainBlending() = default;
-
-	/** @brief False, logged, on failure. */
-	bool RegisterClient();
 
 	/** @brief For good. Terrain Blending returns to its D3D11 textures. */
 	void Fail(const char* a_why);

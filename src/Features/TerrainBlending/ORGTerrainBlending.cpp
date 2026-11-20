@@ -64,19 +64,19 @@ namespace
 struct ORGTerrainBlending::Impl
 {
 	std::shared_ptr<const ComputeProgram> program;
-	std::unique_ptr<GraphResources::Texture2D> blendedDepth;
-	std::unique_ptr<GraphResources::Texture2D> blendedDepth16;
-	std::unique_ptr<GraphResources::Texture2D> mask;
-	// Imported at the first depth pass.
+	// Declared at Setup on the display size (decision 6a). A new size is a new version, adopted with a frame revision.
+	RenderGraph::Frame::DeclaredTexture2D blendedDepth;
+	RenderGraph::Frame::DeclaredTexture2D blendedDepth16;
+	RenderGraph::Frame::DeclaredTexture2D mask;
+	// Declared on Enabled. Its key adds the inputs the last depth pass imported.
+	RenderGraph::Frame::DeclaredClient client;
 	FrameAnchors::Texture mainDepth;
 	FrameAnchors::Texture terrainDepth;
-	bool registered = false;
-	std::pair<UINT, UINT> registeredSize{};  // its group counts follow it
 
 	/** @brief In publish order. */
 	std::array<std::pair<std::string_view, GraphResources::Texture2D*>, 3> Outputs() const
 	{
-		return { { { kBlendedDepthId, blendedDepth.get() }, { kBlendedDepth16Id, blendedDepth16.get() }, { kMaskId, mask.get() } } };
+		return { { { kBlendedDepthId, blendedDepth.Get() }, { kBlendedDepth16Id, blendedDepth16.Get() }, { kMaskId, mask.Get() } } };
 	}
 };
 
@@ -183,15 +183,22 @@ namespace
 		DepthClearFrame frame;
 	};
 
-	/** @brief Right before Main::RenderDepth. The commit notes the frame so ResetDepth can skip its D3D11 clear. */
-	bool RegisterTerrainDepthClear(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height)
+	/** @brief The terrain depth's clear. Kept for the session, as the twin is. */
+	RenderGraph::Frame::DeclaredClient& TerrainDepthClear()
+	{
+		static RenderGraph::Frame::DeclaredClient s_client;
+		return s_client;
+	}
+
+	/** @brief The clear's registration while Terrain Blending is on. The commit notes the frame so ResetDepth can skip its D3D11 clear. */
+	bool MakeTerrainDepthClear(FrameAnchors::ClientDesc& a_client, const std::shared_ptr<org::ExternalTextureResource>& a_depth, std::uint32_t a_width,
+		std::uint32_t a_height)
 	{
 		std::shared_ptr<RenderGraph::RunGate> gate = RenderGraph::RunGate::Create(kClearClientId, 1);
 		if (!gate)
 			return false;
-		FrameAnchors::ClientDesc client{};
-		client.id = kClearClientId;
-		client.passes.push_back({ .name = kClearClientId,
+		a_client.id = kClearClientId;
+		a_client.passes.push_back({ .name = kClearClientId,
 			.anchor = FrameAnchors::Anchor::EarlyPrepass,
 			.order = -100,
 			.kind = FrameAnchors::PassKind::Render,
@@ -199,16 +206,78 @@ namespace
 				return std::make_shared<TerrainDepthClearPass>(a_depth, a_width, a_height, gate);
 			},
 			.atExecution = true });
-		client.gates = { gate };
-		client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
-		// Recorded ahead, so the setting turns it off in the description.
-		client.declared = client.active;
-		client.commit = [gate](const FrameAnchors::Point&) {
+		a_client.gates = { gate };
+		a_client.commit = [gate](const FrameAnchors::Point&) {
 			gate->OpenDispatch(0, 1);
 			if (FrameAnchors::InBuiltGraph(kClearClientId, FrameAnchors::Anchor::EarlyPrepass))
 				ClearedFrame() = globals::state->frameCount;
 		};
-		return FrameAnchors::Register(std::move(client));
+		return true;
+	}
+
+	/**
+	* @brief Right before Main::RenderDepth. The clear exists while the adopted Enabled is on, so it switches in the revision
+	* that switches the blend.
+	*/
+	bool DeclareTerrainDepthClear(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height)
+	{
+		using namespace RenderGraph::Frame;
+		TerrainDepthClear() = DeclareClient<bool>(
+			kClearClientId, DependsOn(globals::features::terrainBlending.settings.Enabled),
+			[](const Inputs& a_in) -> std::optional<bool> {
+				if (!a_in.Get(globals::features::terrainBlending.settings.Enabled))
+					return std::nullopt;
+				return true;
+			},
+			[a_depth = std::move(a_depth), a_width, a_height](const bool&, FrameAnchors::ClientDesc& a_client) {
+				return MakeTerrainDepthClear(a_client, a_depth, a_width, a_height);
+			});
+		return static_cast<bool>(TerrainDepthClear());
+	}
+
+	/** @brief What the blend's client is made for: its depth inputs, imported at the depth pass. */
+	struct BlendInputs
+	{
+		FrameAnchors::Texture mainDepth;
+		FrameAnchors::Texture terrainDepth;
+
+		bool operator==(const BlendInputs& a_other) const { return mainDepth == a_other.mainDepth && terrainDepth == a_other.terrainDepth; }
+	};
+
+	/** @brief The blend's registration for a_inputs, when a revision starts. */
+	bool MakeBlendClient(const std::shared_ptr<Impl>& a_impl, const BlendInputs& a_inputs, FrameAnchors::ClientDesc& a_client)
+	{
+		// Gated so the anchor can run in a frame phase.
+		std::shared_ptr<RenderGraph::RunGate> gate = RenderGraph::RunGate::Create(kClientId, 1);
+		if (!gate) {
+			logger::error("[ORG] Terrain Blending: its run gate could not be created");
+			return false;
+		}
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0, {}, gate);
+		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "depth-blend",
+			.program = a_impl->program,
+			.bindings = { Bind::Uav(*a_impl->blendedDepth), Bind::Uav(*a_impl->blendedDepth16), Bind::Uav(*a_impl->mask), Bind::Srv(a_inputs.mainDepth),
+				Bind::Srv(a_inputs.terrainDepth) },
+			.gate = 0u });
+		if (builder.Failed()) {
+			logger::error("[ORG] Terrain Blending: {}", builder.Failure());
+			return false;
+		}
+		a_client.id = kClientId;
+		a_client.passes = builder.Take();
+		a_client.registerResources = [current = a_impl](org::RenderGraph& a_graph) {
+			for (const auto& [id, texture] : current->Outputs())
+				texture->Register(a_graph);
+		};
+		a_client.gates = { gate };
+		// One dispatch over the bound version. DepthBlend skips threads past the edge, and pixels outside a dynamic-resolution
+		// viewport are never read. The counts are per run, so a new size needs no new registration.
+		a_client.commit = [gate, current = a_impl](const FrameAnchors::Point&) {
+			const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(current->blendedDepth);
+			gate->OpenDispatch(0, (extent[0] + kGroupSize - 1) / kGroupSize, (extent[1] + kGroupSize - 1) / kGroupSize, 1);
+		};
+		logger::info("[ORG] Terrain Blending: the depth blend's client for the next revision");
+		return true;
 	}
 
 	/** @brief The main render target's size, as the D3D11 path uses. */
@@ -289,7 +358,7 @@ bool ORGTerrainBlending::MakeTerrainDepth(RE::BSGraphics::DepthStencilData& a_ta
 		logger::warn("[ORG] Terrain Blending: the terrain depth could not be published; it is a D3D11 texture");
 		return false;
 	}
-	if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass) || !RegisterTerrainDepthClear(graph, desc.Width, desc.Height))
+	if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass) || !DeclareTerrainDepthClear(graph, desc.Width, desc.Height))
 		logger::warn("[ORG] Terrain Blending: the terrain depth's clear could not be put on the EarlyPrepass anchor; it is cleared through D3D11");
 	// One reference each, as D3D11's Create calls leave.
 	a_target.texture = texture->D3D11();
@@ -346,50 +415,13 @@ ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const
 	return Holds() ? impl->mask->SRV() : nullptr;
 }
 
-bool ORGTerrainBlending::RegisterClient()
-{
-	// One dispatch over the whole texture. DepthBlend skips threads past the edge, and pixels outside a dynamic-resolution viewport are never read.
-	const auto& desc = impl->blendedDepth->Desc();
-	// Gated so the anchor can run in a frame phase.
-	std::shared_ptr<RenderGraph::RunGate> gate = RenderGraph::RunGate::Create(kClientId, 1);
-	if (!gate) {
-		logger::error("[ORG] Terrain Blending: its run gate could not be created");
-		return false;
-	}
-	impl->registeredSize = { desc.Width, desc.Height };
-	const std::uint32_t groupsX = (desc.Width + kGroupSize - 1) / kGroupSize;
-	const std::uint32_t groupsY = (desc.Height + kGroupSize - 1) / kGroupSize;
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0, {}, gate);
-	builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "depth-blend",
-		.program = impl->program,
-		.bindings = { Bind::Uav(*impl->blendedDepth), Bind::Uav(*impl->blendedDepth16), Bind::Uav(*impl->mask), Bind::Srv(impl->mainDepth),
-			Bind::Srv(impl->terrainDepth) },
-		.gate = 0u });
-	if (builder.Failed()) {
-		logger::error("[ORG] Terrain Blending: {}", builder.Failure());
-		return false;
-	}
-
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.passes = builder.Take();
-	client.registerResources = [current = impl](org::RenderGraph& a_graph) {
-		for (const auto& [id, texture] : current->Outputs())
-			texture->Register(a_graph);
-	};
-	client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
-	client.gates = { gate };
-	client.commit = [gate, groupsX, groupsY](const FrameAnchors::Point&) { gate->OpenDispatch(0, groupsX, groupsY, 1); };
-	return FrameAnchors::Register(std::move(client));
-}
-
 void ORGTerrainBlending::Fail(const char* a_why)
 {
 	logger::error("[ORG] Terrain Blending returns to D3D11: {}", a_why);
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
 	Withdraw();
-	// The exports stay alive until the depth table no longer names them.
+	// The exports stay alive until the depth table no longer names them. Dropping the declarations stops them following.
 	auto old = std::move(impl);
 	if (onFailed)
 		onFailed();
@@ -419,19 +451,28 @@ bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 		programFailed = true;
 		return false;
 	}
-	// The engine and D3D11 features read them through exports, so never aliased.
-	// Versioned, so a resize is a new version that readers follow without a graph build.
-	const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true };
-	next->blendedDepth = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R32_FLOAT), std::string(kBlendedDepthId), exported);
-	next->blendedDepth16 = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R16_UNORM), std::string(kBlendedDepth16Id), exported);
-	next->mask = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R32_FLOAT), std::string(kMaskId), exported);
+	using namespace RenderGraph::Frame;
+	// The engine and D3D11 features read them through exports, so never aliased. Declared on the display size (decision 6a):
+	// a new size is a new version that readers follow without a graph build. Before the display size is known, the main target's.
+	const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV };
+	const auto declare = [&](std::string_view a_id, DXGI_FORMAT a_format) {
+		return DeclareTexture2D(std::string(a_id), DependsOn(Vars::DisplaySize()),
+			[width, height, a_format](const Inputs& a_in) {
+				const auto display = a_in.Get(Vars::DisplaySize());
+				return OutputDesc(display.width ? display.width : width, display.height ? display.height : height, a_format);
+			},
+			exported);
+	};
+	next->blendedDepth = declare(kBlendedDepthId, DXGI_FORMAT_R32_FLOAT);
+	next->blendedDepth16 = declare(kBlendedDepth16Id, DXGI_FORMAT_R16_UNORM);
+	next->mask = declare(kMaskId, DXGI_FORMAT_R32_FLOAT);
 	for (const auto& [id, texture] : next->Outputs()) {
-		if (!*texture || !texture->SRV()) {
+		if (!texture || !*texture || !texture->SRV()) {
 			Fail("its textures could not be created");
 			return false;
 		}
 	}
-	// Readers are ordered after the blend. The client registers at the first depth pass.
+	// Published once, for the session. Readers are ordered after the blend and follow the versions.
 	for (const auto& [id, texture] : next->Outputs()) {
 		if (!PublishedResources::Publish(id, *texture)) {
 			impl = std::move(next);
@@ -439,45 +480,54 @@ bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 			return false;
 		}
 	}
+	// The client follows Enabled from the first revision. Its key needs the inputs a depth pass imported (Observe).
+	const std::weak_ptr<Impl> weak = next;
+	next->client = DeclareClient<BlendInputs>(
+		kClientId, DependsOn(globals::features::terrainBlending.settings.Enabled),
+		[weak](const Inputs& a_in) -> std::optional<BlendInputs> {
+			const auto current = weak.lock();
+			if (!current || !a_in.Get(globals::features::terrainBlending.settings.Enabled) || !current->mainDepth || !current->terrainDepth)
+				return std::nullopt;
+			return BlendInputs{ current->mainDepth, current->terrainDepth };
+		},
+		[weak](const BlendInputs& a_inputs, FrameAnchors::ClientDesc& a_client) {
+			const auto current = weak.lock();
+			return current && MakeBlendClient(current, a_inputs, a_client);
+		});
+	if (!next->client) {
+		impl = std::move(next);
+		Fail("its client could not be declared");
+		return false;
+	}
 	impl = std::move(next);
-	logger::info("[ORG] Terrain Blending: the depth blend runs on the render graph ({}x{})", width, height);
+	logger::info("[ORG] Terrain Blending: the depth blend runs on the render graph ({}x{}); its textures and client follow the frame revisions", width, height);
 	return true;
+}
+
+void ORGTerrainBlending::Observe()
+{
+	if (!Active())
+		return;
+	auto mainDepth = MainDepth();
+	auto terrainDepth = TerrainDepth();
+	if (!mainDepth || !terrainDepth) {
+		Fail("the main or the terrain depth could not be imported");
+		return;
+	}
+	if (mainDepth == impl->mainDepth && terrainDepth == impl->terrainDepth)
+		return;
+	impl->mainDepth = std::move(mainDepth);
+	impl->terrainDepth = std::move(terrainDepth);
+	// Not variables yet: the next revision makes the client for them.
+	impl->client.Invalidate();
 }
 
 bool ORGTerrainBlending::BeforeDepth()
 {
 	frame = FrameBlend::None;
-	if (!Active() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
+	// The client and the adopted Enabled switch in one revision. Until the first one registered it, D3D11 blends.
+	if (!Active() || !impl->client.Registered())
 		return false;
-	bool changed = !impl->registered;
-	// A resolution change. New versions take effect at the next frame boundary, then the blend re-registers.
-	UINT width = 0, height = 0;
-	if (MainSize(width, height))
-		for (const auto& [id, texture] : impl->Outputs())
-			texture->RequestSize(width, height);
-	if (const auto& desc = impl->blendedDepth->Desc(); desc.Width != impl->registeredSize.first || desc.Height != impl->registeredSize.second) {
-		if (impl->registered)
-			logger::info("[ORG] Terrain Blending: the depth blend's textures are now {}x{}", desc.Width, desc.Height);
-		changed = true;
-	}
-	auto mainDepth = MainDepth();
-	auto terrainDepth = TerrainDepth();
-	if (!mainDepth || !terrainDepth) {
-		Fail("the main or the terrain depth could not be imported");
-		return false;
-	}
-	if (mainDepth != impl->mainDepth || terrainDepth != impl->terrainDepth) {
-		impl->mainDepth = std::move(mainDepth);
-		impl->terrainDepth = std::move(terrainDepth);
-		changed = true;
-	}
-	if (changed) {
-		impl->registered = RegisterClient();
-		if (!impl->registered) {
-			Fail("its client could not be registered");
-			return false;
-		}
-	}
 	frame = FrameBlend::Planned;
 	return true;
 }
@@ -487,7 +537,7 @@ bool ORGTerrainBlending::Blend()
 	if (frame != FrameBlend::Planned)
 		return false;
 	// An anchor that submitted nothing leaves the frame to D3D11.
-	const bool written = Active() && impl->registered && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone);
+	const bool written = Active() && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone);
 	frame = written ? FrameBlend::Written : FrameBlend::Missed;
 	return written;
 }
@@ -511,6 +561,6 @@ void ORGTerrainBlending::ClearShaderCache() {}
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool) const { return nullptr; }
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const { return nullptr; }
 void ORGTerrainBlending::Fail(const char*) {}
-bool ORGTerrainBlending::RegisterClient() { return false; }
+void ORGTerrainBlending::Observe() {}
 
 #endif
