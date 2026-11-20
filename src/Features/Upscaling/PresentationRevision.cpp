@@ -86,10 +86,32 @@ namespace FrameGen::PresentationRevision
 			return requests.askedSerial;
 		}
 
+		/**
+		 * @brief Whether native switches to a_wanted at the revision's adoption instead of before it: a colour space change alone,
+		 * with no presentation layer. The old swap chain then presents every frame of the old revision.
+		 */
+		bool SwitchesAtAdoption(const PresentationConfig& a_wanted)
+		{
+			const auto& asked = Requests().asked;
+			return RenderGraph::Engine::Native::Active() && a_wanted.method == Method::kNone && a_wanted != asked && OnlyHdrDiffers(a_wanted, asked);
+		}
+
 		/** @brief The revision's input for a change of PresentationConfig: the swap chain made for it. Render thread. */
 		Revision::InputWait ProducePresentation(const org::services::VariableSnapshot& a_values, std::uint64_t a_revision)
 		{
 			const auto wanted = Vars::Lane::PresentationConfigIn(a_values);
+			if (SwitchesAtAdoption(wanted)) {
+				// Asked for inside the adoption point, so the replacement runs after the old revision's presents and before the new one's.
+				Revision::InputWait wait;
+				wait.what = std::format("{} (the colour space, switched at adoption)", wanted);
+				wait.poll = [](std::string&) { return Revision::InputState::Ready; };
+				wait.adopt = [wanted] {
+					(void)AskPresenter(wanted);
+					RenderGraph::Engine::Native::AdoptRequestedPresentation(wanted.hdr);
+				};
+				logger::info("[FrameGen] frame revision {} switches the swap chain at its adoption: {}", a_revision, wait.what);
+				return wait;
+			}
 			const std::uint64_t serial = AskPresenter(wanted);
 			Revision::InputWait wait;
 			wait.what = serial ? std::format("the swap chain for {} (presenter request {})", wanted, serial) : std::format("{} (no replacement)", wanted);

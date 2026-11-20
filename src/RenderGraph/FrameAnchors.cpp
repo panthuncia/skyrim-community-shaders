@@ -1942,17 +1942,6 @@ namespace FrameAnchors
 		return client && index < kAnchors && client->serial <= BuiltSerial(state, index);
 	}
 
-	void RebuildForReplacedImports(std::string_view a_reason)
-	{
-		auto lock = Guard();
-		auto& state = Anchors();
-		// The imports' new slots go in the snapshot, and every client is current with it.
-		Publish(state);
-		for (auto& client : state.clients)
-			MarkCurrent(state, client);
-		StructuralRebuild(state, ~0u, a_reason);
-	}
-
 	void SetLateEpochHook(std::function<void()> a_hook)
 	{
 		Anchors().lateHook = std::move(a_hook);
@@ -4447,7 +4436,6 @@ namespace FrameAnchors
 	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&) { return {}; }
 	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view) { return {}; }
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
-	void RebuildForReplacedImports(std::string_view) {}
 	void SetLateEpochHook(std::function<void()>) {}
 	std::uint32_t SegmentOf(Anchor) { return 0; }
 	bool IsUnusedSegment(std::uint32_t) { return false; }

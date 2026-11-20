@@ -28,8 +28,8 @@
 #	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #	include "RenderGraph/ExternalWork.h"
-#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Revision.h"
 #	include "RenderGraph/Frame/Transients.h"
 #	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
@@ -1122,14 +1122,13 @@ namespace RenderGraph::Engine::Native
 				std::chrono::steady_clock::time_point last{};
 			} probe;
 			std::shared_ptr<NativeResource> backBufferRecord;  // CurrentOf gives the version it stands for
-			// The back buffer as graph-owned versions in one slot. The frame's passes write the current version, and the present's tail copies it.
-			// Empty when off, on D3D12, before the graph is up, or when the versions could not be made.
+			// The back buffer as a graph-owned slot. The frame's passes write its current version, and the present's tail copies it.
+			// A resize makes its next version, pending until a frame revision adopts it. Empty when off, on D3D12, before the graph
+			// is up, or when the texture could not be made.
 			struct GraphBackBuffer
 			{
-				std::vector<std::shared_ptr<NativeResource>> records;
-				std::vector<std::shared_ptr<const org::TextureVersion>> versions;
+				std::shared_ptr<NativeResource> record;  // the newest version's, which the engine's handles stand for
 				std::shared_ptr<org::VersionedTexture> slot;
-				uint32_t current = 0;
 				uint64_t tails = 0;
 			} graph;
 			std::atomic<bool> lost = false;
@@ -1144,6 +1143,8 @@ namespace RenderGraph::Engine::Native
 			// With a presentation layer, the vsync the swap chain was made for. Submission thread, under presentLock.
 			std::optional<bool> layerVsync;
 			PresentationState framePresentation{};  // render owner
+			// Whether the output took HDR10 when the swap chain was last made, for a presentation taken before it is replaced.
+			std::atomic<bool> hdr10Supported = false;
 			// The render thread queues a present only once the one before has finished.
 			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
 			std::atomic<uint64_t> presentPaceWaits = 0, presentPaceUs = 0;
@@ -1893,81 +1894,89 @@ namespace RenderGraph::Engine::Native
 				return backBuffer != nullptr;
 			}
 
-			/** @brief Drops the graph present's versions, so the back buffer is its own again. */
+			/** @brief Drops the graph present's slot, so the back buffer is its own again. */
 			void DropGraphBackBuffer()
 			{
-				for (const auto& record : graph.records)
-					if (record && record->graphOwned)
-						::RenderGraph::ForgetMadeImage(record->graphOwned.get());
+				if (graph.record && graph.record->graphOwned)
+					::RenderGraph::ForgetMadeImage(graph.record->graphOwned.get());
 				if (backBufferRecord)
 					Rename(*backBufferRecord, nullptr);
 				graph = {};
 			}
 
+			/** @brief A graph-owned texture at the back buffer's size and format. Null, logged, when it could not be made. */
+			std::shared_ptr<NativeResource> MakeGraphBackBufferTexture()
+			{
+				TextureRequest request;
+				request.width = width;
+				request.height = height;
+				request.format = format;
+				request.bindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+				request.name = "Native::BackBuffer.0";
+				std::shared_ptr<NativeResource> record;
+				if (FAILED(MakeTexture(request, record)) || !record || record->ownership != NativeResource::Ownership::Tracked || !record->graphOwned) {
+					logger::warn("[ORG native] graph present: the back buffer could not be made as a graph-owned texture ({}x{}, DXGI format {})", width, height,
+						static_cast<int>(format));
+					return nullptr;
+				}
+				return record;
+			}
+
+			/** @brief Imports of a_record's image find the slot, and the engine's handles stand for it. */
+			void UseGraphBackBuffer(std::shared_ptr<NativeResource> a_record)
+			{
+				::RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(a_record->image.image), a_record->graphOwned, a_record->graphOwned->GetDescription(),
+					"Native::BackBuffer");
+				::RenderGraph::SetMadeImageSlot(a_record->graphOwned.get(), graph.slot);
+				graph.record = std::move(a_record);
+				Rename(*backBufferRecord, graph.record);
+			}
+
 			/**
-			 * @brief Makes the back buffer's graph-owned versions in one slot, so every importer gets the slot. Needs the present lock.
-			 * @return False when the versions could not be made, and the present copies by hand.
+			 * @brief Makes the back buffer's graph-owned slot, so every importer gets the slot. Needs the present lock.
+			 * @return False when the texture could not be made, and the present copies the back buffer by hand.
 			 */
 			bool MakeGraphBackBuffer()
 			{
-				// One version only. Rotating versions every frame made every prepared ticket stale and every kept recording unusable.
-				const uint32_t count = 1;
+				// One version at a time. Rotating versions every frame made every prepared ticket stale and every kept recording unusable.
 				DropGraphBackBuffer();
 				if (!backBufferRecord || !RenderGraphRuntime::Get().IsActive())
 					return false;
-				GraphBackBuffer made;
-				for (uint32_t i = 0; i < count; ++i) {
-					TextureRequest request;
-					request.width = width;
-					request.height = height;
-					request.format = format;
-					request.bindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-					request.name = fmt::format("Native::BackBuffer.{}", i);
-					std::shared_ptr<NativeResource> record;
-					if (FAILED(MakeTexture(request, record)) || !record || record->ownership != NativeResource::Ownership::Tracked || !record->graphOwned) {
-						logger::warn(
-							"[ORG native] graph present: back buffer version {} could not be made as a graph-owned texture ({}x{}, DXGI format {}); "
-							"the present copies the back buffer by hand",
-							i, width, height, static_cast<int>(format));
-						return false;
-					}
-					made.records.push_back(std::move(record));
-				}
-				try {
-					made.slot = org::VersionedTexture::Create(made.records.front()->graphOwned);
-					made.versions.push_back(made.slot->Current());
-					for (uint32_t i = 1; i < count; ++i)
-						made.versions.push_back(made.slot->Make(made.records[i]->graphOwned));
-				} catch (const std::exception& e) {
-					logger::warn("[ORG native] graph present: the back buffer's slot could not be made ({}); the present copies the back buffer by hand", e.what());
+				auto record = MakeGraphBackBufferTexture();
+				if (!record) {
+					logger::warn("[ORG native] graph present: the present copies the back buffer by hand");
 					return false;
 				}
-				for (const auto& record : made.records) {
-					::RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(record->image.image), record->graphOwned, record->graphOwned->GetDescription(),
-						"Native::BackBuffer");
-					::RenderGraph::SetMadeImageSlot(record->graphOwned.get(), made.slot);
+				try {
+					graph.slot = org::VersionedTexture::Create(record->graphOwned);
+				} catch (const std::exception& e) {
+					logger::warn("[ORG native] graph present: the back buffer's slot could not be made ({}); the present copies the back buffer by hand", e.what());
+					graph = {};
+					return false;
 				}
-				graph = std::move(made);
-				Rename(*backBufferRecord, graph.records.front());
+				UseGraphBackBuffer(std::move(record));
 				logger::info(
-					"[ORG native] graph present: the back buffer is a graph-owned slot of {} version{} ({}x{}, DXGI "
-					"format {}); the present copies the current one into the swap chain image through ORG's external client{}",
-					count, count == 1 ? "" : "s", width, height, static_cast<int>(format), count > 1 ? ", and the next present slot's version becomes current" : "");
+					"[ORG native] graph present: the back buffer is a graph-owned slot ({}x{}, DXGI format {}); the present copies its current version into "
+					"the swap chain image through ORG's external client",
+					width, height, static_cast<int>(format));
 				return true;
 			}
 
-			/** @brief Moves to the next version after a tail. Render owner only, so no frame's passes straddle two versions. */
-			void NextGraphVersion()
+			/**
+			 * @brief A resize at the same format: the new back buffer is the slot's next version, pending until a frame revision adopts
+			 * it with the DisplaySize event. The engine's handles stand for it at once, since the engine takes the buffer again now.
+			 */
+			void PendGraphBackBuffer()
 			{
-				if (graph.versions.size() < 2)
-					return;
-				graph.current = (graph.current + 1) % static_cast<uint32_t>(graph.versions.size());
-				// The back buffer takes its version at the present, an allowed exception until step 9a makes it an event.
-				const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
-				graph.slot->Adopt(graph.versions[graph.current]);
-				Rename(*backBufferRecord, graph.records[graph.current]);
-				if (auto* host = RenderGraphRuntime::Get().Host())
-					host->NoteNewVersions();
+				auto record = MakeGraphBackBufferTexture();
+				if (!record)
+					stl::report_and_fail(fmt::format("[ORG native] the back buffer could not be made again at {}x{} as a graph-owned texture", width, height));
+				if (graph.record && graph.record->graphOwned)
+					::RenderGraph::ForgetMadeImage(graph.record->graphOwned.get());
+				// The slot's current version keeps the old texture's memory until the revision replaces it.
+				::RenderGraph::Frame::Revision::PublishTexture(graph.slot, record->graphOwned, nullptr);
+				UseGraphBackBuffer(std::move(record));
+				logger::info("[ORG native] graph present: the back buffer's next version ({}x{}) is pending until a frame revision adopts it", width, height);
 			}
 
 			void OnGraphReady()
@@ -2005,6 +2014,7 @@ namespace RenderGraph::Engine::Native
 				}
 				if (a_count)
 					bufferCount = (std::max)(a_count, 2u);
+				const DXGI_FORMAT previousFormat = format;
 				if (a_format != DXGI_FORMAT_UNKNOWN)
 					format = a_format;
 				WaitPresents();
@@ -2012,22 +2022,32 @@ namespace RenderGraph::Engine::Native
 					logger::error("[ORG native] the swap chain could not be resized to {}x{}", a_width, a_height);
 					return DXGI_ERROR_INVALID_CALL;
 				}
+				// Nothing the frame binds changes when the size and format stay: the engine takes the same back buffer again.
+				if (backBuffer && a_width == width && a_height == height && format == previousFormat) {
+					logger::info("[ORG native] swap chain resized at its size {}x{}; the back buffer is kept", width, height);
+					return S_OK;
+				}
 				width = a_width;
 				height = a_height;
-				// The engine released its views before ResizeBuffers, so the old back buffer and its versions go now.
+				// The engine released its views before ResizeBuffers, so the old back buffer's handle goes now.
 				const bool graphPresent = graph.slot != nullptr;
-				DropGraphBackBuffer();
+				const bool sameFormat = format == previousFormat;
+				if (!graphPresent || !sameFormat)
+					DropGraphBackBuffer();
 				backBuffer = nullptr;
 				if (!MakeBackBuffer()) {
 					logger::error("[ORG native] the back buffer could not be made again at {}x{}", width, height);
 					return E_OUTOFMEMORY;
 				}
-				if (graphPresent) {
-					// The new versions are a new slot, so graphs built with the old one must be rebuilt.
-					::GraphResources::RequestStructuralRebuild("native back buffer resized: its graph present slot is made again");
+				if (graphPresent && sameFormat) {
+					PendGraphBackBuffer();
+				} else if (graphPresent) {
+					// Another format is another shape class: a new slot, which graphs built with the old one take with a rebuild.
+					::GraphResources::RequestStructuralRebuild("native back buffer made in another format: its graph present slot is made again");
 					(void)MakeGraphBackBuffer();
 				}
 				logger::info("[ORG native] swap chain and back buffer resized to {}x{}", width, height);
+				// The frames take the new size with the revision this event starts, together with the back buffer's version.
 				::RenderGraph::Frame::Vars::SetDisplaySize({ width, height }, "native swap chain resize");
 				return S_OK;
 			}
@@ -2050,6 +2070,7 @@ namespace RenderGraph::Engine::Native
 			{
 				const bool hdr10 = swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084;
 				const bool layer = swapchain->Caps().presentationLayer;
+				hdr10Supported.store(swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), std::memory_order_relaxed);
 				std::lock_guard guard(presentationLock);
 				adoptedPresentation.serial = a_serial;
 				adoptedPresentation.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : swapchainFormat);
@@ -2151,10 +2172,8 @@ namespace RenderGraph::Engine::Native
 					if (!source)
 						return S_OK;
 					tail = graph.slot && source->graphOwned;
-					if (tail) {
+					if (tail)
 						++graph.tails;
-						NextGraphVersion();
-					}
 				}
 				queuedPresents.store(queued + 1, std::memory_order_relaxed);
 				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), tail, a_syncInterval,
@@ -2361,11 +2380,8 @@ namespace RenderGraph::Engine::Native
 					return E_PENDING;
 				slotValues[a_slot] = ++presentValue;
 				const HRESULT result = FinishPresent(signal, a_syncInterval, a_record);
-				if (a_tail && a_nextVersion) {
-					// After the present, so its probe read the version this frame drew.
+				if (a_tail && a_nextVersion)
 					++graph.tails;
-					NextGraphVersion();
-				}
 				return result;
 			}
 
@@ -5153,6 +5169,19 @@ namespace RenderGraph::Engine::Native
 			g_device->framePresentation = Presentation();
 	}
 
+	void AdoptRequestedPresentation(bool a_hdr10)
+	{
+		if (!g_device || !::FrameAnchors::IsRenderOwner())
+			return;
+		auto state = Presentation();
+		// ReplacePresentation presents SDR when the output does not take HDR10.
+		const bool hdr10 = a_hdr10 && g_device->hdr10Supported.load(std::memory_order_relaxed);
+		state.serial = state.requested;
+		state.hdr10 = hdr10;
+		state.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : g_device->swapchainFormat);
+		g_device->framePresentation = state;
+	}
+
 	namespace
 	{
 		/** @brief Vulkan views for external commands, destroyed with their last owner once the GPU is past them. */
@@ -5338,6 +5367,7 @@ namespace RenderGraph::Engine::Native
 	void SetPresentationTornDown(std::function<bool()>) {}
 	void SetPresentationLeaving(std::function<void()>) {}
 	void AdoptPresentation() {}
+	void AdoptRequestedPresentation(bool) {}
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}
 	rhi::QueueProgress GraphicsProgress() { return {}; }

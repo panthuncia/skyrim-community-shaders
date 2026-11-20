@@ -10,8 +10,10 @@
  *
  * Writers change the variable here. A frame revision that changes it asks the active presenter for a replacement and is adopted
  * once the presenter reports the swap chain made for it, so a frame presents into a swap chain made for the revision it runs.
- * Native's submission thread entry (Native::RequestPresentation) is the revision's input. DXVK's recreate is too, except for a
- * change of the colour space alone, which HDR Display applies to DXVK's swap chain when it adopts the revision.
+ * Native's submission thread entry (Native::RequestPresentation) is the revision's input. DXVK's recreate is too.
+ * A change of the colour space alone switches at the revision's adoption, so the old swap chain presents every frame of the old
+ * revision (frame revision plan, step 9a). HDR Display applies it to DXVK's swap chain when it adopts the revision. Native asks
+ * for the replacement inside the adoption point, after the presents queued so far, when no presentation layer is asked for.
  *
  * Without the render graph there are no revisions, and a request goes to the presenter at once.
  */
