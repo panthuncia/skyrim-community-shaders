@@ -26,6 +26,7 @@ bool ORGDynamicCubemaps::Requested()
 
 #	include "Deferred.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
@@ -48,8 +49,10 @@ bool ORGDynamicCubemaps::Requested()
 #	include <array>
 #	include <bit>
 #	include <cstddef>
+#	include <functional>
 #	include <optional>
 #	include <span>
+#	include <string_view>
 #	include <vector>
 
 namespace
@@ -354,7 +357,6 @@ namespace
 	constexpr std::uint32_t kCopyEntries = 3;
 
 	// Set by a commit when a pass writes the copy's source, cleared when the copy records.
-	// An entry stays open while its copy is not in the running graph yet.
 	using CopyDirty = std::array<std::atomic<bool>, kCopyEntries>;
 
 	struct CopyFrame
@@ -426,6 +428,23 @@ namespace
 		explicit operator bool() const { return depth && main && reflections && defaultCubemap; }
 	};
 
+	/** @brief What a registration is made for: the reflection cubemap's edge, and the imports the last update found. */
+	struct ClientKey
+	{
+		std::uint32_t size = 0;
+		Imports imports;
+
+		bool operator==(const ClientKey&) const = default;
+	};
+
+	[[noreturn]] void FailDynamicCubemaps(std::string_view a_why)
+	{
+		const auto message = fmt::format("Community Shaders: Dynamic Cubemaps' render graph path failed: {}", a_why);
+		logger::critical("[ORG] Dynamic Cubemaps: {}", message);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
+	}
+
 	/** @brief a_main is the capture's colour source: the forward pass's main target, as upstream's D3D11 capture reads. */
 	Imports Import(std::uint32_t a_main)
 	{
@@ -461,18 +480,21 @@ namespace
 struct ORGDynamicCubemaps::Impl
 {
 	UINT size = 0;  // mip 0, the engine's reflections cubemap's size
+	// Built at setup. A shader reload swaps their pipelines (ComputeProgram's live slot).
 	std::shared_ptr<const Programs> programs;
-	bool programsDirty = false;
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> copyGate;  // opened while their source is new
+	// The filtered mip copy runs once before the first inference. The BC6H copies wait for their first encode.
 	std::shared_ptr<CopyDirty> copyDirty = [] {
 		auto dirty = std::make_shared<CopyDirty>();
-		for (auto& entry : *dirty)
-			entry.store(true);
+		for (std::uint32_t entry = 0; entry < kCopyEntries; ++entry)
+			(*dirty)[entry].store(entry == kFilteredMipZeroEntry);
 		return dirty;
 	}();
+	// What the last update found. Not a variable yet, so a change invalidates the client's key.
 	Imports imports;
+	RenderGraph::Frame::DeclaredClient client;
 
 	// Graph-only and read in later frames. The filtered one is a plain array, read through array views.
 	std::array<std::unique_ptr<GraphResources::Texture2D>, 2> capture, raw, position;
@@ -484,10 +506,11 @@ struct ORGDynamicCubemaps::Impl
 	// Copied by a one-shot pass before the first capture.
 	std::vector<std::shared_ptr<const GraphResources::StagedUpload>> zeros;
 
-	// The BC6H copy joins the graph from the frame after the first encode.
+	// A cubemap counts as valid from the run of its first encode, whose BC6H copy follows the encode in that run.
 	std::array<bool, 2> encoded{};
-	std::array<bool, 2> copying{};
-	std::function<void()> onFailed;
+
+	/** @brief The registration for a new key, when a revision starts. A nested class, so it reads a_self's impl. */
+	static bool MakeClient(ORGDynamicCubemaps* a_self, const ClientKey& a_key, FrameAnchors::ClientDesc& a_client);
 
 	bool Complete() const
 	{
@@ -518,7 +541,7 @@ struct ORGDynamicCubemaps::Impl
 	}
 
 	/** @brief Each cubemap runs only on its capture frames. */
-	std::shared_ptr<const Plan> CapturePlan() const
+	std::shared_ptr<const Plan> CapturePlan(const Imports& a_imports) const
 	{
 		auto plan = std::make_shared<Plan>();
 		plan->programs = programs;
@@ -530,8 +553,8 @@ struct ORGDynamicCubemaps::Impl
 			plan->uses.push_back({ position[i]->Graph(), true, { { kUavArray, 0 } } });
 		}
 		plan->uses.push_back({ lightingState->Graph(), true });
-		plan->uses.push_back({ imports.depth, false });
-		plan->uses.push_back({ imports.main, false });
+		plan->uses.push_back({ a_imports.depth, false });
+		plan->uses.push_back({ a_imports.main, false });
 		const auto block = [&](std::uint32_t a_cubemap) {
 			return std::vector<Word>{ Shared(), View(a_cubemap * 3), View(a_cubemap * 3 + 1), View(a_cubemap * 3 + 2), View(6), View(7), View(8),
 				Literal(sampler.Index()), LatchAt(offsetof(FrameLatch, capture)) };
@@ -545,7 +568,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	std::shared_ptr<const Plan> InferPlan() const
+	std::shared_ptr<const Plan> InferPlan(const Imports& a_imports) const
 	{
 		auto plan = std::make_shared<Plan>();
 		plan->programs = programs;
@@ -554,8 +577,8 @@ struct ORGDynamicCubemaps::Impl
 		// Cube views of every mip.
 		plan->uses.push_back({ capture[0]->Graph(), false });
 		plan->uses.push_back({ capture[1]->Graph(), false });
-		plan->uses.push_back({ imports.reflections, false });
-		plan->uses.push_back({ imports.defaultCubemap, false });
+		plan->uses.push_back({ a_imports.reflections, false });
+		plan->uses.push_back({ a_imports.defaultCubemap, false });
 		plan->uses.push_back({ inferred->Graph(), true, { { kUavArray, 0 } } });
 		for (std::uint32_t variant = 0; variant < kVariants; ++variant) {
 			const std::vector<Word> block{ Shared(), View(variant == kBase ? 0u : 1u), View(2), View(3), View(4), Literal(sampler.Index()) };
@@ -688,9 +711,9 @@ struct ORGDynamicCubemaps::Impl
 			encoded[cubemap] = true;
 			(*copyDirty)[kBC6HEntry + cubemap].store(true, std::memory_order_release);
 		}
-		// On a cubemap's first publish the BC6H copy only exists from the next frame.
+		// The BC6H copy is in the graph from the start and runs after this run's encode.
 		for (std::uint32_t i = 0; i < 2; ++i)
-			if (encoded[i] && copying[i])
+			if (encoded[i])
 				feature.cubemapValid[i] = true;
 		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 		if (copyGate)
@@ -708,7 +731,7 @@ void ORGDynamicCubemaps::Reserve()
 		logger::warn("[ORG] Dynamic Cubemaps: the DeferredPasses anchor could not be reserved; the cubemaps stay on D3D11");
 }
 
-bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
+bool ORGDynamicCubemaps::Setup()
 {
 	impl.reset();
 	if (!Requested())
@@ -796,23 +819,40 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			logger::warn("[ORG] Dynamic Cubemaps: the cubemaps' zeros could not be staged; they stay on D3D11");
 			return false;
 		}
-		state->onFailed = std::move(a_onFailed);
-		impl = std::move(state);
-		// The anchors hold the client until the shared constants exist. Readers see black cubemaps until the first publish.
-		if (!RegisterClient()) {
-			logger::warn("[ORG] Dynamic Cubemaps: the anchor client could not be registered; the cubemaps stay on D3D11");
-			impl.reset();
+		state->copyGate = RenderGraph::RunGate::Create("cs.dyncubemaps.copies", kCopyEntries);
+		if (!state->copyGate) {
+			logger::warn("[ORG] Dynamic Cubemaps: its copy gate could not be made; the cubemaps stay on D3D11");
 			return false;
 		}
+		impl = std::move(state);
+		const auto giveUp = [this](const char* a_why) {
+			logger::warn("[ORG] Dynamic Cubemaps: {}; the cubemaps stay on D3D11", a_why);
+			impl.reset();
+			FrameAnchors::Unregister(kClientId);
+			Withdraw();
+			return false;
+		};
+		// Declared on the reflection cubemap. Its first registration is at the first revision after this; the anchors then hold
+		// it until the shared constants exist.
+		auto* self = this;
+		impl->client = RenderGraph::Frame::DeclareClient<ClientKey>(
+			kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::ReflectionCubemap()),
+			[self](const RenderGraph::Frame::Inputs& a_in) -> std::optional<ClientKey> {
+				const auto& current = self->impl;
+				if (!current)
+					return std::nullopt;
+				// Zero until EngineTargets raised it: the cubemap the textures were made for.
+				const auto cubemap = a_in.Get(RenderGraph::Frame::Vars::ReflectionCubemap());
+				return ClientKey{ cubemap.size ? cubemap.size : current->size, current->imports };
+			},
+			[self](const ClientKey& a_key, FrameAnchors::ClientDesc& a_client) { return Impl::MakeClient(self, a_key, a_client); });
+		if (!impl->client)
+			return giveUp("its client could not be declared");
 		for (std::uint32_t i = 0; i < 2; ++i)
-			if (!PublishedResources::Publish(*impl->env[i]) || !PublishedResources::Publish(*impl->bc6h[i])) {
-				logger::warn("[ORG] Dynamic Cubemaps: the cubemaps could not be published; they stay on D3D11");
-				FrameAnchors::Unregister(kClientId);
-				Withdraw();
-				impl.reset();
-				return false;
-			}
-		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph at DeferredPasses ({}x{}, {} mips)", size, size, kMips);
+			if (!PublishedResources::Publish(*impl->env[i]) || !PublishedResources::Publish(*impl->bc6h[i]))
+				return giveUp("the cubemaps could not be published");
+		logger::info("[ORG] Dynamic Cubemaps: the cubemaps update on the render graph at DeferredPasses ({}x{}, {} mips); the client follows the frame revisions",
+			size, size, kMips);
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Dynamic Cubemaps setup failed, staying on D3D11: {}", e.what());
@@ -825,13 +865,25 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 	}
 }
 
-bool ORGDynamicCubemaps::RegisterClient()
+bool ORGDynamicCubemaps::Impl::MakeClient(ORGDynamicCubemaps* a_self, const ClientKey& a_key, FrameAnchors::ClientDesc& a_client)
 {
-	auto* self = this;
+	auto* self = a_self;
+	const auto& made = self->impl;
+	if (!made)
+		return false;
+	// The passes are made for a cubemap of kMips mips. The engine makes its targets once a session (Q4), so another size is an error.
+	if (a_key.size != made->size)
+		FailDynamicCubemaps(fmt::format("the engine's reflection cubemap is now {0}x{0}; the passes are made for {1}x{1}", a_key.size, made->size));
 	const auto gated = [self](std::shared_ptr<const Plan> (Impl::*a_plan)() const) {
 		return [self, a_plan]() -> std::shared_ptr<org::RenderPass> {
 			const auto& current = self->impl;
 			return current ? std::make_shared<GatedComputePass>(((*current).*a_plan)()) : nullptr;
+		};
+	};
+	const auto withImports = [self, imports = a_key.imports](std::shared_ptr<const Plan> (Impl::*a_plan)(const Imports&) const) {
+		return [self, a_plan, imports]() -> std::shared_ptr<org::RenderPass> {
+			const auto& current = self->impl;
+			return current ? std::make_shared<GatedComputePass>(((*current).*a_plan)(imports)) : nullptr;
 		};
 	};
 	const auto mips = [self](bool a_inferred, std::uint32_t a_cubemap) {
@@ -844,25 +896,19 @@ bool ORGDynamicCubemaps::RegisterClient()
 				{ current->latch, offset });
 		};
 	};
+	// In the graph from the start. Its entry opens only after an encode wrote the scratch.
 	const auto bc6hCopy = [self](std::uint32_t a_cubemap) {
 		return [self, a_cubemap]() -> std::shared_ptr<org::RenderPass> {
 			const auto& current = self->impl;
-			// Before the first encode the encoder outputs hold nothing.
-			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap, current->copyDirty) :
-			                                                nullptr;
+			return current ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap, current->copyDirty) : nullptr;
 		};
 	};
-	if (impl && !impl->copyGate)
-		impl->copyGate = RenderGraph::RunGate::Create("cs.dyncubemaps.copies", kCopyEntries);
-	if (!impl || !impl->copyGate)
-		return false;
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.sharedConstants = true;
-	client.gates = { impl->copyGate };
+	a_client.id = kClientId;
+	a_client.sharedConstants = true;
+	a_client.gates = { made->copyGate };
 	// Gated so the anchor can run in a frame phase. Dispatch counts are zero in runs the commit did not write, and copies skip at execution.
-	const auto pass = [&client](const char* a_name, std::int32_t a_order, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
-		client.passes.push_back({ .name = a_name,
+	const auto pass = [&a_client](const char* a_name, std::int32_t a_order, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
+		a_client.passes.push_back({ .name = a_name,
 			.anchor = FrameAnchors::Anchor::DeferredPasses,
 			.order = kOrder + a_order,
 			.kind = a_kind,
@@ -870,16 +916,18 @@ bool ORGDynamicCubemaps::RegisterClient()
 			.atExecution = a_kind == FrameAnchors::PassKind::Copy });
 	};
 	using Kind = FrameAnchors::PassKind;
-	client.passes.push_back({ .name = "cs.dyncubemaps.zero",
+	// Black until the first publish, like the D3D11 path's cubemaps. A new registration zeroes them again: it happens only when
+	// the first update moves the capture's colour source, before the first publish.
+	a_client.passes.push_back({ .name = "cs.dyncubemaps.zero",
 		.anchor = FrameAnchors::Anchor::DeferredPasses,
 		.order = kOrder - 1,
 		.kind = Kind::Copy,
 		.make = [self]() -> std::shared_ptr<org::RenderPass> { return self->impl ? GraphResources::MakeUploadPass(self->impl->zeros) : nullptr; },
 		.once = true });
-	pass("cs.dyncubemaps.capture", 0, Kind::Compute, gated(&Impl::CapturePlan));
+	pass("cs.dyncubemaps.capture", 0, Kind::Compute, withImports(&Impl::CapturePlan));
 	pass("cs.dyncubemaps.capture-mips", 1, Kind::Compute, mips(false, 0));
 	pass("cs.dyncubemaps.capture-mips-reflections", 2, Kind::Compute, mips(false, 1));
-	pass("cs.dyncubemaps.infer", 3, Kind::Compute, gated(&Impl::InferPlan));
+	pass("cs.dyncubemaps.infer", 3, Kind::Compute, withImports(&Impl::InferPlan));
 	pass("cs.dyncubemaps.filtered-mip0", 4, Kind::Copy, [self]() -> std::shared_ptr<org::RenderPass> {
 		return self->impl ? std::make_shared<CopyPass>(self->impl->FilteredMipZeroPlan(), self->impl->copyGate, kFilteredMipZeroEntry, self->impl->copyDirty) : nullptr;
 	});
@@ -889,15 +937,16 @@ bool ORGDynamicCubemaps::RegisterClient()
 	pass("cs.dyncubemaps.bc6h", 8, Kind::Copy, bc6hCopy(0));
 	pass("cs.dyncubemaps.bc6h-reflections", 9, Kind::Copy, bc6hCopy(1));
 	pass("cs.dyncubemaps.publish", 10, Kind::Compute, gated(&Impl::PublishPlan));
-	client.registerResources = [self](org::RenderGraph& a_graph) {
+	a_client.registerResources = [self](org::RenderGraph& a_graph) {
 		if (self->impl)
 			self->impl->Register(a_graph);
 	};
-	client.commit = [self](const FrameAnchors::Point&) {
+	a_client.commit = [self](const FrameAnchors::Point&) {
 		if (self->impl)
 			self->impl->Commit();
 	};
-	return FrameAnchors::Register(std::move(client));
+	logger::info("[ORG] Dynamic Cubemaps: a client for the next revision ({0}x{0}, main target {1})", a_key.size, a_key.imports.main.Id());
+	return true;
 }
 
 void ORGDynamicCubemaps::Withdraw()
@@ -906,17 +955,6 @@ void ORGDynamicCubemaps::Withdraw()
 		PublishedResources::Withdraw(kEnvNames[i]);
 		PublishedResources::Withdraw(kBC6HNames[i]);
 	}
-}
-
-void ORGDynamicCubemaps::Fail(const char* a_reason)
-{
-	logger::error("[ORG] Dynamic Cubemaps returns to D3D11: {}", a_reason);
-	FrameAnchors::Unregister(kClientId);
-	Withdraw();
-	auto failed = std::move(impl);
-	// The feature drops its views first, since the textures go when the graph's resources are released below.
-	if (failed && failed->onFailed)
-		failed->onFailed();
 }
 
 bool ORGDynamicCubemaps::IsActive() const
@@ -936,43 +974,24 @@ bool ORGDynamicCubemaps::AfterUpdate()
 {
 	if (!impl)
 		return false;
-	if (!RenderGraphRuntime::Get().IsActive()) {
-		Fail("the render graph is no longer active");
-		return true;
+	// Withdrawing the published cubemaps here would change what built graphs read outside a frame revision.
+	if (!RenderGraphRuntime::Get().IsActive())
+		FailDynamicCubemaps("the render graph is no longer active");
+	// The first update moves the capture's colour source to Deferred's forward target. Not a variable yet, so the next revision
+	// makes the client for it. Old imports stay alive with the builds that hold them.
+	if (auto imports = Import(static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0])); imports && imports != impl->imports) {
+		impl->imports = std::move(imports);
+		impl->client.Invalidate();
 	}
-	auto& state = *impl;
-	bool refresh = false;
-	if (state.programsDirty) {
-		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
-		if (!programs) {
-			Fail("its programs could not be built again");
-			return true;
-		}
-		state.programs = std::move(programs);
-		state.programsDirty = false;
-		refresh = true;
-	}
-	// Old imports stay alive with the builds that hold them.
-	if (auto imports = Import(static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0])); imports && imports != state.imports) {
-		state.imports = std::move(imports);
-		refresh = true;
-	}
-	for (std::uint32_t i = 0; i < 2; ++i)
-		if (state.encoded[i] && !state.copying[i]) {
-			state.copying[i] = true;
-			refresh = true;
-		}
-	if (refresh)
-		FrameAnchors::Refresh(kClientId);
 	return true;
 }
 
 void ORGDynamicCubemaps::ClearShaderCache()
 {
-	if (!impl)
-		return;
-	impl->programsDirty = true;
-	impl->encoded = {};
+	// The programs reload with every live pipeline (RenderGraphRuntime::RequestShaderReload). No cubemap counts as valid until
+	// its next encode.
+	if (impl)
+		impl->encoded = {};
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -983,13 +1002,11 @@ struct ORGDynamicCubemaps::Impl
 
 ORGDynamicCubemaps::~ORGDynamicCubemaps() = default;
 void ORGDynamicCubemaps::Reserve() {}
-bool ORGDynamicCubemaps::Setup(std::function<void()>) { return false; }
+bool ORGDynamicCubemaps::Setup() { return false; }
 bool ORGDynamicCubemaps::IsActive() const { return false; }
 ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const { return {}; }
 bool ORGDynamicCubemaps::AfterUpdate() { return false; }
 void ORGDynamicCubemaps::ClearShaderCache() {}
 void ORGDynamicCubemaps::Withdraw() {}
-void ORGDynamicCubemaps::Fail(const char*) {}
-bool ORGDynamicCubemaps::RegisterClient() { return false; }
 
 #endif

@@ -1,0 +1,76 @@
+# Dynamic Cubemaps with water SSR toggled (a CS::Setting event that clears the engine's SSR shader), then a coc into
+# Dragonsreach and back, a shot after each. The client is declared on the reflection cubemap and registered again only when the
+# first update moves the capture's colour source; no step here may register it again or fail the path (frame revision plan,
+# 6.18). Compose it: native-vulkan+dynamic-cubemaps, native-d3d12+dynamic-cubemaps, guest+dynamic-cubemaps.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+DynamicCubemaps = true
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "DynamicCubemaps.EnabledSSR=0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ssr-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "DynamicCubemaps.EnabledSSR=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "ssr-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "ssr-off", "ssr-on", "interior", "exterior"]
+no_log = ["frame tap error", "a frame declaration failed", "Dynamic Cubemaps' render graph path failed"]

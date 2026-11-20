@@ -69,6 +69,7 @@ The shipped configs:
 | `ibl` | Image Based Lighting on, static IBL off, a DALC mode that reads the environment SH and back, then IBL off (`setting` steps): IBL's client and the fog's IBL inputs switch with frame revisions; compose it, `native-vulkan+ibl` |
 | `skylighting-reset` | coc into Dragonsreach and back out to Whiterun: each loading screen resets Skylighting's probe volumes as new versions in a frame revision; compose it, `native-vulkan+skylighting-reset` |
 | `sss` | Subsurface Scattering's mode switched (Burley, separable, back) and character lighting toggled in Dragonsreach (`setting` steps): the mode's programs and client switch with frame revisions; compose it, `native-vulkan+sss` |
+| `dynamic-cubemaps` | Dynamic Cubemaps with water SSR toggled (`setting` steps), then a coc into Dragonsreach and back: the client follows the reflection cubemap and registers again only for the first colour source; compose it, `native-vulkan+dynamic-cubemaps` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
