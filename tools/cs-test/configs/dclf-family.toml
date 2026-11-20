@@ -1,0 +1,187 @@
+# The DCLF engine draw families whose clients are declared on frame variables (frame revision plan, 6.19): the sky (the main
+# pass, the reflection faces and the sun's query), the screen blood, the decal occlusion tests and the shadow masks. Riverwood at
+# 13:00 in cloudy weather, one melee bandit placed at the player, whose health is raised, and the splatters made to last. First
+# person for the screen blood, third person for the blood decals (the engine tests them before it places them), then HDR on and
+# off again (the hdr step) with a shot in each, and a shot up at the sky. The HDR toggle changes HdrOutputTarget and
+# PresenterFormat, which the blood client follows: expect no new registration of cs.blood-splatter unless the back buffer became
+# another graph resource. Compose it: native-vulkan+dclf-family, native-d3d12+dclf-family, guest+dclf-family.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+HDRDisplay = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimCloudy_A"
+
+[[steps]]
+at = "previous"
+frames = 98
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 1100
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "setgs fBloodSplatterDuration 1000"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "setgs fBloodSplatterFadeStart 1000"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setav health 100000"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.placeatme 1bcd8 1"
+
+[[steps]]
+at = "previous"
+frames = 470
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 80"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 190
+do = "shot"
+arg = "blood"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 70"
+
+[[steps]]
+at = "previous"
+frames = 190
+do = "shot"
+arg = "decals"
+
+# A shot's copy may wait for a build to switch in: give it time to land before HDR changes.
+[[steps]]
+at = "previous"
+frames = 60
+do = "hdr"
+arg = "1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 80"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "blood-hdr"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x -60"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "sky-hdr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "hdr"
+arg = "0"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "sky-sdr"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 80"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "blood-sdr"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["blood", "decals", "blood-hdr", "sky-hdr", "sky-sdr", "blood-sdr"]
+no_log = ["frame tap error", "a frame declaration failed", "cannot be imported for the", "cannot be drawn onto"]

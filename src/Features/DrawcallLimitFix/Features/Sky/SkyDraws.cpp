@@ -1,5 +1,6 @@
 // The sky family's render graph side. One client per view, made once at setup, draws a batch's latched draws in engine order.
 // With CS_ORG_OCCLUSION_QUERIES=1 a third client draws the sun's occlusion draw with an ORG query.
+// The clients are declared at setup and registered by the first frame revision (frame revision plan, 6.19).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -13,6 +14,7 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
@@ -34,6 +36,7 @@
 #include <cstddef>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <string_view>
 
 namespace DCLF::Features::Sky::SkyDraws
@@ -367,6 +370,7 @@ namespace DCLF::Features::Sky::SkyDraws
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
+			std::array<::RenderGraph::Frame::DeclaredClient, kViews> declared;
 			Family::EngineDrawPrograms programs{ "sky", { .source = kShader,
 															.languageVersion = L"2018",
 															.constantWords = ShaderBindings::Words<SkyBlock>(),
@@ -397,7 +401,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			return state;
 		}
 
-		/** @brief Makes the client for a_shape's view. Null, logged, when a target cannot be imported. */
+		/** @brief Makes the client state for a_shape's view and imports its targets. Null, logged, when a target cannot be imported. */
 		std::shared_ptr<Client> MakeClient(const Shape& a_shape)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -482,40 +486,53 @@ namespace DCLF::Features::Sky::SkyDraws
 					}
 				}
 			}
+			return client;
+		}
 
-			FrameAnchors::ClientDesc desc{};
-			desc.id = client->id;
-			desc.sharedConstants = true;
-			desc.gates = { client->gate };
+		/** @brief What a registration is made for: how many query readbacks the sun's passes declare (0 for the other views). */
+		struct ClientKey
+		{
+			std::size_t readbacks = 0;
+			bool operator==(const ClientKey&) const = default;
+		};
+
+		/** @brief The registration of a_client. Its passes declare the targets imported at setup and every readback the ring has now. */
+		bool MakeDesc(const std::shared_ptr<Client>& a_client, FrameAnchors::ClientDesc& a_desc)
+		{
+			const auto& shape = a_client->shape;
+			const bool faceClouds = shape.view == View::Face && shape.cloudShadows && shape.clouds;
+			a_desc.id = a_client->id;
+			a_desc.sharedConstants = true;
+			a_desc.gates = { a_client->gate };
 			const auto addPass = [&](const char* a_name, Part a_part, std::int32_t a_order) {
-				FrameAnchors::PassDesc pass{ .name = client->id + "." + a_name,
-					.anchor = client->anchor,
+				FrameAnchors::PassDesc pass{ .name = a_client->id + "." + a_name,
+					.anchor = a_client->anchor,
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> {
+					.make = [client = a_client, a_part]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor));
 					},
 					// Recorded after the commit, when the draws are known. A face pass's clears are its first draw's load ops, held back by the gate.
 					.atExecution = true };
-				if (client->instances > 1) {
+				if (a_client->instances > 1) {
 					pass.make = nullptr;
-					pass.makeInstance = [client, a_part](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
+					pass.makeInstance = [client = a_client, a_part](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor), a_instance);
 					};
 				}
-				desc.passes.push_back(std::move(pass));
+				a_desc.passes.push_back(std::move(pass));
 			};
-			if (a_shape.view == View::Sun) {
+			if (shape.view == View::Sun) {
 				addPass("occlusion", Part::SunMain, 0);
 				addPass("occlusion-copy", Part::SunCopy, 1);
-			} else if (a_shape.view == View::Main) {
+			} else if (shape.view == View::Main) {
 				addPass("draws", Part::Main, 0);
 			} else {
 				addPass("draws", Part::FaceSky, 0);
 				if (faceClouds)
 					addPass("clouds", Part::FaceClouds, 1);
 			}
-			desc.commit = [client](const FrameAnchors::Point&) {
+			a_desc.commit = [client = a_client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
@@ -533,30 +550,27 @@ namespace DCLF::Features::Sky::SkyDraws
 					if (draw.program)
 						client->gate->OpenDraw(entry, draw.indexCount, 1);
 				}
+				// A new readback chunk changes the key, so the next revision registers the client again with it.
 				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1), instance))
-					FrameAnchors::Refresh(client->id);
+					GetState().declared[static_cast<std::size_t>(client->view)].Invalidate();
 			};
-			desc.executed = [client](const FrameAnchors::Point&) {
+			a_desc.executed = [client = a_client](const FrameAnchors::Point&) {
 				if (client->queries)
 					client->queries->Executed();
 				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 					logger::info("[DCLF] sky: the first {} run drawn by the graph", client->id);
 			};
-			desc.active = [client] { return client->pending; };
-			if (client->instances > 1) {
-				desc.maxInstances = client->instances;
+			a_desc.active = [client = a_client] { return client->pending; };
+			if (a_client->instances > 1) {
+				a_desc.maxInstances = a_client->instances;
 				// Every face instance is declared because the engine decides late how many faces it draws. Unused instances stay closed.
-				desc.instances = [n = client->instances] { return n; };
+				a_desc.instances = [n = a_client->instances] { return n; };
 			}
-			if (!FrameAnchors::Register(std::move(desc))) {
-				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
-				return nullptr;
-			}
-			const auto late = client->inputs.Unregistered();
-			logger::info("[DCLF] sky: the {} client registered at setup (targets {} {} {}, depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {}{})",
-				client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows ? "on" : "off",
-				a_shape.clouds ? "the graph's" : "the engine's", client->inputs.Describe(), late.empty() ? std::string() : std::format("; not published yet: {}", late));
-			return client;
+			const auto late = a_client->inputs.Unregistered();
+			logger::info("[DCLF] sky: the {} client is made (targets {} {} {}, depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {}{})",
+				a_client->id, shape.colours[0], shape.colours[1], shape.colours[2], shape.depth, shape.cloudShadows ? "on" : "off",
+				shape.clouds ? "the graph's" : "the engine's", a_client->inputs.Describe(), late.empty() ? std::string() : std::format("; not published yet: {}", late));
+			return true;
 		}
 
 		/** @brief What a run's recording depends on: everything but the latched values. */
@@ -636,14 +650,32 @@ namespace DCLF::Features::Sky::SkyDraws
 		face.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 		face.cloudShadows = cloudShadows;
 		face.clouds = Address::kCloudGroup.Known();
-		for (const auto& shape : { main, face })
-			state.clients[static_cast<std::size_t>(shape.view)] = MakeClient(shape);
+		std::vector<Shape> shapes{ main, face };
 		if (::RenderGraph::Engine::OcclusionQueries::Active() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineQueries)) {
 			Shape sun;
 			sun.view = View::Sun;
 			sun.colours = { static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN), -1, -1 };
 			sun.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-			state.clients[static_cast<std::size_t>(View::Sun)] = MakeClient(sun);
+			shapes.push_back(sun);
+		}
+		namespace RF = ::RenderGraph::Frame;
+		for (const auto& shape : shapes) {
+			auto client = MakeClient(shape);
+			if (!client)
+				continue;
+			// The targets are the engine's, made once with its other targets, and imported above. The key is the sun ring's
+			// readback count, so a chunk the ring makes later registers the client again with the next revision.
+			auto declared = RF::DeclareClient<ClientKey>(
+				client->id, RF::DependsOn(),
+				[client](const RF::Inputs&) -> std::optional<ClientKey> { return ClientKey{ client->queries ? client->queries->Readbacks().size() : 0 }; },
+				[client](const ClientKey&, FrameAnchors::ClientDesc& a_desc) { return MakeDesc(client, a_desc); });
+			if (!declared) {
+				logger::warn("[DCLF] sky: the {} client could not be declared; the sky stays the engine's", client->id);
+				continue;
+			}
+			logger::info("[DCLF] sky: the {} client declared at setup; it registers with the next frame revision", client->id);
+			state.declared[static_cast<std::size_t>(shape.view)] = std::move(declared);
+			state.clients[static_cast<std::size_t>(shape.view)] = std::move(client);
 		}
 		return true;
 	}
@@ -654,9 +686,10 @@ namespace DCLF::Features::Sky::SkyDraws
 		if (a_shape.view >= View::Count)
 			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_shape.view)];
-		if (!client)
+		// Until a revision registers the client, the engine draws the batch.
+		if (!client || !state.declared[static_cast<std::size_t>(a_shape.view)].Registered())
 			return false;
-		// No client is registered again during play, so a batch with other targets stays the engine's.
+		// No client is registered for other targets during play, so a batch with other targets stays the engine's.
 		if (client->shape != a_shape) {
 			if (!std::exchange(client->shapeLogged, true))
 				logger::warn("[DCLF] sky: a {} batch draws into targets {} {} {} with depth {} (cloud shadows {}, cloud layers {}), not its client's; those batches stay the engine's",
@@ -677,7 +710,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	{
 		const auto& state = GetState();
 		const auto& client = state.clients[static_cast<std::size_t>(View::Sun)];
-		if (!client)
+		if (!client || !state.declared[static_cast<std::size_t>(View::Sun)].Registered())
 			return false;
 		return Family::HeldForBatch("sun", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun), client->anchor);
 	}
