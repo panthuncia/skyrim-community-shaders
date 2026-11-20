@@ -74,7 +74,6 @@ namespace RenderGraph::Frame
 		bool taa = false;
 		std::uint8_t taaMode = 0;   // 0 plain, 1 with the mask swap, 2 the UI form
 		bool taaWater = false;
-		bool dynres = false;        // the upsample runs
 		bool dofCompute = false;
 		bool screenshot = false;    // +0x211
 		bool upscaler = false;      // DLSS, FSR or XeSS

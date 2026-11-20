@@ -358,7 +358,7 @@ namespace RenderGraph::Engine::ImageSpace
 		struct Spec
 		{
 			ShapeKey key;
-			std::uint32_t entry = 0;  // also the latch region (entry * 32) and order key
+			std::uint32_t entry = 0;  // also the latch region (entry * kLatchStride) and order key
 			std::string name;
 			FrameAnchors::Texture output;
 			FrameAnchors::Texture output1;
@@ -371,6 +371,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t width = 0, height = 0;
 			// The feature defines its program is built with, from its registration's key (kSsrPermutation), not the live settings.
 			std::uint32_t permutation = 0;
+			// A render-size step: the pass's render area is the whole output, and its vertex stage reads the viewport from the
+			// latch (ConstantsAt::viewport), which the step's hook writes at each draw from the engine's ratios.
+			bool latchViewport = false;
 		};
 
 		/** @brief Mirrors OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
@@ -384,8 +387,11 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t frameSize = 0;
 			std::uint32_t source = UINT32_MAX;
 			std::uint32_t padding = 0;
+			// The draw's viewport in its render area, as fractions: scale x and y, then offset x and y. A pass made with the latch
+			// viewport (Spec::latchViewport) draws its quad there, so a new ratio is a new value, not a new registration.
+			std::array<float, 4> viewport{ 1.0f, 1.0f, 0.0f, 0.0f };
 		};
-		static_assert(sizeof(ConstantsAt) == 32);
+		static_assert(sizeof(ConstantsAt) == 48);
 
 		/** @brief Mirrors OrgEngineSourcesAt in Common/OrgEngineConstants.hlsli. */
 		using SourcesAt = std::array<std::uint32_t, kMaxSlots>;
@@ -840,10 +846,13 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr std::uint32_t kSamplerFilterModes = 5;
 
 		/**
-		* @brief Effect, output formats, packed blend, depth-stencil format (Unknown for none), depth-stencil table index and the
-		* feature define permutation (Spec::permutation).
+		* @brief Effect, output formats, packed blend, depth-stencil format (Unknown for none), depth-stencil table index, the
+		* feature define permutation (Spec::permutation) and whether the vertex stage takes its viewport from the latch.
 		*/
-		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t, std::uint32_t>;
+		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t, std::uint32_t, bool>;
+
+		/** @brief The fullscreen vertex stage that draws a quad in the viewport its latch holds (ConstantsAt::viewport). */
+		constexpr const char* kLatchViewportVertexShader = "RenderGraph/FullscreenLatchViewportVS.hlsl";
 
 		/** @brief ISReflectionsRayTracing with ENABLESSR (Dynamic Cubemaps' EnabledSSR). The only feature define an effect's key carries. */
 		constexpr std::uint32_t kSsrPermutation = 1;
@@ -1126,7 +1135,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief Needs the engine's effect object. Blend and depth-stencil must already be checked. */
 		RasterProgram::Desc DescribeRaster(const ProgramKey& a_key)
 		{
-			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex, permutation] = a_key;
+			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex, permutation, latchViewport] = a_key;
 			const auto& effect = kEffects[effectIndex];
 			std::array<rhi::BlendAttachment, 2> blend{};
 			std::string error;
@@ -1141,6 +1150,12 @@ namespace RenderGraph::Engine::ImageSpace
 			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(effect.latched)) + effect.samplers +
 			                     (effect.features ? kFeatureWords : 0) + 2 + (effect.latched ? 2 : 0);
 			desc.defines = DefinesOf(effectIndex, permutation);
+			if (latchViewport && !effect.geometry && !effect.vertexStage) {
+				// The latch's handle and offset are the push words before the sources' latch, as MakePass binds them.
+				const auto word = desc.constantWords - 2 - (effect.latched ? 2 : 0);
+				desc.vertexSource = kLatchViewportVertexShader;
+				desc.defines.emplace_back(L"ORG_VIEWPORT_LATCH_WORD", std::to_wstring(word));
+			}
 			desc.targets = { { .format = format, .blend = blend[0] } };
 			if (format1 != rhi::Format::Unknown)
 				desc.targets.push_back({ .format = format1, .blend = blend[1] });
@@ -1177,7 +1192,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			const auto depthIndex = a_spec.depth ? a_spec.key.depthMode * kStencilModes + a_spec.key.stencilMode : 0u;
 			return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend, a_spec.depth ? a_spec.depthFormat : rhi::Format::Unknown, depthIndex,
-				a_spec.permutation };
+				a_spec.permutation, a_spec.latchViewport };
 		}
 
 		/** @brief Whether the blend and depth-stencil states are known yet. a_error says which is not. */
@@ -1342,19 +1357,6 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 		}
 
-		// The dynamic-resolution ratios of the registration being built, from its revision's DynamicRatios.
-		// Its render-size viewports are baked with them until step 8 moves them into the latch.
-		std::optional<std::pair<float, float>> g_buildRatios;
-
-		/** @brief Sets the ratios a registration's build bakes into its viewports, for the scope. */
-		struct BuildRatiosScope
-		{
-			explicit BuildRatiosScope(std::pair<float, float> a_ratios) { g_buildRatios = a_ratios; }
-			~BuildRatiosScope() { g_buildRatios.reset(); }
-			BuildRatiosScope(const BuildRatiosScope&) = delete;
-			BuildRatiosScope& operator=(const BuildRatiosScope&) = delete;
-		};
-
 		bool WorldStepsOn();
 		bool ChainStepsOn();
 		void LogReadback(std::uint64_t a_frame);
@@ -1468,20 +1470,36 @@ namespace RenderGraph::Engine::ImageSpace
 			LogEngineDraws();
 		}
 
-		/** @brief The ratios of the registration being built (BuildRatiosScope), 1 outside a build. */
-		std::pair<float, float> DynamicRatios()
+		/** @brief Values within 1/64 of a pixel snap to it, as ReadViewport snaps the engine's. */
+		float SnapToPixel(float a_value)
 		{
-			return g_buildRatios ? *g_buildRatios : std::pair{ 1.0f, 1.0f };
+			const float rounded = std::round(a_value);
+			return std::abs(a_value - rounded) <= 1.0f / 64.0f ? rounded : a_value;
 		}
 
 		/** @brief Snapped as ReadViewport snaps the engine's. */
 		std::array<std::uint32_t, 6> OriginViewport(float a_width, float a_height)
 		{
-			const auto snap = [](float a_value) {
-				const float rounded = std::round(a_value);
-				return std::abs(a_value - rounded) <= 1.0f / 64.0f ? rounded : a_value;
-			};
-			return ViewportBits({ .width = snap(a_width), .height = snap(a_height), .minDepth = 0.0f, .maxDepth = 1.0f });
+			return ViewportBits({ .width = SnapToPixel(a_width), .height = SnapToPixel(a_height), .minDepth = 0.0f, .maxDepth = 1.0f });
+		}
+
+		/**
+		* @brief The latch viewport of a render-size step drawn now: the engine's dynamic-resolution ratios of the output's area,
+		* snapped as OriginViewport snaps. The ratios apply whatever the lock, as the engine's RenderWorld effects take them.
+		*/
+		std::array<float, 4> RenderViewportOf(const Spec& a_spec)
+		{
+			const auto mip = MipOfName(a_spec.key.output);
+			const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
+			const float width = static_cast<float>((std::max)(a_spec.width >> shift, 1u));
+			const float height = static_cast<float>((std::max)(a_spec.height >> shift, 1u));
+			const auto* graphics = globals::game::graphicsState;
+			if (!graphics)
+				return { 1.0f, 1.0f, 0.0f, 0.0f };
+			const auto& data = graphics->GetRuntimeData();
+			const float x = std::clamp(SnapToPixel(width * data.dynamicResolutionWidthRatio), 1.0f, width);
+			const float y = std::clamp(SnapToPixel(height * data.dynamicResolutionHeightRatio), 1.0f, height);
+			return { x / width, y / height, 0.0f, 0.0f };
 		}
 
 		/** @brief The CS stages' ImageSpace clients. */

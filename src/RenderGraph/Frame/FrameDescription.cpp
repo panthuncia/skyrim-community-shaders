@@ -123,7 +123,6 @@ namespace RenderGraph::Frame
 		flag("taa", a_before.taa, a_after.taa);
 		number("taa form", a_before.taaMode, a_after.taaMode);
 		flag("taa water", a_before.taaWater, a_after.taaWater);
-		flag("dynamic resolution", a_before.dynres, a_after.dynres);
 		flag("dof compute", a_before.dofCompute, a_after.dofCompute);
 		flag("screenshot", a_before.screenshot, a_after.screenshot);
 		flag("upscaler", a_before.upscaler, a_after.upscaler);

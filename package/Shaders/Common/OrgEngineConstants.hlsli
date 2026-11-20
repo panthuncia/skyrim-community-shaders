@@ -29,6 +29,7 @@
  * PerGeometry (PS b2) and of its PerFrame (PS b12, read as FrameBuffer when the shader defines ORG_SHARED_FRAMEBUFFER_AT).
  * Source is a texture the draw reads by heap index (ORG_ENGINE_NO_SOURCE when none): the engine binds a different one
  * each time (the water flow copies' loaded textures), so a pass recorded once cannot hold it.
+ * Mirrors ConstantsAt in src/RenderGraph/Engine/ImageSpace/ImageSpace.cpp.
  */
 struct OrgEngineConstantsAt
 {
@@ -40,6 +41,9 @@ struct OrgEngineConstantsAt
 	uint FrameSize;
 	uint Source;
 	uint Padding;
+	// A render-size step's viewport in its render area: scale xy, then offset xy, as fractions. Only its vertex stage reads it
+	// (RenderGraph/FullscreenLatchViewportVS.hlsl).
+	float4 Viewport;
 };
 
 #	define ORG_ENGINE_NO_SOURCE 0xFFFFFFFF

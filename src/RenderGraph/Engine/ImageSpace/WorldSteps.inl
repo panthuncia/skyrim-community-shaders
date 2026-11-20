@@ -34,7 +34,7 @@ enum class WorldScope : std::uint8_t
 enum class StepArea : std::uint8_t
 {
 	Full,
-	Render,  // the output scaled by the dynamic-resolution ratios at the build
+	Render,  // the output scaled by the engine's dynamic-resolution ratios at each draw, through the latch
 };
 
 /** @brief Engine mode numbers. Address 0 clamp, 3 wrap, 4 border, 5 mirror. Filter 0 point, 1 linear without mips, 2 trilinear. */
@@ -165,13 +165,11 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		if (spec->output1)
 			spec->format1 = format(a_desc.output1, spec->output1);
 		const auto shift = a_desc.output.mip == AnchorPasses::kAllMips ? 0u : a_desc.output.mip;
-		float width = static_cast<float>((std::max)(spec->width >> shift, 1u));
-		float height = static_cast<float>((std::max)(spec->height >> shift, 1u));
-		if (a_desc.area == StepArea::Render) {
-			const auto [x, y] = DynamicRatios();
-			width *= x;
-			height *= y;
-		}
+		const float width = static_cast<float>((std::max)(spec->width >> shift, 1u));
+		const float height = static_cast<float>((std::max)(spec->height >> shift, 1u));
+		// A render-size step records the whole output. Its quad is drawn in the viewport the hook latches at each draw, so a new
+		// ratio needs no registration (decision 6a).
+		spec->latchViewport = a_desc.area == StepArea::Render && !info.geometry && !info.vertexStage;
 		key.viewport = OriginViewport(width, height);
 	}
 	return spec;
@@ -193,7 +191,6 @@ struct StepKey
 struct WorldKey
 {
 	Frame::Vars::Extent2D display{};
-	Frame::Vars::Ratios ratios{};  // the render-size viewports are baked at registration until step 8
 	std::uint32_t saoLevels = 0, effects = 0, states = 0;
 	std::uint32_t ssr = 0;  // Dynamic Cubemaps' EnabledSSR: the SSR raymarch's ENABLESSR permutation
 	friend bool operator==(const WorldKey&, const WorldKey&) = default;
@@ -207,7 +204,6 @@ struct WorldSteps
 	std::array<std::optional<FrameAnchors::ClientDesc>, 2> descs;  // the scopes' and the water blend's
 	std::array<Frame::DeclaredClient, 2> clients;
 	std::uint32_t saoLevels = 0, contrastLevel = 0, width = 0, height = 0;
-	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::map<StepKey, std::uint32_t> entries;
 	std::array<bool, kGateEntries> scopesMade{}, waterMade{};  // set on the build thread
 	// Entries a hook found off, with the frame each was last asked for. The stage key keeps them present while asked for.
@@ -446,7 +442,7 @@ std::optional<WorldKey> WorldKeyOf(const Values& a_values)
 	// ENABLESSR is in the engine's SSR defines only while Dynamic Cubemaps is loaded.
 	const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	const std::uint32_t ssr = dynamicCubemaps.loaded && a_values.Get(dynamicCubemaps.settings.EnabledSSR) ? 1u : 0u;
-	return WorldKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::DynamicRatios()), shape->saoLevels, shape->effects, shape->states, ssr };
+	return WorldKey{ a_values.Get(Frame::Vars::DisplaySize()), shape->saoLevels, shape->effects, shape->states, ssr };
 }
 
 bool WorldLagging()
@@ -475,9 +471,9 @@ bool DeclareWorldSteps()
 	if (!DeclareKept(world.sao, RE::RENDER_TARGET::kSAO, "ImageSpace::SAO") || !DeclareKept(world.saoHistory[0], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO0") ||
 		!DeclareKept(world.saoHistory[1], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO1"))
 		return false;
-	// EnabledSSR picks the SSR raymarch's program, so its change registers the clients again with a revision.
-	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace(),
-		globals::features::dynamicCubemaps.settings.EnabledSSR);
+	// EnabledSSR picks the SSR raymarch's program, so its change registers the clients again with a revision. The ratios are no
+	// dependency: the render-size viewports are latched at each draw.
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace(), globals::features::dynamicCubemaps.settings.EnabledSSR);
 	for (std::size_t part = 0; part < world.clients.size(); ++part)
 		world.clients[part] = DeclareStepClient<WorldKey>(part ? PostPart::WorldWater : PostPart::WorldScopes, dependencies,
 			[](const Frame::Inputs& a_in) { return WorldKeyOf(a_in); }, [part](const WorldKey& a_key) { return WorldDescFor(a_key, part); });
@@ -577,11 +573,8 @@ void BuildWorldSteps(const WorldKey& a_key)
 	main.texture->GetDesc(&mainDesc);
 	world.width = mainDesc.Width;
 	world.height = mainDesc.Height;
-	world.ratios = { a_key.ratios.x, a_key.ratios.y };
 	world.saoLevels = a_key.saoLevels;
 	world.contrastLevel = ContrastLevel(world.saoLevels);
-	// MakeStepSpec bakes the render-size viewports with the key's ratios.
-	const BuildRatiosScope ratioScope(world.ratios);
 	MakeTransient(world.ssrMask, RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "ImageSpace::SSRMaskDownsampled");
 	MakeTransient(world.saoTemp, RE::RENDER_TARGET::kSAO_TEMP_BLUR, "ImageSpace::SAOBlurTemp");
 	KeptExtentLike(world.sao, RE::RENDER_TARGET::kSAO);
@@ -811,9 +804,9 @@ void BuildWorldSteps(const WorldKey& a_key)
 			world.descs[water ? 1 : 0] = std::move(desc);
 	}
 	world.registered = true;
-	logger::info("[ORG] ImageSpace: the RenderWorld scopes are CS passes: {} scope passes ({} SAO levels, contrast level {}), {} water blend passes, for {}x{} at "
-				 "ratios {:.3f}x{:.3f}, registered for the revision starting now",
-		world.scopesCount, world.saoLevels, world.contrastLevel, world.waterCount, world.width, world.height, world.ratios.first, world.ratios.second);
+	logger::info("[ORG] ImageSpace: the RenderWorld scopes are CS passes: {} scope passes ({} SAO levels, contrast level {}), {} water blend passes, for {}x{} "
+				 "(render-size viewports latched per draw), registered for the revision starting now",
+		world.scopesCount, world.saoLevels, world.contrastLevel, world.waterCount, world.width, world.height);
 }
 
 /** @brief None means the draw goes the main client's way. */
@@ -823,6 +816,17 @@ WorldScope WorldStepScope()
 	if (!world.on || !world.registered)
 		return WorldScope::None;
 	return world.scope;
+}
+
+/** @brief The spec of a_entry in the client's newest registration, or null. */
+const Spec* SpecOfEntry(const PostClient& a_client, std::uint32_t a_entry)
+{
+	if (a_entry < a_client.specs.size() && a_client.specs[a_entry] && a_client.specs[a_entry]->entry == a_entry)
+		return a_client.specs[a_entry].get();
+	for (const auto& spec : a_client.specs)
+		if (spec && spec->entry == a_entry)
+			return spec.get();
+	return nullptr;
 }
 
 /** @brief Captures the constants the engine bound for the step and stages them for its pass. Withholds the engine's draw. */
@@ -868,6 +872,11 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, std::size_t a_effect
 			.frameSize = frameAt.size };
 		blocks.push_back(at.block);
 		blocks.push_back(frameAt.block);
+		// A render-size step draws its quad, two triangles, in the viewport of this draw's ratios.
+		if (const auto* spec = SpecOfEntry(a_client, a_entry); spec && spec->latchViewport) {
+			pending.at.viewport = RenderViewportOf(*spec);
+			pending.vertices = 6;
+		}
 	}
 	a_client.batch.push_back(std::move(pending));
 	for (auto& block : blocks)

@@ -276,6 +276,14 @@ namespace RenderGraph::Frame::Vars
 			return FrameVariableSet().set.Take();
 		}
 
+		bool ConstantsOnly(std::uint32_t a_index)
+		{
+			// The variables declared with { .sizes = false } above. A derived variable of one is refused by the set unless it is
+			// constants only too, and none is declared.
+			const auto& variables = FrameVariableSet();
+			return a_index == variables.renderSize.index || a_index == variables.dynamicRatios.index || a_index == variables.shaderGeneration.index;
+		}
+
 		const std::shared_ptr<const org::services::VariableSnapshot>& Adopted()
 		{
 			return FrameVariableSet().adopted;

@@ -551,7 +551,7 @@ namespace
 	struct UpscaleKey
 	{
 		Vars::Extent2D display{};  // kMAIN's, the copy's render area
-		bool depth = false;        // the depth upscale runs: an SDK upscaler below native
+		bool depth = false;        // the depth upscale is in the registration: an SDK upscaler. The frame opens it below native.
 		std::uint64_t inputs = 0;  // Impl::inputsSerial
 		bool operator==(const UpscaleKey&) const = default;
 	};
@@ -590,13 +590,19 @@ namespace
 		const bool depth = a_key.depth && impl.inputs.DepthComplete();
 		if (depth) {
 			const auto& inputs = impl.inputs;
-			builder.Add(RenderGraph::AnchorPasses::Copy{
-				.name = "depth-copy", .source = inputs.depth, .target = inputs.depthCopy, .width = inputs.depthSize.first, .height = inputs.depthSize.second });
+			// The copies run with the depth upscale, so a frame at native quality skips them, as D3D11 does.
+			builder.Add(RenderGraph::AnchorPasses::Copy{ .name = "depth-copy",
+				.source = inputs.depth,
+				.target = inputs.depthCopy,
+				.width = inputs.depthSize.first,
+				.height = inputs.depthSize.second,
+				.gate = kDepthEntry });
 			builder.Add(RenderGraph::AnchorPasses::Copy{ .name = "refraction-normals-copy",
 				.source = inputs.refraction,
 				.target = inputs.refractionCopy,
 				.width = inputs.refractionSize.first,
-				.height = inputs.refractionSize.second });
+				.height = inputs.refractionSize.second,
+				.gate = kDepthEntry });
 			if (!impl.depthProgram)
 				builder.Fail("the depth upscale's program is missing");
 			auto spec = std::make_shared<const DepthSpec>(DepthSpec{ impl.depthProgram, impl.latch, impl.upscaleGate, impl.linearSampler.Index(), inputs });
@@ -606,7 +612,8 @@ namespace
 				.source = inputs.underwater,
 				.target = inputs.underwaterCopy,
 				.width = inputs.underwaterSize.first,
-				.height = inputs.underwaterSize.second });
+				.height = inputs.underwaterSize.second,
+				.gate = kDepthEntry });
 			// At half the screen, as the D3D11 path's viewport.
 			builder.Add(RenderGraph::AnchorPasses::Draw{ .name = "underwater-mask-upscale",
 				.program = impl.underwaterProgram,
@@ -779,13 +786,14 @@ namespace
 		const auto& settings = globals::features::upscaling.settings;
 		const std::weak_ptr<Impl> weak = a_impl;
 		a_impl->upscaleClient = DeclareClient<UpscaleKey>(
-			kClientId, DependsOn(Vars::DisplaySize(), Vars::UpscaleMethod(), settings.qualityMode),
+			kClientId, DependsOn(Vars::DisplaySize(), Vars::UpscaleMethod()),
 			[weak](const Inputs& a_in) -> std::optional<UpscaleKey> {
 				const auto impl = weak.lock();
 				if (!impl || impl->failed)
 					return std::nullopt;
-				// The depth upscale runs below native only, as Upscaling::IsUpscalingActive says.
-				const bool depth = SdkMethod(a_in.Get(Vars::UpscaleMethod())) && a_in.Get(globals::features::upscaling.settings.qualityMode) != 0;
+				// The quality mode is no dependency (decision 6a): the depth upscale is gated, and the frame opens it below native
+				// only, as Upscaling::IsUpscalingActive says. So a quality change builds nothing.
+				const bool depth = SdkMethod(a_in.Get(Vars::UpscaleMethod()));
 				return UpscaleKey{ DisplayOr(a_in.Get(Vars::DisplaySize()), impl->setupDisplay), depth, impl->inputsSerial };
 			},
 			[weak](const UpscaleKey& a_key, FrameAnchors::ClientDesc& a_client) {

@@ -320,7 +320,7 @@ namespace ORGPostChain
 
 	RasterProgram::Viewport Builder::DynamicViewport() const
 	{
-		// A recording cannot follow the ratio, so the draw covers kMAIN until step 8 puts the viewport in the latch.
+		// After the upscale the dynamic part is the whole of kMAIN (step 8). A recording never follows the ratio.
 		return FullViewport();
 	}
 
