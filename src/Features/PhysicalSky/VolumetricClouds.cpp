@@ -755,6 +755,10 @@ void PhysicalSky::SetupVolumetricResources()
 	midCloudMapManager.SetupResources();
 	cloudStormManager.SetupResources();
 	cloudNoiseGenerator.SetupResources();
+	// On the render graph the full-resolution targets exist from the start, one texel while the clouds are off, so their ids
+	// are published before any reader declares them.
+	if (ORGVolumetricClouds::Requested())
+		EnsureVolumetricScreenResources();
 	ORGVolumetricClouds::Get().Setup(*this);
 }
 
@@ -790,8 +794,25 @@ bool PhysicalSky::EnsureVolumetricScreenResources()
 	D3D11_TEXTURE2D_DESC mainDesc;
 	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
 	try {
-		for (const auto& target : kScreenTargets)
+		for (const auto& target : kScreenTargets) {
+			if (ORGVolumetricClouds::Requested()) {
+				// Declared on the display size and the toggles (ORGVolumetricClouds::MakeScreenTarget).
+				const D3D11_TEXTURE2D_DESC desc{ .Width = mainDesc.Width,
+					.Height = mainDesc.Height,
+					.MipLevels = 1,
+					.ArraySize = 1,
+					.Format = target.format,
+					.SampleDesc = { .Count = 1, .Quality = 0 },
+					.Usage = D3D11_USAGE_DEFAULT,
+					.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS };
+				// Null without an active render graph: a D3D11 texture then.
+				if (auto* twin = ORGVolumetricClouds::MakeScreenTarget(desc, target.name, target.id)) {
+					(this->*target.texture).reset(twin);
+					continue;
+				}
+			}
 			this->*target.texture = CreateCloudTexture(mainDesc.Width, mainDesc.Height, target.format, target.name, target.id);
+		}
 	} catch (const std::exception& e) {
 		logger::error("[PhysicalSky] Failed to create the volumetric cloud screen targets ({}), disabling volumetric clouds for this session", e.what());
 		for (const auto& target : kScreenTargets)

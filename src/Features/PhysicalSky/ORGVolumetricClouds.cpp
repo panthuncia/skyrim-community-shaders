@@ -10,7 +10,8 @@
 
 namespace
 {
-	// Set at the first frame the client is scheduled. The outputs are History twins, so they keep what that run wrote.
+	// Set by a commit that opened the neutral clears of the bound versions. The outputs are History twins, so they keep what
+	// that run wrote. Reset from the frame a new version is bound, and while the clouds are off.
 	bool s_outputsWritten = false;
 }
 
@@ -48,6 +49,7 @@ void ORGVolumetricClouds::SetInputSource(InputSource a_source) { inputs = std::m
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -334,13 +336,22 @@ namespace
 
 	constexpr float KilometersToGameUnits(float a_value) { return a_value / Util::Units::GAME_UNIT_TO_KM; }
 
+	/** @brief A full-resolution target: its declared twin and the feature's D3D11 wrapper, which follows the bound version. */
+	struct CloudScreenTarget
+	{
+		RenderGraph::Frame::DeclaredTexture2D twin;
+		::Texture2D* wrapper = nullptr;  // owned by the feature's member
+	};
+
 	/** @brief The 2D and 3D twins, and each one by the D3D11 texture its wrapper names. Render thread. */
 	struct CloudTwins
 	{
 		std::map<std::string, std::unique_ptr<GraphResources::Texture2D>> textures2D;
 		std::map<std::string, std::unique_ptr<GraphResources::Texture3D>> textures3D;
+		std::map<std::string, CloudScreenTarget> screens;
 		std::map<const ID3D11Resource*, const GraphResources::Resource*> byD3D11;
 		std::uint64_t generation = 0;  // bumped by every new twin, which registers the client again
+		std::array<std::uint32_t, 2> screenFallback{ 1, 1 };  // the main target's size at setup, before the display size is known
 	};
 
 	CloudTwins& Twins()
@@ -381,6 +392,27 @@ namespace
 
 		bool operator==(const CloudRegistrationKey&) const = default;
 	};
+
+	/** @brief The client's key: what the last Stage found, and the screen targets' extent the copies bake in. */
+	struct CloudClientKey
+	{
+		CloudRegistrationKey observed;
+		std::array<std::uint32_t, 2> screen{};
+
+		bool operator==(const CloudClientKey&) const = default;
+	};
+
+	/** @brief The screen targets' extent for a revision's values: the display size while the sky and its clouds are on, else one texel. */
+	std::array<std::uint32_t, 2> CloudScreenExtent(const RenderGraph::Frame::Inputs& a_in)
+	{
+		const auto& settings = globals::features::physicalSky.settings;
+		if (!a_in.Get(settings.enabled) || !a_in.Get(settings.enableVolumetricClouds))
+			return { 1, 1 };
+		const auto display = a_in.Get(RenderGraph::Frame::Vars::DisplaySize());
+		if (display.width && display.height)
+			return { display.width, display.height };
+		return Twins().screenFallback;
+	}
 
 	/** @brief The handle table as D3D11's bindings stand at one point of the passes: each slot's entry, or the null descriptor. */
 	class CloudTable
@@ -440,8 +472,11 @@ struct ORGVolumetricClouds::Impl
 	std::uint32_t samplerTr = ORGPhysicalSky::kNoSampler, samplerSv = ORGPhysicalSky::kNoSampler;
 	std::shared_ptr<const void> samplerTrOwner, samplerSvOwner;
 
-	std::optional<CloudRegistrationKey> registered;
-	bool failed = false;
+	// The declared client, and what its key adds: the inputs the last Stage found. They are not variables yet, so a change
+	// invalidates the key and the next revision registers the client for it.
+	RenderGraph::Frame::DeclaredClient client;
+	std::optional<CloudRegistrationKey> observed;
+	bool held = false;           // the adopted revision holds a registration: the frame renders the clouds
 	bool missingInputs = false;  // logged once
 
 	// Render thread. Staged by Stage, taken by the next commit.
@@ -486,6 +521,8 @@ struct ORGVolumetricClouds::Impl
 		if (neutral) {
 			gate->OpenDispatch(kNeutral, 1);
 			neutralCommitted = true;
+			// The run clears the bound versions before any of its passes, and readers are ordered after it.
+			s_outputsWritten = true;
 		}
 		for (const auto& [entry, groups] : frame.dispatches)
 			gate->OpenDispatch(entry, groups[0], groups[1], groups[2]);
@@ -525,7 +562,8 @@ struct ORGVolumetricClouds::Impl
 		return true;
 	}
 
-	bool Register(const PhysicalSky& a_feature, const CloudRegistrationKey& a_key, const std::shared_ptr<Impl>& a_self);
+	/** @brief The client's registration for a key, when a revision starts. False, logged, when it cannot be made (fatal). */
+	bool Make(const PhysicalSky& a_feature, const CloudClientKey& a_key, const std::shared_ptr<Impl>& a_self, FrameAnchors::ClientDesc& a_client);
 };
 
 namespace
@@ -542,12 +580,16 @@ namespace
 	}
 }
 
-bool ORGVolumetricClouds::Impl::Register(const PhysicalSky& a_feature, const CloudRegistrationKey& a_key, const std::shared_ptr<Impl>& a_self)
+bool ORGVolumetricClouds::Impl::Make(const PhysicalSky& a_feature, const CloudClientKey& a_clientKey, const std::shared_ptr<Impl>& a_self,
+	FrameAnchors::ClientDesc& a_client)
 {
 	namespace AnchorPasses = RenderGraph::AnchorPasses;
 	using Bind = AnchorPasses::Bind;
 	using GraphPasses::ClearGate;
+	if (!MakeHandles())
+		return false;
 	const auto& f = a_feature;
+	const auto& a_key = a_clientKey.observed;
 	const auto& in = a_key.inputs;
 	AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kCloudsClientId, kCloudsOrder, latch, gate);
 	const auto null = Bind::Handle(nullIndex);
@@ -636,6 +678,10 @@ bool ORGVolumetricClouds::Impl::Register(const PhysicalSky& a_feature, const Clo
 							const eastl::unique_ptr<Texture2D>& a_shape) {
 		const auto size = size2D(a_shape);
 		copy(std::move(a_name), a_source, a_target, a_entry, size[0], size[1], 1, a_shape->desc.ArraySize);
+	};
+	// A copy between two screen targets, at the extent this key's revision binds. Their wrappers still hold the adopted one.
+	const auto copyScreen = [&](std::string a_name, const FrameAnchors::Texture& a_source, const FrameAnchors::Texture& a_target, std::uint32_t a_entry) {
+		copy(std::move(a_name), a_source, a_target, a_entry, a_clientKey.screen[0], a_clientKey.screen[1]);
 	};
 
 	// The neutral clears (ClearVolumetricToNeutral and SetupVolumetricResources' clears), before everything else of the run.
@@ -917,9 +963,9 @@ bool ORGVolumetricClouds::Impl::Register(const PhysicalSky& a_feature, const Clo
 			{ Slot::RWTexFilteredLum, Bind::Uav(filteredLum) }, { Slot::RWTexFilteredAux, Bind::Uav(filteredAux) } };
 		dispatch("filter", CloudProgram::Filter, kFilter, filter.With(outputs));
 		dispatch("filter.wide", CloudProgram::FilterWide, kFilterWide, filter.With(outputs));
-		copy2D("filter.copy-tr", volTr, filteredTr, kFilterCopy, f.texVolTr);
-		copy2D("filter.copy-lum", volLum, filteredLum, kFilterCopy, f.texVolLum);
-		copy2D("filter.copy-aux", volAux, filteredAux, kFilterCopy, f.texVolAux);
+		copyScreen("filter.copy-tr", volTr, filteredTr, kFilterCopy);
+		copyScreen("filter.copy-lum", volLum, filteredLum, kFilterCopy);
+		copyScreen("filter.copy-aux", volAux, filteredAux, kFilterCopy);
 		// The map menu clears the main view's targets instead.
 		gatedClear("map-menu.tr", volTr, PhysicalSky::kClearTransmittance, kMapMenuClear);
 		gatedClear("map-menu.lum", volLum, PhysicalSky::kClearLuminance, kMapMenuClear);
@@ -970,10 +1016,10 @@ bool ORGVolumetricClouds::Impl::Register(const PhysicalSky& a_feature, const Clo
 	}
 
 	// The next frame's histories, in place of D3D11's pointer swaps.
-	copy2D("history.tr", volTr, historyTr, kHistories, f.texVolTr);
-	copy2D("history.lum", volLum, historyLum, kHistories, f.texVolLum);
-	copy2D("history.aux", volAux, historyAux, kHistories, f.texVolAux);
-	copy2D("history.lightning", lightningMask, lightningHistory, kHistories, f.texLightningMask);
+	copyScreen("history.tr", volTr, historyTr, kHistories);
+	copyScreen("history.lum", volLum, historyLum, kHistories);
+	copyScreen("history.aux", volAux, historyAux, kHistories);
+	copyScreen("history.lightning", lightningMask, lightningHistory, kHistories);
 	copy2D("history.cube-tr", cubeTr, cubeHistoryTr, kHistories, f.texVolCubeTr);
 	copy2D("history.cube-lum", cubeLum, cubeHistoryLum, kHistories, f.texVolCubeLum);
 	copy2D("history.cube-aux", cubeAux, cubeHistoryAux, kHistories, f.texVolCubeAux);
@@ -983,29 +1029,28 @@ bool ORGVolumetricClouds::Impl::Register(const PhysicalSky& a_feature, const Clo
 		logger::error("[ORG] Physical Sky clouds: {}; no clouds", builder.Failure());
 		return false;
 	}
-	FrameAnchors::ClientDesc client{};
-	client.id = kCloudsClientId;
-	client.sharedConstants = builder.ReadsSharedConstants();
-	client.passes = builder.Take();
-	client.gates = { gate };
-	client.registerResources = [state = a_self](org::RenderGraph& a_graph) {
+	a_client.id = kCloudsClientId;
+	a_client.sharedConstants = builder.ReadsSharedConstants();
+	a_client.passes = builder.Take();
+	a_client.gates = { gate };
+	a_client.registerResources = [state = a_self](org::RenderGraph& a_graph) {
 		for (const auto& [_, twin] : Twins().textures2D)
 			twin->Register(a_graph);
 		for (const auto& [_, twin] : Twins().textures3D)
 			twin->Register(a_graph);
+		for (const auto& [_, screen] : Twins().screens)
+			screen.twin->Register(a_graph);
 		if (state->candidates)
 			state->candidates->Register(a_graph);
 	};
-	client.active = [state = a_self] { return state->Active(); };
-	client.commit = [state = a_self](const FrameAnchors::Point&) { state->Commit(); };
-	client.executed = [state = a_self](const FrameAnchors::Point&) { state->Executed(); };
-	if (!FrameAnchors::Register(std::move(client))) {
-		logger::error("[ORG] Physical Sky clouds: the client could not be registered; no clouds");
-		return false;
-	}
-	registered = a_key;
-	logger::info("[ORG] Physical Sky clouds run on the render graph ({}; shadow map {}, terrain heights {}, cloud layer {})", kCloudsClientId,
-		a_key.shadowMap ? "imported" : "none", a_key.terrain.empty() ? "none" : a_key.terrain, a_key.cloudLayer.empty() ? "none" : a_key.cloudLayer);
+	a_client.active = [state = a_self] { return state->Active(); };
+	a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->Commit(); };
+	a_client.executed = [state = a_self](const FrameAnchors::Point&) { state->Executed(); };
+	// Every registration commits the same run, so the one the adopted revision holds keeps running until a newer one is adopted.
+	a_client.matchesById = true;
+	logger::info("[ORG] Physical Sky clouds: a registration for the next revision ({}; {}x{}, shadow map {}, terrain heights {}, cloud layer {})", kCloudsClientId,
+		a_clientKey.screen[0], a_clientKey.screen[1], a_key.shadowMap ? "imported" : "none", a_key.terrain.empty() ? "none" : a_key.terrain,
+		a_key.cloudLayer.empty() ? "none" : a_key.cloudLayer);
 	return true;
 }
 
@@ -1164,14 +1209,124 @@ void ORGVolumetricClouds::Setup(const PhysicalSky& a_feature)
 		logger::error("[ORG] Physical Sky clouds: the programs, gate, readback, candidates buffer or tileable sampler could not be made; no clouds");
 		return;
 	}
+	// On the sky's and the clouds' toggles and the display size, with the inputs the last Stage found.
+	using namespace RenderGraph::Frame;
+	const auto& settings = a_feature.settings;
+	const std::weak_ptr<Impl> weak = next;
+	next->client = DeclareClient<CloudClientKey>(
+		kCloudsClientId, DependsOn(Vars::DisplaySize(), settings.enabled, settings.enableVolumetricClouds),
+		[weak](const Inputs& a_in) -> std::optional<CloudClientKey> {
+			const auto state = weak.lock();
+			const auto& sky = globals::features::physicalSky.settings;
+			if (!state || !state->observed || !a_in.Get(sky.enabled) || !a_in.Get(sky.enableVolumetricClouds))
+				return std::nullopt;
+			return CloudClientKey{ *state->observed, CloudScreenExtent(a_in) };
+		},
+		[weak](const CloudClientKey& a_key, FrameAnchors::ClientDesc& a_client) {
+			const auto state = weak.lock();
+			return state && state->Make(globals::features::physicalSky, a_key, state, a_client);
+		},
+		[weak](const CloudClientKey&) {
+			if (const auto state = weak.lock())
+				state->held = true;
+		});
+	if (!next->client) {
+		logger::critical("[ORG] Physical Sky clouds: the client could not be declared");
+		stl::report_and_fail("Community Shaders: Physical Sky's volumetric clouds client could not be declared on the render graph");
+	}
 	impl = next;
-	logger::info("[ORG] Physical Sky clouds: {} programs loaded; the client registers at the first frame with its inputs", kCloudProgramCount + 3);
+	logger::info("[ORG] Physical Sky clouds: {} programs loaded; the client follows the frame revisions once a frame found its inputs", kCloudProgramCount + 3);
 }
 
 void ORGVolumetricClouds::RequestNeutral()
 {
 	if (impl)
 		impl->neutral = true;
+}
+
+namespace
+{
+	/** @brief Points a D3D11 wrapper at the twin's bound version, and the lookup by D3D11 texture with it. True when it was another one. */
+	bool CloudFollowTwin(::Texture2D& a_wrapper, const GraphResources::Texture2D& a_twin)
+	{
+		auto* d3d11 = a_twin.D3D11();
+		if (!d3d11 || a_wrapper.resource.get() == d3d11)
+			return false;
+		auto& lookup = Twins().byD3D11;
+		lookup.erase(a_wrapper.resource.get());
+		lookup[d3d11] = &a_twin;
+		a_wrapper.resource.copy_from(d3d11);
+		d3d11->GetDesc(&a_wrapper.desc);
+		a_wrapper.srv.copy_from(a_twin.SRV());
+		a_wrapper.uav.copy_from(a_twin.UAV());
+		a_wrapper.rtv.copy_from(a_twin.RTV());
+		return true;
+	}
+}
+
+Texture2D* ORGVolumetricClouds::MakeScreenTarget(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, std::string_view a_publishedId)
+{
+	if (!Requested() || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	using namespace RenderGraph::Frame;
+	const std::string name = a_publishedId.empty() ? std::string(a_name) : std::string(a_publishedId);
+	auto& twins = Twins();
+	if (twins.screens.contains(name))
+		return nullptr;
+	D3D11_TEXTURE2D_DESC desc = a_desc;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.CPUAccessFlags = 0;
+	desc.MiscFlags = 0;
+	twins.screenFallback = { (std::max)(a_desc.Width, 1u), (std::max)(a_desc.Height, 1u) };
+	const auto& settings = globals::features::physicalSky.settings;
+	// History: read in a later frame. D3D11 binds them for engine draws. One texel while the clouds are off (the existence rule).
+	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = CloudExports(desc.BindFlags) };
+	auto declared = DeclareTexture2D(
+		name, DependsOn(Vars::DisplaySize(), settings.enabled, settings.enableVolumetricClouds),
+		[desc](const Inputs& a_in) {
+			auto next = desc;
+			const auto extent = CloudScreenExtent(a_in);
+			next.Width = extent[0];
+			next.Height = extent[1];
+			return next;
+		},
+		options);
+	if (!declared || !*declared || !declared->D3D11() || !declared->SRV() || !declared->UAV()) {
+		logger::error("[ORG] Physical Sky clouds: {} could not be made on the render graph; no clouds on the graph", name);
+		return nullptr;
+	}
+	// Published once, for the session. Readers follow the versions.
+	if (!a_publishedId.empty() && !PublishedResources::Publish(a_publishedId, *declared)) {
+		logger::error("[ORG] Physical Sky clouds: {} could not be published; no clouds on the graph", a_publishedId);
+		return nullptr;
+	}
+	auto* d3d11 = declared->D3D11();
+	d3d11->AddRef();
+	auto* wrapper = new ::Texture2D(d3d11, a_name);
+	wrapper->srv.copy_from(declared->SRV());
+	wrapper->uav.copy_from(declared->UAV());
+	twins.byD3D11[d3d11] = declared.Get();
+	twins.screens.emplace(name, CloudScreenTarget{ std::move(declared), wrapper });
+	++twins.generation;
+	return wrapper;
+}
+
+void ORGVolumetricClouds::FollowVersions(PhysicalSky& a_feature)
+{
+	bool changed = false;
+	for (auto& [_, screen] : Twins().screens)
+		if (screen.wrapper && screen.twin)
+			changed |= CloudFollowTwin(*screen.wrapper, *screen.twin);
+	if (changed) {
+		// New targets hold nothing yet, as on D3D11 (EnsureVolumetricScreenResources): the next run clears them, and the history restarts.
+		s_outputsWritten = false;
+		RequestNeutral();
+		a_feature.volMainHistoryValid = false;
+		a_feature.volHistoryFrameDim = {};
+	}
+	// Off: the next on switch binds new versions, which nothing has written.
+	if (!a_feature.VolumetricCloudsEnabled())
+		s_outputsWritten = false;
 }
 
 bool ORGVolumetricClouds::QueueLightningQuery()
@@ -1213,7 +1368,7 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 {
 	auto& f = a_feature;
 	CloudBindPixel(f);
-	if (!impl || impl->failed || !a_frame.cloud)
+	if (!impl || !a_frame.cloud)
 		return;
 	auto& state = *impl;
 	state.pending.reset();
@@ -1239,23 +1394,23 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 			key.terrain = ORGTerrainShadows::kShadowHeightId;
 		if (globals::features::cloudShadows.loaded)
 			key.cloudLayer = ORGCloudShadows::PublishedLayerId(CloudShadows::kMaxCloudLayers - 1);
-	} else if (state.registered) {
-		key.shadowMap = state.registered->shadowMap;
-		key.terrain = state.registered->terrain;
-		key.cloudLayer = state.registered->cloudLayer;
+	} else if (state.observed) {
+		key.shadowMap = state.observed->shadowMap;
+		key.terrain = state.observed->terrain;
+		key.cloudLayer = state.observed->cloudLayer;
 	}
 	key.twins = Twins().generation;
 
-	if (!state.registered || !(*state.registered == key)) {
-		if (!state.MakeHandles() || !state.Register(f, key, impl)) {
-			state.failed = true;
-			return;
-		}
+	// What the client reads is not a variable yet. A change registers it again with the next revision.
+	if (!state.observed || !(*state.observed == key)) {
+		state.observed = key;
+		state.client.Invalidate();
 	}
-	// Until the schedule holds the client the clouds render nothing, and the targets keep their neutral clears.
-	if (!FrameAnchors::Scheduled(kCloudsClientId, FrameAnchors::Anchor::Prepass))
+	// Until the adopted revision holds a registration the clouds render nothing, and the targets keep their neutral clears.
+	if (!state.client.Registered())
+		state.held = false;
+	if (!state.held)
 		return;
-	s_outputsWritten = true;
 
 	auto& frame = state.pending.emplace();
 	state.pendingFrame = globals::state->frameCount;
@@ -1471,6 +1626,8 @@ struct ORGVolumetricClouds::Impl
 ORGVolumetricClouds::~ORGVolumetricClouds() = default;
 Texture2D* ORGVolumetricClouds::MakeTexture2D(const D3D11_TEXTURE2D_DESC&, const char*, std::string_view) { return nullptr; }
 Texture3D* ORGVolumetricClouds::MakeTexture3D(const D3D11_TEXTURE3D_DESC&, const char*, std::string_view) { return nullptr; }
+Texture2D* ORGVolumetricClouds::MakeScreenTarget(const D3D11_TEXTURE2D_DESC&, const char*, std::string_view) { return nullptr; }
+void ORGVolumetricClouds::FollowVersions(PhysicalSky&) {}
 void ORGVolumetricClouds::Setup(const PhysicalSky&) {}
 void ORGVolumetricClouds::Stage(PhysicalSky&, const Frame&) {}
 void ORGVolumetricClouds::RequestNeutral() {}

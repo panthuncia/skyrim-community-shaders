@@ -207,6 +207,8 @@ struct ORGViewAtmosphere::Impl
 
 	// What the last Prepass found the composite can read. Empty while it cannot run. The composite's key reads it.
 	std::optional<CompositeKey> observed;
+	// Whether the last Prepass found Physical Sky would render if it were on. The key reads it with Physical Sky's toggle.
+	bool skyObserved = false;
 	// A registration after none starts a new count. The frame composes once an adopted revision holds that count's registration.
 	// A registration for new inputs keeps the count: the older one composes until the new one switches in (matchesById).
 	std::uint64_t compositeCount = 0, heldCount = 0;
@@ -388,14 +390,12 @@ struct ORGViewAtmosphere::Impl
 	}
 
 	/**
-	* @brief What the composite can read this frame, for its key. Empty while Physical Sky is on (its media are not on the graph,
-	* so its shaders keep their own aerial perspective and clouds), while no program is built, or while an input is missing.
-	* These are not variables yet, so a change invalidates the client (Prepass).
+	* @brief What the composite can read this frame, for its key. Empty while no program is built, or while an input is missing.
+	* Physical Sky is the key's (its toggle). These are not variables yet, so a change invalidates the client (Prepass).
 	*/
 	std::optional<CompositeKey> Observe()
 	{
-		const auto& sky = globals::features::physicalSky;
-		if ((sky.loaded && sky.cbData.enabled) || !globals::features::exponentialHeightFog.loaded)
+		if (!globals::features::exponentialHeightFog.loaded)
 			return std::nullopt;
 		// The program builds off the render thread. A new build replaces the one in use once it is done.
 		if (auto built = programs.Get(programGeneration, [this] { return CompositeDesc(); }))
@@ -467,12 +467,18 @@ struct ORGViewAtmosphere::Impl
 		medium = RenderGraph::Frame::DeclareClient<bool>(
 			kMediumClientId, Dependencies{}, [](const Inputs&) -> std::optional<bool> { return true; },
 			[this](const bool&, FrameAnchors::ClientDesc& a_client) { return MakeMediumClient(a_client); });
-		// On while the adopted revision has the fog on and the last Prepass found what the composite reads.
+		// On while the adopted revision has the fog on and the last Prepass found what the composite reads. Off while Physical Sky
+		// renders: its media are not on the graph, so its shaders keep their own aerial perspective and clouds. Its toggle is a
+		// dependency, so a toggle switches the composite in the same revision as the sky's clients.
 		const auto& fog = globals::features::exponentialHeightFog.settings;
+		const auto& sky = globals::features::physicalSky.settings;
 		composite = RenderGraph::Frame::DeclareClient<CompositeKey>(
-			kCompositeClientId, DependsOn(fog.enabled),
+			kCompositeClientId, DependsOn(fog.enabled, sky.enabled),
 			[this](const Inputs& a_in) -> std::optional<CompositeKey> {
 				if (!a_in.Get(globals::features::exponentialHeightFog.settings.enabled))
+					return std::nullopt;
+				const auto& physicalSky = globals::features::physicalSky;
+				if (physicalSky.loaded && skyObserved && a_in.Get(physicalSky.settings.enabled))
 					return std::nullopt;
 				return observed;
 			},
@@ -527,8 +533,12 @@ void ORGViewAtmosphere::Prepass()
 	// No shared volume yet, so every frame stages the parameters of no medium.
 	impl->frameParameters = {};
 	// What the composite reads is not a variable yet. A change makes its key again when the next revision starts.
-	if (auto seen = impl->Observe(); seen != impl->observed) {
+	// Physical Sky's checks but its toggle (worldspace, interior, shaders), which the toggle joins in the key.
+	const auto& sky = globals::features::physicalSky;
+	const bool skyHere = sky.loaded && sky.RendersWhenEnabled();
+	if (auto seen = impl->Observe(); seen != impl->observed || skyHere != impl->skyObserved) {
 		impl->observed = std::move(seen);
+		impl->skyObserved = skyHere;
 		impl->composite.Invalidate();
 	}
 }

@@ -346,3 +346,9 @@ scheduled the outputs hold their neutral clears.
   D3D12 pass with no tap, recipe or validation errors, and show the same cloud structure. The scene is washed out as Physical
   Sky is without Linear Lighting (dclf-open-defects.md). Not seen yet: storms, voxel clouds, local NDF, the middle and cirrus
   layers, lightning, reflections of the clouds in water.
+- Frame revisions (2026-11-19, frame revision plan 6.22): the LUTs, the AP shadow and the twelve full-resolution cloud
+  targets are declared textures (the targets one texel while the clouds are off, published from setup), and the five clients
+  are declared on `enabled`, `enableVolumetricClouds` and the display size. No client registers inside the frame and no
+  `FrameAnchors::Scheduled` gate is left. Open question 12 (the AP shadow's size) is answered by the declaration on
+  `DisplaySize`; open question 24 (readers wait for the cloud client) now holds after every clouds-on switch, since
+  `OutputsWritten()` follows the bound versions. Details: the plan's Step 6 "As built (6.22)".
