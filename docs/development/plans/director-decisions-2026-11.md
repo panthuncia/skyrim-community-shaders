@@ -117,3 +117,8 @@ final until the user confirms it.
     six migrations run at once, on disjoint files (the user raised this from the plan's three on 2026-11-19). To stay near
     the cap of about 8 agents building at once, each migration lead does its own build and uses at most one worker. Runs
     still go one at a time through the cs-test lock, so test queues get longer.
+23. **From migration 6.2 on, leads only write code** (the user's instruction, 2026-11-19). A lead doesn't build, stage or
+    run the game. It commits on its branch and lists the tests its change needs. The director merges each branch into
+    integ/hard-ports, builds once in the main checkout, fixes build and test failures, and runs the listed tests. This
+    replaces the per-lead build cap in item 22. Up to six migration leads still run at once. The 6.1 lead was started under
+    the old brief and finishes under it.
