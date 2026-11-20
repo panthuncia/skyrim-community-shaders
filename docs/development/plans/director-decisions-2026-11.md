@@ -163,3 +163,11 @@ final until the user confirms it.
 31. **Leads now running:** 6.6 (SSGI, the second `DeclareProgram` user), 6.9, 6.13, 6.14 and 6.16+6.17, plus the wading
     fix. Still to come: 6.10 and 6.11 (Effects11, with programs), 6.15 (HDR, which depends on 7b), 6.18, 6.19, 6.20,
     6.21, 6.22 and 6.23 (which moves with 7b).
+32. **6.13 and 6.16/6.17 are merged (not yet built).**
+    - 6.13 adds `CS_LLF_LOCAL_SHADOWS` (schema to regenerate) and an optional `adopted` callback on `DeclareClient`.
+    - 6.17 adds a `RenewFn` to the texture declarations: a reset gives a new version at the same extent.
+    - **To measure before keeping:** a Skylighting reset makes about 120 MB of new volumes at every loading screen, briefly
+      240 MB during preparation. If the RX 6600 can't afford it, go back to a gate-only reset.
+    - IBL's client depends on `DALCMode`, not on `EnableIBL`/`UseStaticIBL`, because Effects 11 can turn IBL on while
+      `EnableIBL` is 0. The lead decided this; it is to confirm.
+    - 6.18 (the setup-only features) started in the free slot.
