@@ -6,11 +6,6 @@
 #include <functional>
 #include <memory>
 
-namespace org
-{
-	class ExternalTextureResource;
-}
-
 namespace FrameAnchors
 {
 	class Texture;
@@ -22,8 +17,10 @@ namespace FrameAnchors
 * At the UI stage's HDROutput step, which only ApplyHDR taps: the composite, the copy into the back buffer, and the UI texture's clear.
 * A Bink frame's scene clear is a gated dispatch before the composite, since Bink draws into the UI texture and leaves the scene alone.
 * The UI redirect, the clean composite for screenshots and frame generation, and the no-shader fallback stay on D3D11.
-* The scene, output and UI textures are persistent published twins exported to D3D11, where HDR Display makes its views.
-* On any failure ApplyHDR composes with D3D11. Render thread throughout. Free of ORG/Vulkan includes.
+* The scene, output and UI textures are persistent published twins exported to D3D11, where HDR Display makes its views. They are
+* declared on DisplaySize, so a new display size is a new version of each, adopted with its frame revision.
+* The client is declared on HdrEnabled and DisplaySize. The back buffer is observed by Compose: a new one invalidates the client.
+* Until a revision adopts a registration, ApplyHDR composes with D3D11. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGHDRDisplay
 {
@@ -51,16 +48,25 @@ public:
 	};
 
 	/**
-	* @brief Makes a persistent, exported, published twin. Its export lives until ReleaseTextures.
+	* @brief Declares a persistent, exported, published twin on DisplaySize. a_desc's size is used until a display size is written.
 	* @return A wrapper of the export's texture only, since HDR Display makes the views. Null means make a D3D11 texture.
 	*/
 	Texture2D* MakeTexture(Texture a_texture, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name);
 
+	/**
+	* @brief Render thread, at the frame's start. The adopted version's D3D11 texture when it is not a_current, else null.
+	* The caller wraps it and makes its views again. Its reference is the caller's to take (AddRef'd).
+	*/
+	ID3D11Texture2D* NewExport(Texture a_texture, ID3D11Texture2D* a_current);
+
 	/** @brief Call after the wrappers are gone. The next SetupResources publishes new twins under the same names, costing one rebuild. */
 	void ReleaseTextures();
 
-	/** @brief Null for any other texture, which must then be imported. */
-	std::shared_ptr<org::ExternalTextureResource> GraphOf(ID3D11Texture2D* a_texture) const;
+	/**
+	* @brief The twin's slot, as passes declare it, for its current or its last wrapped D3D11 texture. Empty for any other
+	* texture, which must then be imported.
+	*/
+	FrameAnchors::Texture GraphOf(ID3D11Texture2D* a_texture) const;
 
 	enum class Composed
 	{
@@ -70,8 +76,8 @@ public:
 	};
 
 	/**
-	* @brief Taps the HDROutput step with this frame's constants. Composed::None while not IsActive, and until the UI stage's
-	* build holds a new registration.
+	* @brief Taps the HDROutput step with this frame's constants. Composed::None while not IsActive, until a revision adopted a
+	* registration, and while the adopted one was made for another back buffer than a_backBuffer.
 	* @param a_backBuffer Null means no copy pass.
 	* @param a_clearScene Clear the scene to black first, for a movie frame. With Composed::None the caller clears with D3D11.
 	*/
@@ -85,9 +91,6 @@ public:
 
 	/** @brief When true, a movie frame's clear waits for Compose instead of clearing with D3D11. */
 	bool CanClearScene() const;
-
-	/** @brief The program rebuilds from its file at the next Compose. */
-	void ClearShaderCache();
 
 	/**
 	* @brief The import the registered passes write a_texture through, or null. Readers in other anchors must use it, because a

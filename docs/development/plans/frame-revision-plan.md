@@ -867,6 +867,27 @@ revisions.
   engine's path for the session, as before.
 - Tests: `dclf-family` and `bink` (new). See "Decided by the agent (step 6.19)" in section 9.
 
+**As built (2026-11-19, 6.15, `org-native/rev-step7b`).** HDR Display's textures and composite follow the revisions.
+- The scene, output and UI textures are `DeclareTexture2D` on `DisplaySize` (`ORGHDRDisplay::MakeTexture`), published once as
+  their slots. A new display size is a new version of each, adopted with its revision. They were made once and never resized.
+- `ORGHDRDisplay::GraphOf` returns the twin's slot (`FrameAnchors::Texture`), not the version's resource, for the current or
+  the last wrapped D3D11 texture. So ImageSpace, Bink, Scaleform and Upscaling's hudless source keep one graph resource across
+  versions, and a key read between the adoption and the rewrap still finds the slot.
+- HDR Display makes its own D3D11 views. `HDRDisplay::FollowGraphTextures` (in `BeginRenderFrame`, after the adoption point)
+  wraps a new export (`ORGHDRDisplay::NewExport`) and makes the views again from the old ones' descriptions.
+- The `cs.hdr` client is `DeclareClient` at Setup on `HdrEnabled` and `DisplaySize`. No key while HDR is off. Its key is the
+  display size and a back buffer serial: the back buffer is not a variable yet, so `Compose` calls `Invalidate()` when it sees a
+  new one (the 6.14/6.19 interim). `make` imports the textures and the back buffer and sizes the dispatches and the copy from
+  the key. The `adopted` call sets the held registration, which the commit reads (`matchesById`).
+- `Compose` composes on the graph only while the held registration was made for the frame's back buffer. Otherwise ApplyHDR
+  composes with D3D11, as before a registration switched in. The per-present `Inputs` compare, the re-registration, the
+  `Scheduled` gate and the import failures' `Fail` in `Compose` are gone.
+- No `DeclareProgram`: no define of HDROutputCS follows a setting, and hot reload swaps its live pipeline
+  (`RequestShaderReload`), as 6.18 found. `programDirty` and `ORGHDRDisplay::ClearShaderCache` are gone.
+- HDR's `ProjectSizeSettings` and its `SettingsWritten` call are gone. `enableHDR` reaches the frame as `HdrEnabled`, which
+  `RaiseHdrVariables` writes every frame.
+- Test: `hdr-resize` (new), and `hdr`. See "Decided by the agent (step 6.15)" in section 9.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1871,6 +1892,23 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   imported the framebuffer every tick. Other importers of kFRAMEBUFFER (HDR's compose) still join it. Step 9b makes it an event.
 - **HDR's UI texture made again while HDR is off raises no event**, since `HdrOutputTarget` is none then. Bink keeps the old
   import until HDR turns on, which raises it. Bink draws onto that texture only with HDR on.
+
+**Decided by the agent (step 6.15, HDR Display, 2026-11-19), to confirm:**
+- **The client is not declared on `HdrOutputTarget`.** It is written from `PostChainTarget`, which reads the adopted HDR state, so
+  it changes one revision after `HdrEnabled`. Choosing the scene by it would compose from kFRAMEBUFFER for a revision. The
+  composite runs only for HDR frames, so its scene is always HDR's texture now (the kFRAMEBUFFER branch was dead).
+- **The back buffer is observed, not a variable.** Its serial is in the key and `Compose` invalidates the client on a new one. Setup
+  seeds it from the swap chain's buffer 0. Step 9a makes it an event with the swap chain.
+- **No `DeclareProgram`**, despite row 6.15: there is one permutation, and hot reload already swaps it.
+- **The textures are display size also while HDR is off.** The existence rule (one texel) would save three display-size textures
+  for SDR users, but every HDR toggle would then be a version change of each. Not done; a cheap follow-up if VRAM matters.
+- **The wrappers follow the export by a pointer compare each Begin** (`NewExport`), not by `FirstFrame`. A frame without
+  `BeginRenderFrame` would miss `FirstFrame` for good.
+- **`enableHDR` is not a `CS::Setting`.** It is read under `settingsMutex` in many places, and `HdrEnabled` already carries it into
+  every revision. Its projection only raised an event nothing declares on.
+- **Frames between a new registration and its adoption compose with D3D11**, as before (no wait). That includes the frames after
+  HDR is turned off and before that revision is adopted, since the key clears the held registration when it gives no client.
+- **The re-setup `DrainCommandRing` in `HDRDisplay::SetupResources` stays.** It is not a resize drain: `SetupResources` runs once.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
