@@ -9,6 +9,7 @@
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/EngineTargetUse.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Variables.h"
@@ -236,6 +237,8 @@ namespace RenderGraph::Engine::Targets
 			const auto* old = external.get();
 			const bool sameSize = old && a_image.graph && old->GetWidth() == a_image.graph->GetWidth() && old->GetHeight() == a_image.graph->GetHeight();
 			AdoptImage(a_image, a_srv);
+			// Engine targets take versions when the engine makes them, an allowed exception until step 9a.
+			const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
 			if (AdoptSlot(std::move(previous), true)) {
 				// Same slot, so readers keep declaring it and every graph follows the new version.
 				served = held;

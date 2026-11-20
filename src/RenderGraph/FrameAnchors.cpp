@@ -1493,7 +1493,9 @@ namespace FrameAnchors
 			const auto previous = a_slot.CurrentResource();
 			const bool sameSize = previous && WidthOf(previous.get()) == WidthOf(a_next.get()) && HeightOf(previous.get()) == HeightOf(a_next.get());
 			try {
+				// Imports take versions when the engine makes them, an allowed exception until step 9b.
 				const RenderGraph::Frame::Boundary::Caller caller("engine import");
+				const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
 				a_slot.PublishImage(std::move(a_next), std::move(a_owner));
 			} catch (const std::exception&) {
 				return Joined::NewShape;

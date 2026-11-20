@@ -767,8 +767,9 @@ namespace DCLF
 		}
 		std::shared_ptr<const Impl::SceneSnapshot> snapshot(std::move(taken));
 		TracyCZoneN(adoptVersions, "CS.DCLF.Snapshot.AdoptVersions", true);
-		// The boundary census counts DCLF's own adoption point apart until it moves into the frame's (step 10a).
+		// DCLF's own adoption point is an allowed exception until it moves into the frame's (step 10a).
 		const RenderGraph::Frame::Boundary::Caller boundaryCaller("dclf");
+		const RenderGraph::Frame::Boundary::Allow boundaryAllow(RenderGraph::Frame::Boundary::Exception::Dclf);
 		const auto versions = snapshot->revision ? snapshot->revision->Get<NamedVersions>(Impl::SceneRevisions::kVersionsSlot) : nullptr;
 		if (versions && versions->AdoptAll()) {
 			if (auto* host = RenderGraphRuntime::Get().Host())

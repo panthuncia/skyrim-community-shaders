@@ -1177,6 +1177,28 @@ of every graph, now inside the adoption of the revision that carries the event.
 in development builds. Allowed callers left: `dclf` (until 10a), the engine-import exception (until 9). Late changes (in-frame build
 requests) stay counted until step 10c.
 
+**As built (7d, 2026-11-19, `org-native/rev-step7d`).** Code only; not built or run by the agent.
+- **Fatal.** A late version (a version number above 1 adopted on the render thread outside `Boundary::Scope`) and a late attach
+  are `Driver::NoteTapError(TapError::OutsideAdoption)`, so they stop the game unless `CS_ORG_MISMATCH_FATAL=0`. The census line
+  still counts them first.
+- **Exceptions in one place.** `Boundary::Exception` (`BoundaryCheck.h`) with its table in `BoundaryCheck.cpp`
+  (`kBoundaryExceptions`, name and owning step). A site opens `Boundary::Allow(Exception::...)` around the adoption or attach.
+  Caller tags stay labels only, so the old caller-tag allowance (`kAllowedCallers`) is gone.
+  - `Dclf` (step 10a): `Snapshot.cpp:AdoptSnapshot`'s `AdoptAll`, and every attach of DCLF's epochs
+    (`BuildManager`'s `NoteAttached`: the external builder's and owner-built epochs, which are DCLF's only). That covers its
+    build point at Main::Draw, its wait for a snapshot, the main-resource rebuild and the frame-end `Poll(Attach::All)`.
+  - `EngineImports` (step 9): `EngineTargets.cpp:EngineTexture::Adopt` (engine targets, 9a; this is the guest
+    `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION(_COPY)` pair, tagged `twin`), `FrameAnchors.cpp:JoinSlot` (mid-frame imports,
+    9b) and `NativeDevice.cpp:NextGraphVersion` (the native back buffer's per-present version, 9a).
+- **Counted, not fatal:** new resources' first versions, late changes (until 10c, so `RebuildForReplacedImports`, ImGui's
+  `Refresh` and `dclf:refresh` are counted), build refusals and version lags.
+- **The census line** gives each exception's versions and attaches by name, for the window and the session ("allowed
+  exceptions: dclf (until step 10a) versions N attaches M, engine imports (until step 9) ..."). Adoptions inside the scope are now
+  always "at Begin", also under an exception, so the dclf number no longer includes DCLF adoptions made inside `OnBegin`.
+- **Census before the change** (runs `*-integ-6b3*`, `*-integ-6b4*`, 2026-11-19): late attaches 0 in every run; late versions only
+  the volumetric lighting pair under `twin`, in guest runs (2 to 4 per run). Both are covered above.
+- Test: the step 7 full set below, with no tap error.
+
 **Test.** Full set: standard set, `resize`, `resize-drag`, `menu`, `hdr`, `fg` (guest and `d3d11+fg`), `guest+map`,
 `latch-census-short`, `upscalers` with `native-vulkan`.
 
@@ -1618,7 +1640,7 @@ return nothing (or only the stated exception) at the end.
 | DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
 | `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
-| Boundary check's allowed callers (`dclf`, engine-import exception) and its counted (non-fatal) mode | 10a, 9b, 7d/10c | `rg -n "Allowed\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` |
+| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes | 10a, 9, 7d (versions and attaches fatal) / 10c | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` |
 | Writer shims: `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`, and the wrappers' event calls | 7a | `rg -n "SettingsWritten\|ProjectSizeSettings\|SizeProjection" src` |
 | The lane's `RequestSize` input and the coordinator's "wish" path | 7a | `rg -n "Wish\|wishes" src/RenderGraph/Frame/Revision.*` |
 | Structural rebuilds from publishing under an existing id (EHF, SSGI, LLF, adapt pair, flow map) | 6.x | `rg -n "RequestStructuralRebuild" src` shows only revision-driven shape-class changes; the census shows no `structural rebuild` after `resize` and the toggles |
@@ -2335,6 +2357,21 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The self-test's prepared part was deleted, not ported.** It adopted versions by hand at `AtNextBegin`, the pattern step 7
   removes; the lane does the same work in every `resize` run.
 - **The coordinator's wish names were renamed**, not only the `RequestSize` input removed, so the section 8 grep holds.
+
+**Decided by the agent (step 7d, 2026-11-19), to confirm:**
+- **Exceptions are scopes, not caller tags.** `Boundary::Allow(Exception)` at each site, with one table of names and owning steps.
+  A tag-based allowance would also have allowed `twin`, which every twin uses, not only engine targets.
+- **Two exceptions, not one engine-import row.** `Dclf` (10a) and `EngineImports` (9, covering 9a's engine targets and back
+  buffer and 9b's imports). Splitting 9a from 9b would need a third row; the sites name their substep in a comment.
+- **The native back buffer's per-present version is an engine import.** No run had more than one back buffer version, so it never
+  counted, but it would have been fatal with two.
+- **DCLF's attaches are recognised by epoch**, not by build point: `BuildManager` allows the attach of any epoch in its
+  `ownerBuilt` or `external` set, which `RenderGraphRuntime` fills with DCLF's segments only. A non-DCLF build that attaches at the
+  frame end is fatal.
+- **First versions stay counted, not fatal.** A new resource made inside the frame replaces nothing a recording bound. In the
+  runs they are 90 to 136 per session, mostly DCLF buffers made at load.
+- **The tap error is reported outside the census lock**, with `SegmentId::Count` ("hosted work"). With `CS_ORG_MISMATCH_FATAL=0`
+  it logs once per kind, and the adoption has already happened (the observer runs after it), so nothing is dropped.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

@@ -9084,3 +9084,21 @@ Step 7c of [plans/frame-revision-plan.md](plans/frame-revision-plan.md). CS on `
 - **`DeclareProgram`.** Its builds are registry entries, so every kept key reloads in place. No generation key.
 - **Test.** `shader-reload` (new): a forced reload of every pipeline, then an unchanged one-file reload, a shot before and after
   each.
+
+## Frame revisions, step 7d: the boundary check is fatal (2026-11-19)
+
+Step 7d of [plans/frame-revision-plan.md](plans/frame-revision-plan.md). CS on `org-native/rev-step7d` from `integ/hard-ports`
+`843faa34a`; no submodule changes. Code only, not built or run yet.
+
+- **Fatal.** A version adopted or a build attached on the render thread outside the frame's adoption point is a tap error,
+  `outside the adoption point` (`TapError::OutsideAdoption`). It stops the game in development builds, as the other tap errors.
+- **Named exceptions.** `Boundary::Exception` in `Frame/BoundaryCheck.h`, one table in `BoundaryCheck.cpp`. A site opens
+  `Boundary::Allow` around its adoption or attach:
+  - `dclf`, until step 10a: DCLF's snapshot adoption, and the attach of DCLF's own epochs at any build point;
+  - `engine imports`, until step 9: engine targets (`EngineTexture::Adopt`), mid-frame imports (`FrameAnchors.cpp:JoinSlot`)
+    and the native back buffer's per-present version.
+- **Still counted, not fatal:** a new resource's first version, late changes (until 10c), build refusals, version lags.
+- **The census line** now reads `allowed exceptions: dclf (until step 10a) versions N attaches M, engine imports (until step 9)
+  versions N attaches M` in place of `allowed (dclf) adoptions N`.
+- **Before the change** (runs `*-integ-6b3*`, `*-integ-6b4*`): no late attach in any run. The only late versions were guest's
+  `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION` and its copy (engine targets, 2 to 4 per run), now under `engine imports`.

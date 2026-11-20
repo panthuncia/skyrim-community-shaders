@@ -226,6 +226,17 @@ namespace RenderGraph
 			return ownerBuilt.contains(a_epoch) || (external.contains(a_epoch) && !externalBuilder.post);
 		}
 
+		/** @brief Tells the boundary check of an attach. The owner's own epochs are DCLF's, which attach at its build points until step 10a. */
+		void NoteAttached(std::uint32_t a_epoch) const
+		{
+			if (ownerBuilt.contains(a_epoch) || external.contains(a_epoch)) {
+				const Frame::Boundary::Allow allow(Frame::Boundary::Exception::Dclf);
+				Frame::Boundary::NoteAttach(Label(a_epoch));
+				return;
+			}
+			Frame::Boundary::NoteAttach(Label(a_epoch));
+		}
+
 		void Apply(const PendingRequest& a_request)
 		{
 			auto& host = *desc.host;
@@ -410,7 +421,7 @@ namespace RenderGraph
 			rejectedInARow.erase(epoch);
 			failedAt.erase(epoch);
 			if (a_done.graph)
-				RenderGraph::Frame::Boundary::NoteAttach(Label(epoch));
+				NoteAttached(epoch);
 			++window.attached;
 			window.attachMs += attachMs;
 			window.attachMaxMs = (std::max)(window.attachMaxMs, attachMs);
