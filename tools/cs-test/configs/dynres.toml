@@ -1,0 +1,297 @@
+# Dynamic resolution as viewports (frame revision plan, step 8). For DLSS, FSR and XeSS in turn: quality 1, a shot, then quality
+# mode changes through the setting step (3, 1, 3, 2, 1, 4, 1, 0, 1, some on consecutive frames), with shots at quality 4, 0 and
+# back at 1. Time is stopped, so the shots of one quality compare across methods' passes and against a build before step 8.
+# Compose it: native-vulkan+dynres, native-d3d12+dynres, guest+dynres.
+#
+# Read in the log after each quality change: the "[ORG] frame revision N: adopted" lines carry the variables (Setting.Upscaling.qualityMode,
+# DynamicRatios, RenderSize, UpscalerOptions) with "twins []", "staged builds 0" and "member stages [none]". No "[ORG] frame declaration:
+# client ... registered" and no "[ORG] ImageSpace: ... are CS passes" line follows a quality change; they follow only the upscale steps.
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "upscale"
+arg = "dlss"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "dlss-q1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 5
+do = "setting"
+arg = "Upscaling.qualityMode=2"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "dlss-q4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=0"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "dlss-q0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "dlss-q1-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "upscale"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "fsr-q1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 5
+do = "setting"
+arg = "Upscaling.qualityMode=2"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "fsr-q4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=0"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "fsr-q0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "fsr-q1-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "upscale"
+arg = "xess"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "xess-q1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 5
+do = "setting"
+arg = "Upscaling.qualityMode=2"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "xess-q4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=0"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "xess-q0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "xess-q1-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["dlss-q1", "dlss-q4", "dlss-q0", "dlss-q1-back", "fsr-q1", "fsr-q4", "fsr-q0", "fsr-q1-back", "xess-q1", "xess-q4", "xess-q0", "xess-q1-back"]
