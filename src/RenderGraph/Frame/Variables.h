@@ -86,6 +86,14 @@ namespace RenderGraph::Frame::Vars
 		friend bool operator==(const UpscalerOptions&, const UpscalerOptions&) = default;
 	};
 
+	/** @brief Terrain Shadows' heightmap: which one is installed, and its size. A new heightmap is a new id even at the same size. */
+	struct HeightMapIdentity
+	{
+		std::uint64_t id = 0;  // 0 for none
+		Extent2D size{};
+		friend bool operator==(const HeightMapIdentity&, const HeightMapIdentity&) = default;
+	};
+
 	/** @brief A frame-wide variable by name, as declarations name their dependencies (Frame/Declare.h). */
 	template <class T>
 	struct Var
@@ -102,6 +110,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<TargetIdentity> HdrOutputTarget() { return { "HdrOutputTarget" }; }
 	constexpr Var<ShadowMapShape> EngineShadowMap() { return { "EngineShadowMap" }; }
 	constexpr Var<CubemapShape> ReflectionCubemap() { return { "ReflectionCubemap" }; }
+	constexpr Var<HeightMapIdentity> HeightMap() { return { "HeightMap" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -119,6 +128,8 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. The engine's reflection cubemap. */
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer);
+	/** @brief Any thread. Terrain Shadows' heightmap. */
+	bool SetHeightMap(HeightMapIdentity a_value, std::string_view a_writer);
 	/** @brief Any thread. What the upscaler SDK is configured with. */
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer);
 	/**
@@ -145,6 +156,8 @@ namespace RenderGraph::Frame::Vars
 	ShadowMapShape AdoptedEngineShadowMap();
 	/** @brief Render thread. The adopted reflection cubemap shape. */
 	CubemapShape AdoptedReflectionCubemap();
+	/** @brief Render thread. The adopted Terrain Shadows heightmap. */
+	HeightMapIdentity AdoptedHeightMap();
 	/** @brief Render thread. The adopted upscaler options. */
 	UpscalerOptions AdoptedUpscalerOptions();
 	/** @brief Render thread. The presentation of the adopted revision: the swap chain had it when the revision was adopted. */
@@ -251,5 +264,16 @@ struct std::formatter<RenderGraph::Frame::Vars::UpscalerOptions> : std::formatte
 	auto format(const RenderGraph::Frame::Vars::UpscalerOptions& a_value, std::format_context& a_context) const
 	{
 		return std::format_to(a_context.out(), "{} quality {} output {}{}", a_value.method, a_value.qualityMode, a_value.output, a_value.hdr ? " HDR" : "");
+	}
+};
+
+template <>
+struct std::formatter<RenderGraph::Frame::Vars::HeightMapIdentity> : std::formatter<std::string_view>
+{
+	auto format(const RenderGraph::Frame::Vars::HeightMapIdentity& a_value, std::format_context& a_context) const
+	{
+		if (!a_value.id)
+			return std::format_to(a_context.out(), "none");
+		return std::format_to(a_context.out(), "#{} {}", a_value.id, a_value.size);
 	}
 };
