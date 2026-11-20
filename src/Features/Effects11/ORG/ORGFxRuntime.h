@@ -12,14 +12,16 @@ namespace RenderGraph::Engine
 * @brief Effects11's ORG FX runtime, with CS_ORG_FX=1. The preset's .fx passes run as graph passes at the Tonemap anchor in place
 * of EffectManager::ExecuteEffects. See docs/development/org-fx-runtime.md.
 *
-* Each effect is parsed from FX11's preprocessed text, lowered to bindless HLSL and compiled per pass when first needed.
-* The chain is planned with FX11's ping-pong resolved into fixed textures, declared on the display size. The client is declared on
-* the display size and Effects11's shape writes (frame revision plan, 6.11): its key is the plan, made when a frame revision starts,
-* so a new plan, its builds and the textures' new versions switch in together. The tonemap's targets and FX11's compiled effects
-* are not variables yet: Prepare observes them and invalidates the key when they change.
+* Each effect is parsed from FX11's preprocessed text and lowered to bindless HLSL on the render thread.
+* The chain is planned with FX11's ping-pong resolved into fixed textures, declared on the display size. The chain's programs are
+* one declared program on the display size and Effects11's shape writes (frame revision plan, 6.11): its key lists every program
+* the plan asks for, and the programs lane compiles them before the revision starts. The client is declared on the same values:
+* its key reads the shape and the built programs, and its make builds the chain. So a new plan, its builds and the textures' new
+* versions switch in together, and the render thread never compiles. The tonemap's targets and FX11's compiled effects are not
+* variables yet: Prepare observes them and invalidates both keys when they change.
 * FX11 stays the value store, and the commit copies its variables' bytes into one latch region per pass.
-* Whenever the runtime cannot run a frame, FX11 runs it and a log line says why. A failed graph returns to FX11 for the session.
-* Render thread throughout. Free of ORG/Vulkan includes.
+* A plan or build that fails is fatal. A frame the graph cannot take (no stage holds the chain) runs on FX11, logged.
+* Render thread, except the program builds. Free of ORG/Vulkan includes.
 */
 class ORGFxRuntime
 {

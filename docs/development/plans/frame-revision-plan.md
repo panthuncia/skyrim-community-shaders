@@ -949,6 +949,28 @@ build is fatal.
   (`PostProcessing::PhysicalLens::GenerateMips`), built at Setup.
 - Tests: `post-lens` (new), `post-programs` (new), `post-effects`. All need the profile's Post Processing mode on.
 
+**As built (2026-11-19, Effects11 rules fixes, `org-native/fix-e11-rules`).** 6.10 and 6.11 follow the 6.9 fixes and 6.20.
+- The FX chain's programs are one `DeclareProgram` (`Effects11::FxChain`) on `DisplaySize` and `Effects11.fxShapeWrites`, keyed on
+  the chain's plan: the `Planner` runs in a listing mode that describes every program it asks for (each .fx pass by its lowered
+  source's hash, target format and pass state; CS's colour correction, downsample, sun mask and copies) without compiling. The
+  lane compiles the new ones into a session store keyed by generation and key (`BuildPlan`), and the revision starts once it is
+  done. An equal shape text gives the last plan without planning again. Each pass is lowered once per effect build
+  (`FxEffect::passes`).
+- The client's key reads values, the observed state and the plan's programs (`DeclaredProgram::For`). Its make runs the `Planner`
+  in its building mode, which only looks programs up, and builds the registration. A program the listing did not give fails the build.
+- A failed plan (an effect that does not parse or lower, a missing import of the tonemap's targets or kMAIN's depth), a failed
+  program build or chain build, and anything thrown at the tonemap hook, a revision's start or the commit are fatal. `failed`,
+  `Fail` ("returns to FX11 for the session") and the no-client fall-back are gone.
+- The chain's registrations set `matchesById` and a `generation`. `Prepare` sets the client active from `HeldNow` (held and
+  scheduled), so a new plan's lag frames commit the plan the schedule holds. A tonemap after this frame's stage leaves the observed
+  state alone (`StagePassed`, as the post chain). `Invalidate` (FX11 reload) bumps the generation, clears the store and invalidates
+  both declarations.
+- The rays' registrations set `matchesById` and a `generation`. `PrepareFrame` finds the registration the frame's schedule holds
+  (`HeldNow`), and the frame draws the effects that one has: none while the client lags. Effects11's `DrawVolumetricRays` and
+  `DrawSunRays` read the adopted revision's `raysToggles` (`ORGSunRays::AdoptedToggles`) in place of the live settings while the
+  rays are on the graph, so a toggle switches with the revision and no frame draws them on D3D11. The last-frame `Holds` is gone.
+- Tests: `effects11` (no_log updated), `effects11-programs` (new).
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1437,6 +1459,7 @@ return nothing (or only the stated exception) at the end.
 | The guest own-epoch path that takes builds mid-frame | 7b | `rg -n "own epoch" src/RenderGraph/Frame/FrameDriver.cpp` (comment gone) and no `OwnEpoch` build attaches in the census |
 | Schedule gates for clients registered inside the frame (ViewAtmosphere's composite, the screenshot's clean scene) | 6.21, 6.23, 7a | `rg -n "FrameAnchors::Scheduled\|bool Scheduled" src` |
 | Render-thread compiles in the post chain, and its D3D11 fall-back on a failed build | 6.9 fixes | `rg -n "RasterProgram::Load\|ComputeProgram::Load\|LoadGenerateMips\|failedKey\|Legacy\(" src/Features/PostProcessing` shows only `BuildPlan` (the lane) and the lens's `GenerateMips` declaration |
+| Render-thread compiles in the Effects11 FX chain, and its FX11 fall-back on a failed plan | Effects11 rules fixes | `rg -n "RasterProgram::Load\|ComputeProgram::Load\|returns to FX11\|BuildCsPrograms" src/Features/Effects11/ORG` shows only `BuildPlan` (the lane) |
 | The lens's per-frame upload poll (`StagedBuffer::Poll`) | 4e | `rg -n "StagedBuffer\|Poll\(\)" src/Features/PostProcessing/ORG/ORGPhysicalLens.cpp` |
 | Readback captures inside CS stage recordings | Q11's answer | `rg -n "PlanReadbackCapture" src` shows only the places Q11 allows |
 | The screenshot's per-capture size and format compare | 6.23 | `rg -n "const bool same" src/Features/Screenshot/ORGScreenshot.cpp` |
@@ -2020,6 +2043,28 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   on the render thread (`ProgramCacheDetail::ResolveDefines`), as SSGI and SSS build theirs.
 - **LUT, Lens Flare and Physical Glare read the values Update observed** (LUT type, kernel groups and blur passes, tear film)
   in `BuildRun` and `Programs`, no longer the live settings, so the plan and the build agree.
+
+**Decided by the agent (Effects11 rules fixes, 2026-11-19), to confirm:**
+- **One program declaration for the FX chain, keyed on its plan**, as the post chain. The plan reads FX11's live objects and the
+  observed targets, so `DeclaredProgram::Invalidate` goes with the client's. Supersedes "Planning stays on the render thread" (6.11):
+  parsing and lowering still run on the render thread (CPU text work), the DXC compiles run on the lane.
+- **An .fx pass's program key holds a hash of its lowered source**, not the effect's compiled pointer, since a reload can reuse an
+  address. The store is still cleared at each reload (`Invalidate`), as the old per-effect program maps were, so a reload compiles
+  every pass again. Every plan key built is kept for the session, so each reload keeps one more set.
+- **Missing tonemap imports are fatal**, once a preset is loaded and the tonemap is Effects11's. To keep a menu scene's tonemap from
+  tripping it, a tonemap after this frame's stage is no longer observed (`StagePassed`). If a native frame kind with unbacked
+  targets still reaches it, that is a fatal log naming the import.
+- **The rays switch with the adopted revision's toggles**, read by Effects11's `Draw*`. Turning both off removes the client at the
+  revision's start (no client while both are off), so the rays stop then, up to the revision's adoption early. Nothing draws on
+  D3D11 meanwhile. Supersedes "A toggle shows one frame on D3D11" (6.10).
+- **D3D11 fall-throughs kept, each logged when it starts:**
+  - FX: the graph inactive or the Tonemap anchor missing; a tonemap after this frame's stage; a frame kind with no stage holding the
+    chain, and the frames before the first registration is scheduled (as the post chain); FX11 reloaded an effect after the held plan
+    (`Write` returns false, so FX11 draws until the new plan is adopted); a held plan for other tonemap targets than this frame's.
+  - Rays: inputs the graph cannot read (kMAIN, the t17 depth, Terrain Shadows' heights or Cloud Shadows' cubemap not on the graph);
+    a frame kind with no stage holding the rays; a failed setup (D3D11 for the session).
+  - `GetCommonBufferData`'s `EnableVolumetricRays` still reads the live setting, so for the frames of a toggle's revision a shader
+    that reads it can disagree with the drawn rays.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

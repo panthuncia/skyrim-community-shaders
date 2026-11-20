@@ -38,6 +38,7 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
@@ -55,7 +56,9 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include <algorithm>
 #	include <array>
 #	include <chrono>
+#	include <functional>
 #	include <map>
+#	include <mutex>
 #	include <optional>
 #	include <set>
 #	include <span>
@@ -283,7 +286,15 @@ namespace
 		}
 	};
 
-	using ProgramKey = std::tuple<std::uint32_t, std::uint32_t, rhi::Format, std::string>;  // technique, pass, target format, PassState::Key
+	/** @brief One pass's lowered source, kept with the effect so a plan lowers each pass once. */
+	struct LoweredText
+	{
+		std::string source;
+		std::size_t hash = 0;  // of source, for the program's key
+		std::uint32_t pushWords = 0;
+		bool ok = false;
+		std::string error;
+	};
 
 	struct FxEffect
 	{
@@ -300,19 +311,9 @@ namespace
 		std::vector<org::OwnedDescriptorBinding> samplers;  // per resource slot, empty for textures
 		std::vector<Res> files;                             // per resource slot, its ResourceName texture or null
 		std::unordered_map<std::string, std::uint32_t> techniques;
-		std::map<ProgramKey, std::shared_ptr<const RasterProgram>> programs;
+		std::map<std::pair<std::uint32_t, std::uint32_t>, LoweredText> passes;  // by technique and pass
 
 		std::string Name() const { return fx11 ? fx11->GetName() : std::string("?"); }
-	};
-
-	struct CsPrograms
-	{
-		std::shared_ptr<const ComputeProgram> colorCorrection;
-		std::shared_ptr<const RasterProgram> downsample;
-		std::shared_ptr<const RasterProgram> sunMask;
-		std::map<rhi::Format, std::shared_ptr<const RasterProgram>> copy;
-		org::OwnedDescriptorBinding linearSampler;
-		bool tried = false;
 	};
 
 	// The UAV, then the latch.
@@ -340,6 +341,39 @@ namespace
 	constexpr std::uint32_t kDownsampleWords = 2;
 	constexpr std::uint32_t kSunMaskWords = 4;
 	constexpr std::uint32_t kCopyWords = 3;
+
+	// CS's own programs in a plan, by key. The .fx passes' keys start with "fx|".
+	constexpr std::string_view kColorCorrectionKey = "cs|color-correction";
+	constexpr std::string_view kDownsampleKey = "cs|downsample";
+	constexpr std::string_view kSunMaskKey = "cs|sun-mask";
+
+	ComputeProgram::Desc ColorCorrectionDesc()
+	{
+		return { .source = "Effects11/ColorCorrectionCS.hlsl", .constantWords = ShaderBindings::Words<ColorCorrectionBlock>() };
+	}
+
+	RasterProgram::Desc CsRasterDesc(const char* a_source, std::uint32_t a_words, rhi::Format a_format)
+	{
+		RasterProgram::Desc desc{};
+		desc.pixelSource = a_source;
+		desc.constantWords = a_words;
+		desc.targets = { { .format = a_format } };
+		return desc;
+	}
+
+	RasterProgram::Desc DownsampleDesc() { return CsRasterDesc("Effects11/DownsamplePS.hlsl", kDownsampleWords, rhi::Format::R11G11B10_Float); }
+	RasterProgram::Desc SunMaskDesc() { return CsRasterDesc("Effects11/AdaptationSunMaskPS.hlsl", kSunMaskWords, rhi::Format::R11G11B10_Float); }
+	RasterProgram::Desc CopyDesc(rhi::Format a_format) { return CsRasterDesc("Effects11/CopyPS.hlsl", kCopyWords, a_format); }
+	std::string CopyKey(rhi::Format a_format) { return fmt::format("cs|copy|{}", static_cast<int>(a_format)); }
+
+	/** @brief Logs the reason and stops the game: an error of the FX chain on the render graph has no fallback. */
+	[[noreturn]] void Fatal(std::string_view a_what)
+	{
+		const auto message = fmt::format("Community Shaders: Effects11's FX chain failed on the render graph: {}", a_what);
+		logger::critical("[ORG] Effects11: {}", message);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
+	}
 
 	/** @brief Resolved at record time. */
 	struct PushWord
@@ -854,34 +888,90 @@ namespace
 		bool operator==(const Observed&) const = default;
 	};
 
-	/** @brief What the client is made for: the chain's shape as text, its plan and its registration. Equal when the text is. */
+	struct ChainInputs
+	{
+		Res input, main, depth, output;  // main is kMAIN, when it has an RTV for FX11's result
+		bool inputCopies = false;        // same format and size as Original, so a plain copy
+		bool mainCopies = false;
+		rhi::Format mainFormat = rhi::Format::Unknown;
+		std::uint32_t mainWidth = 0;
+		std::uint32_t mainHeight = 0;
+		rhi::Format outputFormat = rhi::Format::Unknown;
+		std::uint32_t outputWidth = 0;
+		std::uint32_t outputHeight = 0;
+		std::array<bool, kEffects> runs{};
+	};
+
+	/** @brief One program of a plan: its key and its desc, with the defines resolved on the render thread. */
+	struct PlannedProgram
+	{
+		std::string key;
+		std::variant<RasterProgram::Desc, ComputeProgram::Desc> desc;
+	};
+
+	/** @brief The chain's declared program: every program one plan of the chain asks for. Equal keys are one plan. */
+	struct FxPlanKey
+	{
+		std::uint64_t generation = 0;
+		std::vector<std::string> keys;  // sorted
+		std::shared_ptr<const std::vector<PlannedProgram>> programs;
+
+		bool operator==(const FxPlanKey& a_other) const { return generation == a_other.generation && keys == a_other.keys; }
+	};
+
+	/** @brief The programs one plan lists, by key. Built on the programs lane, read by the chain's build. */
+	struct FxPrograms
+	{
+		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
+		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
+	};
+
+	/** @brief Every program built this session, by generation and key, so a plan builds only what is new. Any thread. */
+	struct ProgramStore
+	{
+		std::mutex mutex;
+		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
+		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
+	};
+
+	/**
+	* @brief The client's key: the chain's shape as text, what the build plans from, and the plan's programs. Equal when the text
+	* and the generation are. The programs follow from those, so they are not compared.
+	*/
 	struct Shape
 	{
 		std::string text;
-		std::shared_ptr<Frame> frame;
-		std::shared_ptr<const FrameAnchors::ClientDesc> client;
+		std::uint64_t generation = 0;
+		ChainInputs inputs;
+		RF::Vars::Extent2D display{};
+		std::shared_ptr<const FxPrograms> programs;
 
-		bool operator==(const Shape& a_other) const { return text == a_other.text; }
+		bool operator==(const Shape& a_other) const { return text == a_other.text && generation == a_other.generation; }
 	};
 }
 
 struct ORGFxRuntime::Impl
 {
 	std::array<FxEffect, kEffects> effects{};
-	CsPrograms cs;
+	// TextureManager's linear clamp sampler.
+	org::OwnedDescriptorBinding linearSampler;
 	Textures textures;
 	// A row per kTextures entry. A commit opens the rows of the kept textures whose bound version no run cleared yet.
 	std::shared_ptr<RenderGraph::RunGate> clearGate;
 	std::array<const void*, kTextureRows> clearedVersions{};
 	std::vector<std::pair<std::uint32_t, const void*>> openedClears;  // by the last commit, cleared once its run is submitted
-	// Declared at the first tonemap the graph can take, on the display size and Effects11's shape writes.
+	// Declared at the first tonemap the graph can take, on the display size and Effects11's shape writes. Both keys read observed.
 	RF::DeclaredClient client;
+	RF::DeclaredProgram<FxPrograms> programs;
+	std::shared_ptr<ProgramStore> store = std::make_shared<ProgramStore>();
+	std::uint64_t generation = 0;       // Invalidate's count: a reload lists and builds every program again
+	std::uint64_t buildGeneration = 0;  // the chain's builds, which HeldNow names
+	// The last plan and the shape text it was made for, so an equal text does not plan again.
+	std::optional<std::pair<std::string, FxPlanKey>> lastPlan;
 	Observed observed;
-	std::optional<Shape> planned;  // the last plan, so a key with the same text does not plan again
 	std::string lastReason;
 	bool activeNow = false;
 	bool declaredOwner = false;  // what the client's declared gave at the last Begin
-	bool failed = false;         // FX11 for the session
 	std::uint32_t ranFrame = UINT32_MAX;
 	Res frameInput;
 	Res frameOutput;
@@ -894,48 +984,12 @@ struct ORGFxRuntime::Impl
 
 	FxEffect& EffectOf(Fx a_fx) { return effects[static_cast<std::size_t>(a_fx)]; }
 
-	/** @brief No client for this key: FX11 runs the frame. A new reason is logged once. */
-	std::optional<Shape> Inactive(const std::string& a_reason)
+	/** @brief The graph cannot take this frame's tonemap, so FX11 runs it. A new reason is logged once. */
+	void Inactive(const std::string& a_reason)
 	{
 		if (!a_reason.empty() && a_reason != lastReason)
-			logger::warn("[ORG] Effects11 runs on FX11: {}", a_reason);
+			logger::warn("[ORG] Effects11 runs on FX11 this frame: {}", a_reason);
 		lastReason = a_reason;
-		return std::nullopt;
-	}
-
-	bool BuildCsPrograms(rhi::Device a_device)
-	{
-		if (cs.tried)
-			return cs.colorCorrection && cs.downsample && cs.sunMask && cs.linearSampler;
-		cs.tried = true;
-		cs.colorCorrection = ComputeProgram::Load(a_device, { .source = "Effects11/ColorCorrectionCS.hlsl", .constantWords = ShaderBindings::Words<ColorCorrectionBlock>() });
-		const std::vector<RasterProgram::Target> r11g11b10{ { .format = rhi::Format::R11G11B10_Float } };
-		RasterProgram::Desc downsample{};
-		downsample.pixelSource = "Effects11/DownsamplePS.hlsl";
-		downsample.constantWords = kDownsampleWords;
-		downsample.targets = r11g11b10;
-		cs.downsample = RasterProgram::Load(a_device, downsample);
-		RasterProgram::Desc sunMask{};
-		sunMask.pixelSource = "Effects11/AdaptationSunMaskPS.hlsl";
-		sunMask.constantWords = kSunMaskWords;
-		sunMask.targets = r11g11b10;
-		cs.sunMask = RasterProgram::Load(a_device, sunMask);
-		// TextureManager's linear clamp sampler.
-		cs.linearSampler = ShaderBindings::CreateSampler({});
-		return cs.colorCorrection && cs.downsample && cs.sunMask && cs.linearSampler;
-	}
-
-	std::shared_ptr<const RasterProgram> CopyProgram(rhi::Device a_device, rhi::Format a_format)
-	{
-		if (const auto it = cs.copy.find(a_format); it != cs.copy.end())
-			return it->second;
-		RasterProgram::Desc desc{};
-		desc.pixelSource = "Effects11/CopyPS.hlsl";
-		desc.constantWords = kCopyWords;
-		desc.targets = { { .format = a_format } };
-		auto program = RasterProgram::Load(a_device, desc);
-		cs.copy.emplace(a_format, program);
-		return program;
 	}
 
 	/** @brief False, with the reason kept, on failure. */
@@ -1032,66 +1086,34 @@ struct ORGFxRuntime::Impl
 		return true;
 	}
 
-	/** @brief Compiled on first use. Null, with a_reason, on failure. */
-	std::shared_ptr<const RasterProgram> FxProgram(FxEffect& a_effect, std::uint32_t a_technique, std::uint32_t a_pass, rhi::Format a_format, const PassState& a_state,
-		std::string& a_reason)
+	/** @brief A pass's lowered source, made once per effect build. CPU work only: the plan lists it and the lane compiles it. */
+	const LoweredText& LoweredPassOf(FxEffect& a_effect, std::uint32_t a_technique, std::uint32_t a_pass)
 	{
-		const ProgramKey key{ a_technique, a_pass, a_format, a_state.Key() };
-		if (const auto it = a_effect.programs.find(key); it != a_effect.programs.end()) {
-			if (!it->second)
-				a_reason = fmt::format("{}: technique '{}' pass {} did not compile", a_effect.Name(), a_effect.desc.techniques[a_technique].name, a_pass);
-			return it->second;
-		}
-		const auto& technique = a_effect.desc.techniques[a_technique];
-		auto remember = [&](std::shared_ptr<const RasterProgram> a_program) {
-			a_effect.programs.emplace(key, a_program);
-			return a_program;
-		};
-		const auto lowered = OrgFx::LowerPass(a_effect.lowered, a_effect.desc, a_technique, a_pass);
-		if (!lowered.ok) {
-			a_reason = fmt::format("{}: technique '{}' pass {} could not be lowered, {}", a_effect.Name(), technique.name, a_pass, FirstError(lowered.diagnostics));
-			return remember(nullptr);
-		}
-		RasterProgram::Desc desc{};
-		desc.pixelSource = fmt::format("Effects11/ORG/{}/{}.{}.hlsl", a_effect.Name(), technique.name, a_pass);
-		desc.vertexSource = desc.pixelSource;
-		desc.pixelEntry = std::wstring(OrgFx::kPixelEntry, OrgFx::kPixelEntry + std::strlen(OrgFx::kPixelEntry));
-		desc.vertexEntry = std::wstring(OrgFx::kVertexEntry, OrgFx::kVertexEntry + std::strlen(OrgFx::kVertexEntry));
-		desc.pixelText = lowered.source;
-		desc.vertexText = lowered.source;
-		// Effects11 builds this code without CS's shader defines.
-		desc.commonDefines = false;
-		desc.languageVersion = L"2018";
-		desc.constantWords = lowered.layout.pushWords;
-		desc.targets = { { .format = a_format, .blend = a_state.blend } };
-		desc.alphaToCoverage = a_state.alphaToCoverage;
-		desc.raster = a_state.raster;
-		auto program = RasterProgram::Load(RenderGraphRuntime::Get().Host()->Device(), desc);
-		if (!program)
-			a_reason = fmt::format("{}: DXC could not build technique '{}' pass {} (the [ORG] error above has its messages)", a_effect.Name(), technique.name, a_pass);
-		return remember(std::move(program));
+		const std::pair<std::uint32_t, std::uint32_t> key{ a_technique, a_pass };
+		if (const auto found = a_effect.passes.find(key); found != a_effect.passes.end())
+			return found->second;
+		auto lowered = OrgFx::LowerPass(a_effect.lowered, a_effect.desc, a_technique, a_pass);
+		LoweredText text;
+		text.ok = lowered.ok;
+		if (lowered.ok) {
+			text.hash = std::hash<std::string>{}(lowered.source);
+			text.pushWords = lowered.layout.pushWords;
+			text.source = std::move(lowered.source);
+		} else
+			text.error = FirstError(lowered.diagnostics);
+		return a_effect.passes.emplace(key, std::move(text)).first->second;
 	}
 
-	struct ChainInputs
-	{
-		Res input, main, depth, output;  // main is kMAIN, when it has an RTV for FX11's result
-		bool inputCopies = false;        // same format and size as Original, so a plain copy
-		bool mainCopies = false;
-		rhi::Format mainFormat = rhi::Format::Unknown;
-		std::uint32_t mainWidth = 0;
-		std::uint32_t mainHeight = 0;
-		rhi::Format outputFormat = rhi::Format::Unknown;
-		std::uint32_t outputWidth = 0;
-		std::uint32_t outputHeight = 0;
-		std::array<bool, kEffects> runs{};
-	};
-
-	/** @brief Builds one frame's steps. FX11's ping-pong becomes fixed textures. */
+	/**
+	* @brief Builds one frame's steps. FX11's ping-pong becomes fixed textures. It runs twice for a plan, on the render thread:
+	* listing (a_listing set), where each program is only described for the programs lane, then building (a_programs set), in the
+	* client's make, where each program is looked up. Both runs take the same path, so the build finds every program it asks for.
+	*/
 	class Planner
 	{
 	public:
-		Planner(Impl& a_impl, const ChainInputs& a_inputs, RF::Vars::Extent2D a_display) :
-			impl(a_impl), inputs(a_inputs), frame(std::make_shared<Frame>())
+		Planner(Impl& a_impl, const ChainInputs& a_inputs, RF::Vars::Extent2D a_display, const FxPrograms* a_programs, std::vector<PlannedProgram>* a_listing) :
+			impl(a_impl), inputs(a_inputs), frame(std::make_shared<Frame>()), programs(a_programs), listing(a_listing)
 		{
 			frame->width = a_display.width;
 			frame->height = a_display.height;
@@ -1131,12 +1153,79 @@ struct ORGFxRuntime::Impl
 				error = std::move(a_reason);
 		}
 
-		/** @brief The effect stays on FX11 until the next reload without planning again. */
+		/** @brief The effect keeps the reason. A failed plan is fatal. */
 		void FailEffect(FxEffect& a_effect, std::string a_reason)
 		{
 			a_effect.ok = false;
 			a_effect.reason = a_reason;
 			Fail(std::move(a_reason));
+		}
+
+		/** @brief Listing: describes the program and returns null. Building: the plan's program, or null with the build failed. */
+		template <class Describe>
+		std::shared_ptr<const RasterProgram> Raster(const std::string& a_key, Describe&& a_describe)
+		{
+			if (listing) {
+				if (listed.insert(a_key).second) {
+					RasterProgram::Desc desc = a_describe();
+					RenderGraph::ProgramCacheDetail::ResolveDefines(desc);
+					listing->push_back({ a_key, std::move(desc) });
+				}
+				return nullptr;
+			}
+			if (const auto found = programs->raster.find(a_key); found != programs->raster.end() && found->second)
+				return found->second;
+			Fail(fmt::format("the program {} is not among the plan's programs", a_key));
+			return nullptr;
+		}
+
+		template <class Describe>
+		std::shared_ptr<const ComputeProgram> Compute(const std::string& a_key, Describe&& a_describe)
+		{
+			if (listing) {
+				if (listed.insert(a_key).second) {
+					ComputeProgram::Desc desc = a_describe();
+					RenderGraph::ProgramCacheDetail::ResolveDefines(desc);
+					listing->push_back({ a_key, std::move(desc) });
+				}
+				return nullptr;
+			}
+			if (const auto found = programs->compute.find(a_key); found != programs->compute.end() && found->second)
+				return found->second;
+			Fail(fmt::format("the program {} is not among the plan's programs", a_key));
+			return nullptr;
+		}
+
+		/** @brief A .fx pass's program. False, with a_reason, when the pass cannot be lowered. */
+		bool FxPass(FxEffect& a_effect, std::uint32_t a_technique, std::uint32_t a_pass, rhi::Format a_format, const PassState& a_state,
+			std::shared_ptr<const RasterProgram>& a_program, std::string& a_reason)
+		{
+			const auto& technique = a_effect.desc.techniques[a_technique];
+			const auto& lowered = impl.LoweredPassOf(a_effect, a_technique, a_pass);
+			if (!lowered.ok) {
+				a_reason = fmt::format("{}: technique '{}' pass {} could not be lowered, {}", a_effect.Name(), technique.name, a_pass, lowered.error);
+				return false;
+			}
+			const auto key = fmt::format("fx|{}|{}|{}|{:016x}|{}|{}", a_effect.Name(), technique.name, a_pass, static_cast<std::uint64_t>(lowered.hash),
+				static_cast<int>(a_format), a_state.Key());
+			a_program = Raster(key, [&] {
+				RasterProgram::Desc desc{};
+				desc.pixelSource = fmt::format("Effects11/ORG/{}/{}.{}.hlsl", a_effect.Name(), technique.name, a_pass);
+				desc.vertexSource = desc.pixelSource;
+				desc.pixelEntry = std::wstring(OrgFx::kPixelEntry, OrgFx::kPixelEntry + std::strlen(OrgFx::kPixelEntry));
+				desc.vertexEntry = std::wstring(OrgFx::kVertexEntry, OrgFx::kVertexEntry + std::strlen(OrgFx::kVertexEntry));
+				desc.pixelText = lowered.source;
+				desc.vertexText = lowered.source;
+				// Effects11 builds this code without CS's shader defines.
+				desc.commonDefines = false;
+				desc.languageVersion = L"2018";
+				desc.constantWords = lowered.pushWords;
+				desc.targets = { { .format = a_format, .blend = a_state.blend } };
+				desc.alphaToCoverage = a_state.alphaToCoverage;
+				desc.raster = a_state.raster;
+				return desc;
+			});
+			return true;
 		}
 
 		std::uint32_t Region(std::uint32_t a_bytes)
@@ -1156,10 +1245,7 @@ struct ORGFxRuntime::Impl
 			std::vector<AP::Bind> a_bindings)
 		{
 			// CS's own draws reset EffectManager's states, so the .fx passes after them start from those.
-			// start from those.
 			state = {};
-			if (!a_program)
-				Fail(fmt::format("Effects11::{}: its program could not be built", a_step));
 			AddStep(AP::Draw{ .name = a_step,
 						.program = std::move(a_program),
 						.bindings = std::move(a_bindings),
@@ -1173,7 +1259,7 @@ struct ORGFxRuntime::Impl
 		{
 			const std::uint32_t region = Region(sizeof(DitherConstants));
 			frame->writes.push_back({ .kind = RegionWrite::Kind::Dither, .offset = region, .amplitude = a_amplitude });
-			CsDraw(std::move(a_step), impl.CopyProgram(RenderGraphRuntime::Get().Host()->Device(), a_format), std::move(a_target), a_width, a_height,
+			CsDraw(std::move(a_step), Raster(CopyKey(a_format), [&] { return CopyDesc(a_format); }), std::move(a_target), a_width, a_height,
 				{ AP::Bind::Srv(std::move(a_source)), AP::Bind::Latch(region) });
 		}
 
@@ -1242,8 +1328,8 @@ struct ORGFxRuntime::Impl
 					logger::info("[ORG] Effects11: {} technique '{}' pass {} has a sample mask without sample 0 and draws nothing", e.Name(), technique.name, p);
 					continue;
 				}
-				auto program = impl.FxProgram(e, a_technique, p, format, state, reason);
-				if (!program) {
+				std::shared_ptr<const RasterProgram> program;
+				if (!FxPass(e, a_technique, p, format, state, program, reason)) {
 					FailEffect(e, std::move(reason));
 					return;
 				}
@@ -1275,8 +1361,8 @@ struct ORGFxRuntime::Impl
 				draw->push[1] = { PushWord::Kind::LatchOffset, region };
 				if (layout.shared) {
 					draw->push[OrgFx::kUnusedTextureWord] = { PushWord::Kind::Input, draw->Input(Black()) };
-					draw->push[OrgFx::kUnusedSamplerWord] = { PushWord::Kind::Literal, impl.cs.linearSampler.Index() };
-					draw->samplers.push_back(impl.cs.linearSampler);
+					draw->push[OrgFx::kUnusedSamplerWord] = { PushWord::Kind::Literal, impl.linearSampler.Index() };
+					draw->samplers.push_back(impl.linearSampler);
 				}
 				for (std::size_t i = 0; i < e.lowered.resources.size(); ++i) {
 					const auto word = layout.words[i];
@@ -1394,7 +1480,7 @@ struct ORGFxRuntime::Impl
 				const std::uint32_t region = Region(sizeof(ColorCorrectionConstants));
 				frame->writes.push_back({ .kind = RegionWrite::Kind::ColorCorrection, .offset = region });
 				AddStep(AP::Dispatch{ .name = "color-correction",
-							.program = impl.cs.colorCorrection,
+							.program = Compute(std::string(kColorCorrectionKey), ColorCorrectionDesc),
 							.bindings = { AP::Bind::Uav(original), AP::Bind::Latch(region) },
 							.groups = { (width + 7) / 8, (height + 7) / 8, 1 } },
 					"color-correction");
@@ -1437,8 +1523,8 @@ struct ORGFxRuntime::Impl
 				Res source = original;
 				for (const auto& [name, size] : levels) {
 					const Res target = Tex(name);
-					CsDraw(fmt::format("downsample-{}", size), impl.cs.downsample, target, size, size,
-						{ AP::Bind::Srv(source), AP::Bind::Handle(impl.cs.linearSampler.Index()) });
+					CsDraw(fmt::format("downsample-{}", size), Raster(std::string(kDownsampleKey), DownsampleDesc), target, size, size,
+						{ AP::Bind::Srv(source), AP::Bind::Handle(impl.linearSampler.Index()) });
 					source = target;
 				}
 			}
@@ -1466,8 +1552,8 @@ struct ORGFxRuntime::Impl
 				const std::uint32_t region = Region(sizeof(ENBAdaptation::SunMaskCB));
 				frame->writes.push_back({ .kind = RegionWrite::Kind::SunMask, .offset = region });
 				const Res masked = Tex("SunMasked");
-				CsDraw("adaptation-sun-mask", impl.cs.sunMask, masked, kSize, kSize,
-					{ AP::Bind::Srv(Tex("Downsampled256")), AP::Bind::Handle(impl.cs.linearSampler.Index()), AP::Bind::Latch(region) });
+				CsDraw("adaptation-sun-mask", Raster(std::string(kSunMaskKey), SunMaskDesc), masked, kSize, kSize,
+					{ AP::Bind::Srv(Tex("Downsampled256")), AP::Bind::Handle(impl.linearSampler.Index()), AP::Bind::Latch(region) });
 				Technique(Fx::Adaptation, "Downsample", "AdaptationCurrent", { { "TextureCurrent", masked } });
 				Technique(Fx::Adaptation, "Draw", "Adaptation", { { "TextureCurrent", Tex("AdaptationCurrent") }, { "TexturePrevious", Tex("AdaptationHistory") } });
 				CopyTexture("adaptation-history", Tex("Adaptation"), Tex("AdaptationHistory"));
@@ -1503,6 +1589,9 @@ struct ORGFxRuntime::Impl
 
 			if (!error.empty())
 				return nullptr;
+			// A listing needs only the programs.
+			if (listing)
+				return frame;
 			// Kept textures are cleared before anything reads them, on the first run of each version, as DXVK's D3D11 textures
 			// start at zero. A version made by a revision is born cleared as well, and its first frame clears it again.
 			std::vector<Step> clears;
@@ -1527,6 +1616,9 @@ struct ORGFxRuntime::Impl
 		Impl& impl;
 		const ChainInputs& inputs;
 		std::shared_ptr<Frame> frame;
+		const FxPrograms* programs = nullptr;            // building
+		std::vector<PlannedProgram>* listing = nullptr;  // listing
+		std::set<std::string, std::less<>> listed;
 		PassState state;  // what FX11's context holds for the next .fx pass
 		Res aperture;     // null means black, when DoF wrote none
 	};
@@ -1554,11 +1646,11 @@ struct ORGFxRuntime::Impl
 		return key;
 	}
 
-	/** @brief The registration for a plan. Null, with the reason logged, when the builder refuses a step. */
-	std::shared_ptr<const FrameAnchors::ClientDesc> MakeClient(const std::shared_ptr<Frame>& a_frame)
+	/** @brief The registration for a plan, in a_client. False, with a_failure, when the builder refuses a step. */
+	bool MakeClient(const std::shared_ptr<Frame>& a_frame, FrameAnchors::ClientDesc& a_client, std::string& a_failure)
 	{
-		auto client = std::make_shared<FrameAnchors::ClientDesc>();
-		client->id = kClientId;
+		FrameAnchors::ClientDesc client{};
+		client.id = kClientId;
 		const auto latch = std::shared_ptr<const org::LatchBlock>(a_frame->latch);
 		const std::shared_ptr<const RenderGraph::RunGate> gate = clearGate;
 		AP::Builder builder(FrameAnchors::Anchor::Tonemap, kClientId, kFirstOrder, latch);
@@ -1585,69 +1677,58 @@ struct ORGFxRuntime::Impl
 				a_frame->steps[i]);
 		}
 		if (builder.Failed()) {
-			Inactive(builder.Failure());
-			return nullptr;
+			a_failure = builder.Failure();
+			return false;
 		}
-		client->passes = builder.Take();
-		client->registerResources = [a_frame](org::RenderGraph& a_graph) {
+		client.passes = builder.Take();
+		client.registerResources = [a_frame](org::RenderGraph& a_graph) {
 			for (const auto& [row, texture] : a_frame->textures)
 				texture->Register(a_graph);
 		};
 		// Read at each Begin: while Post Processing or the game owns the tonemap, the passes record only their barriers.
-		client->declared = [] {
+		client.declared = [] {
 			const bool owner = globals::state && globals::state->PeekTonemapOwner() == State::TonemapOwner::kEffects11;
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->declaredOwner = owner;
 			return owner;
 		};
-		client->active = [] {
+		client.active = [] {
 			const auto& self = ORGFxRuntime::Get();
 			return self.impl && self.impl->activeNow;
 		};
 		// The commit that runs is the one of the registration the run's graph holds, so it writes its own plan.
-		client->commit = [a_frame](const FrameAnchors::Point&) {
+		client.commit = [a_frame](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->SafeCommit(*a_frame);
 		};
-		client->executed = [](const FrameAnchors::Point&) {
+		client.executed = [](const FrameAnchors::Point&) {
 			if (auto& self = ORGFxRuntime::Get(); self.impl)
 				self.impl->Executed();
 		};
-		client->gates = { clearGate };
-		return client;
+		client.gates = { clearGate };
+		// A schedule that still holds an older plan taps as it, and that plan's commit runs, so a new plan never drops a frame to FX11.
+		client.matchesById = true;
+		client.generation = ++buildGeneration;
+		a_client = std::move(client);
+		return true;
 	}
 
-	/** @brief The client's key for a revision's values: the plan of the chain the current settings and targets give. */
-	std::optional<Shape> KeyFor(const RF::Inputs& a_in)
-	{
-		if (failed)
-			return std::nullopt;
-		// Nothing may escape a revision's start. An error returns Effects11 to FX11 for the session.
-		try {
-			return Plan(a_in);
-		} catch (const std::exception& e) {
-			Fail(e.what());
-		} catch (...) {
-			Fail("an unknown exception");
-		}
-		return std::nullopt;
-	}
-
-	std::optional<Shape> Plan(const RF::Inputs& a_in)
+	/**
+	* @brief What a revision's chain plans from, and its display size in a_display. Nullopt while no preset runs. An input the
+	* graph cannot take, or an effect it cannot parse or lower, is fatal: FX11 never takes over. Render thread, no compile.
+	*/
+	std::optional<ChainInputs> ChainInputsFor(const RF::Inputs& a_in, RF::Vars::Extent2D& a_display)
 	{
 		// Same conditions as Effects11::RenderTonemap and ExecuteEffects. The tonemap owner is the client's declared.
 		auto& manager = EffectManager::GetSingleton();
 		if (!observed.ready || !manager.IsInitialized() || !manager.IsPresetLoaded())
 			return std::nullopt;
 		if (!observed.input || !observed.output)
-			return Inactive("the tonemap's input or output could not be imported");
+			Fatal("the tonemap's input or output could not be imported");
 		if (!observed.depth)
-			return Inactive("kMAIN's depth could not be imported");
+			Fatal("kMAIN's depth could not be imported");
 		if (observed.outputFormat == rhi::Format::Unknown || !observed.outputWidth || !observed.outputHeight)
-			return Inactive("the tonemap output's format or size is not known");
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host)
-			return Inactive("the render graph is not available");
+			Fatal("the tonemap output's format or size is not known");
 
 		ChainInputs inputs{};
 		for (std::size_t i = 0; i < kEffects; ++i) {
@@ -1659,13 +1740,12 @@ struct ORGFxRuntime::Impl
 			if (!effect.built)
 				BuildEffect(fx);
 			if (!effect.ok)
-				return Inactive(effect.reason);
+				Fatal(effect.reason);
 		}
-		if (!BuildCsPrograms(host->Device()))
-			return Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
 
 		// The textures follow the display size, as TextureManager's follow the screen.
 		const auto display = DisplayOf(a_in);
+		a_display = display;
 		inputs.input = observed.input;
 		inputs.depth = observed.depth;
 		inputs.output = observed.output;
@@ -1682,29 +1762,146 @@ struct ORGFxRuntime::Impl
 		// Where CopyResource would apply: same format and size as Original, mip 0 of one slice.
 		inputs.inputCopies = observed.inputWidth == display.width && observed.inputHeight == display.height && observed.inputFormat == rhi::Format::R16G16B16A16_Float;
 		inputs.mainCopies = inputs.main && observed.mainCopyable && observed.mainWidth == display.width && observed.mainHeight == display.height;
+		return inputs;
+	}
 
-		auto text = ShapeKey(inputs, display);
-		if (planned && planned->text == text)
-			return planned;
-		const auto started = std::chrono::steady_clock::now();
-		Planner planner(*this, inputs, display);
-		auto frame = planner.Build();
-		// The effect fails until the next reload, and FX11 runs it meanwhile.
-		if (!frame)
-			return Inactive(planner.error);
-		auto client = MakeClient(frame);
-		if (!client)
-			return std::nullopt;
-		planned = Shape{ std::move(text), frame, std::move(client) };
-		lastReason.clear();
-		std::string effectsList;
-		for (std::size_t i = 0; i < kEffects; ++i)
-			if (frame->runs[i])
-				effectsList += fmt::format("{}{}", effectsList.empty() ? "" : ", ", effects[i].Name());
-		const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-		logger::info("[ORG] Effects11 runs on the render graph from the next revision: {} passes ({} from .fx: {}), {} latch bytes, {}x{}, planned in {:.0f} ms",
-			frame->steps.size(), frame->fxPasses, effectsList, frame->latchBytes, frame->width, frame->height, ms);
-		return planned;
+	/**
+	* @brief The declared program's key: every program the chain of a_in's values asks for. A listing run of the planner on the
+	* render thread, CPU only. An equal shape text gives the last plan without planning again.
+	*/
+	FxPlanKey PlanFor(const RF::Inputs& a_in)
+	{
+		// Nothing may escape a revision's start, and an error is fatal.
+		try {
+			FxPlanKey plan{ .generation = generation };
+			RF::Vars::Extent2D display{};
+			const auto inputs = ChainInputsFor(a_in, display);
+			if (!inputs)
+				return plan;
+			auto text = ShapeKey(*inputs, display);
+			if (lastPlan && lastPlan->first == text && lastPlan->second.generation == generation)
+				return lastPlan->second;
+			std::vector<PlannedProgram> listed;
+			Planner planner(*this, *inputs, display, nullptr, &listed);
+			planner.Build();
+			if (!planner.error.empty())
+				Fatal(fmt::format("the chain could not be planned: {}", planner.error));
+			for (const auto& program : listed)
+				plan.keys.push_back(program.key);
+			std::ranges::sort(plan.keys);
+			plan.programs = std::make_shared<const std::vector<PlannedProgram>>(std::move(listed));
+			lastPlan.emplace(std::move(text), plan);
+			return plan;
+		} catch (const std::exception& e) {
+			Fatal(fmt::format("planning threw: {}", e.what()));
+		}
+	}
+
+	/** @brief The declared program's build, on the programs lane. Null, logged, when a program does not build: that is fatal. */
+	static std::shared_ptr<const FxPrograms> BuildPlan(ProgramStore& a_store, rhi::Device a_device, const FxPlanKey& a_plan)
+	{
+		auto built = std::make_shared<FxPrograms>();
+		if (!a_plan.programs)
+			return built;
+		std::uint32_t compiled = 0;
+		for (const auto& planned : *a_plan.programs) {
+			const auto stored = fmt::format("{}|{}", a_plan.generation, planned.key);
+			if (const auto* raster = std::get_if<RasterProgram::Desc>(&planned.desc)) {
+				std::shared_ptr<const RasterProgram> program;
+				{
+					const std::lock_guard lock(a_store.mutex);
+					if (const auto found = a_store.raster.find(stored); found != a_store.raster.end())
+						program = found->second;
+				}
+				if (!program) {
+					program = RasterProgram::Load(a_device, *raster);
+					if (!program) {
+						logger::critical("[ORG] Effects11: {} ({}) did not build on the programs lane (the [ORG] error above has DXC's messages)", raster->pixelSource,
+							planned.key);
+						return nullptr;
+					}
+					++compiled;
+					const std::lock_guard lock(a_store.mutex);
+					a_store.raster.emplace(stored, program);
+				}
+				built->raster.emplace(planned.key, std::move(program));
+			} else {
+				const auto& compute = std::get<ComputeProgram::Desc>(planned.desc);
+				std::shared_ptr<const ComputeProgram> program;
+				{
+					const std::lock_guard lock(a_store.mutex);
+					if (const auto found = a_store.compute.find(stored); found != a_store.compute.end())
+						program = found->second;
+				}
+				if (!program) {
+					program = ComputeProgram::Load(a_device, compute);
+					if (!program) {
+						logger::critical("[ORG] Effects11: {} ({}) did not build on the programs lane", compute.source, planned.key);
+						return nullptr;
+					}
+					++compiled;
+					const std::lock_guard lock(a_store.mutex);
+					a_store.compute.emplace(stored, program);
+				}
+				built->compute.emplace(planned.key, std::move(program));
+			}
+		}
+		logger::info("[ORG] Effects11: the FX chain's {} programs are built on the programs lane ({} new)", a_plan.programs->size(), compiled);
+		return built;
+	}
+
+	/**
+	* @brief The client's key for a revision's values: the shape text, what the build plans from and the plan's programs. Reads
+	* values and programs only. The revision started once the programs of its values were built, so they are there.
+	*/
+	std::optional<Shape> KeyFor(const RF::Inputs& a_in)
+	{
+		// Nothing may escape a revision's start, and an error is fatal.
+		try {
+			Shape shape;
+			const auto inputs = ChainInputsFor(a_in, shape.display);
+			if (!inputs)
+				return std::nullopt;
+			shape.inputs = *inputs;
+			shape.text = ShapeKey(*inputs, shape.display);
+			shape.generation = generation;
+			shape.programs = programs.For(a_in);
+			return shape;
+		} catch (const std::exception& e) {
+			Fatal(fmt::format("the client's key threw: {}", e.what()));
+		}
+	}
+
+	/** @brief The make function: builds the chain for a_shape. False is fatal (Frame/Declare.h), so the reason is logged first. */
+	bool Make(const Shape& a_shape, FrameAnchors::ClientDesc& a_client)
+	{
+		std::string failure;
+		try {
+			if (!a_shape.programs)
+				failure = "its programs are not built";
+			else {
+				const auto started = std::chrono::steady_clock::now();
+				Planner planner(*this, a_shape.inputs, a_shape.display, a_shape.programs.get(), nullptr);
+				const auto frame = planner.Build();
+				if (!frame)
+					failure = planner.error;
+				else if (MakeClient(frame, a_client, failure)) {
+					std::string effectsList;
+					for (std::size_t i = 0; i < kEffects; ++i)
+						if (frame->runs[i])
+							effectsList += fmt::format("{}{}", effectsList.empty() ? "" : ", ", effects[i].Name());
+					const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+					logger::info("[ORG] Effects11: FX chain {} built for the next revision: {} passes ({} from .fx: {}), {} programs, {} latch bytes, {}x{}, in {:.0f} ms",
+						a_client.generation, frame->steps.size(), frame->fxPasses, effectsList, a_shape.programs->raster.size() + a_shape.programs->compute.size(),
+						frame->latchBytes, frame->width, frame->height, ms);
+					return true;
+				}
+			}
+		} catch (const std::exception& e) {
+			failure = e.what();
+		}
+		logger::critical("[ORG] Effects11: the FX chain could not be built: {}", failure);
+		return false;
 	}
 
 	/** @brief What this tonemap's targets and FX11's effects are. */
@@ -1745,53 +1942,42 @@ struct ORGFxRuntime::Impl
 		return now;
 	}
 
-	/** @brief At the first tonemap the graph can take. False, the runtime failed, when the client cannot be declared. */
-	bool Declare()
+	/** @brief At the first tonemap the graph can take. A part that cannot be made is fatal. */
+	void Declare()
 	{
 		clearGate = RenderGraph::RunGate::Create("cs.effects11.clears", kTextureRows);
-		if (!clearGate) {
-			Fail("its clear gate could not be made");
-			return false;
-		}
-		// The key reads Effects11's settings, its effects' techniques and the observed targets. Effects11's writers raise
-		// fxShapeWrites, a new observation invalidates the key, and a new display size is in the values.
+		if (!clearGate)
+			Fatal("its clear gate could not be made");
+		linearSampler = ShaderBindings::CreateSampler({});
+		if (!linearSampler)
+			Fatal("its linear sampler could not be made");
+		// Both keys read Effects11's settings, its effects' techniques and the observed targets. Effects11's writers raise
+		// fxShapeWrites, a new observation invalidates both, and a new display size is in the values.
+		const auto dependencies = RF::DependsOn(RF::Vars::DisplaySize(), globals::features::effects11.fxShapeWrites);
+		// The first plan is empty (nothing is observed yet), so the declaration builds nothing. Later plans build on the lane.
+		programs = RF::DeclareProgram(
+			"Effects11::FxChain", dependencies, [this](const RF::Inputs& a_in) { return PlanFor(a_in); },
+			[store = store, device = RenderGraphRuntime::Get().Host()->Device()](const FxPlanKey& a_plan) { return BuildPlan(*store, device, a_plan); });
+		if (!programs)
+			Fatal("its programs could not be declared");
 		client = RF::DeclareClient<Shape>(
-			kClientId, RF::DependsOn(RF::Vars::DisplaySize(), globals::features::effects11.fxShapeWrites),
-			[this](const RF::Inputs& a_in) { return KeyFor(a_in); },
-			[](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) {
-				a_client = *a_shape.client;
-				return true;
-			});
-		if (!client) {
-			Fail("its client could not be declared");
-			return false;
-		}
-		logger::info("[ORG] Effects11: the FX chain's client follows the frame revisions");
-		return true;
+			kClientId, dependencies, [this](const RF::Inputs& a_in) { return KeyFor(a_in); },
+			[this](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return Make(a_shape, a_client); });
+		if (!client)
+			Fatal("its client could not be declared");
+		logger::info("[ORG] Effects11: the FX chain's programs and client follow the frame revisions");
 	}
 
 	/** @brief Prepare catches what it throws. */
 	void PrepareFrame(const RenderGraph::Engine::TonemapTargets& a_targets);
 
-	/** @brief FX11 for the rest of the session. The next revision removes the client. */
-	void Fail(std::string_view a_what)
-	{
-		logger::error("[ORG] Effects11 returns to FX11 for the session: {}", a_what);
-		failed = true;
-		activeNow = false;
-		ranFrame = UINT32_MAX;
-		planned.reset();
-		client.Invalidate();
-	}
-
-	/** @brief Keeps what Commit throws inside the epoch's callback. */
+	/** @brief Keeps what Commit throws inside the epoch's callback. It is fatal. */
 	void SafeCommit(Frame& a_frame)
 	{
 		try {
 			Commit(a_frame);
 		} catch (const std::exception& e) {
-			// Passes already in this epoch run with the latch as it is. Later frames go to FX11.
-			Fail(fmt::format("the commit failed: {}", e.what()));
+			Fatal(fmt::format("the commit failed: {}", e.what()));
 		}
 	}
 
@@ -1901,9 +2087,17 @@ void ORGFxRuntime::Invalidate()
 		return;
 	// The current registration keeps its own copy of the variables it reads, and its commit leaves a reloaded effect to FX11.
 	impl->activeNow = false;
-	impl->planned.reset();
 	for (auto& effect : impl->effects)
 		effect = FxEffect{};
+	// A reload lists and builds every program again. Registrations and kept plans hold their own programs.
+	{
+		const std::lock_guard lock(impl->store->mutex);
+		impl->store->raster.clear();
+		impl->store->compute.clear();
+	}
+	++impl->generation;
+	impl->lastPlan.reset();
+	impl->programs.Invalidate();
 	impl->client.Invalidate();
 }
 
@@ -1914,15 +2108,13 @@ void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets& a_targets)
 	if (!impl)
 		impl = std::make_unique<Impl>();
 	impl->activeNow = false;
-	if (impl->failed)
-		return;
-	// Nothing may escape the engine's tonemap call. An error returns Effects11 to FX11 for the session.
+	// Nothing may escape the engine's tonemap call, and an error is fatal.
 	try {
 		impl->PrepareFrame(a_targets);
 	} catch (const std::exception& e) {
-		impl->Fail(e.what());
+		Fatal(e.what());
 	} catch (...) {
-		impl->Fail("an unknown exception");
+		Fatal("an unknown exception");
 	}
 }
 
@@ -1933,11 +2125,18 @@ void ORGFxRuntime::Impl::PrepareFrame(const RenderGraph::Engine::TonemapTargets&
 		Inactive("the render graph or its Tonemap anchor is not available");
 		return;
 	}
-	if (!client && !Declare())
+	if (!client)
+		Declare();
+	// A tonemap after this frame's stage, such as a menu scene's, is not the world's. No stage takes it, so FX11 runs it, and it
+	// leaves the observed state alone.
+	if (FrameAnchors::StagePassed(kClientId, FrameAnchors::Anchor::Tonemap)) {
+		Inactive("a tonemap after this frame's stage, such as a menu scene's");
 		return;
+	}
 	// Not variables yet: a change of the targets or of FX11's compiled effects plans again at the next revision.
 	if (auto now = Observe(a_targets); !(now == observed)) {
 		observed = std::move(now);
+		programs.Invalidate();
 		client.Invalidate();
 	}
 	frameInput = a_targets.input;
@@ -1945,12 +2144,18 @@ void ORGFxRuntime::Impl::PrepareFrame(const RenderGraph::Engine::TonemapTargets&
 	// Same conditions as Effects11::RenderTonemap and ExecuteEffects. A frame whose Begin left the passes off has no commit either.
 	if (globals::state->GetTonemapOwner() != State::TonemapOwner::kEffects11 || !observed.ready || !declaredOwner)
 		return;
-	activeNow = client.Registered();
+	// The registration the frame's schedule holds commits, which may be older than the newest one (matchesById).
+	const auto hold = FrameAnchors::HeldNow(kClientId, FrameAnchors::Anchor::Tonemap);
+	activeNow = hold.held && hold.scheduled;
+	if (activeNow)
+		lastReason.clear();
+	else
+		Inactive(hold.held ? "the tonemap's stage has no schedule that holds the chain yet" : "this frame has no stage that holds the chain");
 }
 
 bool ORGFxRuntime::RanThisFrame() const
 {
-	return impl && !impl->failed && impl->ranFrame == globals::state->frameCount;
+	return impl && impl->ranFrame == globals::state->frameCount;
 }
 
 #else  // !CS_HAS_RENDER_GRAPH

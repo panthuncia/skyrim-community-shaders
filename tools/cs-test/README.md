@@ -84,6 +84,7 @@ The shipped configs:
 | `cloud-shadows` | Cloud Shadows under a forced storm, its opacity changed and back, then a coc into Dragonsreach and back: the occlusion copy's client, registered once by a frame revision, stays as it is; compose it, `native-vulkan+cloud-shadows` |
 
 | `effects11` | Effects11's rays on, bloom and adaptation off and on, a window resize, a shader cache clear and the rays off (`e11` steps: `<CATEGORY>.<Key>=<value>` or `clear-shader-cache`): the ORG FX chain's plan, its textures and the rays' textures, programs and client switch with frame revisions; needs an Effects11 preset with "Post Processing Mode": "Effects11"; compose it, `native-vulkan+effects11` |
+| `effects11-programs` | Bloom off and on and a shader cache clear: the FX chain's programs are built on the programs lane before their revision starts, never on the render thread; needs an Effects11 preset with "Post Processing Mode": "Effects11"; compose it, `native-vulkan+effects11-programs` |
 
 | `shader-reload` | a forced reload of every live pipeline (`dclf:reload-shaders=all`), then an unchanged one-file reload, a shot before and after each (`wait = "reload"`): the swap is a `ShaderGeneration` event, swapped in by the revision that carries it; compose it, `native-vulkan+shader-reload` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
