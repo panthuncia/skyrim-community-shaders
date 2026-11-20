@@ -309,9 +309,9 @@ namespace ORGPostChain
 		/** @brief The whole of kMAIN. */
 		RasterProgram::Viewport FullViewport() const;
 		/**
-		* @brief For draws the D3D11 path limits to the dynamic-resolution part. The ratio is a per-frame value, so a recording
-		* cannot bake it. Until the viewport comes from the latch (frame revision plan, step 8) this is the whole of kMAIN, and
-		* the effect's constants carry CommitContext::DynamicSize.
+		* @brief For draws the D3D11 path limits to the dynamic-resolution part. The whole of kMAIN: the chain runs after the
+		* upscale, where Upscaling locks dynamic resolution, so the dynamic part is the whole image. The ratio is a per-frame
+		* value, so the effect's constants carry CommitContext::DynamicSize and nothing rebuilds on it (frame revision plan, step 8).
 		*/
 		RasterProgram::Viewport DynamicViewport() const;
 		/** @brief As a D3D11 viewport of width >> a_mip. */

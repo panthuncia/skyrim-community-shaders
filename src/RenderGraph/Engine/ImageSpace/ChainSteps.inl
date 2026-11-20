@@ -39,7 +39,6 @@ struct ChainKey
 {
 	Frame::Vars::Extent2D display{};
 	Frame::Vars::TargetIdentity hdr{};  // HDR Display's scene texture, the final target while HDR is on
-	Frame::Vars::Ratios ratios{};       // the VL composite's render-size viewport is baked at registration until step 8
 	std::uint32_t levels = 0, effects = 0, states = 0;
 	friend bool operator==(const ChainKey&, const ChainKey&) = default;
 };
@@ -52,7 +51,6 @@ struct ChainSteps
 	std::array<std::optional<FrameAnchors::ClientDesc>, 3> descs;
 	std::array<Frame::DeclaredClient, 3> clients;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
-	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::int32_t final = RE::RENDER_TARGET::kFRAMEBUFFER;
 	// The registration's HDR scene texture, null while HDR is off.
 	ID3D11Texture2D* hdrTarget = nullptr;
@@ -496,8 +494,8 @@ std::optional<ChainKey> ChainKeyOf(const Values& a_values)
 	const auto shape = ReadyShape(a_values);
 	if (!shape || !Chain().on)
 		return std::nullopt;
-	return ChainKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::HdrOutputTarget()), a_values.Get(Frame::Vars::DynamicRatios()),
-		shape->luminanceLevels, shape->effects, shape->states };
+	return ChainKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::HdrOutputTarget()), shape->luminanceLevels, shape->effects,
+		shape->states };
 }
 
 bool ChainLagging()
@@ -546,7 +544,8 @@ bool DeclareChainSteps()
 			logger::error("[ORG] ImageSpace: the adapted luminance pair could not be published");
 			return false;
 		}
-	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::HdrOutputTarget(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace());
+	// The ratios are no dependency: the VL composite's render-size viewport is latched at each draw.
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::HdrOutputTarget(), Frame::Vars::EngineImageSpace());
 	for (std::size_t part = 0; part < chain.clients.size(); ++part)
 		chain.clients[part] = DeclareStepClient<ChainKey>(kChainParts[part], dependencies, [](const Frame::Inputs& a_in) { return ChainKeyOf(a_in); },
 			[part](const ChainKey& a_key) { return ChainDescFor(a_key, part); });
@@ -574,7 +573,9 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	on[ChainGroup::kBloom + (std::min)(post.bloom, std::uint8_t{ 6 })] |= post.hdr;
 	on[post.fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap] |= post.hdr && !post.effects11;
 	on[ChainGroup::kTaa] |= post.taa;
-	on[ChainGroup::kUpsample] |= post.dynres;
+	// The engine's own dynamic-resolution upsample runs when its ratio is not 1 and unlocked. A ratio is no build input
+	// (decision 6a), so the upsample stays on. Gated, so frames without it skip it.
+	on[ChainGroup::kUpsample] = true;
 	// A save asks for the screenshot with at most a frame of notice, after Begin may have read the flag. Gated, so idle frames skip it.
 	on[ChainGroup::kScreenshot] = true;
 	// The capture frame is only known at its own Begin, too late for a build. Gated, so every other frame skips it.
@@ -723,10 +724,7 @@ void BuildChainSteps(const ChainKey& a_key)
 	chain.hdrTarget = a_key.hdr.id ? reinterpret_cast<ID3D11Texture2D*>(a_key.hdr.id) : nullptr;
 	chain.hdrFormat = static_cast<DXGI_FORMAT>(a_key.hdr.format);
 	chain.final = FinalName();
-	chain.ratios = { a_key.ratios.x, a_key.ratios.y };
 	chain.levels = a_key.levels;
-	// MakeStepSpec bakes the render-size viewports with the key's ratios.
-	const BuildRatiosScope ratioScope(chain.ratios);
 	using T = RE::RENDER_TARGET;
 	if (AdaptTargetOf(chain.levels, 1) < 0) {
 		// The kept pair is one texel then, and no step could write it.
@@ -1245,9 +1243,8 @@ void BuildChainSteps(const ChainKey& a_key)
 	}
 	chain.registered = true;
 	logger::info("[ORG] ImageSpace: the post chain is CS passes: {} composite, {} pre-tonemap and {} post-tonemap passes ({} luminance levels), for {}x{} "
-				 "into {}x{} at ratios {:.3f}x{:.3f}, registered for the revision starting now",
-		chain.parts[0].count, chain.parts[1].count, chain.parts[2].count, chain.levels, chain.width, chain.height, chain.finalWidth, chain.finalHeight,
-		chain.ratios.first, chain.ratios.second);
+				 "into {}x{} (render-size viewports latched per draw), registered for the revision starting now",
+		chain.parts[0].count, chain.parts[1].count, chain.parts[2].count, chain.levels, chain.width, chain.height, chain.finalWidth, chain.finalHeight);
 }
 
 bool ChainStepNow()
