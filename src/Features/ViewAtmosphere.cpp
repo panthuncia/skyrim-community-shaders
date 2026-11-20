@@ -40,6 +40,35 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	depthDistribution,
 	lookupJitter)
 
+ViewAtmosphere::ViewAtmosphere()
+{
+	settings.nearPixelSize.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.nearPixelSize"));
+	settings.nearSlices.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.nearSlices"));
+	settings.middlePixelSize.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.middlePixelSize"));
+	settings.middleSlices.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.middleSlices"));
+}
+
+ViewAtmosphere::GpuSettings ViewAtmosphere::GetCommonBufferData() const
+{
+	GpuSettings gpu;
+	gpu.enabled = settings.enabled;
+	gpu.nearPixelSize = settings.nearPixelSize;
+	gpu.nearSlices = settings.nearSlices;
+	gpu.middlePixelSize = settings.middlePixelSize;
+	gpu.middleSlices = settings.middleSlices;
+	gpu.distantPixelSize = settings.distantPixelSize;
+	gpu.distantSlices = settings.distantSlices;
+	gpu.historyMissSamples = settings.historyMissSamples;
+	gpu.nearRange = settings.nearRange;
+	gpu.localRange = settings.localRange;
+	gpu.historyWeight = settings.historyWeight;
+	gpu.sampleJitter = settings.sampleJitter;
+	gpu.shadowBias = settings.shadowBias;
+	gpu.depthDistribution = settings.depthDistribution;
+	gpu.lookupJitter = settings.lookupJitter;
+	return gpu;
+}
+
 void ViewAtmosphere::LoadSettings(json& value)
 {
 	settings = value;
@@ -48,11 +77,11 @@ void ViewAtmosphere::LoadSettings(json& value)
 		return std::clamp(std::isfinite(input) ? input : fallback, minimum, maximum);
 	};
 	settings.enabled = settings.enabled != 0;
-	settings.nearPixelSize = std::clamp(settings.nearPixelSize, 4u, 64u);
-	settings.middlePixelSize = std::clamp(settings.middlePixelSize, settings.nearPixelSize, 64u);
-	settings.distantPixelSize = std::clamp(settings.distantPixelSize, settings.nearPixelSize, 64u);
-	settings.nearSlices = std::clamp(settings.nearSlices, 16u, 160u);
-	settings.middleSlices = std::clamp(settings.middleSlices, 16u, 160u);
+	settings.nearPixelSize = std::clamp(settings.nearPixelSize.Get(), 4u, 64u);
+	settings.middlePixelSize = std::clamp(settings.middlePixelSize.Get(), settings.nearPixelSize.Get(), 64u);
+	settings.distantPixelSize = std::clamp(settings.distantPixelSize, settings.nearPixelSize.Get(), 64u);
+	settings.nearSlices = std::clamp(settings.nearSlices.Get(), 16u, 160u);
+	settings.middleSlices = std::clamp(settings.middleSlices.Get(), 16u, 160u);
 	settings.distantSlices = std::clamp(settings.distantSlices, 16u, 160u);
 	settings.historyMissSamples = std::clamp(settings.historyMissSamples, 1u, 16u);
 	settings.nearRange = bounded(settings.nearRange, defaults.nearRange, 15.0f / Util::Units::GAME_UNIT_TO_M, 700.0f / Util::Units::GAME_UNIT_TO_M);
@@ -94,7 +123,8 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::TextWrapped("%s", T(TKEY("shared_hint"), "The shared volume requires active Physical Sky. Otherwise aerial perspective uses its LUT and volumetric fog uses separate volumes. Quality settings below also apply to standalone volumetric fog. Reflections use a separate low-resolution atmosphere and fog cache when the shared volume is enabled."));
 	ImGui::TextUnformatted(IsReady() ? T(TKEY("status_shared"), "Active: shared atmosphere and fog volume") : T(TKEY("status_separate"), "Active: separate rendering paths"));
 
-	const uint32_t minPixels = 4, maxPixels = 64, minSlices = 16, maxSlices = 160;
+	const int minPixels = 4, maxPixels = 64, minSlices = 16, maxSlices = 160;
+	const uint32_t maxDistantPixels = 64, minDistantSlices = 16, maxDistantSlices = 160;
 	const auto distanceSlider = [](const char* label, float& value, float minimum, float maximum) {
 		float meters = value * Util::Units::GAME_UNIT_TO_M;
 		if (ImGui::SliderFloat(label, &meters, minimum, maximum, "%.1f m", ImGuiSliderFlags_AlwaysClamp))
@@ -104,16 +134,18 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::TextWrapped("%s", T(TKEY("grid_hint"), "Smaller pixel sizes and more depth slices improve detail at a higher cost. The shared volume continues beyond the local range to 40 km; standalone volumetric fog ends at the local range."));
 	distanceSlider(T(TKEY("near_range"), "Near Grid End"), settings.nearRange, 15.0f, std::min(700.0f, (settings.localRange - 1000.0f) * Util::Units::GAME_UNIT_TO_M));
 	distanceSlider(T(TKEY("local_range"), "Local Volume End"), settings.localRange, std::max(30.0f, (settings.nearRange + 1000.0f) * Util::Units::GAME_UNIT_TO_M), 3000.0f);
-	if (ImGui::SliderScalar(T(TKEY("near_pixels"), "Near Grid Pixel Size"), ImGuiDataType_U32, &settings.nearPixelSize, &minPixels, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp)) {
-		settings.middlePixelSize = std::max(settings.middlePixelSize, settings.nearPixelSize);
-		settings.distantPixelSize = std::max(settings.distantPixelSize, settings.nearPixelSize);
+	if (Util::SliderInt(T(TKEY("near_pixels"), "Near Grid Pixel Size"), settings.nearPixelSize, minPixels, maxPixels, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+		settings.middlePixelSize = std::max(settings.middlePixelSize.Get(), settings.nearPixelSize.Get());
+		settings.distantPixelSize = std::max(settings.distantPixelSize, settings.nearPixelSize.Get());
 	}
-	ImGui::SliderScalar(T(TKEY("near_slices"), "Near Grid Depth Slices"), ImGuiDataType_U32, &settings.nearSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderScalar(T(TKEY("middle_pixels"), "Middle Grid Pixel Size"), ImGuiDataType_U32, &settings.middlePixelSize, &settings.nearPixelSize, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderScalar(T(TKEY("middle_slices"), "Middle Grid Depth Slices"), ImGuiDataType_U32, &settings.middleSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
+	// The later grids are never finer than the near grid.
+	const uint32_t nearPixels = settings.nearPixelSize;
+	Util::SliderInt(T(TKEY("near_slices"), "Near Grid Depth Slices"), settings.nearSlices, minSlices, maxSlices, "%d", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("middle_pixels"), "Middle Grid Pixel Size"), settings.middlePixelSize, static_cast<int>(nearPixels), maxPixels, "%d", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("middle_slices"), "Middle Grid Depth Slices"), settings.middleSlices, minSlices, maxSlices, "%d", ImGuiSliderFlags_AlwaysClamp);
 	if (enabled && globals::features::physicalSky.loaded && globals::features::physicalSky.cbData.enabled) {
-		ImGui::SliderScalar(T(TKEY("distant_pixels"), "Distant Atmosphere Pixel Size"), ImGuiDataType_U32, &settings.distantPixelSize, &settings.nearPixelSize, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp);
-		ImGui::SliderScalar(T(TKEY("distant_slices"), "Distant Atmosphere Depth Slices"), ImGuiDataType_U32, &settings.distantSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderScalar(T(TKEY("distant_pixels"), "Distant Atmosphere Pixel Size"), ImGuiDataType_U32, &settings.distantPixelSize, &nearPixels, &maxDistantPixels, "%u", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderScalar(T(TKEY("distant_slices"), "Distant Atmosphere Depth Slices"), ImGuiDataType_U32, &settings.distantSlices, &minDistantSlices, &maxDistantSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
 	}
 	ImGui::SeparatorText(T(TKEY("sampling"), "Sampling"));
 	ImGui::SliderFloat(T(TKEY("history_weight"), "Temporal History Weight"), &settings.historyWeight, 0.0f, 0.99f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -205,14 +237,14 @@ bool ViewAtmosphere::Prepare()
 	auto& fog = globals::features::exponentialHeightFog;
 	const bool useFog = fog.IsActive();
 	const float2 screen = Util::ConvertToDynamic(float2{ float(globals::game::graphicsState->screenWidth), float(globals::game::graphicsState->screenHeight) });
-	const uint32_t pixelSize = std::clamp(settings.nearPixelSize, 4u, 64u);
-	const uint32_t farPixelSize = std::max(pixelSize, std::clamp(settings.middlePixelSize, 4u, 64u));
+	const uint32_t pixelSize = std::clamp(settings.nearPixelSize.Get(), 4u, 64u);
+	const uint32_t farPixelSize = std::max(pixelSize, std::clamp(settings.middlePixelSize.Get(), 4u, 64u));
 	const float maxDistance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
 	const float nearEnd = std::clamp(settings.nearRange, 1000.0f, maxDistance * 0.1f);
 	const float middleEnd = std::clamp(settings.localRange, nearEnd + 1000.0f, maxDistance * 0.5f);
 	const uint32_t sizes[3] = { pixelSize, farPixelSize, std::max(pixelSize, std::clamp(settings.distantPixelSize, 4u, 64u)) };
-	const uint32_t layers[3] = { std::clamp(settings.nearSlices, 16u, 160u),
-		std::clamp(settings.middleSlices, 16u, 160u), std::clamp(settings.distantSlices, 16u, 160u) };
+	const uint32_t layers[3] = { std::clamp(settings.nearSlices.Get(), 16u, 160u),
+		std::clamp(settings.middleSlices.Get(), 16u, 160u), std::clamp(settings.distantSlices, 16u, 160u) };
 	const float ends[4] = { 0.0f, nearEnd, middleEnd, maxDistance };
 	Parameters next{};
 	uint32_t gridScale[3] = { 1u, 1u, 1u };
@@ -778,10 +810,6 @@ Feature::SizeProjection ViewAtmosphere::ProjectSizeSettings() const
 {
 	SizeProjection projection;
 	projection.Add("enabled", settings.enabled)
-		.Add("nearPixelSize", settings.nearPixelSize)
-		.Add("nearSlices", settings.nearSlices)
-		.Add("middlePixelSize", settings.middlePixelSize)
-		.Add("middleSlices", settings.middleSlices)
 		.Add("distantPixelSize", settings.distantPixelSize)
 		.Add("distantSlices", settings.distantSlices);
 	return projection;

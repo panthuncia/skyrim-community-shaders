@@ -43,10 +43,10 @@ namespace CS
 			std::memcpy(a_binding.raised.data(), a_binding.address, a_binding.size);
 		}
 
-		void CallSettingHook(SettingRegistry::RaiseHook a_hook, SettingVariableId a_id, std::string_view a_name)
+		void CallSettingHook(SettingRegistry::RaiseHook a_hook, SettingVariableId a_id, std::string_view a_name, const std::vector<std::byte>& a_bytes)
 		{
 			if (a_hook)
-				a_hook(a_id, a_name);
+				a_hook(a_id, a_name, a_bytes.empty() ? nullptr : a_bytes.data(), a_bytes.size());
 		}
 	}
 
@@ -113,15 +113,18 @@ namespace CS
 		auto& table = Settings();
 		RaiseHook hook = nullptr;
 		std::string_view name;
+		std::vector<std::byte> bytes;
 		{
 			std::scoped_lock lock(table.mutex);
-			if (const auto found = table.bindings.find(a_id); found != table.bindings.end())
+			if (const auto found = table.bindings.find(a_id); found != table.bindings.end()) {
 				RecordSettingBytes(found->second);
+				bytes = found->second.raised;
+			}
 			if (a_id != 0 && a_id <= table.names.size())
 				name = table.names[a_id - 1];
 			hook = table.hook;
 		}
-		CallSettingHook(hook, a_id, name);
+		CallSettingHook(hook, a_id, name, bytes);
 	}
 
 	void SettingRegistry::RaiseAt(const void* a_address)
@@ -130,6 +133,7 @@ namespace CS
 		RaiseHook hook = nullptr;
 		SettingVariableId id = 0;
 		std::string_view name;
+		std::vector<std::byte> bytes;
 		{
 			std::scoped_lock lock(table.mutex);
 			const auto found = table.idsByAddress.find(a_address);
@@ -139,11 +143,23 @@ namespace CS
 			if (SettingBytesRaised(binding))
 				return;
 			RecordSettingBytes(binding);
+			bytes = binding.raised;
 			id = found->second;
 			name = table.names[id - 1];
 			hook = table.hook;
 		}
-		CallSettingHook(hook, id, name);
+		CallSettingHook(hook, id, name, bytes);
+	}
+
+	bool SettingRegistry::RaisedBytes(SettingVariableId a_id, void* a_out, std::size_t a_size)
+	{
+		auto& table = Settings();
+		std::scoped_lock lock(table.mutex);
+		const auto found = table.bindings.find(a_id);
+		if (found == table.bindings.end() || found->second.size != a_size)
+			return false;
+		std::memcpy(a_out, found->second.raised.data(), a_size);
+		return true;
 	}
 
 	std::vector<SettingVariableId> SettingRegistry::Unraised()

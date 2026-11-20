@@ -15,7 +15,8 @@
 * Dispatches go through a run gate, so a run without the fog's frame does no work. Copies and the clear have no indirect
 * form and run every time, on data nobody reads then.
 * The two integrated volumes are exported for the engine's shaders at t19 and t22 and published for DCLF.
-* A frame whose inputs the graph cannot read runs on D3D11. A failed program or registration returns to D3D11 for good.
+* The volumes and the client are declared on their settings and the display size, so a change switches in with a frame revision.
+* A frame whose inputs the graph cannot read has no volumetric fog. A failed program at Setup keeps the fog on D3D11.
 * Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGExponentialHeightFog
@@ -37,6 +38,7 @@ public:
 	* 6: every DCLF draw gets no volume. The draws that still run on D3D11 still do.
 	* 7: the far volume is cleared to no fog every run, so every reader sees only the near volume.
 	* 8: no history: the volumes take no temporal history.
+	* 9: the histories are cleared every run, and the scattering's history guard is off.
 	*/
 	static std::uint32_t Debug();
 
@@ -46,7 +48,8 @@ public:
 	static void Reserve();
 
 	/**
-	* @brief At SetupResources. The client registers at the first Prepass, when grid sizes and inputs are known.
+	* @brief At SetupResources. Declares the volumes and the client on their settings (Frame/Declare.h). The client registers when
+	* a revision starts with the fog on and a Prepass has seen its inputs.
 	* @return False keeps the fog on D3D11.
 	*/
 	bool Setup();
@@ -63,11 +66,11 @@ public:
 	ID3D11ShaderResourceView* NearSRV() const;
 	ID3D11ShaderResourceView* FarSRV() const;
 
-	/** @brief A new count reaches the volumes one frame boundary after the setting changes, so readers take it from here. Null when NearSRV is null. */
+	/** @brief The adopted volumes' slice counts, which readers use instead of the settings. Null when NearSRV is null. */
 	std::optional<std::pair<std::uint32_t, std::uint32_t>> Slices() const;
 
-	/** @brief For when the fog turns off. Programs stay and the next Prepass registers again. */
-	void Release();
+	/** @brief Whether the adopted revision has the volumes on. They stay declared while off, at one texel. Render thread. */
+	bool VolumesOn() const;
 
 	~ORGExponentialHeightFog();
 
@@ -79,5 +82,4 @@ private:
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;
-	bool failed = false;
 };

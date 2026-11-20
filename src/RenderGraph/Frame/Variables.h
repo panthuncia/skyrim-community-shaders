@@ -2,6 +2,7 @@
 
 #include "Features/Upscaling/PresentationConfig.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <string_view>
@@ -85,6 +86,23 @@ namespace RenderGraph::Frame::Vars
 		friend bool operator==(const UpscalerOptions&, const UpscalerOptions&) = default;
 	};
 
+	/** @brief A frame-wide variable by name, as declarations name their dependencies (Frame/Declare.h). */
+	template <class T>
+	struct Var
+	{
+		std::string_view name;
+	};
+
+	/** @brief The frame-wide variables a declaration may depend on or read. */
+	constexpr Var<Extent2D> DisplaySize() { return { "DisplaySize" }; }
+	constexpr Var<Extent2D> RenderSize() { return { "RenderSize" }; }
+	constexpr Var<Ratios> DynamicRatios() { return { "DynamicRatios" }; }
+	constexpr Var<Upscaler> UpscaleMethod() { return { "UpscaleMethod" }; }
+	constexpr Var<bool> HdrEnabled() { return { "HdrEnabled" }; }
+	constexpr Var<TargetIdentity> HdrOutputTarget() { return { "HdrOutputTarget" }; }
+	constexpr Var<ShadowMapShape> EngineShadowMap() { return { "EngineShadowMap" }; }
+	constexpr Var<CubemapShape> ReflectionCubemap() { return { "ReflectionCubemap" }; }
+
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
 	/** @brief Any thread. The render size before upscaling. Constants only: no texture may be sized by it. */
@@ -142,10 +160,11 @@ namespace RenderGraph::Frame::Vars
 	std::uint64_t FeatureSettingsEvents(std::string_view a_feature);
 
 	/**
-	* @brief Any thread. One event on the serial variable of a CS::Setting, "Setting.<name>", declared on first use. Settings are
-	* told apart by id, so two settings with one name get two variables.
+	* @brief Any thread. One event on the variable of a CS::Setting, "Setting.<name>", declared on first use. It holds the
+	* setting's value bytes (a_bytes, a_size), so a revision carries the value. Settings are told apart by id, so two settings with
+	* one name get two variables. Matches CS::SettingRegistry::RaiseHook.
 	*/
-	void RaiseSetting(std::uint32_t a_settingId, std::string_view a_name);
+	void RaiseSetting(std::uint32_t a_settingId, std::string_view a_name, const void* a_bytes, std::size_t a_size);
 
 	/** @brief Logs the "[ORG] variables:" line, events per variable in the window and the session, and resets the window. */
 	void LogStats();

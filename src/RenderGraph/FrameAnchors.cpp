@@ -3494,6 +3494,7 @@ namespace FrameAnchors
 		};
 		RecordVersions versions;
 		std::vector<Member> members;
+		std::vector<StageBuildNeed> needs;
 	};
 
 	std::shared_ptr<RevisionRecordings> MakeRevisionRecordings(std::span<const std::uint32_t> a_epochs, std::shared_ptr<const org::IResourceVersions> a_versions,
@@ -3503,6 +3504,31 @@ namespace FrameAnchors
 		revision->versions = { std::move(a_versions), a_serial };
 		AddRevisionMembers(*revision, a_epochs, a_others);
 		return revision;
+	}
+
+	std::uint64_t ClientSegments(std::string_view a_id)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		auto* client = FindClient(state, a_id);
+		if (!client)
+			return 0;
+		std::uint64_t segments = 0;
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d] && ClientHolds(*client, d))
+				segments |= std::uint64_t{ 1 } << d;
+		return segments;
+	}
+
+	std::uint64_t ClientsSerial()
+	{
+		auto lock = Guard();
+		return Anchors().serial;
+	}
+
+	void RequireBuilds(RevisionRecordings& a_revision, std::vector<StageBuildNeed> a_needs)
+	{
+		a_revision.needs = std::move(a_needs);
 	}
 
 	bool StagedStages()
@@ -3557,6 +3583,12 @@ namespace FrameAnchors
 			if (state.declaredEpochs[d] && host.StagedGeneration(EpochOfDeclared(d)) && state.stagedSnapshots[d].load(std::memory_order_acquire) &&
 				std::ranges::none_of(a_revision.members, [&](const RevisionRecordings::Member& a_member) { return a_member.declared == d; }))
 				a_revision.members.push_back({ d });
+		// Stages a needed build lands in are members, whether it is staged yet or not.
+		for (const auto& need : a_revision.needs)
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if ((need.segments >> d & 1u) && state.declaredEpochs[d] &&
+					std::ranges::none_of(a_revision.members, [&](const RevisionRecordings::Member& a_member) { return a_member.declared == d; }))
+					a_revision.members.push_back({ d });
 		// Requests made here are Begin's, not mid-frame re-records.
 		const bool inBegin = std::exchange(state.inBegin, true);
 		for (auto& member : a_revision.members) {
@@ -3642,6 +3674,19 @@ namespace FrameAnchors
 			}
 		}
 		state.inBegin = inBegin;
+		// A needed build must be the one the member installs: staged, or already attached.
+		for (const auto& need : a_revision.needs)
+			for (const auto& member : a_revision.members) {
+				if (!(need.segments >> member.declared & 1u))
+					continue;
+				const auto built = member.staged ? member.stagedBuilt : state.declaredSnapshots[member.declared].load(std::memory_order_acquire);
+				if (built && built->serial >= need.serial)
+					continue;
+				if (progress.ready)
+					progress.missing = member.declared;
+				progress.ready = false;
+				note(progress.waiting, fmt::format("{} build holding {}", declaredInfo[member.declared].names.label, need.what));
+			}
 		return progress;
 	}
 
@@ -4441,6 +4486,9 @@ namespace FrameAnchors
 		return nullptr;
 	}
 	bool StagedStages() { return false; }
+	std::uint64_t ClientSegments(std::string_view) { return 0; }
+	std::uint64_t ClientsSerial() { return 0; }
+	void RequireBuilds(RevisionRecordings&, std::vector<StageBuildNeed>) {}
 	std::uint32_t AddRevisionMembers(RevisionRecordings&, std::span<const std::uint32_t>, std::vector<std::uint32_t>&) { return 0; }
 	RevisionProgress AdvanceRevisionRecordings(RevisionRecordings&, std::uint64_t) { return { .ready = true }; }
 	std::vector<std::uint32_t> RevisionStagedEpochs(const RevisionRecordings&) { return {}; }

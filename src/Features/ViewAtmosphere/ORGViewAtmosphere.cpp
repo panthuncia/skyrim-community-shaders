@@ -216,8 +216,8 @@ struct ORGViewAtmosphere::Impl
 			"[ORG] Atmosphere and Fog: the first post-water composite: kMAIN {}x{} format {}, groups for {}x{}, depth format {}; "
 			"fog on {}, volumetric {}, density {:.4f}/{:.4f}, start {:.0f}, volumetric start {:.0f}, local range {:.0f}, near range {:.0f}; "
 			"the fog's graph volumes {} (slices {}/{}); PostWaterComposite {}, near plane {:.2f}, camera ({:.0f}, {:.0f}, {:.0f}), debug view {}",
-			a_main.Width, a_main.Height, static_cast<int>(a_main.Format), a_width, a_height, static_cast<int>(depthFormat), fog.enabled, fog.volumetricFogEnabled,
-			fog.fogDensity, fog.fogDensity2, fog.startDistance, fog.volumetricFogStartDistance, atmosphere.localRange, atmosphere.nearRange,
+			a_main.Width, a_main.Height, static_cast<int>(a_main.Format), a_width, a_height, static_cast<int>(depthFormat), fog.enabled.Get(), fog.volumetricFogEnabled.Get(),
+			fog.fogDensity.Get(), fog.fogDensity2.Get(), fog.startDistance, fog.volumetricFogStartDistance, atmosphere.localRange, atmosphere.nearRange,
 			orgFog.NearSRV() ? "ran this frame" : "did not run this frame", slices ? slices->first : 0u, slices ? slices->second : 0u,
 			shared.PostWaterComposite, shared.CameraData.y, camera.x, camera.y, camera.z, DebugView());
 		ReportAnalyticInputs();

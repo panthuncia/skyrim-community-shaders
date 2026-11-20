@@ -6,6 +6,7 @@
 
 #	include <ORGModuleServices/Variables.h>
 
+#	include <cstring>
 #	include <format>
 #	include <functional>
 #	include <map>
@@ -30,11 +31,12 @@ namespace RenderGraph::Frame::Vars
 			std::uint64_t session = 0;
 		};
 
-		/** @brief A CS::Setting's serial variable and the name it was declared with. */
+		/** @brief A CS::Setting's variable and the name it was declared with. */
 		struct SettingVariable
 		{
-			Variable<std::uint64_t> variable;
+			Variable<Lane::SettingValue> variable;
 			std::string name;
+			std::uint64_t counter = 0;  // for a setting too big to carry
 		};
 
 		struct FrameVariables
@@ -180,25 +182,57 @@ namespace RenderGraph::Frame::Vars
 		return it == variables.features.end() ? 0 : variables.set.Get(it->second);
 	}
 
-	void RaiseSetting(std::uint32_t a_settingId, std::string_view a_name)
+	namespace
 	{
-		auto& variables = FrameVariableSet();
-		std::string name;
-		std::uint64_t serial = 0;
+		Lane::SettingValue MakeSettingValue(SettingVariable* a_variable, const void* a_bytes, std::size_t a_size)
 		{
-			const std::lock_guard lock(variables.serialMutex);
+			Lane::SettingValue value;
+			if (a_size > Lane::SettingValue::kCapacity || (!a_bytes && a_size)) {
+				// The value cannot travel with the revision. The event still does.
+				value.size = Lane::SettingValue::kTooBig;
+				const std::uint64_t counter = a_variable ? ++a_variable->counter : 0;
+				std::memcpy(value.bytes.data(), &counter, sizeof(counter));
+				return value;
+			}
+			value.size = static_cast<std::uint32_t>(a_size);
+			if (a_size)
+				std::memcpy(value.bytes.data(), a_bytes, a_size);
+			return value;
+		}
+
+		/** @brief The setting's variable, declared with a_initial when it has none. Under serialMutex. */
+		SettingVariable& SettingVariableOf(std::uint32_t a_settingId, std::string_view a_name, const Lane::SettingValue& a_initial)
+		{
+			auto& variables = FrameVariableSet();
 			auto it = variables.settings.find(a_settingId);
 			if (it == variables.settings.end()) {
-				name = fmt::format("Setting.{}", a_name);
+				std::string name = fmt::format("Setting.{}", a_name);
 				// Another setting with this name keeps its variable. This one is told apart by its id.
 				if (variables.set.Find(name) != org::services::kNoVariable)
 					name = fmt::format("Setting.{}#{}", a_name, a_settingId);
-				it = variables.settings.emplace(a_settingId, SettingVariable{ variables.set.Declare(name, std::uint64_t{ 0 }), name }).first;
+				it = variables.settings.emplace(a_settingId, SettingVariable{ variables.set.Declare(name, a_initial), name }).first;
 			}
-			serial = BumpSerial(it->second.variable);
-			name = it->second.name;
+			return it->second;
 		}
-		NoteVariableEvent(name, [&] { return std::format("{} -> {}", serial - 1, serial); }, "setting write");
+	}
+
+	void RaiseSetting(std::uint32_t a_settingId, std::string_view a_name, const void* a_bytes, std::size_t a_size)
+	{
+		auto& variables = FrameVariableSet();
+		std::string name;
+		bool changed = false;
+		{
+			const std::lock_guard lock(variables.serialMutex);
+			const auto existing = variables.settings.find(a_settingId);
+			const bool known = existing != variables.settings.end();
+			auto value = MakeSettingValue(known ? &existing->second : nullptr, a_bytes, a_size);
+			auto& setting = SettingVariableOf(a_settingId, a_name, value);
+			// A new variable holds this value already. The raise still counts as its event.
+			changed = variables.set.Set(setting.variable, value) || !known;
+			name = setting.name;
+		}
+		if (changed)
+			NoteVariableEvent(name, [] { return std::string("new value"); }, "setting write");
 	}
 
 	void LogStats()
@@ -228,6 +262,27 @@ namespace RenderGraph::Frame::Vars
 		void Adopt(std::shared_ptr<const org::services::VariableSnapshot> a_snapshot)
 		{
 			FrameVariableSet().adopted = std::move(a_snapshot);
+		}
+
+		const org::services::VariableSet& Set()
+		{
+			return FrameVariableSet().set;
+		}
+
+		std::uint32_t IndexOf(std::string_view a_name)
+		{
+			return FrameVariableSet().set.Find(a_name);
+		}
+
+		std::uint32_t SettingIndex(std::uint32_t a_settingId, std::string_view a_name, const void* a_bytes, std::size_t a_size)
+		{
+			auto& variables = FrameVariableSet();
+			const std::lock_guard lock(variables.serialMutex);
+			const bool known = variables.settings.contains(a_settingId);
+			if (!known && !a_bytes)
+				return UINT32_MAX;
+			auto& setting = SettingVariableOf(a_settingId, a_name, known ? Lane::SettingValue{} : MakeSettingValue(nullptr, a_bytes, a_size));
+			return setting.variable.index;
 		}
 
 		FrameGen::PresentationConfig PresentationConfigIn(const org::services::VariableSnapshot& a_values)
@@ -304,7 +359,7 @@ namespace RenderGraph::Frame::Vars
 
 	void RaiseFeatureSettings(std::string_view, std::string_view) {}
 	std::uint64_t FeatureSettingsEvents(std::string_view) { return 0; }
-	void RaiseSetting(std::uint32_t, std::string_view) {}
+	void RaiseSetting(std::uint32_t, std::string_view, const void*, std::size_t) {}
 	void LogStats() {}
 }
 

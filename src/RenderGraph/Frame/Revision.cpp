@@ -6,6 +6,7 @@
 #	include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/Frame/BoundaryCheck.h"
+#	include "RenderGraph/Frame/DeclareLane.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/RevisionRecordings.h"
 #	include "RenderGraph/Frame/Variables.h"
@@ -158,6 +159,8 @@ namespace RenderGraph::Frame::Revision
 			// What its variable changes need outside the frame, and the fragment that resolves once all of it is ready.
 			std::vector<RevisionInputWait> inputWaits;
 			std::shared_ptr<org::async::RevisionFragment> inputWaitsFragment;
+			// The stage builds its declared clients' registrations need (Frame/Declare.h).
+			std::vector<FrameAnchors::StageBuildNeed> needs;
 			std::uint64_t firstWish = 0;
 			std::uint64_t planned = 0;  // the frame it was handed to the lane
 			std::shared_ptr<org::runtime::IUploadService> uploads;
@@ -214,6 +217,8 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t variablesFirstChange = 0;  // the frame of the first change no revision carries yet
 			std::shared_ptr<PreparedRevision> preparing;
 			std::shared_ptr<PreparedRevision> adopted;
+			// The needs of a superseded revision, carried to the next one.
+			std::vector<FrameAnchors::StageBuildNeed> carriedNeeds;
 			std::deque<std::pair<std::uint64_t, std::shared_ptr<PreparedRevision>>> retiring;
 			std::unique_ptr<org::async::RevisionAssembler> assembler = std::make_unique<org::async::RevisionAssembler>(kRevisionSlots);
 			std::uint64_t adoptedLines = 0;
@@ -467,6 +472,15 @@ namespace RenderGraph::Frame::Revision
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto job = std::make_shared<PreparedRevision>();
 			job->firstWish = UINT64_MAX;
+			// The declarations follow the values this revision starts with. Their new extents are wishes, collected below.
+			if (host && a_coordinator.variables) {
+				job->needs = std::exchange(a_coordinator.carriedNeeds, {});
+				auto needs = Declarations::Evaluate(*a_coordinator.variables, [](GraphResources::Resource& a_twin, const std::array<unsigned int, 3>& a_extent) {
+					OnSizeWish(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] });
+				});
+				for (auto& need : needs)
+					job->needs.push_back(std::move(need));
+			}
 			if (host && !a_coordinator.wishes.empty() && a_coordinator.plannedSerial != a_coordinator.wishSerial) {
 				for (auto it = a_coordinator.wishes.begin(); it != a_coordinator.wishes.end();) {
 					auto& [twin, wish] = *it;
@@ -503,7 +517,7 @@ namespace RenderGraph::Frame::Revision
 			if (variablesChanged)
 				job->firstWish = (std::min)(job->firstWish, a_coordinator.variablesFirstChange);
 			const bool lane = !job->plans.empty() || !job->bufferWishes.empty();
-			if (!lane && !(host && FrameAnchors::StagedStages()) && !variablesChanged)
+			if (!lane && !(host && FrameAnchors::StagedStages()) && !variablesChanged && job->needs.empty())
 				return;
 			if (job->firstWish == UINT64_MAX)
 				job->firstWish = a_frame;
@@ -553,6 +567,8 @@ namespace RenderGraph::Frame::Revision
 		{
 			auto revision = std::move(a_coordinator.preparing);
 			logger::info("[ORG] frame revision {}: superseded before adoption ({}); its inputs are prepared again", revision->serial, a_why);
+			for (auto& need : revision->needs)
+				a_coordinator.carriedNeeds.push_back(std::move(need));
 			a_coordinator.plannedSerial = 0;
 			// Its variable changes count again against the adopted values.
 			a_coordinator.startedVariables = Vars::Lane::Adopted();
@@ -801,6 +817,8 @@ namespace RenderGraph::Frame::Revision
 						std::initializer_list<std::shared_ptr<const org::IResourceVersions>>{ textures, revision.buffers });
 				revision.recordings = FrameAnchors::MakeRevisionRecordings(revision.closure, revision.versionSet, revision.versionSet ? revision.versionSet->Serial() : 0,
 					revision.others);
+				if (!revision.needs.empty())
+					FrameAnchors::RequireBuilds(*revision.recordings, revision.needs);
 				const std::lock_guard lock(a_coordinator.statsMutex);
 				++a_coordinator.window.prepared;
 				++a_coordinator.session.prepared;
@@ -894,6 +912,8 @@ namespace RenderGraph::Frame::Revision
 		StartPreparation(coordinator, frame);
 		if (idle && coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
+		// After any adoption, so FirstFrame sees the versions this frame binds.
+		Declarations::NoteBegin(frame);
 	}
 
 	void PublishBuffer(const std::shared_ptr<org::VersionedBuffer>& a_buffer, std::uint32_t a_elements, std::vector<std::byte> a_bytes,

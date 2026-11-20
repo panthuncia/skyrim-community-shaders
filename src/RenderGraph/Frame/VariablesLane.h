@@ -2,11 +2,16 @@
 
 #include "Features/Upscaling/PresentationConfig.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace org::services
 {
+	class VariableSet;
 	class VariableSnapshot;
 }
 
@@ -17,6 +22,28 @@ namespace org::services
 */
 namespace RenderGraph::Frame::Vars::Lane
 {
+	/** @brief A CS::Setting's value as its variable holds it: its bytes, or a counter for a setting too big to carry. */
+	struct SettingValue
+	{
+		static constexpr std::size_t kCapacity = 32;
+		static constexpr std::uint32_t kTooBig = UINT32_MAX;
+		std::array<std::byte, kCapacity> bytes{};
+		std::uint32_t size = 0;  // kTooBig when bytes hold a counter
+		friend bool operator==(const SettingValue&, const SettingValue&) = default;
+	};
+
+	/** @brief The index of the frame-wide variable named a_name, or UINT32_MAX for none. Any thread. */
+	std::uint32_t IndexOf(std::string_view a_name);
+
+	/**
+	* @brief The index of a CS::Setting's variable, declared now with a_bytes when it has none yet. Any thread.
+	* a_name is the setting's registry name. With null a_bytes nothing is declared, and UINT32_MAX means none.
+	*/
+	std::uint32_t SettingIndex(std::uint32_t a_settingId, std::string_view a_name, const void* a_bytes, std::size_t a_size);
+
+	/** @brief The set itself, for the newest written values (VariableSet::Get). Any thread. */
+	const org::services::VariableSet& Set();
+
 	/** @brief The newest values. The same snapshot, with no allocation, while nothing changed since the last call. */
 	std::shared_ptr<const org::services::VariableSnapshot> Take();
 

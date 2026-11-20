@@ -605,6 +605,51 @@ accessors (`ORGExponentialHeightFog::Slices` and similar) and move them to `Adop
 **Size.** Large overall; each migration small or medium. Parallel across features with disjoint files, at most three agents at once
 (game launches and builds, section 10).
 
+**As built (2026-11-19, 6.1, `org-native/rev-step6-1`).** The declaration API is `src/RenderGraph/Frame/Declare.{h,cpp}` (its
+coordinator side is `Frame/DeclareLane.h`). Its shape, for 6.2 to 6.23:
+
+```cpp
+namespace RenderGraph::Frame {
+// Dependencies: frame-wide variables (Vars::DisplaySize(), Vars::HdrEnabled(), ...) and bound CS::Setting fields.
+Dependencies DependsOn(const D&... a_dependencies);
+class Inputs {  // one revision's values
+    template <class T> T Get(Vars::Var<T>) const;
+    template <class T> T Get(const CS::Setting<T>&) const;  // T up to 32 bytes
+};
+DeclaredTexture2D DeclareTexture2D(std::string name, Dependencies, std::function<D3D11_TEXTURE2D_DESC(const Inputs&)>, const GraphResources::Options&);
+DeclaredTexture3D DeclareTexture3D(std::string name, Dependencies, std::function<D3D11_TEXTURE3D_DESC(const Inputs&)>, const GraphResources::Options&);
+// DeclaredTexture<Twin>: operator* / -> give the versioned GraphResources twin passes declare.
+template <class Key>
+DeclaredClient DeclareClient(std::string id, Dependencies,
+    std::function<std::optional<Key>(const Inputs&)> key,               // nullopt: no client
+    std::function<bool(const Key&, FrameAnchors::ClientDesc&)> make);  // false is fatal
+// DeclaredClient::Invalidate(): the key reads state that is not a variable yet and it changed.
+class AdoptedRevision {
+    template <class T> T Get(Vars::Var<T>) const;
+    template <class T> T Get(const CS::Setting<T>&) const;
+    std::array<std::uint32_t, 3> Extent(const DeclaredTexture<Twin>&) const;  // the bound version's
+    bool FirstFrame(const DeclaredTexture<Twin>&) const;                     // first frame of a new version
+    bool Has(const DeclaredTexture<Twin>&) const;
+};
+namespace Revision { const AdoptedRevision& Adopted(); }
+}
+```
+
+- Declarations are evaluated when a revision starts (`Revision.cpp:StartPreparation`), against the snapshot that revision carries,
+  only when a dependency's serial moved (or the declaration is new or invalidated). A new extent is a size wish on the twin, so the
+  step 4 path makes the version on the lane (born cleared for History). A new client key registers the client there and the revision
+  waits for every stage build that holds it (`FrameAnchors::StageBuildNeed`, checked in `AdvanceRevisionRecordings`). So the values,
+  the versions and the client switch in at one Begin.
+- `CS::Setting` variables now carry the value (`Vars::Lane::SettingValue`, up to 32 bytes); the raise hook passes the bytes.
+- Exponential Height Fog: twelve textures declared at Setup on `DisplaySize` (decision 6a: the grid covers the display, the shaders
+  already map the dynamic-resolution depth region), ViewAtmosphere's `nearPixelSize`, `nearSlices`, `middlePixelSize`,
+  `middleSlices`, and EHF's `enabled`, `volumetricFogEnabled`, `volumetricFogExtinctionScale`, `fogDensity`, `fogDensity2`. They are one
+  texel while the volumes are off and are published once. The client is declared on the toggles and pixel sizes; its key adds the
+  inputs the last Prepass found. Constants, group counts and `Slices()` read `Adopted().Extent`; history validity reads `FirstFrame`.
+  `FollowSizes`, `ResetHistories`, `Build`/`Register` from the Prepass, the per-frame release and debug mode 10 are gone.
+- Worker rv61a split the GPU-copied structs (`ExponentialHeightFog::GpuSettings`, `ViewAtmosphere::GpuSettings`) and ported the fields;
+  EHF's `ProjectSizeSettings` is gone and ViewAtmosphere's keeps `enabled`, `distantPixelSize`, `distantSlices`.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1270,6 +1315,32 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Upscaler options are not read from the adopted revision yet.** `ConfigureUpscaling` computes the render size from the live
   `qualityMode` in the evaluate's frame. Reading only the options from the adopted revision would pair an old mode with a new
   render size. It moves with `RenderSize`/`DynamicRatios` in 6.14.
+
+**Decided by the agent (step 6.1, 2026-11-19), to confirm:**
+- **Declarations are evaluated at the start of a revision, on the render thread**, not on the lane. Description and key functions
+  are cheap, and the client registration needs the render owner. Versions are still made on the lane. Evaluating only when a
+  revision starts (never while one is in preparation) keeps a staged build of a new client from joining an older revision.
+- **Texture descriptions may change only their extent.** Another format or flag is fatal. No 6.x user needs more yet; a shape-class
+  change needs a new slot and staged builds of its readers, left for the first user that needs it.
+- **No `DeclareProgram` yet.** EHF's programs are fixed at Setup. Programs that follow settings (6.4, 6.6) can be part of a client's
+  key (its `make` loads them) or get their own declaration then; loading on the render thread at revision start would block a Begin
+  for a compile, so 6.4 should decide.
+- **Client keys may read state that is not a variable** through `DeclaredClient::Invalidate()` (an interim). EHF's inputs (IBL,
+  Skylighting, LLF, Terrain and Cloud Shadows, Physical Sky publishing, the directional shadow map, temporal) are found by its Prepass;
+  a change invalidates the key and the next revision registers the new client. They become variables as those features migrate.
+- **The first enable registers the client one revision after the volumes.** The key needs one Prepass's inputs, so the volumes and
+  values adopt first and the client about four frames later. Volumetric fog stays off in those frames (below). A later enable reuses the
+  inputs already seen, so all of it switches in one revision.
+- **The shaders' volumetric flag follows the written volumes.** On the graph, `GetCommonBufferData` clears `volumetricFogEnabled`
+  while `NearSRV()` is null (no run wrote the bound versions yet). Every reader then skips the volumes in the frames after a new
+  version, instead of the D3D11 readers getting null views and the graph readers an unwritten volume. A frame the graph path cannot
+  run (inputs missing) has no volumetric fog; it no longer falls back to the D3D11 path (debug mode 3 still runs it).
+- **Declarations live until process exit.** Dropping a `DeclaredClient` stops following and leaves the registration; unregistering
+  from a static destructor at exit was the alternative and is unsafe.
+- **Debug mode 10 (one-shot history clears through `Rearm`) is removed**, so EHF has no `Rearm` or `once` pass left. Mode 9 stays.
+- **ViewAtmosphere's four grid fields were ported in 6.1**, since EHF's volumes depend on them. 6.21 ports the rest.
+- **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
+  drag adopts variables-only revisions and never a new version.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

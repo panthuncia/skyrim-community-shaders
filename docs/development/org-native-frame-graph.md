@@ -9033,3 +9033,28 @@ Step 5 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): variable
   outcome earlier the same day (`rv1`, 6 runs).
 - `native-vulkan+fg-hdr` hung once on a cold shader store (the render thread waiting on a DCLF grass program's compile). It passed after
   a warm-up run.
+
+## Frame revisions, step 6.1: Exponential Height Fog (2026-11-19)
+
+Step 6.1 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md), with the CS declaration API (`Frame/Declare.{h,cpp}`).
+CS on `org-native/rev-step6-1` from `integ/hard-ports` `925add6a1`; no submodule changes. The API's shape and the decisions to
+confirm are in the plan (step 6's "As built (6.1)" and section 9, "Decided by the agent (step 6.1)").
+
+- **Declarations.** Textures and clients are declared on frame variables and `CS::Setting` fields, and evaluated when a revision
+  starts. A new extent is a version made on the lane; a new client key registers the client and the revision waits for the stage
+  builds that hold it. Setting variables carry their value.
+- **Exponential Height Fog.** Its twelve volumes are declared at Setup on the display size and the grid settings (one texel while
+  off, published once), its client on its toggles. `FollowSizes`, `ResetHistories`, the per-frame release, the Prepass
+  `Build`/`Register` and debug mode 10 are gone. The settings it and ViewAtmosphere size by are `CS::Setting` (GPU structs split).
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv61`, missed-writer check on). 16 launches, none stuck at loading.
+
+| Run | Result | Notes |
+|---|---|---|
+| `native-vulkan+resize`, `native-d3d12+resize`, `guest+resize` | passed | 0 `stale recording`, 0 `structural rebuild`, 0 missed writers; each grid change one revision with its twins (e.g. `120x68x64 -> 120x68x96`), members pre-main, deferred+water, sun |
+| `native-vulkan+resize` vs `nfg` | shots match | fog, grid, fsr 1.1 to 1.3 mean diff; taa 4.1 (tree sway, checked by eye) |
+| `guest+fog`, `native-vulkan+fog`, `native-d3d12+fog` | passed | native vs `nfg` 0.8 to 1.1; guest `nfg` still shows the non-finite kMAIN defect (black image), `rv61` is clean and looks like native |
+| `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick`, `latch-census-short` | passed | no tap errors; the boundary census names no fog site |
+
+- On first enable the client lands one revision after the volumes (it needs one Prepass's inputs), about four frames; volumetric fog is
+  off in those frames, not black.
