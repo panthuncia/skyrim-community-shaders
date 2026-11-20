@@ -739,18 +739,18 @@ namespace DCLF
 		}
 		// The frame revision adopts it as its scene fragment (plan step 10b). Latest wins, and a replaced one is dropped here on the
 		// builder. Count after the post, because a waiting frame polls the count.
-		RenderGraph::Frame::Revision::Scene scene;
-		scene.serial = snapshot->serial;
+		RenderGraph::Frame::Revision::Scene posting;
+		posting.serial = snapshot->serial;
 		if (snapshot->revision) {
 			if (const auto versions = snapshot->revision->Get<NamedVersions>(SceneRevisions::kVersionsSlot))
-				scene.buffersSerial = versions->Serial();
-			scene.frameVersions = snapshot->frameVersions;
+				posting.buffersSerial = versions->Serial();
+			posting.frameVersions = snapshot->frameVersions;
 			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
 				if (const auto kind = static_cast<RenderGraphRuntime::Segment>(segment); RenderGraphRuntime::IsDclfSegment(kind))
-					scene.builds.emplace_back(RenderGraphRuntime::EpochOf(kind), snapshot->epochBuilds[segment]);
+					posting.builds.emplace_back(RenderGraphRuntime::EpochOf(kind), snapshot->epochBuilds[segment]);
 		}
-		scene.value = std::move(snapshot);
-		RenderGraph::Frame::Revision::PublishScene(std::move(scene));
+		posting.value = std::move(snapshot);
+		RenderGraph::Frame::Revision::PublishScene(std::move(posting));
 		snapshotsPosted.fetch_add(1, std::memory_order_release);
 		snapshotsBuilt.fetch_add(1, std::memory_order_relaxed);
 		snapshotTimings.Push(b.timing);
