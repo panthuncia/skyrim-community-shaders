@@ -669,6 +669,16 @@ outside it. The light copy always moves the whole capacity. So no pass revision 
 `ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
 culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
 
+**As built (2026-11-19, 6.16, `org-native/rev-step6-16`).** IBL's client is declared once, at Setup, on `ReflectionCubemap` and
+IBL's `DALCMode`. Its key holds whether the reflection cubemap exists, whether the DALC mode reads the environment SH (modes 0
+and 1) and whether Dynamic Cubemaps publishes its cubemap (read at evaluation: it is published once, at Dynamic Cubemaps' setup).
+`make` takes the sources from the key. `Refresh`, `declared` and the per-frame source compare in `ORGIBL::Prepass` are gone; the
+scene switch (`IsDisabledForCurrentScene`) stays the client's `active`, a per-frame gate. `EnableIBL`, `UseStaticIBL` and
+`DALCMode` are `CS::Setting<std::uint32_t>`, bound in `IBL::IBL()`; IBL's `ProjectSizeSettings` is gone. Exponential Height Fog's
+key now holds IBL's SH from `EnableIBL` (a dependency) and IBL being on the graph, and Skylighting's probes from Skylighting being
+on the graph. The scene switch is a constant (`ConstantInputs::ibl`), so the fog's client no longer changes at loading screens or
+the map. Test: `ibl` (new).
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1400,6 +1410,19 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Before the first adopted `DisplaySize`, the grid is the Setup grid.**
 - **Guest also copies the whole light capacity each run** (1024 lights, about 80 KB), as native did. Its recordings then stop
   changing as the light count grows.
+
+**Decided by the agent (step 6.16, 2026-11-19), to confirm:**
+- **IBL's client does not depend on `EnableIBL` or `UseStaticIBL`.** The D3D11 path projects the SH whatever `EnableIBL` says,
+  and with Effects 11 managing IBL the shaders turn IBL on with `EnableIBL` off (`GetCommonBufferData`). `UseStaticIBL` is a shader
+  constant only. Both are ported to `Setting`; `EnableIBL` is a dependency of the fog's key. The client depends on `DALCMode`
+  instead, which decides the environment pass.
+- **Dynamic Cubemaps' published cubemap is read at key evaluation, not as a variable.** It is published once at its setup. Its
+  mid-session D3D11 fallback (`ORGDynamicCubemaps::Fail`) withdraws the id outside a revision, which a built IBL graph then lacks;
+  6.18 should make that failure fatal.
+- **The runtime going down keeps IBL's D3D11 return** (`ORGIBL::Fail`), without unregistering or withdrawing: the state is kept,
+  since the declaration's functions hold it.
+- **The scene switch stays per-frame** (the client's `active`, and a constant for the fog). It is engine menu state, not a
+  setting, and a gate keeps loading screens from rebuilding.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

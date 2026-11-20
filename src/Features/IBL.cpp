@@ -17,6 +17,13 @@
 
 #define I18N_KEY_PREFIX "feature.ibl."
 
+IBL::IBL()
+{
+	settings.EnableIBL.Bind(CS::SettingRegistry::Declare("ImageBasedLighting.EnableIBL"));
+	settings.UseStaticIBL.Bind(CS::SettingRegistry::Declare("ImageBasedLighting.UseStaticIBL"));
+	settings.DALCMode.Bind(CS::SettingRegistry::Declare("ImageBasedLighting.DALCMode"));
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	IBL::Settings,
 	EnableIBL,
@@ -41,7 +48,7 @@ void IBL::DrawSettings()
 		T("common.settings_managed_by_enb", "This setting is managed by Effects 11."));
 	const Util::DefaultsWhileActive<Settings> shownDefaults(settings, managedByENB);
 
-	ImGui::Checkbox(T(TKEY("enable_ibl"), "Enable IBL"), (bool*)&settings.EnableIBL);
+	Util::Checkbox(T(TKEY("enable_ibl"), "Enable IBL"), settings.EnableIBL);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_ibl_tooltip"), "Toggle IBL. When enabled, ambient lighting is derived from cubemap spherical harmonics instead of the vanilla system."));
 	}
@@ -74,10 +81,7 @@ void IBL::DrawSettings()
 			T(TKEY("dalc_mode_dalc_plus_sky"), "DALC + Sky"),
 			T(TKEY("dalc_mode_dalc_plus_sky_directional"), "DALC + Sky (Directional)")
 		};
-		int dalcMode = static_cast<int>(settings.DALCMode);
-		if (ImGui::Combo(T(TKEY("dalc_mode"), "DALC Mode"), &dalcMode, dalcModeNames, IM_ARRAYSIZE(dalcModeNames))) {
-			settings.DALCMode = static_cast<uint>(dalcMode);
-		}
+		Util::Combo(T(TKEY("dalc_mode"), "DALC Mode"), settings.DALCMode, dalcModeNames, IM_ARRAYSIZE(dalcModeNames));
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("dalc_mode_tooltip"),
 								  "How the DALC-to-IBL brightness ratio is computed:\n"
@@ -87,7 +91,7 @@ void IBL::DrawSettings()
 								  "DALC + Sky (Directional): Same, but Skylighting also dims vanilla ambient per-direction."));
 		}
 	}
-	ImGui::Checkbox(T(TKEY("use_static_ibl"), "Use Static IBL For Out-of-World Objects"), (bool*)&settings.UseStaticIBL);
+	Util::Checkbox(T(TKEY("use_static_ibl"), "Use Static IBL For Out-of-World Objects"), settings.UseStaticIBL);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("use_static_ibl_tooltip"), "Uses pre-baked static IBL cubemap textures for objects rendered outside the game world (e.g. inventory items, loading screens)."));
 	}
@@ -140,16 +144,16 @@ IBL::PerFrame IBL::GetCommonBufferData() const
 	const bool managedByENB = IsManagedByENB();
 	const Settings source = managedByENB ? Settings{} : settings;
 	PerFrame data = {
-		.EnableIBL = sceneDisabled ? 0u : source.EnableIBL,
+		.EnableIBL = sceneDisabled ? 0u : source.EnableIBL.Get(),
 		.PreserveFogLuminance = source.PreserveFogLuminance,
-		.UseStaticIBL = source.UseStaticIBL,
+		.UseStaticIBL = source.UseStaticIBL.Get(),
 		.DALCAmount = source.DALCAmount,
 		.EnvIBLScale = source.EnvIBLScale,
 		.SkyIBLScale = source.SkyIBLScale,
 		.EnvIBLSaturation = source.EnvIBLSaturation,
 		.SkyIBLSaturation = source.SkyIBLSaturation,
 		.FogAmount = source.FogAmount,
-		.DALCMode = source.DALCMode,
+		.DALCMode = source.DALCMode.Get(),
 		.EnableReflectionFallback = source.EnableReflectionFallback,
 		.ReflectionFallbackDistance = source.ReflectionFallbackDistance,
 		.ENBSkyFalloff = globals::features::effects11.OwnsFeature(E11Handoff::Feature::IBL)
@@ -216,7 +220,7 @@ void IBL::Prepass()
 	auto& orgIBL = ORGIBL::Get();
 
 	// The render graph projects the SH at the Prepass anchor, right after this (CS_ORG_IBL=1): bind its textures for the main pass.
-	if (orgIBL.Prepass(settings.DALCMode < 2)) {
+	if (orgIBL.Prepass()) {
 		ID3D11ShaderResourceView* views[2]{ EnvIBLSRV(), SkyIBLSRV() };
 		context->PSSetShaderResources(76, 2, views);
 		return;
@@ -445,9 +449,3 @@ ID3D11ComputeShader* IBL::GetDiffuseIBLCS()
 	return diffuseIBLCS;
 }
 
-Feature::SizeProjection IBL::ProjectSizeSettings() const
-{
-	SizeProjection projection;
-	projection.Add("EnableIBL", settings.EnableIBL).Add("UseStaticIBL", settings.UseStaticIBL);
-	return projection;
-}

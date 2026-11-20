@@ -10,7 +10,8 @@
 *
 * Projects the environment cubemap and the engine's reflections cubemap into the same 3x1 SH textures the D3D11 path writes.
 * The SH textures are History, since the reflection prepass reads last frame's. They are exported for D3D11 readers and published.
-* A missing source clears its SH to zero, as a null view projects. If the runtime stops later, IBL returns to D3D11.
+* A missing source clears its SH to zero, as a null view projects. The client is declared on the reflection cubemap and the DALC
+* mode (Frame/Declare.h), so a change of either switches in with a frame revision. If the runtime stops later, IBL returns to D3D11.
 * Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGIBL
@@ -37,8 +38,8 @@ public:
 	/** @brief Set up, and the runtime still up. */
 	bool IsActive() const;
 
-	/** @brief Before the Prepass anchor. a_useEnvironment is true when the DALC mode reads it. @return False means the D3D11 dispatches run. */
-	bool Prepass(bool a_useEnvironment);
+	/** @brief Before the Prepass anchor. The adopted revision's client projects the SH. @return False means the D3D11 dispatches run. */
+	bool Prepass();
 
 	/** @brief Null when inactive. */
 	ID3D11ShaderResourceView* EnvSRV() const;
@@ -49,7 +50,7 @@ public:
 private:
 	ORGIBL() = default;
 
-	/** @brief Unregisters, withdraws the textures, then a_onFailed brings the D3D11 path back. */
+	/** @brief The runtime went down: a_onFailed brings the D3D11 path back. */
 	void Fail(const char* a_reason);
 
 	struct Impl;

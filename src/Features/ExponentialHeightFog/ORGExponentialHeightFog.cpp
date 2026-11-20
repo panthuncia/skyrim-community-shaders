@@ -857,7 +857,7 @@ struct ORGExponentialHeightFog::Impl
 		declaredClient = RenderGraph::Frame::DeclareClient<Shape>(
 			kClientId,
 			DependsOn(quality.nearPixelSize, quality.middlePixelSize, fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity,
-				fog.fogDensity2),
+				fog.fogDensity2, globals::features::ibl.settings.EnableIBL),
 			[this](const Inputs& a_in) -> std::optional<Shape> {
 				const auto& f = globals::features::exponentialHeightFog.settings;
 				const auto& q = globals::features::viewAtmosphere.settings;
@@ -868,7 +868,17 @@ struct ORGExponentialHeightFog::Impl
 				if (!observed)
 					return std::nullopt;
 				const auto sizes = ExponentialHeightFog::GridSizesFor({ 1.0f, 1.0f }, a_in.Get(q.nearPixelSize), 16, a_in.Get(q.middlePixelSize), 16);
-				return Shape{ sizes.nearGroupReduce, sizes.farGroupReduce, *observed };
+				Shape shape{ sizes.nearGroupReduce, sizes.farGroupReduce, *observed };
+				// IBL's SH and Skylighting's probes are bound while their features run on the graph: IBL from its EnableIBL, the
+				// probes always. A scene that disables IBL turns it off in the constants, so the binding stays.
+				const auto& ibl = globals::features::ibl;
+				if (ibl.loaded && a_in.Get(ibl.settings.EnableIBL) != 0 && ORGIBL::Get().IsActive()) {
+					shape.observed.inputs[kEnvIBL] = { nullptr, std::string(ORGIBL::kEnvId) };
+					shape.observed.inputs[kSkyIBL] = { nullptr, std::string(ORGIBL::kSkyId) };
+				}
+				if (globals::features::skylighting.loaded && ORGSkylighting::Get().IsActive())
+					shape.observed.inputs[kProbes] = { nullptr, std::string(ORGSkylighting::kProbeArrayId) };
+				return shape;
 			},
 			[this](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return MakeClient(a_shape, a_client); });
 		return static_cast<bool>(declaredClient);
@@ -1113,27 +1123,11 @@ bool ORGExponentialHeightFog::Prepass()
 		inputs.directionalShadow = true;
 	}
 
-	auto& ibl = globals::features::ibl;
-	if (ibl.loaded && ibl.settings.EnableIBL != 0 && !ibl.IsDisabledForCurrentScene() && ibl.EnvIBLSRV() && ibl.SkyIBLSRV()) {
-		seen.inputs[kEnvIBL] = Published(ORGIBL::kEnvId, ibl.EnvIBLSRV());
-		seen.inputs[kSkyIBL] = Published(ORGIBL::kSkyId, ibl.SkyIBLSRV());
-		if (seen.inputs[kEnvIBL] && seen.inputs[kSkyIBL])
-			inputs.ibl = true;
-		else {
-			// IBL's SH views are not the exports, so the fog runs without IBL, which its constants turn off.
-			seen.inputs[kEnvIBL] = {};
-			seen.inputs[kSkyIBL] = {};
-		}
-	}
-
+	// IBL's SH and Skylighting's probes are in the client's key (DeclareClient), from the variables. A 3D texture, so only the
+	// graph's own probe volume can be read.
 	auto& skylighting = globals::features::skylighting;
-	if (skylighting.loaded && skylighting.ProbeArraySRV()) {
-		// A 3D texture, so only the graph's own probe volume can be read.
-		if (!PublishedResources::IsExportOf(skylighting.ProbeArraySRV(), ORGSkylighting::kProbeArrayId))
-			return fallback("Skylighting's probes are on D3D11");
-		seen.inputs[kProbes] = { nullptr, std::string(ORGSkylighting::kProbeArrayId) };
-		inputs.skylighting = true;
-	}
+	if (skylighting.loaded && skylighting.ProbeArraySRV() && !ORGSkylighting::Get().IsActive())
+		return fallback("Skylighting's probes are on D3D11");
 
 	// Without the sky the shader skips terrain and cloud shadows, and Cloud Shadows binds nothing.
 	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
@@ -1209,6 +1203,10 @@ bool ORGExponentialHeightFog::Prepass()
 	}
 	if (!impl->state)
 		return fallback("its client is not registered yet");
+	// The client's IBL and probe bindings, as its key found them. The scene's IBL switch is a constant.
+	const auto& bound = impl->state->shape.observed.inputs;
+	inputs.ibl = bound[kEnvIBL] && bound[kSkyIBL] && !globals::features::ibl.IsDisabledForCurrentScene();
+	inputs.skylighting = static_cast<bool>(bound[kProbes]);
 
 	// As the D3D11 Prepass keeps it. A new version holds no history in its first frame.
 	const std::uint32_t frame = globals::state->frameCount;

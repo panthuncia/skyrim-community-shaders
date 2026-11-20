@@ -1,10 +1,14 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 struct IBL : Feature
 {
 public:
+	/** @brief Binds the settings the frame revisions follow (EnableIBL, UseStaticIBL, DALCMode). */
+	IBL();
+
 	virtual bool IsCore() const override { return true; };
 
 	virtual inline std::string GetName() override { return "Image Based Lighting"; }
@@ -34,8 +38,6 @@ public:
 	virtual void DrawSettings() override;
 
 	virtual void LoadSettings(json& o_json) override;
-	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
-	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 
 	/** @brief Binds IBL and static fallback textures as pixel shader resources for the reflections prepass. */
@@ -51,16 +53,17 @@ public:
 
 	struct Settings
 	{
-		uint EnableIBL = 0;
+		// Exponential Height Fog's client reads EnableIBL. IBL's own client reads DALCMode (whether the environment SH is projected).
+		CS::Setting<std::uint32_t> EnableIBL = 0;
 		uint PreserveFogLuminance = 0;
-		uint UseStaticIBL = 1;
+		CS::Setting<std::uint32_t> UseStaticIBL = 1;
 		float DALCAmount = 1.0f;
 		float EnvIBLScale = 1.0f;
 		float SkyIBLScale = 1.0f;
 		float EnvIBLSaturation = 1.0f;
 		float SkyIBLSaturation = 1.0f;
 		float FogAmount = 0.0f;
-		uint DALCMode = 2;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
+		CS::Setting<std::uint32_t> DALCMode = 2;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
 		bool DisableInWorldMap = true;
 		bool DisableInLoadingScreen = true;
 		uint EnableReflectionFallback = 1;
