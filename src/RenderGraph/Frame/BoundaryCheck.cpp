@@ -104,6 +104,17 @@ namespace RenderGraph::Frame::Boundary
 					++byKey["(other)"];
 			}
 
+			/** @brief Every key with its count, most first. */
+			std::string All() const
+			{
+				std::vector<std::pair<std::string_view, std::uint64_t>> sorted(byKey.begin(), byKey.end());
+				std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+				std::string line;
+				for (const auto& [key, count] : sorted)
+					line += fmt::format("{}{} x {}", line.empty() ? "" : ", ", key, count);
+				return line.empty() ? std::string("none") : line;
+			}
+
 			std::string Top() const
 			{
 				std::vector<std::pair<std::string_view, std::uint64_t>> sorted(byKey.begin(), byKey.end());
@@ -127,6 +138,7 @@ namespace RenderGraph::Frame::Boundary
 			BoundaryCounts changes;
 			BoundaryCounts attaches;
 			BoundaryCounts refusals;  // by site and reason, any thread
+			BoundaryCounts sessionChangeSites;  // late changes in the session, by site: the sources to move before they can be fatal
 			std::uint64_t atBegin = 0;
 			std::uint64_t sessionVersions = 0, sessionFirst = 0, sessionChanges = 0, sessionAttaches = 0, sessionRefusals = 0;
 		};
@@ -205,7 +217,9 @@ namespace RenderGraph::Frame::Boundary
 		if (t_inBoundaryScope || !OnRenderThread(state))
 			return;
 		const std::lock_guard lock(state.mutex);
-		state.changes.Add(fmt::format("{} {}", a_caller, a_what));
+		const auto key = fmt::format("{} {}", a_caller, a_what);
+		state.changes.Add(key);
+		state.sessionChangeSites.Add(key);
 		++state.sessionChanges;
 	}
 
@@ -244,6 +258,9 @@ namespace RenderGraph::Frame::Boundary
 			part(state.versions), state.versionCallers.total ? fmt::format(" (callers: {})", state.versionCallers.Top()) : std::string(), part(state.changes),
 			part(state.attaches), part(state.firstVersions), state.atBegin, part(state.refusals),
 			state.sessionVersions, state.sessionChanges, state.sessionAttaches, state.sessionFirst, state.sessionRefusals);
+		// Every site, so the sources left are listed by the run's last line (plan step 10c: late changes stay counted until they are moved).
+		if (state.sessionChangeSites.total)
+			logger::info("[ORG] boundary: session late changes by site: {}", state.sessionChangeSites.All());
 		state.versions = {};
 		state.firstVersions = {};
 		state.versionCallers = {};

@@ -883,9 +883,11 @@ manager attaches them at a frame's end. `CS_DCLF_ASYNC_BUILDS=0` restores the ol
     value;
   - anywhere else it is an error, and the build uses the attached value.
 
-**Conditions.** `RefreshGraphConditions` sets the *requested* conditions. The frame keeps the *attached* ones until the builds attach
-(`PublishAttachedBuildState`). Outside a build, `CurrentGraphConditions` returns the attached conditions, so the frame's mode
-(`GraphBuiltForCpu`), the preparations and the revision inputs follow the graph that runs. Inside a `BuildScope` it returns the build's
+**Conditions.** `UpdateGraphConditions` sets the *requested* conditions, inside the adoption point of a Begin whose revision changed
+one of their variables (`DclfToggles`, `Interior`, `DclfPassCuts`; frame revision plan step 10c). The frame keeps the *attached* ones
+until a scene recorded on the builds is adopted (`PublishAttachedBuildState`). The revision inputs a scene records with take their
+pipeline fields from the build state they record on, so the scene, its builds and its conditions switch in one adoption. Outside a build, `CurrentGraphConditions` returns the attached conditions, so the frame's mode
+(`GraphBuiltForCpu`) and the preparations follow the graph that runs. Inside a `BuildScope` it returns the build's
 conditions. Every attached value is kept alive, so the reference stays valid while another thread swaps it.
 
 **The builds** (`Core/Render/Epochs/GraphBuilds.cpp`, `BuildManager::ExternalBuilder`).
@@ -2643,8 +2645,8 @@ Native mode with segments; guest is unchanged.
 
 Engine order (Ghidra, SE 0x1405b1020, Main's frame): `Renderer::Begin`, then the decal manager and UI work, then `Main::Draw`
 (0x1405b1710), whose first call is where Drawcall Limit Fix's scene frame starts (`Main_Draw_Early`, 35560 + 0xD3). DCLF's build
-point (`IndirectDraws::BuildPoint`: its builds handed out, the build manager's finished builds attached, `RefreshGraphConditions`)
-ran there, after Begin. It needs nothing from `Main::Draw`: the graph conditions read the cell and the toggles, and the revision
+point (`IndirectDraws::BuildPoint`: its builds handed out, the build manager's finished builds staged; the graph conditions moved to
+the adoption point in step 10c) ran there, after Begin. It needs nothing from `Main::Draw`: the graph conditions read the cell and the toggles, and the revision
 inputs it posts are latest-wins. Native mode with segments now runs it from the frame driver at Begin, before the descriptions
 (`DCLF::BuildPointAtFrameStart`), for a frame that draws the world; the scene-frame start skips it for that frame. Guest keeps it at
 `Main::Draw`. The other attach points are the frame's end (`SealPresented`, `Attach::All`), DCLF's own wait for a snapshot and

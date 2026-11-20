@@ -6,18 +6,25 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "RenderGraph/BuildManager.h"
+#include "RenderGraph/Frame/Revision.h"
+#include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/Frame/VariablesLane.h"
+
+#include <ORGModuleServices/Variables.h>
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
-		// Render thread: the defaults until the first build point.
+		// Main thread: the defaults until the first UpdateGraphConditions.
 		std::shared_ptr<const GraphConditions> requested = std::make_shared<const GraphConditions>();
 		// Every attached value is kept, so a reference CurrentGraphConditions handed out stays valid while another thread swaps it.
 		std::mutex attachedMutex;
@@ -27,6 +34,25 @@ namespace DCLF::Draws
 		std::string requestedCuts;  // cutsMutex
 		std::atomic<bool> latchedRecordCut{ false };
 		std::atomic<bool> builtForCpu{ false };
+		// Set at the adoption of a revision that changed a variable the conditions follow, and at first (plan step 10c).
+		std::atomic<bool> inputsMoved{ true };
+		// The Interior variable of the last revision that carried it. Before the first, the engine's cell is read once.
+		std::atomic<bool> adoptedInterior{ false };
+		std::atomic<bool> interiorAdopted{ false };
+		// Main thread: the toggles' generation the conditions were last made for. A toggle applied without a revision moves it too.
+		std::uint32_t togglesSeen = 0;
+		// Main thread: whether DCLF's first build point made the first conditions. Until then a Begin leaves them alone.
+		bool firstMade = false;
+
+		/** @brief A producer's wait for a variable that needs no work outside the frame: ready at once, a_adopt runs at the adoption. */
+		RenderGraph::Frame::Revision::InputWait AtAdoption(std::string a_what, std::function<void()> a_adopt)
+		{
+			RenderGraph::Frame::Revision::InputWait wait;
+			wait.what = std::move(a_what);
+			wait.poll = [](std::string&) { return RenderGraph::Frame::Revision::InputState::Ready; };
+			wait.adopt = std::move(a_adopt);
+			return wait;
+		}
 
 		const GraphConditions& AttachedConditions()
 		{
@@ -48,8 +74,13 @@ namespace DCLF::Draws
 
 	void SetPassCuts(std::string a_cuts)
 	{
-		std::lock_guard lock(cutsMutex);
-		requestedCuts = std::move(a_cuts);
+		{
+			std::lock_guard lock(cutsMutex);
+			if (requestedCuts == a_cuts)
+				return;
+			requestedCuts = std::move(a_cuts);
+		}
+		RenderGraph::Frame::Vars::RaiseDclfPassCuts("dclf:cut");
 	}
 
 	bool PassCut(std::string_view a_key)
@@ -76,14 +107,61 @@ namespace DCLF::Draws
 		return CpuPipelineFor(a_set, a_interior) || CpuPipelineForced();
 	}
 
-	void RefreshGraphConditions(org::GraphHost& a_host)
+	void RegisterConditionInputs()
 	{
+		namespace Revision = RenderGraph::Frame::Revision;
+		namespace Lane = RenderGraph::Frame::Vars::Lane;
+		using Values = org::services::VariableSnapshot;
+		const bool toggles = Revision::RegisterInputProducer("DclfToggles", [](const Values& a_values, std::uint64_t) {
+			const std::uint64_t word = Lane::DclfTogglesIn(a_values);
+			return AtAdoption("DCLF's toggles", [word] {
+				Toggles::Get().ApplyAdopted(word);
+				inputsMoved.store(true, std::memory_order_release);
+			});
+		});
+		const bool interior = Revision::RegisterInputProducer("Interior", [](const Values& a_values, std::uint64_t) {
+			const bool value = Lane::InteriorIn(a_values);
+			return AtAdoption("DCLF's cell kind", [value] {
+				adoptedInterior.store(value, std::memory_order_relaxed);
+				interiorAdopted.store(true, std::memory_order_release);
+				inputsMoved.store(true, std::memory_order_release);
+			});
+		});
+		const bool cuts = Revision::RegisterInputProducer("DclfPassCuts", [](const Values&, std::uint64_t) {
+			return AtAdoption("DCLF's pass cuts", [] { inputsMoved.store(true, std::memory_order_release); });
+		});
+		Toggles::Get().UseRevisions(toggles);
+		logger::info("[DCLF] graph conditions: toggles {}, cell kind {}, pass cuts {}", toggles ? "through frame revisions (DclfToggles)" : "applied at once",
+			interior ? "from the Interior variable" : "from the engine", cuts ? "through frame revisions (DclfPassCuts)" : "applied at once");
+	}
+
+	void FirstGraphConditions(org::GraphHost& a_host)
+	{
+		if (std::exchange(firstMade, true))
+			return;
+		inputsMoved.store(true, std::memory_order_release);
+		UpdateGraphConditions(a_host);
+	}
+
+	void UpdateGraphConditions(org::GraphHost& a_host)
+	{
+		// Before DCLF's first build point nothing of DCLF runs, so its builds are not asked for (a main menu Begin).
+		if (!firstMade)
+			return;
+		const std::uint32_t togglesGeneration = Toggles::Get().Generation();
+		if (!inputsMoved.exchange(false, std::memory_order_acq_rel) && togglesGeneration == togglesSeen)
+			return;
+		togglesSeen = togglesGeneration;
 		GraphConditions next;
-		const auto* tes = RE::TES::GetSingleton();
-		next.interior = tes && tes->interiorCell;
+		if (interiorAdopted.load(std::memory_order_acquire))
+			next.interior = adoptedInterior.load(std::memory_order_relaxed);
+		else {
+			const auto* tes = RE::TES::GetSingleton();
+			next.interior = tes && tes->interiorCell;
+		}
 		next.twoPassOcclusion = Toggles::Get().Active().cullMode >= 2;
-		// A pipeline change rebuilds DCLF's graphs. Frames keep the old ones until a Begin adopts a snapshot recorded on the new
-		// ones. Entering or leaving an interior rebuilds the graph anyway.
+		// A pipeline change rebuilds DCLF's graphs. Frames keep the old ones until a Begin adopts a scene recorded on the new ones,
+		// with these conditions (its build state's). Entering or leaving an interior rebuilds the graph anyway.
 		next.cpuPipeline = CpuPipelineForCell(Toggles::Get().Active(), next.interior);
 		// The direct forward families need their epochs' late passes recorded at execution, after the commit.
 		const auto& runtime = RenderGraphRuntime::Get();

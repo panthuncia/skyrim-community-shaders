@@ -195,6 +195,8 @@ void DrawcallLimitFix::PostPostLoad()
 	(void)DCLF::SceneScheduler::Graph();
 	Hooks::Install();
 	installed = true;
+	// The toggles and the graph conditions follow frame variables from here on (plan step 10c).
+	DCLF::Draws::RegisterConditionInputs();
 	// DCLF's test commands and waits exist only when it installs.
 	DCLF::RegisterTestCommands();
 	// The menu's saved toggles, now that every toggle is seeded. Set switches win.
@@ -789,7 +791,8 @@ void DrawcallLimitFix::DrawSettings()
 	DCLF::Capture::DrawControls();
 	DCLF::Diagnostics::PlayerParity::DrawPanel();
 	DrawSceneWriterPanel();
-	// The live toggles, for A/B comparisons without a restart. These are the requested set, applied at the next frame's start.
+	// The live toggles, for A/B comparisons without a restart. These are the requested set. An edit is committed below as an event
+	// on DclfToggles, and takes effect with the revision that carries it.
 	auto& toggles = DCLF::Toggles::Get().Requested();
 	if (ImGui::TreeNodeEx("What DCLF draws", ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::TextWrapped("Each takes effect at the next frame, and Save Settings keeps it. What DCLF does not draw, the game draws as it would without DCLF.");
@@ -867,6 +870,8 @@ void DrawcallLimitFix::DrawSettings()
 			}
 			ImGui::EndDisabled();
 		}
+		// Writing the same set is no event, so this commits only an edit.
+		DCLF::Toggles::Get().Commit("menu");
 		ImGui::TreePop();
 	}
 	if (!ImGui::TreeNodeEx("Advanced"))
@@ -962,6 +967,7 @@ void DrawcallLimitFix::ApplySavedSettings()
 	}
 	if (!applied.empty())
 		logger::info("[DCLF] from the saved settings (where no switch is set): {}", applied);
+	DCLF::Toggles::Get().Commit("saved settings");
 }
 
 void DrawcallLimitFix::ClearShaderCache()

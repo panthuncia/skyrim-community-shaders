@@ -13,7 +13,8 @@
 * - refusals: builds ORG refused at their staging, attach or switch, by site and reason, on any thread (plan Q9).
 * Late versions and late attaches are tap errors (TapError::OutsideAdoption), fatal in development builds. There are no exceptions:
 * DCLF's, the last, went with step 10a. A new resource's first version is counted, not an error.
-* Late changes and the counts below them stay counted, not fatal, until step 10c.
+* Late changes and the counts below them stay counted, not fatal. Step 10c moved DCLF's (its graph conditions); the other sources
+* are listed by site at each census and move before late changes become fatal.
 * One "[ORG] boundary:" line per statistics window and one at a test run's exit, in development builds only (not CS_RELEASE_PROFILE).
 * The render thread is the one that last opened a Scope. Other threads are not counted.
 */
