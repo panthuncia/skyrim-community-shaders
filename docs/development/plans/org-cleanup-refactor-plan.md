@@ -1016,17 +1016,15 @@ This section is for a new director session picking up the plan.
   - OMS (`extern/ORGModuleServices`) at `d48c924`, branch `rev-step5`;
   - `extern/BasicRHI` on `org-native/fg-dlssg-native`;
   - `extern/Streamline` on `org-native/fg-native-d3d12`;
-  - `extern/dxvk` on `org-port/view-trace`.
+  - `extern/dxvk` on `org-port/view-trace` and `org_integration` (`c1077d2b`).
 
   New submodule work goes on a branch inside the submodule, and is pushed before the
   superproject is pushed. Local submodule URLs were synced back to `.gitmodules` with
   `git submodule sync`.
 
-  **One gap:** dxvk's nested `subprojects/dxbc-spirv` pins `10726e1` ("spirv: Make shared
-  memory zero-initialization optional", local branch `cs/optional-lds-zero-init`). That commit
-  is on no remote. Its URL is upstream `doitsujin/dxbc-spirv`, and there is no fork to push to.
-  So a fresh `--recursive` clone fails on that one nested submodule. The fix needs a fork:
-  push the branch there, point dxvk's `.gitmodules` at the fork, then bump dxvk here.
+  dxvk's nested `subprojects/dxbc-spirv` pins `10726e1` (optional shared memory zero-init),
+  which is not upstream. It lives on the fork `panthuncia/dxbc-spirv`, branch
+  `cs/optional-lds-zero-init`, and dxvk's `.gitmodules` points there (dxvk `c1077d2b`).
 - **Worktrees:** the port worktrees under `..\org-port-worktrees` were removed on 2026-11-20.
   Three folders stay on disk only for reference: `org-frame-slots`, `org-rebuild-race` (their
   git data was lost) and `org-p0-pipelines` (its HEAD `c5bedf3` is not in the main repos).
