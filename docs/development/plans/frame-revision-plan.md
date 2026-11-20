@@ -1307,6 +1307,34 @@ target as the import from the start, with Dynamic Cubemaps' "first update done" 
 **Test.** Standard set, `hdr` in four modes (acceptance: no black frame in a shot taken 2 frames after the switch, a new `shot` step at
 `frames = 2`), `menu`, `fg`, `guest+map`, `latch-census-short`. A window-resize test is not possible today (correction 4).
 
+**As built (9a, 2026-11-19, `org-native/rev-step9a`).** Code only; not built or run by the agent. Q4 is answered in section 9.
+- **Engine targets.** `EngineTexture::Adopt` no longer publishes. A remake in the same shape class (format, mips, slices) hands
+  the new image to `Revision::PublishTexture`: a pending version of the same slot, adopted with the next revision together with
+  every stage that declares it. The made-image registry points the new image at the slot at once. Another shape class gives a
+  new slot when no reader holds the old one, and is fatal when one does. `Settle`, the `heldReplaced`/`heldResized` and
+  `changed` flags, its `Builds::RequestAll` and `FrameAnchors::RebuildForReplacedImports` are gone.
+- **`EngineTargets` variable** (a serial: `Vars::RaiseEngineTargets`, `AdoptedEngineTargets`). `EndSet`, `TakeOver` and every
+  target made outside a set (`Move`) raise it. `EndSet` raises `DisplaySize` and the shape variables as before.
+- **A second set is fatal.** `BeginSet` calls `report_and_fail` while the graph is active (Q4, decision of 2026-11-18). Plain
+  D3D11 and an inactive graph keep the old warning and the second `State::Setup`.
+- **Native back buffer.** A `ResizeBuffers` at the same size and format keeps the back buffer and its slot. A new size at the
+  same format makes the next texture a pending version of the slot (`PendGraphBackBuffer`, through `PublishTexture`). The
+  engine's handles take it at once, and `DisplaySize` is raised. The structural rebuild is gone from this path. A new format
+  still makes a new slot with a structural rebuild (counted as a late change). `NextGraphVersion` was dead (one version) and is
+  gone, with the multi-version fields.
+- **HDR colour space at adoption.** In native mode, a `PresentationConfig` change of the colour space alone, with no frame
+  generation, is no longer an input wait. `ProducePresentation` returns a ready input whose `adopt` asks for the replacement
+  inside the adoption point (`AskPresenter`), and `Native::AdoptRequestedPresentation` makes the requested presentation the
+  frame's. The submission thread replaces the swap chain after the presents queued so far. So the old swap chain presents every
+  frame of the old revision, and the new one every frame of the adopted revision (section 11, 4.1). Guest already worked this
+  way: HDR Display calls `SetColorSpace1` in `BeginRenderFrame`, after the adoption point, from `AdoptedHdrEnabled`, and
+  `hdrEnabledForFrame` was already the adopted value. No new HDR variable: `HdrEnabled`, `PresentationConfig.hdr` and
+  `PresenterFormat` carry it.
+- **Boundary exceptions.** `EngineImports` keeps one site, `FrameAnchors.cpp:JoinSlot`, labelled "until step 9b". The engine
+  target and back buffer sites are gone.
+- Test: `hdr` gains `hdr-2` and `sdr-2` shots two frames after each switch, and `no_log` lines. See "Decided by the agent
+  (step 9a)" in section 9.
+
 **Acceptance.** The boundary census shows zero engine-import late versions. `hdr` shows no black frame.
 
 **Size.** Medium to large. 9a and 9b separate agents; 9b's sources can split by feature.
@@ -1713,7 +1741,7 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q1 | Exactly which data `EpochsDeclaring` should use: the graph's declared versioned resolvers at build, or each recording's `versions` list. | Read `ORG/src/Render/RenderGraph/RenderGraphPersistent.cpp` around the comment "the one its host data's revision names" and where `PersistentRecording::versions` is filled. Prefer build-time data (staged graphs have no recording yet). |
 | Q2 | Cost of making a twin's D3D11 export at adoption on the render thread (DXVK interop wrap of existing memory). | Tracy zone around `AdoptPrepared` in a `resize` run. If it costs more than about 0.2 ms per twin, investigate making exports on the lane (D3D11 device creation is free-threaded, the interop call is not known to be). |
 | Q3 | Which executor the revision lane runs on. | Read `RenderGraphRuntime.cpp` for the executors used by `BuildManager`'s build thread and DCLF's pumps (`DCLF/Core/Scene/Coordinator/ScenePump.cpp`). Do not add a thread if a serialized pump on an existing executor works. |
-| Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | Grep run logs for "creating its render targets again". Read `Hooks.cpp`'s thunk caller (`Renderer::WindowSizeChanged`). If it never runs mid-session, implement 9a's event path without a test and say so in the dated doc. |
+| Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | **Answered (9a, 2026-11-19, from the code): yes, so a pending version cannot serve the engine's own objects.** (1) The `Create` thunk (`Hooks.cpp`) runs `globals::ReInit` and `State::Setup` right after `EndSet`, and they read the new targets (`HDRDisplay::SetupResources` takes kMAIN's description; HDR and Deferred call `Targets::Recreate`). (2) The engine fills its own fields, so it binds the new D3D11 objects from its next draw. (3) The 3D targets are made inside the frame, when volumetric lighting first renders (`Create3DRenderTarget`), and drawn at once. (4) In native mode `ResizeBuffers` comes from `Renderer::WindowSizeChanged`, which then calls `Create`. No CS code calls it alone, and `WndProc_Hook` keeps the window size unless the user drags the frame. So the first set is made before the graph exists (`State::Setup` initializes the graph after `Create`), and `TakeOver` makes first versions. A second set while the graph runs is now fatal at `BeginSet` (decision of 2026-11-18). What is left in a session: targets the engine remakes outside a set (the volumes, guest only, read by no graph) and a native `ResizeBuffers`. Both become pending versions that join the next revision. In the frames before the adoption the graph reads the old version while the engine writes the new one. That is accepted, since no graph declares the volumes and a native resize is followed by the fatal `Create`. `EndSet` is not made a boundary. |
 | Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | **Answered (7c, 2026-11-19): not as a swap of slots alone.** The swap now runs inside `AdoptLatest`, but as a render-thread build of every graph (`BuildManager::SwapPipelines`). Why, from the code: (1) `ComputeProgram`/`RasterProgram::Pipeline()` read the slot (`LivePipelineSlot::Peek`) when a pass records, and keep no reference. (2) A revision's recordings are made before its adoption, on the host's thread, so they would bind the old payloads. (3) `Publish` retires a replaced payload at `SubmissionsMade()`, and a kept recording made before the swap may replay after it: a freed pipeline. (4) `AttachStagedEpochGraphs` holds the host's thread, but gives no hook to publish inside the hold. Making it safe needs pipelines named by the revision: the registry's staged set as host data (`IResourceVersions`-like, OMS), a recording that can read its host data or retains its payloads (ORG `RecordingContext`), and programs that bind through it. |
 | Q6 | Where the engine shadow map's size and format are created and whether they change in a session. | Read `LightLimitFix.cpp:EnsureLocalShadowResources` (it reads `kSHADOWMAPS`) and the engine target plan in `docs/development/p4/render-targets.md`. |
 | Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | Read `FrameDriver.cpp:OnBegin`'s comment and `DCLF/Core/Render/FrameDriver.cpp:BeginFrame`'s caller in guest; check the epoch order in a `guest-quick` census. |
@@ -2446,6 +2474,26 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
   Its constants keep `CommitContext::DynamicSize`.
 - **The enforcement lists the constants-only variables in CS** (`Vars::Lane::ConstantsOnly`), since OMS's `VariableSet` gives no
   traits without a snapshot, and taking one at declaration would race the lane. It also covers `DeclareBuffer`.
+
+**Decided by the agent (step 9a, 2026-11-19), to confirm:**
+- **A second `Create` while the graph runs is now an explicit `report_and_fail` at `BeginSet`.** It was a warning and a second
+  `State::Setup`. The decision calls it fatal, and with the exception gone its versions would be pending anyway. A user dragging
+  the window frame in windowed mode now stops the game with that message.
+- **`EndSet` is not the boundary.** Q4 is yes, but a second set is fatal, so no supported change needs a boundary there. The
+  in-frame volume remakes join the next revision. No graph declares them, so the frames between are not wrong.
+- **The colour space switches at adoption only without frame generation.** With a presentation layer the replacement keeps the
+  input wait: DLSS-G turns off before a swap chain change, and a layer's inputs are tagged while the frame renders, so a
+  replacement between them is not checked. The next frame's present may wait once for the replacement on the submission thread
+  (the present pacing that exists already). The render thread adds no wait of its own.
+- **The predicted presentation's HDR10 comes from the last replacement's support check** (`hdr10Supported`). If Windows HDR was
+  turned off in between, the frame renders HDR into an SDR swap chain until the next change, and `UpdateSwapChainColorSpace`
+  logs the mismatch.
+- **A native resize to a new size takes a pending version.** Frames before its adoption present the new texture while the graph
+  writes the old one. A native resize is always followed by the fatal `Create` (Q4), so these frames never show.
+- **A back buffer resize to another format keeps the new slot and structural rebuild.** No caller changes the format. The rebuild
+  is counted as a late change (step 10c).
+- **The engine target's pending version has no owner.** The version holds the image and ORG owns its memory, so the old image
+  lives while its version is still current or held.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
