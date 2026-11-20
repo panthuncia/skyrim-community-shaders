@@ -305,3 +305,12 @@ final until the user confirms it.
     - **Shader reload while DCLF draws keeps a named, counted render-thread wait** (development only), instead of the
       lead's proposed fatal, until recordings name their pipelines (item 42). Shader reload is a development tool, so a
       wait there is better than losing it.
+58. **10a-0 and 10a are merged (`2d44ec319`), not built yet.**
+    - **New tap error:** `TapError::DclfInputChanged` for target or main-resource changes after DCLF draws. The shadow
+      format is latched from the engine's targets, so no exception was needed.
+    - **Staged epochs:** DCLF's epochs are staged, `AdoptSnapshotAtBegin` runs at every render-owner Begin, and the boundary
+      exceptions are gone.
+    - **Shader reload:** keeps a named wait (`[DCLF] shader-reload wait`).
+    - **Open:** nothing flags a DCLF epoch that keeps re-staging and never switches in. A `Starved`-like tap error is
+      wanted.
+    - **10b:** written code-only in parallel, merged only after 10a's full runs pass.
