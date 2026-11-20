@@ -353,3 +353,10 @@ final until the user confirms it.
     of `cs.scaleform`, `cs.screenshot` and `cs.deferred`, plus 16 unnamed ones in guest. A follow-up lead moves each
     source into the adoption point and then makes `NoteLateChange` fatal. That is the last item of the frame revision
     plan.
+65. **10c passed 24 of 24** (batch 8):
+    - `dclf-toggles` in all three modes, including the CPU→GPU pipeline switch that hung under 10a;
+    - `resize` in three modes, with the corrected `no_log`;
+    - the step 7 set, plus `river`, `rain`, `flicker-taa`, `native-census` and `native-tour`.
+
+    Every run had zero DCLF waits and zero tap errors. Steps 1–10 of the frame revision plan are merged and tested. Only
+    the late-changes follow-up (making in-frame build requests fatal) is still in flight.
