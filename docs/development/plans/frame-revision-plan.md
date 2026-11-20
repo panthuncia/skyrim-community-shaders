@@ -661,6 +661,14 @@ namespace Revision { const AdoptedRevision& Adopted(); }
   `AtNextBegin` call are gone. The upload and draw passes still skip work on a texture their page does not bind, and the whole
   texture is restaged until a recorded upload copied its bound version, so nothing else changed.
 
+**As built (2026-11-19, 6.8, `org-native/rev-step6-8`).** LLF's cluster buffers keep their Setup size, the display size's grid,
+which `ORGLightCulling::Setup` now takes as the capacity. The passes dispatch for that capacity, and the push constants carry
+only it. The run's grid travels in the latch (`LLFLatch::clusterSize`); the shaders clamp it to the capacity and skip clusters
+outside it. The light copy always moves the whole capacity. So no pass revision follows the grid or the light count, and
+`pending`, `BeginFrame` and the atomic shape are gone. `LightLimitFix::UpdateClusterParameters` takes the grid from
+`ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
+culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1379,6 +1387,19 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The shaders' scale and offset still read the live heightmap size.** `NeedsRefresh` keeps terrain shadows off until a refresh
   ran in a graph holding the new client, which is adopted with the new version, so the two sizes agree whenever shadows are on.
 - **The heightmap upload stays a one-shot pass** (`PassDesc::once`). The one-shot machinery is step 7a's.
+
+**Decided by the agent (step 6.8, 2026-11-19), to confirm:**
+- **The grid is a run value, not a recorded constant.** It goes into the latch, and the dispatches cover the Setup grid. A push
+  constant read from `Adopted()` would make every ratio change a new pass revision, so a re-recording outside any revision.
+- **The grid applies the adopted ratios always.** `Util::ConvertToDynamic` ignored the ratios while the engine's
+  `dynamicResolutionLock` was set; that is live engine state, not a variable. With an upscaler the grid may now be smaller than
+  before (64 render pixels a cluster). Watch for lights dropped by `CLUSTER_MAX_LIGHTS` in dense scenes.
+- **No buffer declaration.** Declare.h has none, and the buffers already follow the display size at Setup. A display larger than at
+  Setup (a native swap chain resize) keeps the buffers and gets larger clusters, with one warning. Declaring the buffers on
+  `DisplaySize` waits for a buffer declaration.
+- **Before the first adopted `DisplaySize`, the grid is the Setup grid.**
+- **Guest also copies the whole light capacity each run** (1024 lights, about 80 KB), as native did. Its recordings then stop
+  changing as the light count grows.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

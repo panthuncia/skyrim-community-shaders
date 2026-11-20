@@ -290,7 +290,8 @@ void LightLimitFix::SetupResources()
 
 	// Culling runs on the render graph when DXVK's device could be adopted. The D3D11 set is the
 	// fallback for native D3D11 and for graph failures, so it is made only when one of those needs it.
-	if (!ORGLightCulling::Get().Setup(legacyClusterCount, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS))
+	// The buffers hold the display size's grid. A dynamic resolution culls a smaller grid in them.
+	if (!ORGLightCulling::Get().Setup({ clusterSize[0], clusterSize[1], clusterSize[2] }, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS))
 		EnsureLegacyCulling();
 
 	strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
@@ -1018,6 +1019,13 @@ void LightLimitFix::UpdateClusterParameters()
 {
 	lightsNear = *globals::game::cameraNear;
 	lightsFar = *globals::game::cameraFar;
+
+	// On the graph the grid is the adopted revision's, so the culling and this frame's readers agree on it.
+	std::array<uint32_t, 3> adoptedGrid{};
+	if (ORGLightCulling::Get().AdoptedClusterGrid(adoptedGrid)) {
+		std::copy(adoptedGrid.begin(), adoptedGrid.end(), clusterSize);
+		return;
+	}
 
 	auto renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
 	clusterSize[0] = ((uint)renderSize.x + 63) / 64;
