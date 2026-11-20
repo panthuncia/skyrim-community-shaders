@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDrawStats.h"
@@ -189,6 +190,11 @@ namespace DCLF
 		std::shared_ptr<const void> AdoptCurrentSnapshot(bool a_wait);
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */
 		void BindAdopted();
+		/**
+		 * @brief Render thread. What DCLF's graphs and snapshots are built for changed after DCLF first drew (plan step 10a-0).
+		 * No revision carries such a change, so it is a tap error (TapError::DclfInputChanged), fatal in development builds.
+		 */
+		static void NoteInputChanged(std::string_view a_what);
 		/** @brief Render thread, frame start. Builds the frame's payload from the installed snapshot. False without one. */
 		bool MakeFramePayload();
 		/** @brief Render thread, frame start. Posts the resources and fits the next builds need, latest wins. */

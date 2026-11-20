@@ -187,13 +187,8 @@ namespace DCLF
 		bool ready = false;
 		const auto resourcesBefore = impl->resources;
 		try {
+			// New main resources are made only before DCLF draws, so their graphs build like any other DCLF build.
 			ready = impl->Setup(capture, depthOnly);
-			// New main resources under claims. The graph is built now on this thread because the colour epoch, the frame's last,
-			// draws with them. Only DCLF's epochs are built here, and the next frame waits at its start for a matching snapshot.
-			if (ready && impl->resources != resourcesBefore && resourcesBefore) {
-				(void)RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix: main resources made again under claims");
-				impl->SettleBuildState();
-			}
 		} catch (const std::exception& e) {
 			// Never retried. The feature stays on the native path.
 			logger::error("[DCLF] Main-pass graph resources could not be created: {}", e.what());

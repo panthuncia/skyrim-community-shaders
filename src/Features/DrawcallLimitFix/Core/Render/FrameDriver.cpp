@@ -74,6 +74,11 @@ namespace DCLF
 		s_buildPointFrame = a_frame;
 	}
 
+	void IndirectDraws::NoteInputChanged(std::string_view a_what)
+	{
+		RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::DclfInputChanged, RenderGraph::Frame::SegmentId::Count, a_what);
+	}
+
 	FrameDriver& FrameDriver::Get()
 	{
 		static FrameDriver driver;

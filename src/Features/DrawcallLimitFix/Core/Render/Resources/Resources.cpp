@@ -379,6 +379,21 @@ namespace DCLF
 		if (resources && targets == formats && target.Width == width && target.Height == height && sameFrameBuffers &&
 			resources->graphBuffers == graphBuffers)
 			return true;
+		// Once DCLF draws, its graphs and snapshot hold these resources and no revision carries new ones (plan step 10a-0).
+		// The colour epoch is skipped instead.
+		if (resources && !Scene::FrameView::Get().NotDrawingYet()) {
+			std::string what;
+			if (!(targets == formats))
+				what += "the target formats, ";
+			if (target.Width != width || target.Height != height)
+				what += fmt::format("the size {}x{} -> {}x{}, ", width, height, target.Width, target.Height);
+			if (!sameFrameBuffers)
+				what += fmt::format("the CPU structured buffers at t16 and up ({} -> {}), ", resources->frameBuffers.size(), frameBuffers.size());
+			if (resources->graphBuffers != graphBuffers)
+				what += fmt::format("the frame graph buffers with indices {:#x} -> {:#x}, ", resources->graphBuffers, graphBuffers);
+			IndirectDraws::NoteInputChanged(fmt::format("the main-pass graph resources would be made again after DCLF drew; changed: {}", what.substr(0, what.size() - 2)));
+			return false;
+		}
 
 		auto device = host->Device();
 		auto state = std::make_shared<Resources>();

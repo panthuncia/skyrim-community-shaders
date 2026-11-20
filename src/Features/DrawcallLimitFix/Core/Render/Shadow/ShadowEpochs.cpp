@@ -740,6 +740,15 @@ namespace DCLF
 			shadowTargetFormat = dsvFormat;
 			NoteCapability(shadowCatalogBuilt, fmt::format("a view draws into format {}", static_cast<int>(dsvFormat)));
 		}
+		// The shadow pipelines are built for the engine shadow map's format, fixed before DCLF draws (plan step 10a-0).
+		// Before then a view's own format replaces it. After, no revision carries the change.
+		if (dsvFormat != DXGI_FORMAT_UNKNOWN && dsvFormat != pipelineShadowFormat) {
+			if (pipelineShadowFormat != DXGI_FORMAT_UNKNOWN && !Scene::FrameView::Get().NotDrawingYet())
+				IndirectDraws::NoteInputChanged(fmt::format("a shadow view draws into depth format {}, not the shadow pipelines' {}", static_cast<int>(dsvFormat),
+					static_cast<int>(pipelineShadowFormat)));
+			else
+				pipelineShadowFormat = dsvFormat;
+		}
 	}
 
 	void ShadowEngine::NoteShadowEpochDrawn(const ShadowPayload& a_payload, const std::array<bool, kShadowModeCount>& a_modeUsed, std::uint32_t a_frame,

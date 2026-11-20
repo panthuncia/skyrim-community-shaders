@@ -398,6 +398,8 @@ namespace RenderGraph::Frame::Driver
 			return "missed settings writer";
 		case TapError::OutsideAdoption:
 			return "outside the adoption point";
+		case TapError::DclfInputChanged:
+			return "DCLF input changed after it drew";
 		default:
 			return "?";
 		}

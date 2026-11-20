@@ -5,11 +5,13 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Globals.h"
 
 #include <d3d11.h>
 
 #include <cstdint>
+#include <string>
 
 namespace DCLF::Features::MainView
 {
@@ -42,13 +44,28 @@ namespace DCLF::Features::MainView
 			return formats;
 		}
 
+		std::string DescribeFormats(const TargetFormats& a_formats)
+		{
+			std::string text;
+			for (std::uint32_t i = 0; i < a_formats.colorCount; ++i)
+				text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
+			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
+		}
+
 		/** @brief The main pass's targets and bindings for this frame's colour epoch; false when its targets are not bound. */
 		bool CaptureMainPass()
 		{
 			const auto formats = CurrentTargetFormats();
 			if (formats.colorCount == 0 || formats.depth == DXGI_FORMAT_UNKNOWN)
 				return false;
-			DrawPipelines::Get().SetTargetFormats(formats);
+			// The engine's targets are made once (step 9a), so DCLF's pipelines and graphs are built for these formats.
+			// Once DCLF draws, no revision carries a change. It is a tap error, and the colour epoch is skipped.
+			auto& pipelines = DrawPipelines::Get();
+			if (pipelines.HasTargetFormats() && !(formats == pipelines.Targets()) && !Scene::FrameView::Get().NotDrawingYet()) {
+				IndirectDraws::NoteInputChanged(fmt::format("the main pass's target formats changed ({} -> {})", DescribeFormats(pipelines.Targets()), DescribeFormats(formats)));
+				return false;
+			}
+			pipelines.SetTargetFormats(formats);
 			IndirectDraws::Get().CaptureMainPass();
 			// Read here because inside the deferred pass the blend table holds the deferred variants.
 			DrawPipelines::Get().CaptureEngineStates();
