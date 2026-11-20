@@ -261,3 +261,9 @@ final until the user confirms it.
 50. **The `ibl` config still stopped in 6b4.** The recipe check stops at its first finding. The second was IBL's env SH
     (pre-main) reading `DynamicCubemaps::Env`, which is written in deferred+water. The director added it to
     `kPreviousFrame`: it is Persistent, and D3D11 also reads last frame's.
+51. **Step 8 is merged.** Render-size viewports live in the latch, drawn by `FullscreenLatchViewportVS`. `post.dynres` is
+    gone. Declaring a texture or buffer on a constants-only variable is a fatal declaration error. Open: Screen Space
+    Shadows' program and the Effects11 rays' areas still depend on the render size. `dynres` shows whether a quality
+    change re-registers them. The VRAM measurement procedure is in the plan (`dynres-vram`, at 4K).
+52. **Steps 9a and 9b run in parallel** with separate leads, as the plan allows. 9a resolves Q4 from the code before it
+    writes any. Step 10 is serial afterwards: 10a, 10b and 10c, one lead each, with full runs between them.
