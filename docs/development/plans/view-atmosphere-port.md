@@ -76,9 +76,9 @@ through `RequestSize`, so a quality change is a new version at the next frame bo
 
 Until the shared volume runs on the graph, the fog's graph volumes are the fog and the medium says "no medium". When the shared
 volume lands (3.6), `ORGViewAtmosphere::SharedVolumeActive()` becomes the switch: `ViewAtmosphere::IsPrepared()` answers it in
-graph modes, `ExponentialHeightFog::Prepass` then releases the fog's volumes as on D3D11, and the fog's published ids are
-withdrawn (they stay declarable, so the readers' graphs do not change). The switch reads settings and Physical Sky's state at
-the frame's Prepass only, and both sides follow it in the same frame.
+graph modes. The fog's volumes then go to one texel through their declaration (the existence rule, frame revision plan step 6),
+and the atlas to its full size through its own, so both switch with one revision. The fog's ids stay published, so the readers'
+graphs do not change.
 
 ### 3.4 The post-water composite (client `cs.view-atmosphere.composite`, EngineDraws)
 
@@ -91,9 +91,12 @@ the frame's Prepass only, and both sides follow it in the same frame.
   depth, the medium by published id, the fog's volumes by published id (or the no-fog volume), IBL's SH, Dynamic Cubemaps'
   `EnvTextureBC6H`. Writes kMAIN through its UAV. Groups per run from kMAIN's size and the dynamic resolution, through the run gate.
   Once a main-view frame, never in a reflection face, as on D3D11.
-- **When it is on.** `CompositeActive()`: Exponential Height Fog on, Physical Sky off (its media are not on the graph yet), the
-  program built (ProgramCache, off the render thread) and every input it needs published. Otherwise `PostWaterComposite` is 0 and
-  the shaders do their own fog, as before #3157. A change of inputs registers the client again; nothing per frame does.
+- **When it is on.** The client is declared on Exponential Height Fog's `enabled` (frame revision plan 6.21). Its key also needs
+  Physical Sky off (its media are not on the graph yet), the program built (ProgramCache, off the render thread) and every input it
+  needs published, as the last Prepass observed them. `CompositeActive()`, and so `PostWaterComposite`, is on once the adopted
+  revision holds the registration, so the flag and the composite switch at one Begin. Otherwise the shaders do their own fog, as
+  before #3157. A change of inputs registers the client again when the next revision starts. The older registration composes
+  until then (`matchesById`).
 - **Volumetric clouds.** D3D11 renders Physical Sky's clouds first (`RenderVolumetricClouds(kMainViewAndCubemap)`). That is
   Physical Sky's port; its cloud passes go at the same step or just before it.
 
@@ -148,8 +151,7 @@ t125-t127 for the faces (with `flags.w = 1`). On the graph:
    own epochs, so a frame texture selects its view per epoch: no new registers, and one shader path for faces and main view.
 3. Sky (`Sky.hlsl`) and Water (`Water.hlsl`) DCLF families: whether their graph builds define `DCLF_BINDLESS` and bind frame
    textures. If not, they read t125-t127 unbound.
-4. **Decided (2026-11-19, Q12):** `CompositeActive()`, and so `PostWaterComposite`, is on only in frames whose schedule draws
-   the composite (`FrameAnchors::ScheduledThisFrame`, from the schedules taken at Renderer::Begin). A frame whose build lags
-   keeps the shaders' own fog instead of having none. Migration 6.21 deletes this.
+4. **Done (6.21).** `PostWaterComposite` followed the registration while the composite waited for its build, so those frames had
+   no fog. Q12's point fix (`FrameAnchors::ScheduledThisFrame`) is gone: the flag is the registration the adopted revision holds.
 5. The D3D11 composite took PS t31 as bound by the engine at the hook. The graph reads Dynamic Cubemaps' `EnvTextureBC6H`, as the
    ORG SSAO composite does. Compare in an interior with `useDynamicCubemaps`.
