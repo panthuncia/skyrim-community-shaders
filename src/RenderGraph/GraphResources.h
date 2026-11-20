@@ -19,7 +19,9 @@ namespace org
 	class RenderGraph;
 	class RenderPass;
 	class Resource;
+	class VersionedBuffer;
 	class VersionedTexture;
+	struct BufferVersion;
 }
 
 /**
@@ -178,7 +180,10 @@ namespace GraphResources
 		/** @brief The slot a versioned texture's passes declare, the same across same-shape Resizes. Null otherwise. */
 		const std::shared_ptr<org::VersionedTexture>& Versioned() const { return slot; }
 
-		/** @brief Registers the graph resource by name with a graph being built. A versioned texture registers its slot as the resolver. */
+		/** @brief The slot a versioned structured buffer's passes declare, the same across element counts. Null otherwise. */
+		const std::shared_ptr<org::VersionedBuffer>& BufferVersions() const { return bufferSlot; }
+
+		/** @brief Registers the graph resource by name with a graph being built. A versioned texture or buffer registers its slot as the resolver. */
 		void Register(org::RenderGraph& a_graph) const;
 
 		Lifetime GetLifetime() const { return options.lifetime; }
@@ -295,6 +300,7 @@ namespace GraphResources
 		std::shared_ptr<const void> alive = std::make_shared<const int>(0);
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
+		std::shared_ptr<org::VersionedBuffer> bufferSlot;  // a versioned structured buffer's (Options::versioned)
 		std::optional<Extent> requestedSize;          // RequestSize's, until the next frame boundary
 		std::uint32_t exportLayout = 0;               // an exported texture's resting VkImageLayout, the same for every version
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
@@ -377,17 +383,36 @@ namespace GraphResources
 		D3D11_TEXTURE3D_DESC desc;
 	};
 
-	/** @brief A graph structured buffer, the twin of Buffer.h's StructuredBuffer. Exported views cover every element. */
+	/**
+	* @brief A graph structured buffer, the twin of Buffer.h's StructuredBuffer. Exported views cover every element.
+	* A versioned one (Options::versioned, not a transient) has a slot, BufferVersions(), that passes declare. A new element
+	* count is then a new version of the slot (Frame::DeclareBuffer), made off the render thread and adopted at a frame boundary.
+	*/
 	class StructuredBuffer : public Resource
 	{
 	public:
 		StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options = {});
 
+		/** @brief The element count of the current version. Render thread. */
 		UINT Count() const { return count; }
+		UINT Stride() const { return stride; }
 		ID3D11Buffer* D3D11() const { return static_cast<ID3D11Buffer*>(d3d11.get()); }
 
+		/**
+		* @brief Render thread, at a frame boundary, after BufferVersions() adopted a_version, a version of a_count elements. Makes
+		* the D3D11 export and views (exported buffers), updates Graph() and Count(), and releases the old D3D11 side after
+		* D3D11's last use. Fatal when a_version is not the slot's current version, or D3D11 refuses it.
+		*/
+		void AdoptVersion(const std::shared_ptr<const org::BufferVersion>& a_version, UINT a_count);
+
 	private:
+		/** @brief The D3D11 buffer and views of a_buffer, a_count elements. False when D3D11 refuses one. */
+		bool Export(org::Resource& a_buffer, UINT a_count, winrt::com_ptr<ID3D11Resource>& a_d3d11, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
+			winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav) const;
+
 		UINT count = 0;
+		UINT stride = 0;
+		UINT bindFlags = 0;
 	};
 
 	/** @brief A graph buffer, the twin of Buffer.h's raw or typed Buffer. An exported one takes D3D11 views through CreateSRV and CreateUAV. */

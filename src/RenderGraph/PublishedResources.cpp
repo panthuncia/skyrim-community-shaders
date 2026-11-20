@@ -14,6 +14,7 @@
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
+#	include <Resources/Buffers/VersionedBuffer.h>
 #	include <Resources/GloballyIndexedResource.h>
 #	include <Resources/VersionedTexture.h>
 
@@ -36,6 +37,7 @@ namespace PublishedResources
 			std::shared_ptr<org::Resource> resource;
 			// A versioned twin's slot. Every graph registers it as the id's resolver, so a resize is a new version, not a new resource.
 			std::shared_ptr<org::VersionedTexture> slot;
+			std::shared_ptr<org::VersionedBuffer> bufferSlot;  // the same for a declared buffer (Frame::DeclareBuffer)
 			std::optional<org::SRVViewType> view;  // none means the primary view
 			bool published = false;                // false when withdrawn but still registered
 			const ID3D11ShaderResourceView* srv = nullptr;  // compared, never used
@@ -51,6 +53,7 @@ namespace PublishedResources
 				std::string id;
 				std::shared_ptr<org::Resource> resource;
 				std::shared_ptr<org::VersionedTexture> slot;  // registered as the id's resolver in place of resource
+				std::shared_ptr<org::VersionedBuffer> bufferSlot;  // the same for a buffer
 			};
 			std::vector<Registered> resources;
 		};
@@ -114,10 +117,14 @@ namespace PublishedResources
 					return;
 				for (const auto& entry : snapshot->resources) {
 					const org::ResourceIdentifier id(entry.id);
-					if (!entry.slot)
+					if (!entry.slot && !entry.bufferSlot)
 						a_graph.RegisterResource(id, entry.resource);
-					else if (!a_graph._resolverMap.contains(id))  // the producer's own registration may have come first
+					else if (a_graph._resolverMap.contains(id))  // the producer's own registration may have come first
+						continue;
+					else if (entry.slot)
 						a_graph.RegisterResolver(id, entry.slot);
+					else
+						a_graph.RegisterResolver(id, entry.bufferSlot);
 				}
 			}
 
@@ -138,7 +145,7 @@ namespace PublishedResources
 		{
 			auto snapshot = std::make_shared<Snapshot>();
 			for (const auto& entry : a_state.entries)
-				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot });
+				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot, entry.bufferSlot });
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 			if (!a_host.HasExtension(kExtensionId)) {
 				a_host.AddExtension(kExtensionId, [&a_state]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
@@ -167,12 +174,18 @@ namespace PublishedResources
 				return nullptr;
 			if (a_entry.slot && a_entry.twin && !a_entry.alive.expired() && a_entry.twin->Versioned() == a_entry.slot)
 				return a_entry.twin->SRV();
+			if (a_entry.bufferSlot && a_entry.twin && !a_entry.alive.expired() && a_entry.twin->BufferVersions() == a_entry.bufferSlot)
+				return a_entry.twin->SRV();
 			return a_entry.srv;
 		}
 
 		std::shared_ptr<org::Resource> CurrentOf(const Entry& a_entry)
 		{
-			return a_entry.slot ? a_entry.slot->CurrentResource() : a_entry.resource;
+			if (a_entry.slot)
+				return a_entry.slot->CurrentResource();
+			if (a_entry.bufferSlot)
+				return a_entry.bufferSlot->Get();
+			return a_entry.resource;
 		}
 
 		/** @brief A cube gets TextureCube, a 2D array its full array, else Texture2D. */
@@ -192,6 +205,7 @@ namespace PublishedResources
 			const GraphResources::Resource* twin = nullptr;
 			std::weak_ptr<const void> alive;
 			std::shared_ptr<org::VersionedTexture> slot;  // a new version of it is not a new resource
+			std::shared_ptr<org::VersionedBuffer> bufferSlot;
 		};
 
 		bool PublishEntry(std::string_view a_id, const Source& a_source, std::optional<org::SRVViewType> a_view)
@@ -200,7 +214,8 @@ namespace PublishedResources
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto* entry = Find(state, a_id);
 			// The same resource or a new version of the same slot needs no build.
-			if (entry && (entry->resource == a_source.resource || (entry->slot && entry->slot == a_source.slot))) {
+			if (entry && (entry->resource == a_source.resource || (entry->slot && entry->slot == a_source.slot) ||
+							 (entry->bufferSlot && entry->bufferSlot == a_source.bufferSlot))) {
 				entry->resource = a_source.resource;
 				entry->srv = a_source.srv;
 				entry->twin = a_source.twin;
@@ -214,6 +229,7 @@ namespace PublishedResources
 				entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
 			entry->resource = a_source.resource;
 			entry->slot = a_source.slot;
+			entry->bufferSlot = a_source.bufferSlot;
 			entry->view = a_view;
 			entry->published = true;
 			entry->srv = a_source.srv;
@@ -239,7 +255,9 @@ namespace PublishedResources
 					a_resource.Name(), a_id);
 				return false;
 			}
-			return PublishEntry(a_id, { .name = a_resource.Name(), .resource = a_resource.Graph(), .srv = a_resource.SRV(), .twin = &a_resource, .alive = a_resource.Alive(), .slot = a_resource.Versioned() },
+			return PublishEntry(a_id,
+				{ .name = a_resource.Name(), .resource = a_resource.Graph(), .srv = a_resource.SRV(), .twin = &a_resource, .alive = a_resource.Alive(), .slot = a_resource.Versioned(),
+					.bufferSlot = a_resource.BufferVersions() },
 				a_view);
 		}
 
@@ -309,13 +327,14 @@ namespace PublishedResources
 		for (auto& entry : state.entries) {
 			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
 				continue;
-			if (entry.slot && entry.twin->Versioned() == entry.slot) {
+			if ((entry.slot && entry.twin->Versioned() == entry.slot) || (entry.bufferSlot && entry.twin->BufferVersions() == entry.bufferSlot)) {
 				// A new version of the same slot, which every graph already resolves.
 				entry.resource = entry.twin->Graph();
 				entry.srv = entry.published ? entry.twin->SRV() : nullptr;
 				continue;
 			}
 			entry.slot = entry.twin->Versioned();
+			entry.bufferSlot = entry.twin->BufferVersions();
 			entry.resource = entry.twin->Graph();
 			entry.srv = entry.published ? entry.twin->SRV() : nullptr;  // a withdrawn id has no export to match
 			changed += fmt::format("{}'{}'", changed.empty() ? "" : ", ", entry.id);

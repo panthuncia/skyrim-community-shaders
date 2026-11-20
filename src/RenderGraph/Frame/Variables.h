@@ -60,7 +60,7 @@ namespace RenderGraph::Frame::Vars
 		friend bool operator==(const TargetIdentity&, const TargetIdentity&) = default;
 	};
 
-	/** @brief The engine's shadow map array (kSHADOWMAPS). */
+	/** @brief An engine shadow map array: kSHADOWMAPS (EngineShadowMap) or kSHADOWMAPS_ESRAM (ShadowCascades). */
 	struct ShadowMapShape
 	{
 		Extent2D size{};
@@ -134,6 +134,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<bool> HdrEnabled() { return { "HdrEnabled" }; }
 	constexpr Var<TargetIdentity> HdrOutputTarget() { return { "HdrOutputTarget" }; }
 	constexpr Var<ShadowMapShape> EngineShadowMap() { return { "EngineShadowMap" }; }
+	constexpr Var<ShadowMapShape> ShadowCascades() { return { "ShadowCascades" }; }
 	constexpr Var<CubemapShape> ReflectionCubemap() { return { "ReflectionCubemap" }; }
 	constexpr Var<HeightMapIdentity> HeightMap() { return { "HeightMap" }; }
 	constexpr Var<bool> Interior() { return { "Interior" }; }
@@ -155,6 +156,8 @@ namespace RenderGraph::Frame::Vars
 	bool SetHdrOutputTarget(TargetIdentity a_value, std::string_view a_writer);
 	/** @brief Any thread. The engine's shadow map array. */
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer);
+	/** @brief Any thread. The engine's cascade shadow maps (kSHADOWMAPS_ESRAM), which Volumetric Shadows reads. */
+	bool SetShadowCascades(ShadowMapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. The engine's reflection cubemap. */
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer);
 	/** @brief Any thread. Terrain Shadows' heightmap. */

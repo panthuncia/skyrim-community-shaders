@@ -993,6 +993,53 @@ build is fatal.
 - Linear Lighting's handling in Physical Sky is unchanged.
 - The config is `physical-sky`.
 
+**As built (2026-11-19, step 6 follow-ups, `org-native/rev-step6-followups`).** Cross-feature items the migrations left open.
+- **`Frame::DeclareBuffer`** (Declare.h): a structured buffer as a function of variables, by analogy with `DeclareTexture2D`. The
+  description function returns a `D3D11_BUFFER_DESC`, and only `ByteWidth` may change (whole elements). A new element count is a
+  new version of the same slot. `AdoptedRevision::Elements(buffer)` and `FirstFrame(buffer)` read the bound version.
+  - The twin is a versioned `GraphResources::StructuredBuffer`. It holds an `org::VersionedBuffer` slot (`BufferVersions()`), which
+    `Register` registers as the name's resolver and passes declare (`org::ResourceResolverAndRange(*slot)`).
+  - The step 4 buffer fragment carries it: `Declarations::Evaluate` gives a new count to the coordinator (`OnBufferWish`), the lane
+    makes the version with `MakeStructured` and nothing to upload, and the fragment resolves at once. At adoption the slot adopts
+    the version, then `StructuredBuffer::AdoptVersion` makes the D3D11 export and views, updates `Count()` and `Graph()`, and
+    releases the old export after D3D11's last use.
+  - `PublishedResources` publishes a declared buffer as its slot (`Entry::bufferSlot`), so its readers resolve every version
+    without a build, `ShaderResourceIndex` follows the current one, and `IsExportOf` follows the twin's export.
+- **Light Limit Fix's cluster buffers** (clusters, light index list, light grid) are declared on `DisplaySize`. A larger native
+  display is a new version of each. The lights and the counter keep their size.
+  - The dispatches are indirect through a run gate (`LightLimitFix::CullingGate`): each run's commit writes the group counts of
+    the bound buffers' grid. That grid also goes in the latch (`LLFLatch::clusterCapacity`), where the shaders clamp the run's grid
+    to it, so the push constants hold only view and latch indices. No recording follows the display size.
+  - `BoundGrid` is the adopted display's grid when the bound clusters buffer holds it, else the first versions' grid (only before
+    the first adoption); anything else is fatal. `AdoptedClusterGrid` clamps to it. The "larger than at setup" warning is gone.
+- **Histogram Auto Exposure's two buffers** are declared buffers of a fixed size, made at the effect's `Declare`. Only their
+  creation changed; the passes, the reset gate and the readback are as 6.9 left them.
+- **ImageSpace's world clients depend on `DynamicCubemaps.EnabledSSR`** (6.18's open item). `WorldKey::ssr` holds it (while Dynamic
+  Cubemaps is loaded), so a toggle registers both world clients again with a revision. The SSR raymarch steps carry it as their
+  spec's `permutation`, which is part of the ImageSpace program key, and `DefinesOf` sets `ENABLESSR` from it in place of the live
+  define. So the revision that switches the clients in also switches the program. The engine's own shader-cache clear stays for
+  plain D3D11.
+- **Volumetric Shadows follows a new frame variable, `ShadowCascades`** (`Vars::ShadowMapShape` of `kSHADOWMAPS_ESRAM`, raised
+  with the engine's other targets in `RaiseTargetVariables`), 6.18's open item. The client is declared on it, and its key imports
+  the cascades and the volumetric copy when a revision carries the change, with the width from the variable. `Observe`, the
+  EarlyPrepass compare and `Invalidate` are gone. `UpdateImports` only checks that the cascades' view is still there (fatal if
+  not), without importing.
+- **Section 8 greps after the follow-ups** (over `src/`, `e9674777b` plus this branch):
+  - `ResetHistories`, `RegisterAgain`: none.
+  - `clearPending`: only `DrawcallLimitFix/Diagnostics/PlayerParity.cpp`, a diagnostic's own flag, not a history reset (no owner).
+  - `Rearm`: only the definition (`FrameAnchors.{h,cpp}`) and `AnchorPasses.h`'s one-shot comments. No caller is left; step 7a
+    deletes it with the one-shot passes (Terrain Shadows' heightmap upload, 6.3).
+  - `AtNextBegin`: the hook (`FrameDriver.{h,cpp}`), `GraphResources.cpp`'s `ApplySizeRequests` and `GraphResourcesSelfTest.cpp`.
+    Step 7a.
+  - `RequestSize`: only `GraphResources.{h,cpp}`'s definitions and `Revision.{h,cpp}`'s wish hook comments. No feature calls it.
+    Step 7a.
+  - `Refresh(`, the frame-revision ones: `FrameAnchors::Refresh` in DCLF's Sky, DecalOcclusion, BloodSplatter and ShadowMask
+    clients and its test harness, and in `BinkGraph.cpp` (6.19); in `Menu/ImGuiRenderer.cpp` when the overlay's target import
+    changes (no migration owns it: an engine import, step 9b, or 6.15 if the HDR toggle is what moves it); in
+    `GraphResourcesSelfTest.cpp`, and `PublishedResources::Refresh` from the anchors' resize poll (step 7a). The other matches
+    (`BaselineManager`, `GoToIndex`, `FormEditSources`, `LightEditor`, Terrain Shadows' `NeedsRefresh`, DCLF's
+    `RequestAccumulatedRefresh`) are other mechanisms.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -2106,6 +2153,26 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **`llf-local-shadows` is D3D11 only.** LLF's local shadows need DCLF off and the graph modes need it on, so 6.13's graph cache
   (`ORGLocalShadows`, on when `GraphMode()`) has no supported configuration today. It is left in place for a later decision:
   delete it, or let the cache follow DCLF's shadow views.
+
+**Decided by the agent (step 6 follow-ups, 2026-11-19), to confirm:**
+- **A buffer version has undefined contents.** Every declared buffer so far is written before it is read (LLF's cluster buffers
+  every run). A buffer that needs zeros or data would need the fragment's upload path, which `PublishBuffer` already has.
+- **The lights buffer and the counter are not declared.** Their size follows the light capacity, a constant.
+- **LLF's grid comes from the bound buffers, not a recorded constant.** The gate and the latch carry it per run, as 6.8 did for the
+  run's grid. Push-constant capacity would make every display size a new pass revision outside a revision.
+- **The guest culling epoch is no CS stage**, so it is not a member of the revision that adopts the new buffers. It takes them
+  after adoption through `NoteNewVersions`, as DCLF's readers of other slots do. Not checked in a run: that the first frame after a
+  resize binds the new buffers in that epoch. If it binds the old ones, the dispatch covers a grid larger than they hold.
+- **Histogram Auto Exposure keeps one version, with no one-element version while off.** The chain binds the buffers' graph
+  resources (`Bind::Uav(Graph())`, the readback's `AddBuffer`, Composite's `Image` of the adaptation). A new version would leave
+  those bindings on the old one. Binding a buffer slot there needs `AnchorPasses::Bind`, `RunReadback` and the chain's `Image` to
+  take a `VersionedBuffer`, which is the post chain's code (6.20). The buffers are 1 KB.
+- **The new SSR permutation compiles at the world clients' build**, on first use, as any ImageSpace program not built before
+  (`GetNow`, logged as built at the graph's build). Setup builds neither permutation ahead. `DeclareProgram` would move the compile
+  before the revision starts; it was not used, since the ImageSpace program cache keys every pass shape, not only defines.
+- **Volumetric Shadows imports in its key function**, at the start of a revision on the render thread, not at EarlyPrepass. The
+  engine makes the maps once a session, before the variable's event. Cascades the engine has but that cannot be imported then are
+  fatal, since no later event would register the client again (before, the passes stayed out until an EarlyPrepass found them).
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

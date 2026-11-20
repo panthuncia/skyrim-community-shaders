@@ -71,13 +71,18 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t renew = 0;  // nonzero: a new version even at the twin's extent (a declaration's renew count changed)
 		};
 
-		/** @brief A buffer's newest contents, waiting for the next revision. */
+		/**
+		* @brief A buffer's newest contents, waiting for the next revision. A declared buffer's (Frame::DeclareBuffer) has no bytes:
+		* its new element count needs no upload, and its twin takes the version at adoption.
+		*/
 		struct BufferWish
 		{
 			std::weak_ptr<org::VersionedBuffer> buffer;
 			std::uint32_t elements = 0;
 			std::shared_ptr<std::vector<std::byte>> bytes;
 			std::shared_ptr<const void> payload;
+			std::weak_ptr<const void> twinAlive;
+			GraphResources::StructuredBuffer* twin = nullptr;
 		};
 
 		/** @brief A texture the caller made, waiting to become its slot's next version (PublishTexture). */
@@ -97,7 +102,9 @@ namespace RenderGraph::Frame::Revision
 			std::uint32_t elements = 0;
 			std::shared_ptr<const org::BufferVersion> version;
 			std::shared_ptr<const void> payload;
-			std::shared_ptr<std::vector<std::byte>> bytes;  // kept until the upload completed
+			std::shared_ptr<std::vector<std::byte>> bytes;  // kept until the upload completed. Null for a declared buffer
+			std::weak_ptr<const void> twinAlive;
+			GraphResources::StructuredBuffer* twin = nullptr;  // a declared buffer's twin, which takes the version at adoption
 		};
 
 		/** @brief The value of the buffers fragment: names its buffers' pending versions to the recordings made for the revision. */
@@ -293,7 +300,8 @@ namespace RenderGraph::Frame::Revision
 
 		/**
 		* @brief The buffers' versions made and their uploads queued on the uploader's worker path. The fragment resolves once every
-		* upload completed, and fails when one is cancelled. Lane.
+		* upload completed, and fails when one is cancelled. A declared buffer's version has nothing to upload: its passes write it
+		* before they read it. With no upload at all the fragment resolves here. Lane.
 		*/
 		void MakeBufferVersions(PreparedRevision& a_job)
 		{
@@ -303,9 +311,14 @@ namespace RenderGraph::Frame::Revision
 				auto buffer = wish.buffer.lock();
 				if (!buffer)
 					continue;
-				RevisionBuffer entry{ .key = buffer->Key(), .buffer = buffer, .elements = wish.elements, .payload = std::move(wish.payload), .bytes = std::move(wish.bytes) };
+				RevisionBuffer entry{ .key = buffer->Key(), .buffer = buffer, .elements = wish.elements, .payload = std::move(wish.payload), .bytes = std::move(wish.bytes),
+					.twinAlive = wish.twinAlive, .twin = wish.twin };
 				entry.version = buffer->MakeStructured(wish.elements);
 				entry.name = entry.version->buffer ? entry.version->buffer->GetName() : std::string("a buffer");
+				if (!entry.bytes) {
+					entries.push_back(std::move(entry));
+					continue;
+				}
 				if (!a_job.uploads)
 					throw std::runtime_error(fmt::format("{} has no uploader", entry.name));
 				const org::StreamingUploadSegment segment{ entry.bytes->data(), entry.bytes->size() };
@@ -324,6 +337,10 @@ namespace RenderGraph::Frame::Revision
 			auto fragment = std::make_shared<org::async::RevisionFragment>();
 			a_job.buffers = buffers;
 			a_job.buffersFragment = fragment;
+			if (tickets.empty()) {
+				(void)fragment->Resolve(std::move(buffers));
+				return;
+			}
 			const auto ready = org::services::TokenForTickets(std::move(tickets));
 			// Settled from the uploader's notifications, once. The callback holds only weak references, so it ends no cycle.
 			ready->subscribe([weakReady = std::weak_ptr<const org::async::GpuSubmissionSet>(ready), weakFragment = std::weak_ptr(fragment),
@@ -446,6 +463,18 @@ namespace RenderGraph::Frame::Revision
 			wish = { a_twin.Alive(), &a_twin, *a_extent, standing ? wish.frame : frame, renew };
 		}
 
+		/** @brief A declared buffer's new element count, a version for the next revision. Latest wins. Render thread. */
+		void OnBufferWish(Coordinator& a_coordinator, GraphResources::StructuredBuffer& a_buffer, std::uint32_t a_elements, std::uint64_t a_frame)
+		{
+			const auto& slot = a_buffer.BufferVersions();
+			if (!slot)
+				FailRevision(fmt::format("{} has a new element count but no versions", a_buffer.Name()));
+			const std::lock_guard lock(a_coordinator.bufferMutex);
+			if (a_coordinator.bufferWishes.empty())
+				a_coordinator.bufferFirstWish = a_frame;
+			a_coordinator.bufferWishes[slot->Key()] = { slot, a_elements, nullptr, nullptr, a_buffer.Alive(), &a_buffer };
+		}
+
 		/** @brief The hook RequestSize calls on every change of a twin's wish. Render thread. */
 		void OnSizeWish(GraphResources::Resource& a_twin, const std::optional<Extent>& a_extent)
 		{
@@ -521,9 +550,13 @@ namespace RenderGraph::Frame::Revision
 			// The declarations follow the values this revision starts with. Their new extents are wishes, collected below.
 			if (host && a_coordinator.variables) {
 				job->needs = std::exchange(a_coordinator.carriedNeeds, {});
-				auto needs = Declarations::Evaluate(*a_coordinator.variables,
+				auto needs = Declarations::Evaluate(
+					*a_coordinator.variables,
 					[](GraphResources::Resource& a_twin, const std::array<unsigned int, 3>& a_extent, bool a_renew) {
 						OnWish(a_twin, Extent{ a_extent[0], a_extent[1], a_extent[2] }, a_renew);
+					},
+					[&a_coordinator, a_frame](GraphResources::StructuredBuffer& a_buffer, std::uint32_t a_elements) {
+						OnBufferWish(a_coordinator, a_buffer, a_elements, a_frame);
 					});
 				for (auto& need : needs)
 					job->needs.push_back(std::move(need));
@@ -632,7 +665,7 @@ namespace RenderGraph::Frame::Revision
 				const std::lock_guard lock(a_coordinator.bufferMutex);
 				for (const auto& entry : revision->buffers->buffers)
 					if (const auto buffer = entry.buffer.lock(); buffer && !a_coordinator.bufferWishes.contains(entry.key))
-						a_coordinator.bufferWishes[entry.key] = { buffer, entry.elements, entry.bytes, entry.payload };
+						a_coordinator.bufferWishes[entry.key] = { buffer, entry.elements, entry.bytes, entry.payload, entry.twinAlive, entry.twin };
 			}
 			// So do its published textures.
 			{
@@ -720,12 +753,18 @@ namespace RenderGraph::Frame::Revision
 				for (std::size_t i = 0; i < revision->twins.size(); ++i)
 					revision->twins[i]->AdoptPrepared(revision->versions[i]);
 				if (buffers) {
-					const std::lock_guard lock(a_coordinator.bufferMutex);
+					{
+						const std::lock_guard lock(a_coordinator.bufferMutex);
+						for (const auto& entry : buffers->buffers)
+							if (const auto buffer = entry.buffer.lock()) {
+								buffer->Adopt(entry.version);
+								a_coordinator.adoptedPayloads[entry.key] = entry.payload;
+							}
+					}
+					// A declared buffer's twin makes its D3D11 export of the version and reads its count from it.
 					for (const auto& entry : buffers->buffers)
-						if (const auto buffer = entry.buffer.lock()) {
-							buffer->Adopt(entry.version);
-							a_coordinator.adoptedPayloads[entry.key] = entry.payload;
-						}
+						if (entry.twin && !entry.twinAlive.expired() && !entry.buffer.expired())
+							entry.twin->AdoptVersion(entry.version, entry.elements);
 				}
 			}
 			// Per-frame tickets (DCLF's, the anchors') prepared before resolved the old versions. Revision-driven stages need no call.

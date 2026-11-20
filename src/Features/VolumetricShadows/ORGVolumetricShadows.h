@@ -29,8 +29,8 @@ public:
 	bool Setup();
 
 	/**
-	* @brief Before the anchor runs. Observes the engine's shadow maps. A change makes the next frame revision register the client
-	* for them. The passes are left out while the cascades are missing. Fatal when the cascades go away once imported.
+	* @brief Before the anchor runs. Fatal when the cascades go away once the client imported them. The client follows the
+	* ShadowCascades frame variable, so nothing here registers it.
 	*/
 	void UpdateImports();
 

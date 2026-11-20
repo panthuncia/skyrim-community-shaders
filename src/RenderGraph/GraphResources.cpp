@@ -20,6 +20,7 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
+#	include <Resources/Buffers/VersionedBuffer.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/PixelBuffer.h>
 #	include <Resources/TextureDescription.h>
@@ -725,11 +726,15 @@ namespace GraphResources
 	void Resource::Register(org::RenderGraph& a_graph) const
 	{
 		std::shared_lock lock(RegisterMutex());
-		if (slot) {
+		if (slot || bufferSlot) {
 			// PublishedResources may have registered the same id already, and a graph takes one resolver per id.
 			const org::ResourceIdentifier id(name);
-			if (!a_graph._resolverMap.contains(id))
+			if (a_graph._resolverMap.contains(id))
+				return;
+			if (slot)
 				a_graph.RegisterResolver(id, slot);
+			else
+				a_graph.RegisterResolver(id, bufferSlot);
 			return;
 		}
 		if (graph)
@@ -751,6 +756,7 @@ namespace GraphResources
 		graph.reset();
 		// The slot's versions keep their textures while a frame or a recording holds them.
 		slot.reset();
+		bufferSlot.reset();
 	}
 
 	bool Resource::ShapeAt(const Extent&, ExportDesc&) const
@@ -1230,7 +1236,7 @@ namespace GraphResources
 	}
 
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), count(a_count)
+		Resource(std::move(a_name), a_options), count(a_count), stride(a_desc.StructureByteStride), bindFlags(a_desc.BindFlags)
 	{
 		if (!CheckBufferDesc(a_desc, name) || !a_count || !a_desc.StructureByteStride || Has(options.d3d11, Export::RTV))
 			return;
@@ -1239,42 +1245,93 @@ namespace GraphResources
 			auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(a_count, a_desc.StructureByteStride, unordered);
 			PlaceBuffer(*buffer, name, Aliasable());
 			if (Exported()) {
-				D3D11_BUFFER_DESC wrapDesc{};
-				wrapDesc.ByteWidth = a_count * a_desc.StructureByteStride;
-				wrapDesc.Usage = D3D11_USAGE_DEFAULT;
-				wrapDesc.BindFlags = a_desc.BindFlags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
-				wrapDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-				wrapDesc.StructureByteStride = a_desc.StructureByteStride;
-				auto wrapped = RenderGraphRuntime::Get().WrapBuffer(*buffer, wrapDesc);
-				d3d11.copy_from(wrapped.get());
-				graph = std::move(buffer);
-				if (!wrapped) {
+				winrt::com_ptr<ID3D11Resource> wrapped;
+				const bool viewed = Export(*buffer, a_count, wrapped, srv, uav);
+				d3d11 = std::move(wrapped);
+				graph = buffer;
+				if (!d3d11) {
 					Reset();
 					return;
 				}
-				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-				srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-				srvDesc.Buffer.NumElements = a_count;
-				D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-				uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-				uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-				uavDesc.Buffer.NumElements = a_count;
-				auto* device = globals::d3d::device;
-				if ((Has(options.d3d11, Export::SRV) && FAILED(device->CreateShaderResourceView(wrapped.get(), &srvDesc, srv.put()))) ||
-					(Has(options.d3d11, Export::UAV) && FAILED(device->CreateUnorderedAccessView(wrapped.get(), &uavDesc, uav.put())))) {
+				if (!viewed) {
 					logger::error("[ORG] {}: D3D11 refused a view of the exported buffer", name);
 					Reset();
 					return;
 				}
 				NameViews();
-				return;
+			} else {
+				graph = buffer;
 			}
-			graph = std::move(buffer);
+			// Passes declare the slot, so a new element count is a new version, not a new resource.
+			if (options.versioned && !Aliasable())
+				bufferSlot = org::VersionedBuffer::Create(std::move(buffer));
 		} catch (const std::exception& e) {
 			logger::error("[ORG] {}: not created: {}", name, e.what());
 			Reset();
 		}
+	}
+
+	bool StructuredBuffer::Export(org::Resource& a_buffer, UINT a_count, winrt::com_ptr<ID3D11Resource>& a_d3d11, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
+		winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav) const
+	{
+		D3D11_BUFFER_DESC wrapDesc{};
+		wrapDesc.ByteWidth = a_count * stride;
+		wrapDesc.Usage = D3D11_USAGE_DEFAULT;
+		wrapDesc.BindFlags = bindFlags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		wrapDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		wrapDesc.StructureByteStride = stride;
+		auto wrapped = RenderGraphRuntime::Get().WrapBuffer(a_buffer, wrapDesc);
+		a_d3d11.copy_from(wrapped.get());
+		if (!wrapped)
+			return false;
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		srvDesc.Buffer.NumElements = a_count;
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+		uavDesc.Buffer.NumElements = a_count;
+		auto* device = globals::d3d::device;
+		if (Has(options.d3d11, Export::SRV) && FAILED(device->CreateShaderResourceView(wrapped.get(), &srvDesc, a_srv.put())))
+			return false;
+		if (Has(options.d3d11, Export::UAV) && FAILED(device->CreateUnorderedAccessView(wrapped.get(), &uavDesc, a_uav.put())))
+			return false;
+		return true;
+	}
+
+	void StructuredBuffer::AdoptVersion(const std::shared_ptr<const org::BufferVersion>& a_version, UINT a_count)
+	{
+		const auto fail = [&](std::string_view a_why) {
+			const auto message = fmt::format("Community Shaders: {} could not adopt its version of {} elements: {}", name, a_count, a_why);
+			logger::critical("[ORG] {}", message);
+			spdlog::default_logger()->flush();
+			stl::report_and_fail(message);
+		};
+		std::unique_lock lock(RegisterMutex());
+		if (!bufferSlot || !a_version || !a_version->buffer)
+			fail("it has no slot, or the version no buffer");
+		if (bufferSlot->Current() != a_version)
+			fail("its slot has not adopted the version");
+		winrt::com_ptr<ID3D11Resource> nextD3D11;
+		winrt::com_ptr<ID3D11ShaderResourceView> nextSrv;
+		winrt::com_ptr<ID3D11UnorderedAccessView> nextUav;
+		if (Exported() && !Export(*a_version->buffer, a_count, nextD3D11, nextSrv, nextUav))
+			fail("D3D11 did not wrap it or refused a view");
+		// The old D3D11 side goes first, as in Reset. The slot's old version keeps its buffer while frames hold it.
+		srv = nullptr;
+		uav = nullptr;
+		d3d11 = nullptr;
+		if (Exported() && graph)
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
+		graph = a_version->buffer;
+		d3d11 = std::move(nextD3D11);
+		srv = std::move(nextSrv);
+		uav = std::move(nextUav);
+		count = a_count;
+		if (Exported())
+			NameViews();
+		logger::info("[ORG] {}: adopted its version of {} elements", name, a_count);
 	}
 
 	Buffer::Buffer(const D3D11_BUFFER_DESC& a_desc, std::string a_name, Options a_options) :
@@ -1373,8 +1430,11 @@ namespace GraphResources
 	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData>) const { return nullptr; }
 	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
 	void Texture3D::RequestSize(UINT, UINT, UINT) {}
-	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC&, UINT a_count, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), count(a_count) {}
+	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options) :
+		Resource(std::move(a_name), a_options), count(a_count), stride(a_desc.StructureByteStride), bindFlags(a_desc.BindFlags) {}
+	bool StructuredBuffer::Export(org::Resource&, UINT, winrt::com_ptr<ID3D11Resource>&, winrt::com_ptr<ID3D11ShaderResourceView>&,
+		winrt::com_ptr<ID3D11UnorderedAccessView>&) const { return false; }
+	void StructuredBuffer::AdoptVersion(const std::shared_ptr<const org::BufferVersion>&, UINT) {}
 	Buffer::Buffer(const D3D11_BUFFER_DESC&, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options) {}
 	bool Buffer::CreateSRV(const D3D11_SHADER_RESOURCE_VIEW_DESC&) { return false; }

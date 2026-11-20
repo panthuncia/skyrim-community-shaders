@@ -11,6 +11,7 @@
 *
 * Runs LLF's own shaders, built with LLF_ORG_BINDLESS, and produces the same light lists the D3D11 path does.
 * The buffers are Persistent twins exported to D3D11 at t35-t37 and published by id. The ids are withdrawn when the graph fails.
+* The cluster buffers are declared on the display size (Frame::DeclareBuffer), so a new display size is a new version of each.
 * The culling runs in its own epoch through a host extension, not at an anchor, so Execute reports failure and LLF checks IsActive every frame.
 * Free of ORG/Vulkan includes.
 */
@@ -27,7 +28,7 @@ public:
 	{
 		const void* lights = nullptr;
 		uint32_t lightCount = 0;
-		uint32_t clusterSize[3]{};  // the adopted revision's grid, at most the capacity given to Setup
+		uint32_t clusterSize[3]{};  // the adopted revision's grid, at most the bound buffers' grid
 		float lightsNear = 0.0f;
 		float lightsFar = 0.0f;
 		std::array<float, 16> cameraProjInverse{};  // row-major, as in FrameBuffer
@@ -37,8 +38,9 @@ public:
 	static ORGLightCulling& Get();
 
 	/**
-	* @brief a_clusterCapacity is the largest cluster grid the buffers hold, the grid of the display size. The passes dispatch for it,
-	* and each run culls the grid its FrameInputs carry. @return False keeps LLF on D3D11.
+	* @brief a_clusterCapacity is the display size's grid at setup, used while the display size variable is zero. The buffers hold
+	* the adopted display size's grid. The passes dispatch for it, and each run culls the grid its FrameInputs carry.
+	* @return False keeps LLF on D3D11.
 	*/
 	bool Setup(const std::array<uint32_t, 3>& a_clusterCapacity, uint32_t a_maxLights, uint32_t a_lightStride, uint32_t a_maxLightsPerCluster);
 
@@ -48,7 +50,7 @@ public:
 
 	/**
 	* @brief Render thread. The cluster grid of the adopted revision: its display size times its dynamic ratios, 64 pixels a
-	* cluster, at most the capacity given to Setup. The culling and every reader of the frame use it. @return False when inactive.
+	* cluster, at most the bound buffers' grid. The culling and every reader of the frame use it. @return False when inactive.
 	*/
 	bool AdoptedClusterGrid(std::array<uint32_t, 3>& a_grid) const;
 

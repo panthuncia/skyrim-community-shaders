@@ -109,6 +109,19 @@ namespace RenderGraph::Frame
 			std::uint64_t firstFrame = UINT64_MAX;
 		};
 
+		struct BufferDeclaration
+		{
+			std::string name;
+			DependencyState dependencies;
+			BufferDescFn desc;
+			D3D11_BUFFER_DESC shape{};  // the first description: only ByteWidth may change
+			std::shared_ptr<GraphResources::StructuredBuffer> twin;
+			std::uint32_t wished = 0;  // the element count of the last version asked for
+			// For FirstFrame. The version the last Begin found, and the frame it was new in.
+			const void* lastVersion = nullptr;
+			std::uint64_t firstFrame = UINT64_MAX;
+		};
+
 		struct ClientDeclaration
 		{
 			std::string id;
@@ -153,6 +166,7 @@ namespace RenderGraph::Frame
 		{
 			// Render thread only.
 			std::vector<std::weak_ptr<Detail::TextureDeclaration>> textures;
+			std::vector<std::weak_ptr<Detail::BufferDeclaration>> buffers;
 			std::vector<std::weak_ptr<Detail::ClientDeclaration>> clients;
 			std::vector<std::weak_ptr<Detail::ProgramDeclaration>> programs;
 			bool dirty = false;
@@ -337,6 +351,18 @@ namespace RenderGraph::Frame
 			return ExtentOfDesc(desc);
 		}
 
+		/** @brief A buffer description's element count. Fatal on a change other than ByteWidth, or a part of an element. */
+		std::uint32_t BufferElements(const Detail::BufferDeclaration& a_buffer, const D3D11_BUFFER_DESC& a_desc)
+		{
+			auto shape = a_desc;
+			shape.ByteWidth = a_buffer.shape.ByteWidth;
+			if (std::memcmp(&shape, &a_buffer.shape, sizeof(D3D11_BUFFER_DESC)) != 0)
+				FailDeclaration(fmt::format("{}'s description changed more than its size", a_buffer.name));
+			if (!a_desc.ByteWidth || a_desc.ByteWidth % a_desc.StructureByteStride != 0)
+				FailDeclaration(fmt::format("{}'s size, {} bytes, is no whole number of {}-byte elements", a_buffer.name, a_desc.ByteWidth, a_desc.StructureByteStride));
+			return a_desc.ByteWidth / a_desc.StructureByteStride;
+		}
+
 		/** @brief Registers, registers again or removes a client for a new key. The need is empty when nothing changed. */
 		std::optional<FrameAnchors::StageBuildNeed> EvaluateClient(Detail::ClientDeclaration& a_client, const Inputs& a_values)
 		{
@@ -420,6 +446,38 @@ namespace RenderGraph::Frame
 		RenewFn a_renew)
 	{
 		return DeclareTexture<GraphResources::Texture3D>(std::move(a_name), std::move(a_dependencies), std::move(a_desc), a_options, std::move(a_renew));
+	}
+
+	DeclaredBuffer DeclareBuffer(std::string a_name, Dependencies a_dependencies, BufferDescFn a_desc, const GraphResources::Options& a_options)
+	{
+		if (!a_desc)
+			FailDeclaration(fmt::format("{} has no description", a_name));
+		auto declaration = std::make_shared<Detail::BufferDeclaration>();
+		declaration->name = a_name;
+		declaration->dependencies.Resolve(a_dependencies, a_name);
+		const auto desc = a_desc(Inputs(nullptr));
+		if (!(desc.MiscFlags & D3D11_RESOURCE_MISC_BUFFER_STRUCTURED) || !desc.StructureByteStride)
+			FailDeclaration(fmt::format("{} is no structured buffer", a_name));
+		declaration->shape = desc;
+		const auto elements = BufferElements(*declaration, desc);
+		// Versions are what a revision changes.
+		auto options = a_options;
+		options.versioned = true;
+		auto twin = std::make_shared<GraphResources::StructuredBuffer>(desc, elements, a_name, options);
+		if (!*twin) {
+			logger::error("[ORG] frame declaration: {} could not be made", a_name);
+			return {};
+		}
+		if (!twin->BufferVersions())
+			FailDeclaration(fmt::format("{} has no versions: a declared buffer is not a transient", a_name));
+		auto* typed = twin.get();
+		declaration->wished = elements;
+		declaration->desc = std::move(a_desc);
+		declaration->twin = std::move(twin);
+		auto& registry = DeclarationsOf();
+		registry.buffers.push_back(declaration);
+		registry.dirty = true;
+		return { std::move(declaration), typed };
 	}
 
 	void DeclaredClient::Invalidate() const
@@ -532,6 +590,17 @@ namespace RenderGraph::Frame
 		return a_texture && a_texture->firstFrame == Driver::Current().frame;
 	}
 
+	std::uint32_t AdoptedRevision::Elements(const DeclaredBuffer& a_buffer) const
+	{
+		return a_buffer ? a_buffer->Count() : 0;
+	}
+
+	bool AdoptedRevision::FirstFrame(const DeclaredBuffer& a_buffer) const
+	{
+		const auto& declaration = a_buffer.Declaration();
+		return declaration && declaration->firstFrame == Driver::Current().frame;
+	}
+
 	namespace Declarations
 	{
 		bool Dirty()
@@ -539,7 +608,7 @@ namespace RenderGraph::Frame
 			return DeclarationsOf().dirty;
 		}
 
-		std::vector<FrameAnchors::StageBuildNeed> Evaluate(const org::services::VariableSnapshot& a_values, const Wish& a_wish)
+		std::vector<FrameAnchors::StageBuildNeed> Evaluate(const org::services::VariableSnapshot& a_values, const Wish& a_wish, const BufferWish& a_bufferWish)
 		{
 			auto& registry = DeclarationsOf();
 			registry.dirty = false;
@@ -558,6 +627,17 @@ namespace RenderGraph::Frame
 				texture->wished = extent;
 				texture->renewed = renewed;
 				a_wish(*texture->twin, extent, renew);
+			}
+			std::erase_if(registry.buffers, [](const auto& a_weak) { return a_weak.expired(); });
+			for (const auto& weak : registry.buffers) {
+				const auto buffer = weak.lock();
+				if (!buffer->dependencies.Changed(a_values))
+					continue;
+				const auto elements = BufferElements(*buffer, buffer->desc(inputs));
+				if (elements == buffer->wished)
+					continue;
+				buffer->wished = elements;
+				a_bufferWish(*buffer->twin, elements);
 			}
 			std::vector<FrameAnchors::StageBuildNeed> needs;
 			std::erase_if(registry.clients, [](const auto& a_weak) { return a_weak.expired(); });
@@ -603,6 +683,14 @@ namespace RenderGraph::Frame
 					if (version != texture->lastVersion) {
 						texture->lastVersion = version;
 						texture->firstFrame = a_frame;
+					}
+				}
+			for (const auto& weak : registry.buffers)
+				if (const auto buffer = weak.lock()) {
+					const void* version = buffer->twin->Graph().get();
+					if (version != buffer->lastVersion) {
+						buffer->lastVersion = version;
+						buffer->firstFrame = a_frame;
 					}
 				}
 			// The programs follow the adopted values. Their builds were done before the revision that carries them started.
@@ -652,6 +740,8 @@ namespace RenderGraph::Frame
 	{
 		struct TextureDeclaration
 		{};
+		struct BufferDeclaration
+		{};
 		struct ClientDeclaration
 		{};
 		struct ProgramDeclaration
@@ -679,6 +769,7 @@ namespace RenderGraph::Frame
 	void Inputs::ReadSetting(CS::SettingVariableId a_id, void* a_out, std::size_t a_size) const { CS::SettingRegistry::RaisedBytes(a_id, a_out, a_size); }
 	DeclaredTexture2D DeclareTexture2D(std::string, Dependencies, Texture2DDescFn, const GraphResources::Options&, RenewFn) { return {}; }
 	DeclaredTexture3D DeclareTexture3D(std::string, Dependencies, Texture3DDescFn, const GraphResources::Options&, RenewFn) { return {}; }
+	DeclaredBuffer DeclareBuffer(std::string, Dependencies, BufferDescFn, const GraphResources::Options&) { return {}; }
 	void DeclaredClient::Invalidate() const {}
 	bool DeclaredClient::Registered() const { return false; }
 	DeclaredClient Detail::DeclareClient(std::string, Dependencies, ClientFunctions) { return {}; }
@@ -694,6 +785,8 @@ namespace RenderGraph::Frame
 	Inputs AdoptedRevision::Values() const { return Inputs(nullptr); }
 	std::array<std::uint32_t, 3> AdoptedRevision::ExtentOf(const Detail::TextureDeclaration*) const { return {}; }
 	bool AdoptedRevision::FirstFrameOf(const Detail::TextureDeclaration*) const { return false; }
+	std::uint32_t AdoptedRevision::Elements(const DeclaredBuffer&) const { return 0; }
+	bool AdoptedRevision::FirstFrame(const DeclaredBuffer&) const { return false; }
 
 	namespace Revision
 	{
