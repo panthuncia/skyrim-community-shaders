@@ -195,3 +195,13 @@ final until the user confirms it.
 39. **7b and 7c start before 7a.** The plan orders them after 7a, but 7a only deletes code that step 6 frees up, and 7b
     and 7c don't depend on those deletions. 4e already replaced `SwitchStaged` with `AttachStaged`. The 7b lead also
     does 6.15 (HDR) and 6.23 (Screenshot), which wait on 7b. 7a and 7d follow once step 6 is fully merged.
+40. **`guest+llf-local-shadows` drew no world** (a flat sky colour and the HUD) from its first shot, before any LLF
+    change. That config turns DCLF off. `d3d11+llf-local-shadows` passed with Dragonsreach drawn. So guest with DCLF
+    off does not draw the world on this branch, and 6.13's graph cache is untested in guest. Open: is guest without DCLF
+    supported? If not, the config's guest form needs another route.
+41. **6.10/6.11 (Effects11) is merged, with the same rule gaps as 6.9:**
+    - FX planning, including per-pass DXC compiles, runs on the render thread at revision start;
+    - a failed plan falls back to FX11;
+    - toggling the rays shows one frame on D3D11.
+
+    These go to a follow-up after 6.20 lands, using the pattern 6.20 sets for the post chain.
