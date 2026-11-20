@@ -70,6 +70,7 @@ The shipped configs:
 | `skylighting-reset` | coc into Dragonsreach and back out to Whiterun: each loading screen resets Skylighting's probe volumes as new versions in a frame revision; compose it, `native-vulkan+skylighting-reset` |
 | `sss` | Subsurface Scattering's mode switched (Burley, separable, back) and character lighting toggled in Dragonsreach (`setting` steps): the mode's programs and client switch with frame revisions; compose it, `native-vulkan+sss` |
 | `dynamic-cubemaps` | Dynamic Cubemaps with water SSR toggled (`setting` steps), then a coc into Dragonsreach and back: the client follows the reflection cubemap and registers again only for the first colour source; compose it, `native-vulkan+dynamic-cubemaps` |
+| `volumetric-shadows` | coc into Dragonsreach and back out to Whiterun: Volumetric Shadows' client, registered once by a frame revision, stays as it is across the interior's shut gate; compose it, `native-vulkan+volumetric-shadows` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |

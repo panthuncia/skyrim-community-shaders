@@ -9,6 +9,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -27,6 +28,9 @@
 
 #	include <algorithm>
 #	include <array>
+#	include <optional>
+#	include <string>
+#	include <string_view>
 
 namespace
 {
@@ -74,6 +78,21 @@ namespace
 		ShaderBindings::Handle inputTexture, outputTexture;
 	};
 
+	/**
+	* @brief What the client's passes read: the engine's cascades, its volumetric copy and the cascades' width. The engine makes
+	* them once a session (Q4). They are not variables yet, so EarlyPrepass observes them and invalidates the client on a change.
+	*/
+	struct CascadeInputs
+	{
+		FrameAnchors::Texture cascades;
+		FrameAnchors::Texture volumetric;  // null means the cascades are read twice
+		UINT sourceWidth = 0;
+
+		bool Complete() const { return cascades && sourceWidth; }
+		bool operator==(const CascadeInputs&) const = default;
+	};
+
+	/** @brief Made at setup and kept. */
 	struct Resources
 	{
 		std::array<std::shared_ptr<const ComputeProgram>, kMips> downsample;  // by mip
@@ -83,10 +102,6 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> shadowCopy;  // exported, engine draws and DCLF read it at t18
 		std::unique_ptr<GraphResources::Texture2D> blurTemp;    // transient
 		std::shared_ptr<RenderGraph::RunGate> gate;               // opened by the commit
-		// Render thread. Read when a pass is made.
-		FrameAnchors::Texture cascades;
-		FrameAnchors::Texture volumetric;  // null means the cascades are read twice
-		UINT sourceWidth = 0;
 	};
 
 	D3D11_TEXTURE2D_DESC CopyDesc()
@@ -126,9 +141,9 @@ namespace
 	{
 	public:
 		// At the build, on the render thread, so it sees the resources as they are now.
-		DownsamplePass(const std::shared_ptr<Resources>& a_resources, std::uint32_t a_mip) :
-			resources(a_resources), program(a_resources->downsample[a_mip]), cascades(a_resources->cascades),
-			volumetric(a_resources->volumetric), output(a_resources->shadowCopy->Graph()), mip(a_mip) {}
+		DownsamplePass(const std::shared_ptr<Resources>& a_resources, const CascadeInputs& a_inputs, std::uint32_t a_mip) :
+			resources(a_resources), program(a_resources->downsample[a_mip]), cascades(a_inputs.cascades),
+			volumetric(a_inputs.volumetric), output(a_resources->shadowCopy->Graph()), mip(a_mip) {}
 
 		DownsampleBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -244,11 +259,33 @@ namespace
 		return desc.Width;
 	}
 
-	FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<Resources>& a_resources)
+	/** @brief The cascades and the volumetric copy as the engine has them now. */
+	CascadeInputs Observe()
 	{
-		FrameAnchors::ClientDesc client{};
+		CascadeInputs inputs;
+		inputs.cascades = ImportShadowMap(kCascades);
+		inputs.volumetric = ImportShadowMap(kVolumetric);
+		inputs.sourceWidth = inputs.cascades ? CascadeWidth() : 0u;
+		return inputs;
+	}
+
+	[[noreturn]] void FailVolumetricShadows(std::string_view a_why)
+	{
+		const auto message = fmt::format("Community Shaders: Volumetric Shadows' render graph path failed: {}", a_why);
+		logger::critical("[ORG] Volumetric Shadows: {}", message);
+		spdlog::default_logger()->flush();
+		stl::report_and_fail(message);
+	}
+
+	/**
+	* @brief The registration for a_inputs, when a revision starts. Without the cascades it has no passes, so an epoch never
+	* reads a missing map. The group counts come from the width the registration is made for, so the commit and the passes agree.
+	*/
+	bool MakeClient(const std::shared_ptr<Resources>& a_resources, const CascadeInputs& a_inputs, FrameAnchors::ClientDesc& a_client)
+	{
+		auto& client = a_client;
 		client.id = kClientId;
-		// Each pass is left out of a build without the cascades, so an epoch never reads a missing map.
+		const bool complete = a_inputs.Complete();
 		auto add = [&](std::string a_name, std::int32_t a_order, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
 			client.passes.push_back({ .name = std::string(kClientId) + "." + std::move(a_name),
 				.anchor = FrameAnchors::Anchor::EarlyPrepass,
@@ -258,14 +295,14 @@ namespace
 		};
 		for (std::uint32_t mip = 0; mip < kMips; ++mip) {
 			const std::int32_t order = static_cast<std::int32_t>(mip) * 3;
-			add(fmt::format("downsample-mip{}", mip), order, [a_resources, mip]() -> std::shared_ptr<org::RenderPass> {
-				return a_resources->cascades && a_resources->sourceWidth ? std::make_shared<DownsamplePass>(a_resources, mip) : nullptr;
+			add(fmt::format("downsample-mip{}", mip), order, [a_resources, a_inputs, complete, mip]() -> std::shared_ptr<org::RenderPass> {
+				return complete ? std::make_shared<DownsamplePass>(a_resources, a_inputs, mip) : nullptr;
 			});
-			add(fmt::format("blur-h-mip{}", mip), order + 1, [a_resources, mip]() -> std::shared_ptr<org::RenderPass> {
-				return a_resources->cascades && a_resources->sourceWidth ? std::make_shared<BlurPass>(a_resources, mip, true) : nullptr;
+			add(fmt::format("blur-h-mip{}", mip), order + 1, [a_resources, complete, mip]() -> std::shared_ptr<org::RenderPass> {
+				return complete ? std::make_shared<BlurPass>(a_resources, mip, true) : nullptr;
 			});
-			add(fmt::format("blur-v-mip{}", mip), order + 2, [a_resources, mip]() -> std::shared_ptr<org::RenderPass> {
-				return a_resources->cascades && a_resources->sourceWidth ? std::make_shared<BlurPass>(a_resources, mip, false) : nullptr;
+			add(fmt::format("blur-v-mip{}", mip), order + 2, [a_resources, complete, mip]() -> std::shared_ptr<org::RenderPass> {
+				return complete ? std::make_shared<BlurPass>(a_resources, mip, false) : nullptr;
 			});
 		}
 		client.registerResources = [a_resources](org::RenderGraph& a_graph) {
@@ -273,14 +310,15 @@ namespace
 			a_resources->blurTemp->Register(a_graph);
 		};
 		// Only with directional shadows, as the D3D11 path.
-		client.active = [a_resources] { return a_resources->cascades && a_resources->sourceWidth && globals::state->HasDirectionalShadows(); };
+		client.active = [complete] { return complete && globals::state->HasDirectionalShadows(); };
 		// Directional shadows follow the cell and are read at frame start. The cascades need no bit of their own, since builds only make passes with them.
 		client.declared = [] { return globals::state->HasDirectionalShadows(); };
 		client.gates = { a_resources->gate };
-		client.commit = [a_resources](const FrameAnchors::Point&) {
+		const UINT sourceWidth = a_inputs.sourceWidth;
+		client.commit = [a_resources, sourceWidth](const FrameAnchors::Point&) {
 			const auto& gate = *a_resources->gate;
 			for (std::uint32_t mip = 0; mip < kMips; ++mip) {
-				const std::uint32_t groups = DownsampleGroups(a_resources->sourceWidth, mip);
+				const std::uint32_t groups = DownsampleGroups(sourceWidth, mip);
 				gate.OpenDispatch(DownsampleEntry(mip), groups, groups, 1);
 				for (const bool horizontal : { true, false }) {
 					const auto [x, y] = BlurGroups(mip, horizontal);
@@ -288,13 +326,20 @@ namespace
 				}
 			}
 		};
-		return client;
+		logger::info("[ORG] Volumetric Shadows: a client for the next revision (cascades {} ({} wide), volumetric copy {})",
+			a_inputs.cascades ? "imported" : "missing", a_inputs.sourceWidth,
+			a_inputs.volumetric ? "imported" : "missing (the cascades are read twice)");
+		return true;
 	}
 }
 
 struct ORGVolumetricShadows::Impl
 {
 	std::shared_ptr<Resources> resources;
+	// What the last EarlyPrepass found. The client's key reads it.
+	std::shared_ptr<CascadeInputs> observed = std::make_shared<CascadeInputs>();
+	// Declared at Setup and kept. New inputs are a new registration, switched in by a frame revision.
+	RenderGraph::Frame::DeclaredClient client;
 	bool inputChecked = false;
 };
 
@@ -352,49 +397,44 @@ bool ORGVolumetricShadows::Setup()
 	}
 	auto state = std::make_unique<Impl>();
 	state->resources = resources;
-	impl = std::move(state);
-	if (!FrameAnchors::Register(MakeClient(resources))) {
-		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its anchor client could not be registered");
-		impl.reset();
+	*state->observed = Observe();
+	// The client follows the engine's shadow map (one event a session, when the engine's targets are made) and the imports the
+	// last EarlyPrepass found. Its first evaluation is at the next revision.
+	auto observed = state->observed;
+	state->client = RenderGraph::Frame::DeclareClient<CascadeInputs>(
+		kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::EngineShadowMap()),
+		[observed](const RenderGraph::Frame::Inputs&) -> std::optional<CascadeInputs> { return *observed; },
+		[resources](const CascadeInputs& a_inputs, FrameAnchors::ClientDesc& a_client) { return MakeClient(resources, a_inputs, a_client); });
+	if (!state->client) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its client could not be declared");
 		return false;
 	}
-	// DCLF's colour passes read it by name, ordered after the blurs.
+	// DCLF's colour passes read it by name, ordered after the blurs. Published once, for the session.
 	if (!PublishedResources::Publish(*resources->shadowCopy)) {
 		logger::warn("[ORG] Volumetric Shadows stays on D3D11: the shared shadow map could not be published");
-		Stop();
+		FrameAnchors::Unregister(kClientId);
 		return false;
 	}
-	logger::info("[ORG] Volumetric Shadows runs on the render graph at EarlyPrepass (shared map aliasable {}, temporary aliasable {})",
+	impl = std::move(state);
+	logger::info("[ORG] Volumetric Shadows runs on the render graph at EarlyPrepass (shared map aliasable {}, temporary aliasable {}); its client "
+				 "follows the frame revisions",
 		resources->shadowCopy->Aliasable(), resources->blurTemp->Aliasable());
 	return true;
-}
-
-void ORGVolumetricShadows::Stop()
-{
-	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kShadowCopyId);
-	impl.reset();
 }
 
 void ORGVolumetricShadows::UpdateImports()
 {
 	if (!IsActive())
 		return;
-	// A new import rebuilds the graphs.
-	auto& resources = *impl->resources;
-	auto cascades = ImportShadowMap(kCascades);
-	auto volumetric = ImportShadowMap(kVolumetric);
-	const UINT width = cascades ? CascadeWidth() : 0u;
-	if (cascades != resources.cascades || volumetric != resources.volumetric || width != resources.sourceWidth) {
-		const bool first = !resources.cascades;
-		resources.cascades = std::move(cascades);
-		resources.volumetric = std::move(volumetric);
-		resources.sourceWidth = width;
-		FrameAnchors::Refresh(kClientId);
-		if (first || !resources.cascades)
-			logger::info("[ORG] Volumetric Shadows: cascades {} ({} wide), volumetric copy {}", resources.cascades ? "imported" : "missing",
-				resources.sourceWidth, resources.volumetric ? "imported" : "missing (the cascades are read twice)");
-	}
+	// The engine makes its shadow maps once a session, so this changes when they first appear. They are not variables yet:
+	// the next revision makes the client for them.
+	auto observed = Observe();
+	if (observed == *impl->observed)
+		return;
+	if (impl->observed->cascades && !observed.cascades)
+		FailVolumetricShadows("the engine's cascade shadow map could no longer be imported");
+	*impl->observed = std::move(observed);
+	impl->client.Invalidate();
 }
 
 bool ORGVolumetricShadows::IsActive() const
@@ -414,8 +454,8 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 		logger::info("[ORG] Volumetric Shadows: the shadow mask's t4 is the engine's cascade map, as the passes read it");
 		return;
 	}
-	logger::error("[ORG] Volumetric Shadows: the shadow mask's t4 is not the cascade map the passes read; back to the D3D11 dispatches");
-	Stop();
+	// Going back to D3D11 here would withdraw the published map outside a revision, from graphs built on it.
+	FailVolumetricShadows("the shadow mask's t4 is not the cascade map the passes read");
 }
 
 ID3D11ShaderResourceView* ORGVolumetricShadows::SharedShadowMapSRV() const
@@ -448,7 +488,6 @@ ORGVolumetricShadows::~ORGVolumetricShadows() = default;
 void ORGVolumetricShadows::Reserve() {}
 bool ORGVolumetricShadows::Setup() { return false; }
 void ORGVolumetricShadows::UpdateImports() {}
-void ORGVolumetricShadows::Stop() {}
 bool ORGVolumetricShadows::IsActive() const { return false; }
 void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView*) {}
 ID3D11ShaderResourceView* ORGVolumetricShadows::SharedShadowMapSRV() const { return nullptr; }
