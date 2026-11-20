@@ -30,9 +30,11 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/FrameResources.h"
 #	include "RenderGraph/Frame/PostChain.h"
+#	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
@@ -364,6 +366,8 @@ namespace RenderGraph::Engine::ImageSpace
 			rhi::Format format1 = rhi::Format::Unknown;
 			FrameAnchors::Texture depth;
 			rhi::Format depthFormat = rhi::Format::Unknown;
+			// The output's extent in this registration. A kept output's twin may hold the last version's until the revision adopts.
+			std::uint32_t width = 0, height = 0;
 		};
 
 		/** @brief Mirrors OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
@@ -453,8 +457,6 @@ namespace RenderGraph::Engine::ImageSpace
 			// Kept so a build still has the description when the engine's table entry is empty.
 			std::map<std::uint32_t, D3D11_BLEND_DESC> blendDescs;
 			std::map<std::uint32_t, D3D11_DEPTH_STENCIL_DESC> depthDescs;
-			// Used to detect a resize.
-			std::map<std::int32_t, const void*> importedObjects;
 			const ID3D11Texture2D* publishedFlowMap = nullptr;
 			std::uint32_t scope = 0;
 			std::uint32_t drawIndex = 0;
@@ -778,18 +780,8 @@ namespace RenderGraph::Engine::ImageSpace
 			IS().publishedFlowMap = FlowMapTexture();
 		}
 
-		/** @brief Publishes again if another texture takes the slot after Setup, as Unified Water's does. */
-		void CheckFlowMap()
-		{
-			auto& state = IS();
-			const auto* texture = FlowMapTexture();
-			if (!state.publishedFlowMap || !texture || texture == state.publishedFlowMap)
-				return;
-			logger::info("[ORG] ImageSpace: another texture took the flow map's slot; it is published in its place{}",
-				FlowCopyTexture() ? "" : " (it has no UAV, so there are no flow copies)");
-			state.publishedFlowMap = texture;
-			PublishFlowMap();
-		}
+		/** @brief The HDR scene texture of the chain's registration, null while HDR is off (ChainSteps.inl). */
+		ID3D11Texture2D* ChainHdrTarget();
 
 		/** @brief The graph's import of a ShapeKey name. Any mip resolves to its texture. */
 		FrameAnchors::Texture ImportOf(std::int32_t a_name)
@@ -799,7 +791,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (a_name & kFlowMapOutput)
 				return FlowMapImport();
 			if (a_name & kHdrSceneOutput)
-				return ORGHDRDisplay::Get().GraphOf(globals::features::hdrDisplay.PostChainTarget());
+				return ORGHDRDisplay::Get().GraphOf(ChainHdrTarget());
 			const auto index = IndexOfName(a_name);
 			if (a_name & kDefaultTextureInput) {
 				auto* texture = DefaultTextureOf(index);
@@ -810,31 +802,6 @@ namespace RenderGraph::Engine::ImageSpace
 			if (a_name & kCubeInput)
 				return FrameAnchors::EngineCubemap(index);
 			return FrameAnchors::EngineTarget(index);
-		}
-
-		/** @brief The engine object an import is made from, read without a D3D11 call. A change means a resize. */
-		const void* EngineObjectOf(std::int32_t a_name)
-		{
-			auto* renderer = globals::game::renderer;
-			if (!renderer || a_name < 0 || (a_name & kLatchSourceInput))
-				return nullptr;
-			if (a_name & kFlowMapOutput)
-				return FlowMapTexture();
-			if (a_name & kHdrSceneOutput)
-				return globals::features::hdrDisplay.PostChainTarget();
-			const auto index = IndexOfName(a_name);
-			if (a_name & kDefaultTextureInput) {
-				auto* texture = DefaultTextureOf(index);
-				return texture ? texture->texture : nullptr;
-			}
-			if (a_name & kDepthInput)
-				return index < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL ? renderer->GetDepthStencilData().depthStencils[index].texture : nullptr;
-			if (a_name & kCubeInput)
-				return index < RE::RENDER_TARGETS_CUBEMAP::kTOTAL ? renderer->GetRendererData().cubemapRenderTargets[index].texture : nullptr;
-			if (index >= RE::RENDER_TARGET::kTOTAL)
-				return nullptr;
-			const auto& target = renderer->GetRuntimeData().renderTargets[index];
-			return target.texture ? static_cast<const void*>(target.texture) : static_cast<const void*>(target.RTV);
 		}
 
 		rhi::Format RtvFormatOf(std::int32_t a_name, const FrameAnchors::Texture& a_import)
@@ -1291,7 +1258,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto mip = MipOfName(spec.key.output);
 				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
 				bool exact = false;
-				if (!RenderAreaOf(spec.key, (std::max)(spec.output.Width() >> shift, 1u), (std::max)(spec.output.Height() >> shift, 1u), draw.viewport, exact)) {
+				if (!RenderAreaOf(spec.key, (std::max)(spec.width >> shift, 1u), (std::max)(spec.height >> shift, 1u), draw.viewport, exact)) {
 					logger::error("[ORG] ImageSpace: {}: its viewport is outside its output; its pass is left out of the graph", spec.name);
 					return nullptr;
 				}
@@ -1352,71 +1319,22 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 		}
 
-		void CheckWorldSteps();
-		void CheckChainSteps();
-		void CheckStartSteps();
-		void CheckMenuSteps();
-		void ReregisterSteps();
-		std::pair<float, float> DynamicRatios();
+		// The dynamic-resolution ratios of the registration being built, from its revision's DynamicRatios.
+		// Its render-size viewports are baked with them until step 8 moves them into the latch.
+		std::optional<std::pair<float, float>> g_buildRatios;
 
-		// Upscaling sets the engine's ratios inside each frame and resets them after it.
-		// So the registration keeps the asking frame's ratios, which the Begin that applies it would not see.
-		std::optional<std::pair<float, float>> g_registrationRatios;
-
-		/**
-		* @brief Registers a stage's steps again at the next frame boundary, once while one is pending.
-		* A frame keeps the step layout its schedule was described with.
-		*/
-		void RegisterAtBoundary(bool& a_pending, bool (*a_ready)(), void (*a_register)())
+		/** @brief Sets the ratios a registration's build bakes into its viewports, for the scope. */
+		struct BuildRatiosScope
 		{
-			if (std::exchange(a_pending, true))
-				return;
-			Frame::Driver::AtNextBegin([&a_pending, a_ready, a_register, ratios = DynamicRatios()] {
-				a_pending = false;
-				if (!a_ready())
-					return;
-				g_registrationRatios = ratios;
-				a_register();
-				g_registrationRatios.reset();
-			});
-		}
-
-		/** @brief Whether kMAIN and the ImageSpace manager exist yet. */
-		bool StepTargetsReady()
-		{
-			return IS().on && RE::ImageSpaceManager::GetSingleton() && globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture;
-		}
-
-		void NoteImports(const Spec& a_spec)
-		{
-			auto& state = IS();
-			for (const auto name : { a_spec.key.output, a_spec.key.output1 })
-				if (name >= 0)
-					state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
-			for (const auto name : a_spec.key.inputs)
-				if (name >= 0)
-					state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
-		}
+			explicit BuildRatiosScope(std::pair<float, float> a_ratios) { g_buildRatios = a_ratios; }
+			~BuildRatiosScope() { g_buildRatios.reset(); }
+			BuildRatiosScope(const BuildRatiosScope&) = delete;
+			BuildRatiosScope& operator=(const BuildRatiosScope&) = delete;
+		};
 
 		bool WorldStepsOn();
 		bool ChainStepsOn();
-
-		/** @brief Once a frame. Re-registers the stages' steps when the engine remade a registered target. */
-		void CheckImports()
-		{
-			auto& state = IS();
-			bool changed = false;
-			// HDR's scene texture comes and goes with HDR. CheckChainSteps handles it.
-			for (const auto& [name, object] : state.importedObjects)
-				if (!(name & kHdrSceneOutput) && EngineObjectOf(name) != object) {
-					changed = true;
-					break;
-				}
-			if (!changed)
-				return;
-			logger::info("[ORG] ImageSpace: the engine made its targets again; the stages' steps register again on the new imports");
-			ReregisterSteps();
-		}
+		void LogReadback(std::uint64_t a_frame);
 
 		bool Usable()
 		{
@@ -1522,24 +1440,15 @@ namespace RenderGraph::Engine::ImageSpace
 			state.frame = frame;
 			// Last frame's post segments were submitted at their end taps, so their constant chunks are no longer read.
 			state.postKeep.clear();
-			CheckFlowMap();
-			CheckImports();
-			CheckWorldSteps();
-			CheckChainSteps();
-			CheckStartSteps();
-			CheckMenuSteps();
+			if (ChainStepsOn())
+				LogReadback(Frame::Driver::Current().frame);
 			LogEngineDraws();
 		}
 
-		/** @brief 1 when there is no graphics state. Inside RegisterAtBoundary, the asking frame's ratios. */
+		/** @brief The ratios of the registration being built (BuildRatiosScope), 1 outside a build. */
 		std::pair<float, float> DynamicRatios()
 		{
-			if (g_registrationRatios)
-				return *g_registrationRatios;
-			if (!globals::game::graphicsState)
-				return { 1.0f, 1.0f };
-			const auto& data = globals::game::graphicsState->GetRuntimeData();
-			return { data.dynamicResolutionWidthRatio, data.dynamicResolutionHeightRatio };
+			return g_buildRatios ? *g_buildRatios : std::pair{ 1.0f, 1.0f };
 		}
 
 		/** @brief Snapped as ReadViewport snaps the engine's. */
@@ -1579,12 +1488,62 @@ namespace RenderGraph::Engine::ImageSpace
 #	include "RenderGraph/Engine/ImageSpace/StartSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
 
-		void ReregisterSteps()
+		/** @brief The engine's ImageSpace shape now. Render owner. */
+		Frame::Vars::ImageSpaceShape EngineShapeNow()
 		{
-			World().registered = false;
-			Chain().registered = false;
-			Start().registered = false;
-			Menu().registered = false;
+			const auto& state = IS();
+			Frame::Vars::ImageSpaceShape shape;
+			if (!RE::ImageSpaceManager::GetSingleton())
+				return shape;
+			shape.luminanceLevels = Frame::PostChain::LuminanceLevels();
+			shape.saoLevels = EngineSaoLevels();
+			if (auto* displacement = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture) {
+				D3D11_TEXTURE2D_DESC desc{};
+				displacement->GetDesc(&desc);
+				shape.displacementSize = desc.Width;
+			}
+			if (auto* flow = FlowCopyTexture()) {
+				D3D11_TEXTURE2D_DESC desc{};
+				flow->GetDesc(&desc);
+				shape.flowCopySize = desc.Width;
+			}
+			shape.flowMap = reinterpret_cast<std::uint64_t>(FlowMapTexture());
+			// The manager makes some effects after the first lookups, and each one it makes can take its pass.
+			for (std::size_t i = 0; i < kEffects.size(); ++i)
+				shape.effects += state.enabled[i] && ShaderOf(i) ? 1u : 0u;
+			// The engine fills its blend table after Setup. A pass needs its blend state when its build makes it.
+			for (const auto blend : { PackBlend(0, 0, 2, 0), PackBlend(5, 0, 2, 0), PackBlend(1, 0, 2, 0), PackBlend(0, 0, 1, 0) }) {
+				D3D11_BLEND_DESC desc{};
+				shape.states += BlendDescOf(blend, desc) ? 1u : 0u;
+			}
+			return shape;
+		}
+
+		/**
+		* @brief Writes the engine's ImageSpace shape as the EngineImageSpace variable. The engine raises no event for it, so this
+		* runs at Setup and each Begin, and only a change is an event: the step clients register again at the next revision.
+		*/
+		void WriteEngineShape(std::string_view a_writer)
+		{
+			(void)Frame::Vars::SetEngineImageSpace(EngineShapeNow(), a_writer);
+		}
+
+		/** @brief Setup. The kept textures and every step client, declared on their variables. False, logged, on failure. */
+		bool DeclareSteps()
+		{
+			if (!DeclareWorldSteps()) {
+				logger::error("[ORG] ImageSpace: the world steps could not be declared");
+				return false;
+			}
+			if (!DeclareChainSteps()) {
+				logger::error("[ORG] ImageSpace: the post chain could not be declared");
+				return false;
+			}
+			if (!DeclareStartSteps() || !DeclareMenuSteps()) {
+				logger::error("[ORG] ImageSpace: the start stage's water effects or the composites could not be declared");
+				return false;
+			}
+			return true;
 		}
 
 		/** @brief An ImageSpace draw with no CS pass in native mode. Fatal in development builds, logged once in release. Draws nothing. */
@@ -2123,6 +2082,8 @@ namespace RenderGraph::Engine::ImageSpace
 		state.postOn = true;
 		Chain().on = World().on = Start().on = Menu().on = true;
 		state.on = true;
+		// Before the declarations, which read it.
+		WriteEngineShape("ImageSpace::Setup");
 		std::string selected;
 		for (std::size_t i = 0; i < kEffects.size(); ++i)
 			if (state.enabled[i])
@@ -2132,9 +2093,14 @@ namespace RenderGraph::Engine::ImageSpace
 		if (const auto copy = EffectNamed("ISCopySubRegionCS"); copy >= 0 && state.enabled[static_cast<std::size_t>(copy)]) {
 			MakeFlowMap();
 			PublishFlowMap();
+			WriteEngineShape("ImageSpace::Setup");
 		}
-		if (globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture && RE::ImageSpaceManager::GetSingleton())
-			RegisterMenuSteps();
+		// The first revision registers the clients the engine is ready for, so the build is ready for the main menu.
+		if (!DeclareSteps()) {
+			Chain().on = World().on = Start().on = Menu().on = false;
+			state.on = false;
+			return off("its textures or clients could not be declared");
+		}
 	}
 
 	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final)
@@ -2163,9 +2129,9 @@ namespace RenderGraph::Engine::ImageSpace
 
 	void OnFrameBegin()
 	{
-		// Registered at the first frame so the build is ready for the main menu.
+		// After the revision's adoption, so a change is a later revision's.
 		if (Usable())
-			CheckMenuSteps();
+			WriteEngineShape("ImageSpace at Begin");
 	}
 
 	void OnMenuEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final)

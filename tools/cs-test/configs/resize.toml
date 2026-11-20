@@ -1,7 +1,9 @@
 # Size changes in the middle of a session: the fog volumes' grid settings (ViewAtmosphere's near and middle sizes, as the menu's sliders
 # write them) and upscale method switches to FSR and to TAA (a new render size when the
 # method changes). Each new size is a new version of a graph
-# texture, which may only switch in at a frame boundary. Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
+# texture, which may only switch in at a frame boundary. The upscale switches also change the dynamic-resolution ratios that
+# ImageSpace's world and chain clients follow (frame revision plan 6.7), so those register again with the revision.
+# Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
 extends = ["base"]
 
 [run]

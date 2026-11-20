@@ -44,12 +44,20 @@ struct StepSampler
 	std::uint8_t filter = 0;
 };
 
+/**
+* @brief A CS texture the steps use instead of an engine target. A kept one is declared once (Frame/Declare.h), so a new size is
+* a new version of its slot. A transient one is made for each registration.
+*/
 struct OwnedTarget
 {
-	// One texture for every registration and every stage.
-	std::shared_ptr<GraphResources::Texture2D> texture;
+	GraphResources::Texture2D* texture = nullptr;  // the twin passes declare
+	Frame::DeclaredTexture2D declared;              // a kept texture's
+	std::shared_ptr<GraphResources::Texture2D> transient;
 	rhi::Format format = rhi::Format::Unknown;
-	bool fresh = false;  // made or resized by the last registration, so a history needs its first clear again
+	// The extent of the registration being built, which the revision that switches the registration in binds.
+	std::uint32_t width = 0, height = 0;
+	// A kept texture's first version is not born cleared, so the first registration clears it once. Later versions are.
+	bool cleared = false;
 	explicit operator bool() const { return texture && *texture; }
 };
 
@@ -121,6 +129,9 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		a_error = "its output could not be resolved";
 		return nullptr;
 	}
+	// A kept output may still have its last version's extent. The registration is for the extent the revision adopts with it.
+	spec->width = a_desc.output.owned ? a_desc.output.owned->width : spec->output.Width();
+	spec->height = a_desc.output.owned ? a_desc.output.owned->height : spec->output.Height();
 	if (a_desc.output1) {
 		spec->output1 = texture(a_desc.output1);
 		if (!spec->output1) {
@@ -152,8 +163,8 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		if (spec->output1)
 			spec->format1 = format(a_desc.output1, spec->output1);
 		const auto shift = a_desc.output.mip == AnchorPasses::kAllMips ? 0u : a_desc.output.mip;
-		float width = static_cast<float>((std::max)(spec->output.Width() >> shift, 1u));
-		float height = static_cast<float>((std::max)(spec->output.Height() >> shift, 1u));
+		float width = static_cast<float>((std::max)(spec->width >> shift, 1u));
+		float height = static_cast<float>((std::max)(spec->height >> shift, 1u));
 		if (a_desc.area == StepArea::Render) {
 			const auto [x, y] = DynamicRatios();
 			width *= x;
@@ -173,13 +184,25 @@ struct StepKey
 	friend auto operator<=>(const StepKey&, const StepKey&) = default;
 };
 
+/**
+* @brief What the world steps' registration is a function of. Their clients are declared on these variables (Frame/Declare.h),
+* so a change registers them again when a revision starts, and the revision switches the new builds in.
+*/
+struct WorldKey
+{
+	Frame::Vars::Extent2D display{};
+	Frame::Vars::Ratios ratios{};  // the render-size viewports are baked at registration until step 8
+	std::uint32_t saoLevels = 0, effects = 0, states = 0;
+	friend bool operator==(const WorldKey&, const WorldKey&) = default;
+};
+
 struct WorldSteps
 {
 	bool on = false;          // the deferred+water stage runs in this mode
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;  // a retry waits kRetryFrames after it
+	bool registered = false;  // a registration was built
+	std::optional<WorldKey> built;
+	std::array<std::optional<FrameAnchors::ClientDesc>, 2> descs;  // the scopes' and the water blend's
+	std::array<Frame::DeclaredClient, 2> clients;
 	std::uint32_t saoLevels = 0, contrastLevel = 0, width = 0, height = 0;
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::map<StepKey, std::uint32_t> entries;
@@ -193,7 +216,6 @@ struct WorldSteps
 	std::uint32_t scopesCount = 0, waterCount = 0;
 	OwnedTarget ssrMask, saoTemp, sao;
 	std::array<OwnedTarget, 2> saoHistory;
-	bool historyCleared = false;
 	WorldScope scope = WorldScope::None;
 	std::uint32_t minifyLevel = 0;
 };
@@ -227,33 +249,170 @@ std::uint16_t EngineNormalsParity()
 	return ssr ? static_cast<std::uint16_t>(~EngineFrameCounter() & 1u) : 0;
 }
 
-/** @brief Made like the engine target, with a UAV for the history's first clear. */
-bool MakeOwned(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
+/** @brief Like the engine target, with a UAV for a history's first clear. False while the engine has not made it. */
+bool OwnedDescLike(std::int32_t a_like, D3D11_TEXTURE2D_DESC& a_desc)
 {
-	const auto index = static_cast<std::int32_t>(a_like);
-	const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[index];
+	if (a_like < 0 || a_like >= static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL))
+		return false;
+	const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[a_like];
 	if (!target.texture)
 		return false;
-	D3D11_TEXTURE2D_DESC desc{};
-	target.texture->GetDesc(&desc);
+	a_desc = {};
+	target.texture->GetDesc(&a_desc);
 	// The engine's texture may be typeless, so use the RTV's format.
 	if (target.RTV) {
 		D3D11_RENDER_TARGET_VIEW_DESC view{};
 		target.RTV->GetDesc(&view);
-		desc.Format = view.Format;
+		a_desc.Format = view.Format;
 	}
-	desc.MipLevels = 1;
-	desc.ArraySize = 1;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
-	desc.CPUAccessFlags = 0;
-	desc.MiscFlags = 0;
-	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
-	a_out.texture = std::move(made.texture);
-	a_out.fresh = made.fresh;
-	// The engine target may have no memory in native mode, so read the format from its description, not an import.
-	a_out.format = rhi::helpers::ToRHI(desc.Format);
-	return static_cast<bool>(a_out);
+	a_desc.MipLevels = 1;
+	a_desc.ArraySize = 1;
+	a_desc.Usage = D3D11_USAGE_DEFAULT;
+	a_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+	a_desc.CPUAccessFlags = 0;
+	a_desc.MiscFlags = 0;
+	return true;
+}
+
+/** @brief A registration's transient texture of a_desc. Fatal when it cannot be made. Render thread. */
+void MakeTransient(OwnedTarget& a_out, const D3D11_TEXTURE2D_DESC& a_desc, std::string_view a_name)
+{
+	a_out.transient = Frame::Resources::Texture2D(a_name, a_desc);
+	if (!a_out.transient)
+		stl::report_and_fail(fmt::format("Community Shaders: the ImageSpace texture {} could not be made", a_name));
+	a_out.texture = a_out.transient.get();
+	// The engine target may have no memory in native mode, so the format comes from its description, not an import.
+	a_out.format = rhi::helpers::ToRHI(a_desc.Format);
+	a_out.width = a_desc.Width;
+	a_out.height = a_desc.Height;
+}
+
+/** @brief A transient texture like the engine target. Fatal when the target or the texture is missing. */
+void MakeTransient(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_name)
+{
+	D3D11_TEXTURE2D_DESC desc{};
+	if (!OwnedDescLike(static_cast<std::int32_t>(a_like), desc))
+		stl::report_and_fail(fmt::format("Community Shaders: the ImageSpace texture {} is made like engine target {}, which the engine has not made", a_name,
+			static_cast<std::int32_t>(a_like)));
+	MakeTransient(a_out, desc, a_name);
+}
+
+/** @brief A kept texture's description at a revision's values. False when the engine has no target for them. */
+using KeptDescFn = std::function<bool(const Frame::Inputs&, D3D11_TEXTURE2D_DESC&)>;
+
+/**
+* @brief Setup. A texture kept across frames, declared on a_dependencies with a_desc, so a new size is a new version of its slot,
+* born cleared. Its format is the first description's. One texel while a_desc finds no target. False, logged, on failure.
+*/
+bool DeclareKept(OwnedTarget& a_out, std::string_view a_name, Frame::Dependencies a_dependencies, KeptDescFn a_desc)
+{
+	D3D11_TEXTURE2D_DESC first{};
+	if (!a_desc(Frame::Inputs(nullptr), first)) {
+		logger::error("[ORG] ImageSpace: {} has no description: the engine target it is made like is missing", a_name);
+		return false;
+	}
+	a_out.declared = Frame::DeclareTexture2D(std::string(a_name), std::move(a_dependencies),
+		[a_desc, first](const Frame::Inputs& a_in) {
+			D3D11_TEXTURE2D_DESC desc = first;
+			if (!a_desc(a_in, desc)) {
+				desc = first;
+				desc.Width = desc.Height = 1;
+			}
+			desc.Format = first.Format;
+			return desc;
+		},
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
+	if (!a_out.declared)
+		return false;
+	a_out.texture = a_out.declared.Get();
+	a_out.format = rhi::helpers::ToRHI(first.Format);
+	a_out.width = first.Width;
+	a_out.height = first.Height;
+	return true;
+}
+
+/** @brief Setup. A kept texture like an engine target. The engine makes its targets once a session (Q4), with the display size. */
+bool DeclareKept(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_name)
+{
+	const auto like = static_cast<std::int32_t>(a_like);
+	return DeclareKept(a_out, a_name, Frame::DependsOn(Frame::Vars::DisplaySize()),
+		[like](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(like, a_desc); });
+}
+
+/** @brief A kept texture like an engine target: its extent in the registration being built. */
+void KeptExtentLike(OwnedTarget& a_target, std::int32_t a_like)
+{
+	D3D11_TEXTURE2D_DESC desc{};
+	const bool found = OwnedDescLike(a_like, desc);
+	a_target.width = found ? desc.Width : 1u;
+	a_target.height = found ? desc.Height : 1u;
+}
+
+/**
+* @brief A one-shot clear of a kept texture's first version, before any pass reads it. Later versions are born cleared.
+* Nothing when an earlier registration cleared it.
+*/
+void ClearFirstVersion(OwnedTarget& a_target, const char* a_client, std::int32_t a_order, std::string a_name, std::vector<FrameAnchors::PassDesc>& a_passes)
+{
+	if (a_target.cleared)
+		return;
+	a_target.cleared = true;
+	AnchorPasses::Builder builder(Anchor::ImageSpace, a_client, a_order);
+	builder.Add(AnchorPasses::ClearOf(std::move(a_name), *a_target.texture), true);
+	for (auto& pass : builder.Take())
+		a_passes.push_back(std::move(pass));
+}
+
+/** @brief The covered effects and blend states the engine has made. Steps register once it has its ImageSpace manager. */
+template <class Values>
+std::optional<Frame::Vars::ImageSpaceShape> ReadyShape(const Values& a_values)
+{
+	const auto shape = a_values.Get(Frame::Vars::EngineImageSpace());
+	if (!IS().on || shape.effects == 0)
+		return std::nullopt;
+	return shape;
+}
+
+/**
+* @brief Whether the engine draws for another registration than the frame's: a variable the registration follows was written
+* since it was built, or the revision with it is not adopted yet. A draw with no pass is lag then, not a mismatch.
+*/
+template <class Key, class KeyOf>
+bool Lagging(const std::optional<Key>& a_built, KeyOf&& a_keyOf)
+{
+	if (!a_built)
+		return true;
+	return a_keyOf(Frame::Inputs(nullptr)) != a_built || a_keyOf(Frame::Revision::Adopted()) != a_built;
+}
+
+/**
+* @brief Setup. Declares the step client a_part on a_dependencies. Every client of a step group has the group's key, so they
+* register again together. a_desc gives the client's registration for a key, and builds the group's registrations once per key.
+* Null or empty means no client.
+*/
+template <class Key>
+Frame::DeclaredClient DeclareStepClient(PostPart a_part, Frame::Dependencies a_dependencies, std::function<std::optional<Key>(const Frame::Inputs&)> a_key,
+	std::function<const std::optional<FrameAnchors::ClientDesc>*(const Key&)> a_desc)
+{
+	const std::string id = IS().post[static_cast<std::size_t>(a_part)].id;
+	return Frame::DeclareClient<Key>(
+		id, std::move(a_dependencies),
+		[a_key, a_desc](const Frame::Inputs& a_in) -> std::optional<Key> {
+			auto key = a_key(a_in);
+			if (!key)
+				return std::nullopt;
+			const auto* desc = a_desc(*key);
+			if (!desc || !*desc)
+				return std::nullopt;
+			return key;
+		},
+		[a_desc](const Key& a_value, FrameAnchors::ClientDesc& a_out) {
+			const auto* desc = a_desc(a_value);
+			if (!desc || !*desc)
+				return false;
+			a_out = **desc;
+			return true;
+		});
 }
 
 /** @brief The SAO level count (528105 / 415050). The minify loop draws levels 1 to count - 1. */
@@ -274,28 +433,47 @@ std::uint32_t ContrastLevel(std::uint32_t a_levels)
 	return 0;
 }
 
-void RegisterWorldSteps();
+/** @brief The world steps' key at a revision's values, or none while the engine is not ready for them. */
+template <class Values>
+std::optional<WorldKey> WorldKeyOf(const Values& a_values)
+{
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !World().on)
+		return std::nullopt;
+	return WorldKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::DynamicRatios()), shape->saoLevels, shape->effects, shape->states };
+}
 
-/** @brief Re-registers when a size, the level count or the ratios change, or a build left a pass out. Render owner. */
-void CheckWorldSteps()
+bool WorldLagging()
+{
+	return Lagging(World().built, [](const auto& a_values) { return WorldKeyOf(a_values); });
+}
+
+void BuildWorldSteps(const WorldKey& a_key);
+
+/** @brief The world client a_part's registration for a_key. Builds both clients' once per key. */
+const std::optional<FrameAnchors::ClientDesc>* WorldDescFor(const WorldKey& a_key, std::size_t a_part)
 {
 	auto& world = World();
-	if (!world.on || !IS().on)
-		return;
-	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
-	if (!main.texture || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	D3D11_TEXTURE2D_DESC desc{};
-	main.texture->GetDesc(&desc);
-	const auto ratios = DynamicRatios();
-	const auto frame = Frame::Driver::Current().frame;
-	// A pass waiting on an unpublished feature output is retried, at most this often.
-	constexpr std::uint64_t kRetryFrames = 120;
-	if (world.registered && world.retry && frame - world.registeredFrame < kRetryFrames)
-		return;
-	if (world.registered && !world.retry && world.width == desc.Width && world.height == desc.Height && world.saoLevels == EngineSaoLevels() && world.ratios == ratios)
-		return;
-	RegisterAtBoundary(world.pending, [] { return World().on && StepTargetsReady(); }, RegisterWorldSteps);
+	if (world.built != a_key) {
+		world.built = a_key;
+		BuildWorldSteps(a_key);
+	}
+	return &world.descs[a_part];
+}
+
+/** @brief Setup. The kept SAO textures, and the scopes and water blend clients declared on their variables. False, logged, on failure. */
+bool DeclareWorldSteps()
+{
+	auto& world = World();
+	// The fog-only composite reads the blurred AO in frames where SAO drew nothing, so it is kept across frames.
+	if (!DeclareKept(world.sao, RE::RENDER_TARGET::kSAO, "ImageSpace::SAO") || !DeclareKept(world.saoHistory[0], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO0") ||
+		!DeclareKept(world.saoHistory[1], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO1"))
+		return false;
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::DynamicRatios(), Frame::Vars::EngineImageSpace());
+	for (std::size_t part = 0; part < world.clients.size(); ++part)
+		world.clients[part] = DeclareStepClient<WorldKey>(part ? PostPart::WorldWater : PostPart::WorldScopes, dependencies,
+			[](const Frame::Inputs& a_in) { return WorldKeyOf(a_in); }, [part](const WorldKey& a_key) { return WorldDescFor(a_key, part); });
+	return std::ranges::all_of(world.clients, [](const Frame::DeclaredClient& a_client) { return static_cast<bool>(a_client); });
 }
 
 template <class On>
@@ -369,14 +547,16 @@ void WorldWaterRows(std::array<std::uint64_t, 4>& a_rows)
 	}
 }
 
-/** @brief Registers the scopes and water blend clients for the current sizes, in Main::RenderWorld's order. */
-void RegisterWorldSteps()
+/**
+* @brief The scopes and water blend clients' registrations for a_key, in Main::RenderWorld's order. Their declarations register
+* them when the revision starts, and the revision switches their builds in. Render thread.
+*/
+void BuildWorldSteps(const WorldKey& a_key)
 {
 	auto& state = IS();
 	auto& world = World();
 	world.registered = false;
-	world.retry = false;
-	world.registeredFrame = Frame::Driver::Current().frame;
+	world.descs = {};
 	world.entries.clear();
 	world.scopesMade.fill(false);
 	world.waterMade.fill(false);
@@ -389,22 +569,16 @@ void RegisterWorldSteps()
 	main.texture->GetDesc(&mainDesc);
 	world.width = mainDesc.Width;
 	world.height = mainDesc.Height;
-	world.ratios = DynamicRatios();
-	world.saoLevels = EngineSaoLevels();
+	world.ratios = { a_key.ratios.x, a_key.ratios.y };
+	world.saoLevels = a_key.saoLevels;
 	world.contrastLevel = ContrastLevel(world.saoLevels);
-	// The same textures at every registration while their shape holds. A new history is cleared by its first pass.
-	using Lifetime = GraphResources::Lifetime;
-	if (!MakeOwned(world.ssrMask, RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "ImageSpace::SSRMaskDownsampled", Lifetime::Transient) ||
-		!MakeOwned(world.saoTemp, RE::RENDER_TARGET::kSAO_TEMP_BLUR, "ImageSpace::SAOBlurTemp", Lifetime::Transient) ||
-		// The fog-only composite reads the blurred AO in frames where SAO drew nothing, so keep it across frames.
-		!MakeOwned(world.sao, RE::RENDER_TARGET::kSAO, "ImageSpace::SAO", Lifetime::History) ||
-		!MakeOwned(world.saoHistory[0], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO0", Lifetime::History) ||
-		!MakeOwned(world.saoHistory[1], RE::RENDER_TARGET::kSAO_RAWAO, "ImageSpace::SAORawAO1", Lifetime::History)) {
-		logger::warn("[ORG] ImageSpace: the world steps' targets could not be made; registered again at a later frame");
-		world.retry = true;
-		return;
-	}
-	world.historyCleared = false;
+	// MakeStepSpec bakes the render-size viewports with the key's ratios.
+	const BuildRatiosScope ratioScope(world.ratios);
+	MakeTransient(world.ssrMask, RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "ImageSpace::SSRMaskDownsampled");
+	MakeTransient(world.saoTemp, RE::RENDER_TARGET::kSAO_TEMP_BLUR, "ImageSpace::SAOBlurTemp");
+	KeptExtentLike(world.sao, RE::RENDER_TARGET::kSAO);
+	for (auto& history : world.saoHistory)
+		KeptExtentLike(history, RE::RENDER_TARGET::kSAO_RAWAO);
 
 	using E = Effects;
 	using T = RE::RENDER_TARGET;
@@ -559,18 +733,10 @@ void RegisterWorldSteps()
 		auto& keys = water ? world.waterKey : world.scopesKey;
 		auto& count = water ? world.waterCount : world.scopesCount;
 		std::vector<FrameAnchors::PassDesc> passes;
-		// Clear a new history pair before any pass reads it.
-		if (!water) {
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				if (!world.saoHistory[h].fresh)
-					continue;
-				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -1 - static_cast<std::int32_t>(h));
-				auto clear = AnchorPasses::ClearOf(fmt::format("sao.history{}.clear", h), *world.saoHistory[h].texture);
-				builder.Add(std::move(clear), true);
-				for (auto& pass : builder.Take())
-					passes.push_back(std::move(pass));
-			}
-		}
+		// Clear the history pair's first versions before any pass reads them.
+		if (!water)
+			for (std::uint32_t h = 0; h < 2; ++h)
+				ClearFirstVersion(world.saoHistory[h], client.id, -1 - static_cast<std::int32_t>(h), fmt::format("sao.history{}.clear", h), passes);
 		for (auto& step : steps) {
 			if (step.water != water)
 				continue;
@@ -584,7 +750,6 @@ void RegisterWorldSteps()
 			++count;
 			keys[entry] = step.key;
 			world.entries[step.key] = entry;
-			NoteImports(*spec);
 			passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
 				.anchor = Anchor::ImageSpace,
 				.order = static_cast<std::int32_t>(entry),
@@ -594,8 +759,6 @@ void RegisterWorldSteps()
 					auto pass = MakePass(spec, latch, gate, id);
 					auto& made = water ? World().waterMade : World().scopesMade;
 					made[entry] = pass != nullptr;
-					if (!pass)
-						World().retry = true;
 					return pass;
 				},
 				// Every hook has run by the commit, so a step the engine did not draw skips and folds its barriers.
@@ -634,15 +797,13 @@ void RegisterWorldSteps()
 			desc.rows = WorldScopeRows;
 		desc.repeats = true;
 		desc.segmentOnly = FrameAnchors::NamedByStage(client.id);
-		if (!FrameAnchors::Register(std::move(desc))) {
-			logger::error("[ORG] ImageSpace: the world step client {} was refused", client.id);
-			world.on = false;
-			return;
-		}
+		// An empty client is no client. Its declaration then registers none.
+		if (!desc.passes.empty())
+			world.descs[water ? 1 : 0] = std::move(desc);
 	}
 	world.registered = true;
 	logger::info("[ORG] ImageSpace: the RenderWorld scopes are CS passes: {} scope passes ({} SAO levels, contrast level {}), {} water blend passes, for {}x{} at "
-				 "ratios {:.3f}x{:.3f}",
+				 "ratios {:.3f}x{:.3f}, registered for the revision starting now",
 		world.scopesCount, world.saoLevels, world.contrastLevel, world.waterCount, world.width, world.height, world.ratios.first, world.ratios.second);
 }
 
@@ -763,8 +924,8 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	const StepKey key{ a_scope, id, variant };
 	const auto found = world.entries.find(key);
 	if (found == world.entries.end()) {
-		// The engine may draw for new sizes before the next Begin registers them.
-		if (world.pending) {
+		// The engine may draw for new sizes before the revision with their registration is adopted.
+		if (WorldLagging()) {
 			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Deferred);
 			return true;
 		}
