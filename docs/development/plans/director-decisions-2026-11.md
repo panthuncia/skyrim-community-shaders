@@ -338,3 +338,18 @@ final until the user confirms it.
 
     A pipeline toggle switching mid-session is 10c's job (toggles as variables), so it goes into the 10c brief. It is
     unknown whether this failed before 10a; the config is new.
+63. **10b (with its fix) passed its real checks**:
+    - zero DCLF waits and zero tap errors in the 21 runs read;
+    - `menu-resize` passed, which shows the starvation rule;
+    - "declared view mismatch" *warnings* are zero.
+
+    `resize` failed in three modes only because its `no_log` matched the stats line ("0 mismatched"); the pattern is now
+    "declared view mismatch:". Those three are rerun with 10c's batch.
+64. **10c is merged**: DCLF toggles and graph conditions are variables. The `dclf-toggles` hang was the pipeline fields
+    coming from the attached (old) conditions while recordings used the new build state; they now come from
+    `next.build->conditions`.
+
+    **Late changes stay counted, not fatal (to confirm).** Most are not DCLF's: one-shot passes and the re-registering
+    of `cs.scaleform`, `cs.screenshot` and `cs.deferred`, plus 16 unnamed ones in guest. A follow-up lead moves each
+    source into the adoption point and then makes `NoteLateChange` fatal. That is the last item of the frame revision
+    plan.
