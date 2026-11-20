@@ -322,7 +322,8 @@ namespace RenderGraph::Frame::Driver
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
 		next.kind = DecideKind(state, next.capture);
 		// In native mode every build attaches here before the schedule is chosen, so DCLF's build point runs here for a world frame.
-		// Guest mode keeps it at Main::Draw, where the anchors' own epochs may take a build mid-frame.
+		// Guest mode keeps DCLF's build point at Main::Draw (DCLF's BeginFrame), since its epochs are external until step 10a.
+		// No anchor runs an epoch of its own, and CS stage builds are staged: they attach only in AdoptLatest, in both modes.
 		if (Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
 			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			DCLF::BuildPointAtFrameStart(next.frame);

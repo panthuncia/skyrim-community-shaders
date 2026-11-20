@@ -1040,6 +1040,42 @@ build is fatal.
     (`BaselineManager`, `GoToIndex`, `FormEditSources`, `LightEditor`, Terrain Shadows' `NeedsRefresh`, DCLF's
     `RequestAccumulatedRefresh`) are other mechanisms.
 
+**As built (2026-11-19, 6.15, `org-native/rev-step7b`).** HDR Display's textures and composite follow the revisions.
+- The scene, output and UI textures are `DeclareTexture2D` on `DisplaySize` (`ORGHDRDisplay::MakeTexture`), published once as
+  their slots. A new display size is a new version of each, adopted with its revision. They were made once and never resized.
+- `ORGHDRDisplay::GraphOf` returns the twin's slot (`FrameAnchors::Texture`), not the version's resource, for the current or
+  the last wrapped D3D11 texture. So ImageSpace, Bink, Scaleform and Upscaling's hudless source keep one graph resource across
+  versions, and a key read between the adoption and the rewrap still finds the slot.
+- HDR Display makes its own D3D11 views. `HDRDisplay::FollowGraphTextures` (in `BeginRenderFrame`, after the adoption point)
+  wraps a new export (`ORGHDRDisplay::NewExport`) and makes the views again from the old ones' descriptions.
+- The `cs.hdr` client is `DeclareClient` at Setup on `HdrEnabled` and `DisplaySize`. No key while HDR is off. Its key is the
+  display size and a back buffer serial: the back buffer is not a variable yet, so `Compose` calls `Invalidate()` when it sees a
+  new one (the 6.14/6.19 interim). `make` imports the textures and the back buffer and sizes the dispatches and the copy from
+  the key. The `adopted` call sets the held registration, which the commit reads (`matchesById`).
+- `Compose` composes on the graph only while the held registration was made for the frame's back buffer. Otherwise ApplyHDR
+  composes with D3D11, as before a registration switched in. The per-present `Inputs` compare, the re-registration, the
+  `Scheduled` gate and the import failures' `Fail` in `Compose` are gone.
+- No `DeclareProgram`: no define of HDROutputCS follows a setting, and hot reload swaps its live pipeline
+  (`RequestShaderReload`), as 6.18 found. `programDirty` and `ORGHDRDisplay::ClearShaderCache` are gone.
+- HDR's `ProjectSizeSettings` and its `SettingsWritten` call are gone. `enableHDR` reaches the frame as `HdrEnabled`, which
+  `RaiseHdrVariables` writes every frame.
+- Test: `hdr-resize` (new), and `hdr`. See "Decided by the agent (step 6.15)" in section 9.
+
+**As built (2026-11-19, 6.23, `org-native/rev-step7b`, worker mig623).** The screenshot's clean scene follows the revisions.
+- The texture `Screenshot::CleanScene` and the client `cs.screenshot.clean` are declared once, at `ORGScreenshot::Setup`, on
+  `DisplaySize` and `HdrEnabled`. kFRAMEBUFFER is the back buffer at the snapshot point, and its format is fixed when the swap
+  chain is made, so no format variable is needed: the texture takes kFRAMEBUFFER's format at setup.
+- The clean scene is read only in SDR. With HDR on, the texture is one texel and the key is empty, so there is no client.
+- The key is the display size and kFRAMEBUFFER's import. The import is not a variable yet: `SnapshotCleanScene` calls
+  `Invalidate()` when it changes, as Upscaling's hudless source does.
+- The `adopted` call records the key the adopted revision holds. The frame copies only while that key was made for
+  kFRAMEBUFFER's import at its current size. Otherwise the capture uses the D3D11 snapshot, as before.
+- Every registration shares the gate and the commit and sets `matchesById`. The capture reads the clean scene through its slot,
+  at the adopted size. The readback buffers stay on the Capture anchor's placed epoch.
+- Gone: `const bool same`, the in-frame twin and client (`RegisterCleanClient`) and the `Scheduled` gate in
+  `SnapshotCleanScene`. The first `shot-ui` of a session can already read the clean scene.
+- Test: `screenshot-clean` (new). See "Decided by the agent (step 6.23)" in section 9.
+
 ---
 
 ### Step 7. Delete the old paths and make the check fatal
@@ -1055,6 +1091,11 @@ for revisions.
 mid-frame (`FrameDriver.cpp:OnBegin` comment; cleanup plan piece A7). Make them staged members of revisions (or CS stage steps if A7
 lands first; check `docs/development/org-native-frame-graph.md` for A7's state). Then delete `Builds::SwitchStaged` and
 `BuildManager::SwitchStaged`.
+
+**As built (2026-11-19, 7b, `org-native/rev-step7b`).** Nothing was left to move. A7 made HDR output, the hudless copy and the
+clean scene copy UI-stage steps, so they are ordinary revision members, and 4e removed `SwitchStaged` (no caller, and none in ORG
+or OMS). 7b rewrote `FrameDriver.cpp:OnBegin`'s comment: guest keeps DCLF's build point at Main::Draw because DCLF's epochs are
+external until 10a, not because of own epochs. The section 8 greps for 7b are empty. HDR's and the clean scene's `Scheduled` gates go with 6.15 and 6.23, the hudless copy's with 9b.
 
 **7c. Shader reload.** `RenderGraphRuntime::RequestShaderReload` → `ServicePipelineReload` → `Builds::RequestAllSynchronous` becomes an
 event (`Vars::ShaderGeneration`) whose revision has every epoch as a member, built async and staged. The pipeline swap that needs the host
@@ -2173,6 +2214,33 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Volumetric Shadows imports in its key function**, at the start of a revision on the render thread, not at EarlyPrepass. The
   engine makes the maps once a session, before the variable's event. Cascades the engine has but that cannot be imported then are
   fatal, since no later event would register the client again (before, the passes stayed out until an EarlyPrepass found them).
+
+**Decided by the agent (step 6.15, HDR Display, 2026-11-19), to confirm:**
+- **The client is not declared on `HdrOutputTarget`.** It is written from `PostChainTarget`, which reads the adopted HDR state, so
+  it changes one revision after `HdrEnabled`. Choosing the scene by it would compose from kFRAMEBUFFER for a revision. The
+  composite runs only for HDR frames, so its scene is always HDR's texture now (the kFRAMEBUFFER branch was dead).
+- **The back buffer is observed, not a variable.** Its serial is in the key and `Compose` invalidates the client on a new one. Setup
+  seeds it from the swap chain's buffer 0. Step 9a makes it an event with the swap chain.
+- **No `DeclareProgram`**, despite row 6.15: there is one permutation, and hot reload already swaps it.
+- **The textures are display size also while HDR is off.** The existence rule (one texel) would save three display-size textures
+  for SDR users, but every HDR toggle would then be a version change of each. Not done; a cheap follow-up if VRAM matters.
+- **The wrappers follow the export by a pointer compare each Begin** (`NewExport`), not by `FirstFrame`. A frame without
+  `BeginRenderFrame` would miss `FirstFrame` for good.
+- **`enableHDR` is not a `CS::Setting`.** It is read under `settingsMutex` in many places, and `HdrEnabled` already carries it into
+  every revision. Its projection only raised an event nothing declares on.
+- **Frames between a new registration and its adoption compose with D3D11**, as before (no wait). That includes the frames after
+  HDR is turned off and before that revision is adopted, since the key clears the held registration when it gives no client.
+- **The re-setup `DrainCommandRing` in `HDRDisplay::SetupResources` stays.** It is not a resize drain: `SetupResources` runs once.
+
+**Decided by the agent (step 6.23, Screenshot clean scene, 2026-11-19), to confirm:**
+- **One texture, no format variable** (not 6.14's three). kFRAMEBUFFER is the back buffer at the snapshot, and an HDR toggle
+  changes only its colour space. If the game ever changed its format through `ResizeBuffers`, nothing would check it.
+- **`HdrEnabled` decides existence** (one texel, no client with HDR on). It saves a display-size texture for HDR users.
+- **A per-frame check of the held key against the live import and its size stays.** It is not the old rebuild compare: it stops
+  a copy of the wrong extent in the frames between a resize and its adoption.
+- **The capture client is still registered again in-frame by `SetSource`** when its source or size changes, and `CopyBuilt`
+  still asks `FrameAnchors::Scheduled` for it without a UI stage. Out of this row's scope; it is the section 8 grep's last hit in
+  this file.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

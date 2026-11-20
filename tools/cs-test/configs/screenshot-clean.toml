@@ -1,0 +1,69 @@
+# The screenshot's clean scene (frame revision plan, 6.23): captures as the menu's button takes them (shot-ui, into the user's
+# screenshot folder), an HDR toggle and a window resize, with a shot-ui after each. The clean scene's texture and client are
+# declared at setup on DisplaySize and HdrEnabled, so with HDR on the client is removed, and HDR off or a new size registers it
+# again with a revision. Expect "the copy now reads the clean scene" for the first, the after-SDR and the after-resize captures,
+# "the clean scene's copy switches in with the revision adopted" after each registration, and every capture read back. In guest
+# the resize may not change the back buffer. Compose it: native-vulkan+screenshot-clean, native-d3d12+screenshot-clean,
+# guest+screenshot-clean.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+HDRDisplay = true
+
+# Two captures: the second must read the clean scene even if the first did not.
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot-ui"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot-ui"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "hdr"
+arg = "1"
+
+# HDR captures recompose HDR's output, not the clean scene.
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot-ui"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "hdr"
+arg = "0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot-ui"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot-ui"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error", "a frame declaration failed", "the clean scene's copy could not be built", "the clean scene's texture could not be declared",
+	"the clean scene's client could not be declared", "this capture uses D3D11", "it is lost", "kFRAMEBUFFER cannot be imported"]

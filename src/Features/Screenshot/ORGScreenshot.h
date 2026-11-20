@@ -22,6 +22,7 @@ namespace DirectX
 * D3D11's staging copy is used only when the graph cannot take a capture at all.
 * The pre-UI clean scene is a graph copy too: at the UI stage's FrameGeneration step, after the post chain and before the UI, kFRAMEBUFFER
 * is copied into a graph texture that a capture of that frame then reads. It needs no D3D11 content, so it also works in native mode.
+* The texture and its client are declared once, at setup, on DisplaySize and HdrEnabled, so they switch in with a frame revision.
 * Render thread throughout, except Crop. Free of ORG/Vulkan includes.
 */
 class ORGScreenshot
@@ -74,14 +75,14 @@ public:
 
 	/**
 	* @brief After the ImageSpace chain, before the UI: copies kFRAMEBUFFER into the clean scene on the graph.
-	* @return False when it did not copy this frame, such as while the copy's first build has not switched in.
+	* @return False when it did not copy this frame: no adopted revision holds a copy for kFRAMEBUFFER's import at its size yet.
 	*/
 	bool SnapshotCleanScene();
 
 	/** @brief Whether SnapshotCleanScene copied this frame. */
 	bool HasFreshCleanScene() const;
 
-	/** @brief The clean scene's description. Null before the first SnapshotCleanScene. */
+	/** @brief The clean scene's description at the size of its last copy. Null when there is no clean scene on the graph. */
 	const D3D11_TEXTURE2D_DESC* CleanSceneDesc() const;
 
 	/** @brief Any thread, since the encoding worker calls it. @return False when the readback does not hold the crop. */

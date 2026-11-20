@@ -716,8 +716,7 @@ void HDRDisplay::SetupResources()
 		settings.hdrAutoDetected = true;
 		logger::info("[HDR] Auto-configured HDR based on display: {}", isHDRMonitor ? "enabled" : "disabled");
 	}
-	// Outside the lock, since the projection takes it.
-	SettingsWritten("HDRDisplay auto-detect");
+	// The setting reaches the frame as the HdrEnabled variable, written below and at every BeginRenderFrame.
 	bool enableHDR;
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
@@ -843,7 +842,58 @@ void HDRDisplay::BeginRenderFrame()
 		UpdateHDRData();
 		UpdateSwapChainColorSpace();
 	}
+	FollowGraphTextures();
 	RaiseHdrVariables(*this, requestedHDR, "HDRDisplay::BeginRenderFrame");
+}
+
+namespace
+{
+	/** @brief A wrapper of a_texture (its reference taken) with a_old's views made again on it. Deletes a_old. */
+	Texture2D* Rewrap(Texture2D* a_old, ID3D11Texture2D* a_texture, const char* a_name)
+	{
+		auto* next = new Texture2D(a_texture, a_name);
+		if (a_old->srv) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+			a_old->srv->GetDesc(&desc);
+			next->CreateSRV(desc);
+		}
+		if (a_old->uav) {
+			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+			a_old->uav->GetDesc(&desc);
+			next->CreateUAV(desc);
+		}
+		if (a_old->rtv) {
+			D3D11_RENDER_TARGET_VIEW_DESC desc{};
+			a_old->rtv->GetDesc(&desc);
+			next->CreateRTV(desc);
+		}
+		delete a_old;
+		return next;
+	}
+}
+
+void HDRDisplay::FollowGraphTextures()
+{
+	// After the frame's adoption point: a new display size is a new version of each graph texture, with a new D3D11 export.
+	auto& graph = ORGHDRDisplay::Get();
+	const std::pair<ORGHDRDisplay::Texture, Texture2D**> textures[] = {
+		{ ORGHDRDisplay::Texture::Scene, &hdrTexture },
+		{ ORGHDRDisplay::Texture::Output, &outputTexture },
+		{ ORGHDRDisplay::Texture::Ui, &uiTexture },
+	};
+	static constexpr const char* kNames[] = { "HDR::HdrTexture", "HDR::OutputTexture", "HDR::UiTexture" };
+	for (std::size_t i = 0; i < std::size(textures); ++i) {
+		auto& wrapper = *textures[i].second;
+		if (!wrapper)
+			continue;
+		auto* next = graph.NewExport(textures[i].first, wrapper->resource.get());
+		if (!next)
+			continue;
+		wrapper = Rewrap(wrapper, next, kNames[i]);
+		// A new version's contents are undefined: the next redirect clears it.
+		if (textures[i].first == ORGHDRDisplay::Texture::Ui)
+			uiTextureClean = false;
+	}
 }
 
 void HDRDisplay::RedirectFramebuffer()
@@ -1590,7 +1640,7 @@ void HDRDisplay::RestoreLDRRenderTargets()
 void HDRDisplay::ClearShaderCache()
 {
 	patchedBlendStateCache.clear();
-	ORGHDRDisplay::Get().ClearShaderCache();
+	// The graph's HDR output program reloads with every live pipeline (RenderGraphRuntime::RequestShaderReload).
 	if (hdrOutputCS) {
 		hdrOutputCS->Release();
 		hdrOutputCS = nullptr;
@@ -1740,17 +1790,4 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	FrameGen::DxvkPresenter::Get().SetColorSpace(swapChain4, IsHDREnabledForFrame());
 
 	swapChain4->Release();
-}
-
-Feature::SizeProjection HDRDisplay::ProjectSizeSettings() const
-{
-	// The menu and the render thread write enableHDR under the settings mutex. Locking leaves the settings unchanged.
-	bool enableHDR = false;
-	{
-		std::lock_guard lock(const_cast<std::mutex&>(settingsMutex));
-		enableHDR = settings.enableHDR;
-	}
-	SizeProjection projection;
-	projection.Add("enableHDR", enableHDR);
-	return projection;
 }
