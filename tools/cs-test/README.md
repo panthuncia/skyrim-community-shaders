@@ -65,6 +65,7 @@ The shipped configs:
 | `fg` | FSR frame generation switched on (the `fg` step), then the CS menu, the pause menu and a coc with it on, driver presents logged; compose it, `guest+fg`, `d3d11+fg` |
 | `native-fg` | `fg` on native Vulkan (`native-vulkan` + `fg`); with HDR, `native-fg+hdr` |
 | `terrain-shadows` | coc between worldspaces (the save's, Raven Rock, Riverwood), a shot in each: Terrain Shadows' heightmap and shadow height map switch with a frame revision; compose it, `native-vulkan+terrain-shadows` |
+| `river-sgtm` | Riverwood's river with the global time multiplier at 4, then 1: the water client's heightmap bound changes with a frame revision; compose it, `native-vulkan+river-sgtm` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
