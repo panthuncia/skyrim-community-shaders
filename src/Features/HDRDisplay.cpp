@@ -834,8 +834,8 @@ void HDRDisplay::BeginRenderFrame()
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		requestedHDR = settings.enableHDR;
 	}
-	// The frame renders for the HDR state of the revision it adopted. Native's revision waited for the swap chain made for it,
-	// and DXVK's swap chain takes the colour space here, in the frame that adopted it.
+	// The frame renders for the HDR state of the revision it adopted. Native asked for its swap chain at the adoption, and DXVK's
+	// swap chain takes the colour space here, in the frame that adopted it. So no frame presents into the other colour space.
 	if (const bool adopted = RenderGraph::Frame::Vars::AdoptedHdrEnabled(); adopted != hdrEnabledForFrame) {
 		hdrEnabledForFrame = adopted;
 		logger::info("HDR: enableHDR={} adopted with the frame revision (the setting is {})", hdrEnabledForFrame, requestedHDR);
@@ -1765,8 +1765,8 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	// setup and never again.
 	RefreshDisplayLuminance();
 
-	// In native mode the swap chain handle answers no IDXGISwapChain4. The frame revision that changed the HDR setting replaced the
-	// swap chain with the colour space before it was adopted (FrameGen::PresentationRevision), so there is nothing to set here.
+	// In native mode the swap chain handle answers no IDXGISwapChain4. The frame revision that changed the HDR setting asked for the
+	// swap chain at its adoption (FrameGen::PresentationRevision), so there is nothing to set here.
 	if (RenderGraph::Engine::Native::Active()) {
 		const bool hdr = IsHDREnabledForFrame();
 		const auto presentation = RenderGraph::Engine::Native::FramePresentation();

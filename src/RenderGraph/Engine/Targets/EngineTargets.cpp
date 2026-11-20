@@ -6,12 +6,12 @@
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 
 #	include "Globals.h"
-#	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/Frame/BoundaryCheck.h"
 #	include "RenderGraph/Frame/EngineTargetUse.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Revision.h"
 #	include "RenderGraph/Frame/Variables.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -94,7 +94,10 @@ namespace RenderGraph::Engine::Targets
 			std::shared_ptr<const void> owner;
 		};
 
-		/** @brief An engine target's graph texture. A remake with the same format, mips and slices is the slot's next version, so no graph rebuilds. */
+		/**
+		* @brief An engine target's graph texture. A remake with the same format, mips and slices is the slot's next version. It is
+		* pending and joins the next frame revision, so no graph rebuilds and no version changes inside a frame.
+		*/
 		class EngineTexture final : public GraphResources::Resource
 		{
 		public:
@@ -102,8 +105,8 @@ namespace RenderGraph::Engine::Targets
 				Resource(std::move(a_name), { .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV, .versioned = true }) {}
 
 			/**
-			* @brief Takes a new image. Same shape class means the slot's next version. Otherwise it is a new slot, and if the old image
-			* was served, graphs holding it must be rebuilt.
+			* @brief Takes a new image. Same shape class means the slot's next version, pending until a frame revision adopts it.
+			* Otherwise it is a new slot. Replacing an image a reader holds by another shape class is fatal.
 			*/
 			void Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv);
 
@@ -147,6 +150,9 @@ namespace RenderGraph::Engine::Targets
 			std::uint64_t Image() const { return image; }
 
 		private:
+			/** @brief Makes the new image a pending version of a_previous when the shape class holds. False means a new slot. */
+			bool PendVersion(std::shared_ptr<org::VersionedTexture> a_previous);
+
 			std::shared_ptr<org::ExternalTextureResource> external;
 			std::uint64_t image = 0;
 			bool served = false;
@@ -211,12 +217,6 @@ namespace RenderGraph::Engine::Targets
 			std::array<Depth, kDepthSlots> depths;
 			std::array<Cube, kCubeSlots> cubes;
 			std::array<Volume, kVolumeSlots> volumes;
-			bool changed = false;
-			// A served image was replaced, so graphs may hold the old one and the move bumps the resize generation.
-			// A first creation, or one no reader asked for, only publishes.
-			bool heldReplaced = false;
-			// A served image changed size. Passes that took the size are remade once, off the render thread.
-			bool heldResized = false;
 			bool inSet = false;
 			// Images whose texture refused the retire token. Kept for the session rather than freed under DXVK.
 			std::vector<std::shared_ptr<const void>> pinned;
@@ -230,45 +230,52 @@ namespace RenderGraph::Engine::Targets
 
 		RE::BSGraphics::Renderer* Renderer() { return RE::BSGraphics::Renderer::GetSingleton(); }
 
+		/** @brief Whether one slot may hold both: the same format, mip count and slice count (VersionedResource's rule). */
+		bool SameShapeClass(const org::Resource& a_a, const org::Resource& a_b)
+		{
+			if (a_a.HasLayout() != a_b.HasLayout() || a_a.GetMipLevels() != a_b.GetMipLevels() || a_a.GetArraySize() != a_b.GetArraySize())
+				return false;
+			rhi::ResourceDesc a{}, b{};
+			const bool knownA = a_a.TryGetRHIResourceDesc(a);
+			const bool knownB = a_b.TryGetRHIResourceDesc(b);
+			if (knownA != knownB)
+				return false;
+			return !knownA || a.texture.format == b.texture.format;
+		}
+
+		bool EngineTexture::PendVersion(std::shared_ptr<org::VersionedTexture> a_previous)
+		{
+			auto image = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
+			const auto current = a_previous ? a_previous->CurrentResource() : nullptr;
+			if (!image || !current || !SameShapeClass(*current, *image))
+				return false;
+			slot = std::move(a_previous);
+			// Imports of the new D3D11 texture find the slot. Its current version stays the old image until the revision.
+			RenderGraph::SetMadeImageSlot(graph.get(), slot);
+			RenderGraph::Frame::Revision::PublishTexture(slot, std::move(image), nullptr);
+			return true;
+		}
+
 		void EngineTexture::Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
 		{
 			const bool held = std::exchange(served, false) && Graph();
 			auto previous = Versioned();
-			const auto* old = external.get();
-			const bool sameSize = old && a_image.graph && old->GetWidth() == a_image.graph->GetWidth() && old->GetHeight() == a_image.graph->GetHeight();
 			AdoptImage(a_image, a_srv);
-			// Engine targets take versions when the engine makes them, an allowed exception until step 9a.
-			const RenderGraph::Frame::Boundary::Allow allow(RenderGraph::Frame::Boundary::Exception::EngineImports);
-			if (AdoptSlot(std::move(previous), true)) {
-				// Same slot, so readers keep declaring it and every graph follows the new version.
+			if (PendVersion(std::move(previous))) {
+				// Same slot, so readers keep declaring it and take the new version with the revision.
 				served = held;
-				if (held && !sameSize)
-					Targets().heldResized = true;
 				return;
 			}
+			// A graph that holds the old slot would need a rebuild outside any revision. No supported change does this.
 			if (held)
-				Targets().heldReplaced = true;
+				stl::report_and_fail(fmt::format("Community Shaders: the engine made {} again in another format, mip count or slice count while a "
+												 "render graph reads it. That is not a frame revision (frame revision plan, step 9a).",
+					Name()));
+			(void)AdoptSlot(nullptr, false);
 		}
 
-		/** @brief Builds the anchors again once if a held image was replaced, or remakes graphs off-thread if held images only resized. */
-		bool Settle(std::string_view a_what)
-		{
-			auto& state = Targets();
-			if (std::exchange(state.heldReplaced, false)) {
-				state.heldResized = false;
-				FrameAnchors::RebuildForReplacedImports(fmt::format("engine targets ({}) made again in another shape class", a_what));
-				logger::info("[ORG] engine targets: {} made again in another shape class while a reader held its old image; the anchors build again", a_what);
-				return true;
-			}
-			if (std::exchange(state.heldResized, false)) {
-				RenderGraph::Builds::RequestAll(fmt::format("engine targets: {} resized; passes that took a size are made again", a_what));
-				return true;
-			}
-			return false;
-		}
-
-		/** @brief Republishes the id if a reader asked for it, and builds the anchors again only if a held image was replaced. */
-		bool Move(const std::unique_ptr<EngineTexture>& a_texture);
+		/** @brief Republishes the id if a reader asked for it, and raises the EngineTargets event. */
+		void Move(const std::unique_ptr<EngineTexture>& a_texture);
 
 		// Indexed past CommonLib's array sizes, since AE has 116 render targets where CommonLib declares 114.
 		RE::BSGraphics::RenderTargetData& ColourData(std::uint32_t a_index) { return (&Renderer()->GetRuntimeData().renderTargets[0])[a_index]; }
@@ -451,10 +458,11 @@ namespace RenderGraph::Engine::Targets
 			return a_texture->Handle();
 		}
 
-		bool Move(const std::unique_ptr<EngineTexture>& a_texture)
+		void Move(const std::unique_ptr<EngineTexture>& a_texture)
 		{
 			Republish(a_texture);
-			return Settle(a_texture ? a_texture->Name() : std::string("?"));
+			// Outside a set the engine made one target. Its new version joins the revision this event starts.
+			Frame::Vars::RaiseEngineTargets(a_texture ? std::string_view(a_texture->Name()) : std::string_view("an engine target"));
 		}
 
 		// --- Render targets (75467 / 77253) ---
@@ -616,7 +624,6 @@ namespace RenderGraph::Engine::Targets
 			}
 			a_record.uav = data.UAV;
 			a_record.shape = a_shape;
-			Targets().changed = true;
 			return true;
 		}
 
@@ -757,7 +764,6 @@ namespace RenderGraph::Engine::Targets
 			}
 			data.depthSRV = Give(std::move(depthSrv), data.texture, name + " SRV", image.graph, handles);
 			data.stencilSRV = Give(std::move(stencilSrv), data.texture, name + " stencil SRV", image.graph, handles);
-			Targets().changed = true;
 			return true;
 		}
 
@@ -846,7 +852,6 @@ namespace RenderGraph::Engine::Targets
 			for (UINT face = 0; face < 6; ++face)
 				data.cubeSideRTV[face] = Give(std::move(faces[face]), data.texture, fmt::format("{} RTV {}", name, face), image.graph, handles);
 			data.SRV = Give(std::move(srv), data.texture, name + " SRV", image.graph, handles);
-			Targets().changed = true;
 			return true;
 		}
 
@@ -942,7 +947,7 @@ namespace RenderGraph::Engine::Targets
 			data.srv = Give(std::move(srv), data.texture, name + " SRV", image.graph, handles);
 			data.uav = Give(std::move(uav), data.texture, name + " UAV", image.graph, handles);
 			data.created = 1;
-			// Made outside a set. A first creation only publishes. Replacing a served image rebuilds the anchors.
+			// Made outside a set, when volumetric lighting first renders. A remake is a pending version that joins the next revision.
 			Move(a_record.texture);
 			return true;
 		}
@@ -1055,7 +1060,12 @@ namespace RenderGraph::Engine::Targets
 
 	void BeginSet()
 	{
-		Targets().changed = false;
+		// The first set is made before the graph exists. A set made while it runs is a window resize or a lost display.
+		// Decided 2026-11-18: that stays fatal, as CS's resources and recordings are made for one set (frame revision plan, Q4).
+		if (Enabled() && Active())
+			stl::report_and_fail(
+				"Community Shaders: the engine is creating its render targets again (a window resize or a display change) while the "
+				"render graph runs. That is not supported: restart the game at the new size.");
 		Targets().inSet = true;
 	}
 
@@ -1063,19 +1073,9 @@ namespace RenderGraph::Engine::Targets
 	{
 		auto& state = Targets();
 		state.inSet = false;
+		// The set's sizes and one EngineTargets event. Its graph images, if any, are made again by TakeOver.
 		RaiseTargetVariables();
-		if (!state.changed || !Active())
-			return;
-		state.changed = false;
-		std::uint32_t colours = 0, depths = 0;
-		for (const auto& colour : state.colours)
-			colours += colour.texture && colour.texture->Graph() ? 1u : 0u;
-		for (const auto& depth : state.depths)
-			depths += depth.texture && depth.texture->Graph() ? 1u : 0u;
-		// One move for the whole set. The anchors rebuild once if a served image was replaced.
-		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		Settle("the set");
-		logger::info("[ORG] engine targets: the set was made again on the render graph ({} render targets, {} depth-stencil targets)", colours, depths);
+		Frame::Vars::RaiseEngineTargets("engine targets: the set");
 	}
 
 	void TakeOver()
@@ -1134,9 +1134,8 @@ namespace RenderGraph::Engine::Targets
 			else
 				++kept;
 		}
-		state.changed = false;
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		Settle("the startup set");
+		Frame::Vars::RaiseEngineTargets("engine targets: the startup set");
 		logger::info("[ORG] engine targets: {} targets now on the render graph, {} mip views made again on them, {} kept on D3D11 after a failure", taken, mipViews, kept);
 	}
 
@@ -1247,7 +1246,6 @@ namespace RenderGraph::Engine::Targets
 		}
 		if (!MakeColour(a_target, record, shape, a_keepCopy ? Fields::KeepCopy : Fields::Replace))
 			return false;
-		Targets().changed = false;
 		Move(record.texture);
 		logger::info("[ORG] {}: made again as {} ({}x{}, format {})", record.texture->Name(), a_name ? a_name : "?", a_desc.Width, a_desc.Height, static_cast<int>(a_desc.Format));
 		return true;
@@ -1264,7 +1262,6 @@ namespace RenderGraph::Engine::Targets
 			return true;
 		if (!MakeColour(a_target, record, shape, Fields::KeepCopy))
 			return false;
-		Targets().changed = false;
 		Move(record.texture);
 		return true;
 	}

@@ -13,7 +13,9 @@
 * The engine's target creation functions are detoured so ORG makes each image. The engine's fields get DXVK's D3D11 objects
 * over the same memory, so D3D11 readers keep working. Each target is a versioned slot published by id, such as "Engine::kMAIN".
 *
-* The first set is made with D3D11 before the graph exists, and TakeOver replaces it. Later sets are made on ORG directly.
+* The first set is made with D3D11 before the graph exists, and TakeOver replaces it. A later set is fatal (frame revision plan, Q4).
+* A target the engine makes again outside a set with the same format, mips and slices is a pending version of its slot. It joins
+* the next frame revision with the EngineTargets event, so graphs take it at a Begin.
 * The engine still frees targets through D3D11. A token in each texture's private data retires the image once DXVK destroys it.
 *
 * Kept on D3D11: kFRAMEBUFFER, mip-generating targets, mip views of other targets, non-DEFAULT 3D targets, and failures.
@@ -26,10 +28,10 @@ namespace RenderGraph::Engine::Targets
 
 	void Install();
 
-	/** @brief Call before BSShaderRenderTargets::Create. */
+	/** @brief Call before BSShaderRenderTargets::Create. Fatal while the render graph runs: the engine makes its set once. */
 	void BeginSet();
 
-	/** @brief Call after BSShaderRenderTargets::Create. Publishes the set and moves the resize generation once. */
+	/** @brief Call after BSShaderRenderTargets::Create. Raises the set's frame variables (DisplaySize, EngineTargets and the shapes). */
 	void EndSet();
 
 	/** @brief Remakes the targets the engine made on D3D11 before the graph existed, right after the graph initializes. */

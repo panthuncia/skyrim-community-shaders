@@ -96,7 +96,7 @@ namespace RenderGraph::Frame::Boundary
 		// The one list of allowed exceptions to rule R1. Each row goes with the step that names it.
 		constexpr std::array<BoundaryExceptionInfo, static_cast<std::size_t>(Exception::Count)> kBoundaryExceptions{ {
 			{ "dclf", "step 10a" },
-			{ "engine imports", "step 9" },
+			{ "engine imports", "step 9b" },
 		} };
 
 		struct BoundaryExceptionCounts

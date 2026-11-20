@@ -186,6 +186,14 @@ namespace RenderGraph::Engine::Native
 	 */
 	void AdoptPresentation();
 
+	/**
+	 * @brief Takes the latest request (RequestPresentation) as the frame's presentation before the swap chain has it, with
+	 * a_hdr10 as its colour space when the output takes HDR10. For a colour space change asked for inside the adoption point:
+	 * the submission thread replaces the swap chain after the presents queued so far, so earlier frames present into the old
+	 * swap chain and the frames of the adopted revision into the new one. Render owner.
+	 */
+	void AdoptRequestedPresentation(bool a_hdr10);
+
 	/** @brief Queued-present waits and their total time in microseconds since the last call. Any thread. */
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);
 

@@ -141,6 +141,7 @@ namespace RenderGraph::Frame::Vars
 	constexpr Var<ImageSpaceShape> EngineImageSpace() { return { "EngineImageSpace" }; }
 	constexpr Var<SurfaceFormat> PresenterFormat() { return { "PresenterFormat" }; }
 	constexpr Var<std::uint64_t> ShaderGeneration() { return { "ShaderGeneration" }; }
+	constexpr Var<std::uint64_t> EngineTargets() { return { "EngineTargets" }; }
 
 	/** @brief Any thread. The display size: the swap chain's back buffer and the engine's full-size targets. */
 	bool SetDisplaySize(Extent2D a_value, std::string_view a_writer);
@@ -180,6 +181,11 @@ namespace RenderGraph::Frame::Vars
 	* (the presenter's input fragment, FrameGen::PresentationRevision).
 	*/
 	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view a_writer);
+	/**
+	* @brief Any thread. One event on EngineTargets, a serial: the engine made its set or one of its targets again. Their new
+	* images are pending versions that join the revision this event starts (Engine/Targets/EngineTargets.h).
+	*/
+	void RaiseEngineTargets(std::string_view a_writer);
 	/** @brief Any thread. The newest written presentation, which no revision may carry yet. For writers that change one field. */
 	FrameGen::PresentationConfig WrittenPresentationConfig();
 
@@ -207,6 +213,8 @@ namespace RenderGraph::Frame::Vars
 	UpscalerOptions AdoptedUpscalerOptions();
 	/** @brief Render thread. The adopted shader generation: the last shader reload whose pipelines were swapped in. */
 	std::uint64_t AdoptedShaderGeneration();
+	/** @brief Render thread. The adopted EngineTargets serial. */
+	std::uint64_t AdoptedEngineTargets();
 	/** @brief Render thread. The presentation of the adopted revision: the swap chain had it when the revision was adopted. */
 	FrameGen::PresentationConfig AdoptedPresentationConfig();
 

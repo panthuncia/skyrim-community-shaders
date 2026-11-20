@@ -50,7 +50,7 @@ namespace RenderGraph::Frame::Boundary
 	enum class Exception : std::uint8_t
 	{
 		Dclf,           // DCLF adopts its snapshot's versions and attaches its own epochs' builds at its build points (step 10a)
-		EngineImports,  // engine targets, engine imports and the native back buffer take versions when the engine makes them (step 9)
+		EngineImports,  // imports found in the frame (FrameAnchors.cpp JoinSlot) take versions when the engine makes them (step 9b)
 		Count
 	};
 
@@ -93,8 +93,9 @@ namespace RenderGraph::Frame::Boundary
 	void NoteRefusal(std::string_view a_site, std::string_view a_reason);
 
 	/**
-	* @brief A stage's schedule lagged a frame or more because a_slot got a version outside a frame revision (an engine import, the
-	* native back buffer). Counted by slot on any thread, until step 9 brings those slots into revisions.
+	* @brief A stage's schedule lagged a frame or more because a_slot got a version outside a frame revision (an import found in the
+	* frame). Counted by slot on any thread, until step 9b brings those slots into revisions. Engine targets and the native back
+	* buffer take theirs with a revision since step 9a.
 	*/
 	void NoteVersionLag(std::string_view a_slot);
 

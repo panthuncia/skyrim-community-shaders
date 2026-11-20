@@ -60,6 +60,8 @@ namespace RenderGraph::Frame::Vars
 			Variable<bool> interior = set.Declare("Interior", false);
 			// Sizes nothing: a reload changes pipelines only.
 			Variable<std::uint64_t> shaderGeneration = set.Declare("ShaderGeneration", std::uint64_t{}, { .sizes = false });
+			// A serial: the engine made its targets again. Their sizes and formats are the shape variables above.
+			Variable<std::uint64_t> engineTargets = set.Declare("EngineTargets", std::uint64_t{});
 
 			std::mutex eventsMutex;
 			std::map<std::string, VariableEventCounts, std::less<>> events;
@@ -166,6 +168,16 @@ namespace RenderGraph::Frame::Vars
 		return SetFrameVariable(FrameVariableSet().presentationConfig, a_value, "PresentationConfig", a_writer);
 	}
 	FrameGen::PresentationConfig WrittenPresentationConfig() { return FrameVariableSet().set.Get(FrameVariableSet().presentationConfig); }
+	void RaiseEngineTargets(std::string_view a_writer)
+	{
+		auto& variables = FrameVariableSet();
+		std::uint64_t serial = 0;
+		{
+			const std::lock_guard lock(variables.serialMutex);
+			serial = BumpSerial(variables.engineTargets);
+		}
+		NoteVariableEvent("EngineTargets", [&] { return std::format("{} -> {}", serial - 1, serial); }, a_writer);
+	}
 
 	Extent2D AdoptedDisplaySize() { return AdoptedFrameValue(FrameVariableSet().displaySize); }
 	Extent2D AdoptedRenderSize() { return AdoptedFrameValue(FrameVariableSet().renderSize); }
@@ -179,6 +191,7 @@ namespace RenderGraph::Frame::Vars
 	SurfaceFormat AdoptedPresenterFormat() { return AdoptedFrameValue(FrameVariableSet().presenterFormat); }
 	UpscalerOptions AdoptedUpscalerOptions() { return AdoptedFrameValue(FrameVariableSet().upscalerOptions); }
 	std::uint64_t AdoptedShaderGeneration() { return AdoptedFrameValue(FrameVariableSet().shaderGeneration); }
+	std::uint64_t AdoptedEngineTargets() { return AdoptedFrameValue(FrameVariableSet().engineTargets); }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return AdoptedFrameValue(FrameVariableSet().presentationConfig); }
 
 	void RaiseFeatureSettings(std::string_view a_feature, std::string_view a_writer)
@@ -386,6 +399,7 @@ namespace RenderGraph::Frame::Vars
 		const std::lock_guard lock(g_stubPresentationMutex);
 		return g_stubPresentation;
 	}
+	void RaiseEngineTargets(std::string_view) {}
 
 	Extent2D AdoptedDisplaySize() { return {}; }
 	Extent2D AdoptedRenderSize() { return {}; }
@@ -399,6 +413,7 @@ namespace RenderGraph::Frame::Vars
 	SurfaceFormat AdoptedPresenterFormat() { return {}; }
 	UpscalerOptions AdoptedUpscalerOptions() { return {}; }
 	std::uint64_t AdoptedShaderGeneration() { return 0; }
+	std::uint64_t AdoptedEngineTargets() { return 0; }
 	FrameGen::PresentationConfig AdoptedPresentationConfig() { return WrittenPresentationConfig(); }
 
 	void RaiseFeatureSettings(std::string_view, std::string_view) {}
