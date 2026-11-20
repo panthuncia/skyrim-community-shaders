@@ -289,3 +289,19 @@ final until the user confirms it.
     Everything else passed in batch 4: DCLF family, Bink, shader reload, Physical Sky, clouds, dynamic cubemaps,
     volumetric shadows, SSS, cloud shadows, post-lens, post-programs and the 7a full set.
 56. **Batch 5** is 7d, 8, 9a, 9b and the fixes, built after one shadowing rename in `EngineTargets.cpp`.
+57. **10a stopped at correction 5** (docs only, merged). The lead found that targets, shadow format and main resources
+    can each still change outside a revision, plus four more blockers (see "As found" under step 10). The director read
+    the 44 batch-4 run logs:
+    - **No changes in practice:** zero "Main pass targets changed" lines, and one "Main-pass graph resources" line per
+      session, so no main-resource remake.
+    - **The waits:** every graph run has 2–6 "[DCLF] frame N waited" lines, of 42–67 ms each. All are "a snapshot current
+      for the graph as built (build generation N)", after DCLF's own rebuilds. That is the stall 10a removes.
+
+    **The director's calls for 10a-0, to confirm:**
+    - A target change or main-resource remake after DCLF first draws becomes a tap error. The plan's proposal to
+      register CS features' t16+ buffers is not built, since nothing changes.
+    - The shadow format comes from the engine's shadow and occlusion targets when they are made. If that can't be done
+      cleanly, the format switch becomes a counted, named exception.
+    - **Shader reload while DCLF draws keeps a named, counted render-thread wait** (development only), instead of the
+      lead's proposed fatal, until recordings name their pipelines (item 42). Shader reload is a development tool, so a
+      wait there is better than losing it.
