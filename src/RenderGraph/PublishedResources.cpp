@@ -41,7 +41,7 @@ namespace PublishedResources
 			std::optional<org::SRVViewType> view;  // none means the primary view
 			bool published = false;                // false when withdrawn but still registered
 			const ID3D11ShaderResourceView* srv = nullptr;  // compared, never used
-			const GraphResources::Resource* twin = nullptr;  // read again by Refresh while alive has not expired
+			const GraphResources::Resource* twin = nullptr;  // its export is read through it while alive has not expired
 			std::weak_ptr<const void> alive;
 		};
 
@@ -167,7 +167,7 @@ namespace PublishedResources
 				GraphResources::RequestStructuralRebuild(fmt::format("published resource {} replaced by a new resource", a_what));
 		}
 
-		/** @brief The D3D11 export of an entry's twin. A versioned twin's export changes on resize. */
+		/** @brief The D3D11 export of an entry's twin. A versioned twin's export changes with each adopted version. */
 		const ID3D11ShaderResourceView* ExportOf(const Entry& a_entry)
 		{
 			if (!a_entry.published)
@@ -196,7 +196,7 @@ namespace PublishedResources
 			return a_desc.ArraySize > 1 ? std::optional(org::SRVViewType::Texture2DArrayFull) : std::optional(org::SRVViewType::Texture2D);
 		}
 
-		/** @brief What an entry is published from, either a twin whose resizes Refresh follows or an import. */
+		/** @brief What an entry is published from, either a twin, whose new versions it follows, or an import. */
 		struct Source
 		{
 			std::string_view name;
@@ -315,33 +315,6 @@ namespace PublishedResources
 		// A slot is the id's resolver in every graph, and ShaderResourceIndex follows its current version.
 		std::shared_ptr<org::Resource> resource = a_import.Slot() ? a_import.Slot()->CurrentResource() : a_import.Plain();
 		return PublishEntry(a_id, { .name = a_id, .resource = std::move(resource), .srv = a_srv, .slot = a_import.Slot() }, view);
-	}
-
-	void Refresh()
-	{
-		auto& state = Published();
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || !RenderGraphRuntime::Get().IsActive())
-			return;
-		std::string changed;
-		for (auto& entry : state.entries) {
-			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
-				continue;
-			if ((entry.slot && entry.twin->Versioned() == entry.slot) || (entry.bufferSlot && entry.twin->BufferVersions() == entry.bufferSlot)) {
-				// A new version of the same slot, which every graph already resolves.
-				entry.resource = entry.twin->Graph();
-				entry.srv = entry.published ? entry.twin->SRV() : nullptr;
-				continue;
-			}
-			entry.slot = entry.twin->Versioned();
-			entry.bufferSlot = entry.twin->BufferVersions();
-			entry.resource = entry.twin->Graph();
-			entry.srv = entry.published ? entry.twin->SRV() : nullptr;  // a withdrawn id has no export to match
-			changed += fmt::format("{}'{}'", changed.empty() ? "" : ", ", entry.id);
-			logger::info("[ORG] '{}' published again after a resize ({})", entry.id, entry.twin->Name());
-		}
-		if (!changed.empty())
-			Store(state, *host, Change::Replaced, changed);
 	}
 
 	void Withdraw(std::string_view a_id)
@@ -474,7 +447,6 @@ namespace PublishedResources
 	bool Publish(std::string_view, const GraphResources::Texture2D&) { return false; }
 	bool Publish(const GraphResources::Texture2D&) { return false; }
 	bool PublishImport(std::string_view, const FrameAnchors::Texture&, const ID3D11ShaderResourceView*) { return false; }
-	void Refresh() {}
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
 	bool IsRegistered(std::string_view) { return false; }

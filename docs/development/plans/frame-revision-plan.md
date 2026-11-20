@@ -1051,6 +1051,41 @@ in step 6, `AtNextBegin` (no users after Terrain Shadows and ImGui migrate), `Fe
 `ProjectSizeSettings` (all fields are `Setting<T>`), the `RequestSize` input of the lane. `GraphResources.h`'s header rules rewritten
 for revisions.
 
+**As built (7a, 2026-11-19, `org-native/rev-step7a`).** Code only; not built or run by the agent.
+- **Gone:** `RequestSize`, `RequestExtent`, `RequestedExtent`, `ApplySizeRequests`, the size-wish hook (`SetSizeWishHook`), the
+  twins' `Resize`/`ResizeTo`, `ResizeGeneration`, `BumpResizeGeneration`, `ResizeCauses`, `FrameAnchors.cpp:Service`'s resize
+  block, `PublishedResources::Refresh`, `FrameAnchors::Rearm` (and `AnchorMask`'s one-shot-only form), `Driver::AtNextBegin`.
+  `Frame::Resources`' `fresh` was already gone.
+- **A twin keeps its size for life.** Only a declared texture gets a new extent, as a new version made on the lane. The
+  coordinator's old "resize at the next Begin" for an extent no version serves (`ApplyResizes`) is now fatal, at the
+  declaration's evaluation (`Preparable`) and at planning (`PlanPrepare`). Declare.cpp already fails a description that changes
+  more than the extent, so this only catches a mip chain (`MipLevels = 0`) or depth that changes the shape class.
+- **The lane's `RequestSize` input** is gone. What is left of the coordinator's wish path is the declarations' extents, renamed
+  (`ExtentRequest`, `extents`, `BufferRequest`, `TextureRequest`, `firstInput`). The census line lost its "resized at Begin
+  without a version" counts.
+- **Engine targets:** `Settle`'s generation bump for a held image replaced in another shape class is now
+  `FrameAnchors::RebuildForReplacedImports` (the snapshot, the clients marked current and a structural rebuild of every anchor
+  epoch: the old poll's work, minus the republish, which `Republish` already does). Still not a revision path: step 9a's row.
+- **`GraphResources.h`**'s header rules are written for revisions (declared textures only, slots, no in-frame versions).
+- **Self-test:** the resize step and the prepared part (a manual adoption through `AtNextBegin`) are gone. What is left writes
+  and reads back one exported texture, and runs the setting pilot. The lane's `Prepare`/`AdoptPrepared` are covered by `resize`.
+- **Kept:**
+  - the one-shot passes (`PassDesc::once`, `armed`): users are Terrain Shadows' heightmap upload, Dynamic Cubemaps' zero pass,
+    TruePBR's glints noise fill, ImageSpace's first-version clear (`WorldSteps.inl:ClearFirstVersion`) and `AnchorPasses`'s
+    `Clear`/`Upload` defaults. They need no `Rearm`: a new registration arms them. Replacing them needs a first-run gate on
+    declared resources' `FirstFrame` (open);
+  - `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`: not every field is a `Setting<T>`. Left in projections:
+    HDRDisplay `enableHDR` (6.15, with 7b's owner), Post Processing's strings (`LUT.LutPath`, `ColorGrading.currentTonemapper`)
+    and ColorGrading's `useOpenDrt`, `enableTonemap`, `enableAutoHDR`, `skipLUT`, Grass Collision `EnableGrassCollision`, Terrain
+    Shadows `EnableTerrainShadow`. Strings need a `Setting` form for non-trivially-copyable values;
+  - `FrameAnchors::Refresh`: `Menu/ImGuiRenderer.cpp:149` (step 9b) and DCLF's test harness command `dclf:refresh=<id>`
+    (`Diagnostics/TestHarness.cpp`, a stress tool, no owner). 6.19's client uses are gone.
+- **Section 8 greps after 7a:** `RequestSize|RequestExtent|ApplySizeRequests`, `AtNextBegin`, `ResizeGeneration|ResizeCauses`,
+  `BumpResizeGeneration|BumpGeneration`, `PublishedResources::Refresh`, `fresh`, `Wish|wishes` in `Revision.*` and
+  `GraphResources.h`'s `RequestSize|resize generation` are empty. `Rearm(` is empty; `.once`/`armed` stay (above).
+  `SettingsWritten|ProjectSizeSettings|SizeProjection` stay (above).
+- Test: the step 7 full set below.
+
 **7b. Guest own-epoch anchors.** HDROutput and FrameGeneration's hudless copy run on their anchors' own tickets and can take a build
 mid-frame (`FrameDriver.cpp:OnBegin` comment; cleanup plan piece A7). Make them staged members of revisions (or CS stage steps if A7
 lands first; check `docs/development/org-native-frame-graph.md` for A7's state). Then delete `Builds::SwitchStaged` and
@@ -2173,6 +2208,20 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **Volumetric Shadows imports in its key function**, at the start of a revision on the render thread, not at EarlyPrepass. The
   engine makes the maps once a session, before the variable's event. Cascades the engine has but that cannot be imported then are
   fatal, since no later event would register the client again (before, the passes stayed out until an EarlyPrepass found them).
+
+**Decided by the agent (step 7a, 2026-11-19), to confirm:**
+- **An extent no version serves is fatal.** The old path resized the twin at Begin and rebuilt every anchor epoch through the
+  resize poll, outside any revision. Declarations already fail any other description change.
+- **Engine targets keep their rebuild, under a new name.** `FrameAnchors::RebuildForReplacedImports` replaces the resize
+  generation bump, since Q4 makes a mid-session `Create` fatal and this only fires while the first set is taken over. Step 9a
+  removes it with `Settle`.
+- **The one-shot passes stay.** They have five users and no `Rearm` caller; a new registration arms them, and that is
+  revision-driven for declared clients.
+- **The settings shims stay.** Fields in projections are not `Setting<T>` yet (list in 7a's "As built"), so the missed-writer
+  check still needs them.
+- **The self-test's prepared part was deleted, not ported.** It adopted versions by hand at `AtNextBegin`, the pattern step 7
+  removes; the lane does the same work in every `resize` run.
+- **The coordinator's wish names were renamed**, not only the `RequestSize` input removed, so the section 8 grep holds.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

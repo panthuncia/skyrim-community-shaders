@@ -27,10 +27,6 @@ namespace RenderGraph::Frame::Driver
 	/** @brief Renderer::Begin's detour, before the engine's Begin, after the render owner was claimed. */
 	void OnBegin();
 
-	/** @brief Runs a_work at the next frame boundary, before schedules are chosen. Only a boundary may publish a new slot version.
-	*  Runs it now when the driver is not installed. Render owner. */
-	void AtNextBegin(std::function<void()> a_work);
-
 	/** @brief ServingThread::SetLoadingScreenActive's detour: a_active before the loop starts, false once it ended. */
 	void OnLoadingScreen(bool a_active);
 

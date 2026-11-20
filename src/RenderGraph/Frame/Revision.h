@@ -24,8 +24,9 @@ namespace org::services
 * @brief The frame revision coordinator (frame revision plan, step 4).
 *
 * A frame revision changes everything CS stage recordings bind in one frame. Its inputs:
-* - twins' size wishes (GraphResources::Texture2D/Texture3D::RequestSize): the next versions are made on the revision lane, off
-*   the render thread, born cleared for histories;
+* - declared textures' new extents (Frame/Declare.h): the next versions are made on the revision lane, off the render
+*   thread, born cleared for histories. An extent no version can serve (another shape class) is fatal;
+* - declared buffers' new element counts (Frame::DeclareBuffer): new versions made on the lane, contents undefined;
 * - CS-owned versioned buffers' new contents (PublishBuffer): uploaded from the lane, ready once the upload completes;
 * - textures a caller made as new versions of a versioned texture (PublishTexture), such as ImGui's atlas pages;
 * - staged builds of CS stages: every frame slot is recorded on the staged build;
@@ -35,12 +36,11 @@ namespace org::services
 * The closure is every epoch whose graph declares a changed slot. The CS stages among it, and every stage with a staged build,
 * record every frame slot against the pending versions. Once all of it is ready, one Begin adopts it whole: versions, exports,
 * staged builds and every member stage's schedule switch in the same frame. One revision is prepared at a time. Inputs that
-* arrive meanwhile wait, latest wins. A wish no version can serve (another shape class) takes today's path: a resize at the
-* next Begin.
+* arrive meanwhile wait, latest wins.
 */
 namespace RenderGraph::Frame::Revision
 {
-	/** @brief Takes the twins' size wishes. Frame::Driver::Install calls it. Does nothing without the render graph. */
+	/** @brief Starts the coordinator and binds the settings' raise hook. Frame::Driver::Install calls it. */
 	void Install();
 
 	/** @brief Where an input a revision waits for stands. */
@@ -77,8 +77,8 @@ namespace RenderGraph::Frame::Revision
 	bool RegisterInputProducer(std::string_view a_variable, InputProducer a_producer);
 
 	/**
-	* @brief Render thread, first in Frame::Driver::OnBegin inside the adoption point. Applies wishes no version serves, advances
-	* the revision in preparation, adopts it when it is ready, and hands newer inputs to the lane. Never waits.
+	* @brief Render thread, first in Frame::Driver::OnBegin inside the adoption point. Advances the revision in preparation,
+	* adopts it when it is ready, and hands newer inputs to the lane. Never waits.
 	*/
 	void AdoptLatest();
 

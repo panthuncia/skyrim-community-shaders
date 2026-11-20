@@ -86,7 +86,6 @@ namespace RenderGraph::Frame::Driver
 			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
-			std::vector<std::function<void()>> atNextBegin;  // run by the next OnBegin
 			struct RecordingLog
 			{
 				std::chrono::steady_clock::time_point start{};
@@ -249,16 +248,6 @@ namespace RenderGraph::Frame::Driver
 		return state.loadStart.load(std::memory_order_acquire) == state.currentFrame.load(std::memory_order_acquire) + 1;
 	}
 
-	void AtNextBegin(std::function<void()> a_work)
-	{
-		auto& state = Get();
-		if (!state.installed) {
-			a_work();
-			return;
-		}
-		state.atNextBegin.push_back(std::move(a_work));
-	}
-
 	namespace
 	{
 		/**
@@ -304,10 +293,7 @@ namespace RenderGraph::Frame::Driver
 		const Boundary::Scope boundary;
 		// The newest prepared frame revision switches in whole, before anything reads what it changes.
 		Revision::AdoptLatest();
-		// Work that waited for a frame boundary runs before the frame's kind and schedules are decided.
-		for (auto& work : std::exchange(state.atNextBegin, {}))
-			work();
-		// After that work, so the writes it made have raised their events.
+		// After the adoption, so the values it adopted are the ones compared.
 		CheckSettingsWriters();
 		// A declared segment of the last frame whose tap never fired is a tap error.
 		if (state.began)

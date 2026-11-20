@@ -145,8 +145,6 @@ namespace RenderGraph::Engine::Targets
 			const ID3D11Resource* D3D11Texture() const { return d3d11.get(); }
 			std::uint64_t Image() const { return image; }
 
-			static void BumpGeneration(std::string_view a_who) { BumpResizeGeneration(a_who); }
-
 		private:
 			std::shared_ptr<org::ExternalTextureResource> external;
 			std::uint64_t image = 0;
@@ -249,13 +247,13 @@ namespace RenderGraph::Engine::Targets
 				Targets().heldReplaced = true;
 		}
 
-		/** @brief Bumps the resize generation once if a held image was replaced, or remakes graphs off-thread if held images only resized. */
+		/** @brief Builds the anchors again once if a held image was replaced, or remakes graphs off-thread if held images only resized. */
 		bool Settle(std::string_view a_what)
 		{
 			auto& state = Targets();
 			if (std::exchange(state.heldReplaced, false)) {
 				state.heldResized = false;
-				EngineTexture::BumpGeneration(fmt::format("engine targets ({})", a_what));
+				FrameAnchors::RebuildForReplacedImports(fmt::format("engine targets ({}) made again in another shape class", a_what));
 				logger::info("[ORG] engine targets: {} made again in another shape class while a reader held its old image; the anchors build again", a_what);
 				return true;
 			}
@@ -266,7 +264,7 @@ namespace RenderGraph::Engine::Targets
 			return false;
 		}
 
-		/** @brief Republishes the id if a reader asked for it, and bumps the resize generation only if a held image was replaced. */
+		/** @brief Republishes the id if a reader asked for it, and builds the anchors again only if a held image was replaced. */
 		bool Move(const std::unique_ptr<EngineTexture>& a_texture);
 
 		// Indexed past CommonLib's array sizes, since AE has 116 render targets where CommonLib declares 114.

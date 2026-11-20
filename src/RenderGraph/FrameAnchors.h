@@ -308,8 +308,11 @@ namespace FrameAnchors
 	*  Held and scheduled draws. Held and not scheduled lags. Not held has no place now. Render owner. */
 	StageHold HeldNow(std::string_view a_id, Anchor a_anchor);
 
-	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
-	void Rearm(std::string_view a_id);
+	/**
+	* @brief Engine targets replaced a served image in another shape class (EngineTargets' Settle). Publishes the imports' new
+	* slots and builds every anchor epoch again. Not a revision path: step 9a replaces it. Render thread.
+	*/
+	void RebuildForReplacedImports(std::string_view a_reason);
 
 	/** @brief The hook run after each late anchor's epoch, since an upscaler, frame generation or the present may follow.
 	*  One hook. Installing another replaces it. */
