@@ -245,14 +245,14 @@ namespace RenderGraph::Engine::Targets
 
 		bool EngineTexture::PendVersion(std::shared_ptr<org::VersionedTexture> a_previous)
 		{
-			auto image = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
+			auto made = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
 			const auto current = a_previous ? a_previous->CurrentResource() : nullptr;
-			if (!image || !current || !SameShapeClass(*current, *image))
+			if (!made || !current || !SameShapeClass(*current, *made))
 				return false;
 			slot = std::move(a_previous);
 			// Imports of the new D3D11 texture find the slot. Its current version stays the old image until the revision.
 			RenderGraph::SetMadeImageSlot(graph.get(), slot);
-			RenderGraph::Frame::Revision::PublishTexture(slot, std::move(image), nullptr);
+			RenderGraph::Frame::Revision::PublishTexture(slot, std::move(made), nullptr);
 			return true;
 		}
 
