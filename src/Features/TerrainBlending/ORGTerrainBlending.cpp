@@ -28,6 +28,7 @@ ORGTerrainBlending::~ORGTerrainBlending() = default;
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Frame/Declare.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/GraphResources.h"

@@ -675,6 +675,10 @@ def parse_field_statement(raw_statement: str) -> tuple[str, str] | None:
     match = re.match(r"(.+?)\s+([A-Za-z_]\w*)$", statement)
     if not match:
         return None
+    # A CS::Setting<T> keeps its wrapper here, so an access into a struct T can go through the value.
+    # Every reader of the type calls clean_type, which unwraps it.
+    if SETTING_WRAPPER_RE.search(match.group(1)):
+        return match.group(2), f"CS::Setting<{clean_type(match.group(1))}>"
     return match.group(2), clean_type(match.group(1))
 
 
@@ -4633,6 +4637,9 @@ def build_entries(source_dir: Path) -> list[dict[str, object]]:
             if not value_type and clean_type(field_type).split("::")[-1] in enum_types:
                 value_type = "Integer"
             field_access = f"{access}.{field}"
+            if not value_type and SETTING_WRAPPER_RE.fullmatch(field_type):
+                # A struct in a CS::Setting: its members are reached through the value.
+                field_access = f"{access}.{field}.Get()"
             if value_type:
                 add_entry(
                     context, path, field, value_type, field_access,
