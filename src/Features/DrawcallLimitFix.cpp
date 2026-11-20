@@ -129,6 +129,7 @@ void DrawcallLimitFix::PostPostLoad()
 		const auto game = REL::Module::get().version();
 		unavailableReason = fmt::format("DCLF supports Skyrim SE 1.5.97, AE 1.6.1170 and AE 1.7.104 only (this game is {})", game.string("."));
 		logger::info("[DCLF] {}; the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
 	// CS_DCLF=0 is the baseline, with nothing installed. Unset means on.
@@ -141,12 +142,14 @@ void DrawcallLimitFix::PostPostLoad()
 	if (const auto missing = DCLF::SceneWriter::MissingReason(); !missing.empty()) {
 		unavailableReason = missing;
 		logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
 	for (auto missing : { DCLF::PassCapture::SitesMissing() })
 		if (!missing.empty()) {
 			unavailableReason = fmt::format("{} DCLF hooks are not the engine's code (another plugin patched them first)", missing);
 			logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
+			RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 			return;
 		}
 	// Every other site DCLF's hooks write. A chained hook needs a CALL there, and one that skips or replaces the engine's code needs the engine's own bytes.
@@ -156,6 +159,7 @@ void DrawcallLimitFix::PostPostLoad()
 	if (const auto conflicts = DCLF::HookSites::Conflicts(); !conflicts.empty()) {
 		unavailableReason = fmt::format("its hooks conflict with another plugin's ({})", conflicts);
 		logger::error("[DCLF] {}; DCLF stays off and the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
 	logger::info("[DCLF] hook preflight: {} sites checked, no conflicts", DCLF::HookSites::Checked());

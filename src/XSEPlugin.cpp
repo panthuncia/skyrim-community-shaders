@@ -147,6 +147,9 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 
 				// Run feature PostPostLoad() first so features can disable themselves if needed
 				Feature::ForEachLoadedFeature("PostPostLoad", [](Feature* feature) { feature->PostPostLoad(); });
+				// Native and guest mode draw the world through DCLF, so a DCLF that did not load is a startup error there.
+				if (!globals::features::drawcallLimitFix.loaded)
+					RenderGraph::Engine::Native::RequireDclf("its feature did not load (see its line above)");
 				// The test runner, once DCLF's switches and commands are registered.
 				Testing::OnSkseMessage(message->type);
 

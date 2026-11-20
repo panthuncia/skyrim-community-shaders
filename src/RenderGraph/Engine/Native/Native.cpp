@@ -147,8 +147,25 @@ namespace RenderGraph::Engine::Native
 		return on;
 	}
 
+	void RequireDclf(std::string_view a_cause)
+	{
+		if (!GraphMode())
+			return;
+		const auto message = fmt::format(
+			"Community Shaders {} cannot run without Drawcall Limit Fix: {}. This mode withholds the engine's draws and DCLF draws the world, "
+			"so the world would be empty. Turn DCLF on, or run without the render graph (CS_ORG=0).",
+			Requested() ? "native mode (CS_ORG_NATIVE=1)" : "guest mode (DXVK with the render graph)", a_cause);
+		logger::critical("[ORG] {}", message);
+		stl::report_and_fail(message);
+	}
+
 	void ApplySwitches()
 	{
+		// DCLF draws the world's geometry in native and guest mode, and the engine's draws are dropped there.
+		if (std::ranges::contains(Switches::List("CS_DISABLE_FEATURES"), std::string_view("DrawcallLimitFix")))
+			RequireDclf("CS_DISABLE_FEATURES names DrawcallLimitFix");
+		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
+			RequireDclf("CS_DCLF=0");
 		if (!Requested())
 			return;
 		for (const auto& conflict : kConflicts) {
@@ -159,11 +176,6 @@ namespace RenderGraph::Engine::Native
 			if (!CoversAll(narrowing))
 				Fail(fmt::format("{}={}", narrowing.name, Switches::Value(narrowing.name)), narrowing.why);
 		}
-		// DCLF draws the world's geometry in native mode, and without it the engine's draws would be dropped.
-		if (std::ranges::contains(Switches::List("CS_DISABLE_FEATURES"), std::string_view("DrawcallLimitFix")))
-			Fail("CS_DISABLE_FEATURES naming DrawcallLimitFix", "the world's draws it takes would stay the engine's");
-		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
-			Fail("CS_DCLF=0", "the world's draws Drawcall Limit Fix takes would stay the engine's");
 		Stage("switches", "no conflicting switch is set");
 		// GraphicsAPI::ApplyAtBoot already set CS_ORG_NATIVE_BACKEND, so the cached read sees its value.
 		if (!Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))
