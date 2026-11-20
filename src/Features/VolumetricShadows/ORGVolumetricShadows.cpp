@@ -80,7 +80,7 @@ namespace
 
 	/**
 	* @brief What the client's passes read: the engine's cascades, its volumetric copy and the cascades' width. The engine makes
-	* them once a session (Q4). They are not variables yet, so EarlyPrepass observes them and invalidates the client on a change.
+	* them once a session (Q4) and raises ShadowCascades then, so the key imports them when a revision carries that change.
 	*/
 	struct CascadeInputs
 	{
@@ -248,33 +248,31 @@ namespace
 		return FrameAnchors::EngineDepth(a_depthStencil);
 	}
 
-	/** @brief 0 when the map does not exist. */
-	UINT CascadeWidth()
-	{
-		auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[kCascades].texture;
-		if (!texture)
-			return 0;
-		D3D11_TEXTURE2D_DESC desc{};
-		texture->GetDesc(&desc);
-		return desc.Width;
-	}
-
-	/** @brief The cascades and the volumetric copy as the engine has them now. */
-	CascadeInputs Observe()
-	{
-		CascadeInputs inputs;
-		inputs.cascades = ImportShadowMap(kCascades);
-		inputs.volumetric = ImportShadowMap(kVolumetric);
-		inputs.sourceWidth = inputs.cascades ? CascadeWidth() : 0u;
-		return inputs;
-	}
-
 	[[noreturn]] void FailVolumetricShadows(std::string_view a_why)
 	{
 		const auto message = fmt::format("Community Shaders: Volumetric Shadows' render graph path failed: {}", a_why);
 		logger::critical("[ORG] Volumetric Shadows: {}", message);
 		spdlog::default_logger()->flush();
 		stl::report_and_fail(message);
+	}
+
+	/**
+	* @brief The key at a revision's values: the cascades and the volumetric copy, imported now, and the width ShadowCascades
+	* carries. Empty inputs (no passes) before the engine made its shadow maps. Fatal when the engine has them and they cannot
+	* be imported, since no later event would register the client.
+	*/
+	CascadeInputs CascadesAt(const RenderGraph::Frame::Inputs& a_values)
+	{
+		const auto shape = a_values.Get(RenderGraph::Frame::Vars::ShadowCascades());
+		CascadeInputs inputs;
+		if (!shape.size.width)
+			return inputs;
+		inputs.cascades = ImportShadowMap(kCascades);
+		if (!inputs.cascades)
+			FailVolumetricShadows("the engine made its cascade shadow map, but it could not be imported");
+		inputs.volumetric = ImportShadowMap(kVolumetric);
+		inputs.sourceWidth = shape.size.width;
+		return inputs;
 	}
 
 	/**
@@ -336,8 +334,8 @@ namespace
 struct ORGVolumetricShadows::Impl
 {
 	std::shared_ptr<Resources> resources;
-	// What the last EarlyPrepass found. The client's key reads it.
-	std::shared_ptr<CascadeInputs> observed = std::make_shared<CascadeInputs>();
+	// Whether the key last evaluated imported the cascades.
+	std::shared_ptr<bool> imported = std::make_shared<bool>(false);
 	// Declared at Setup and kept. New inputs are a new registration, switched in by a frame revision.
 	RenderGraph::Frame::DeclaredClient client;
 	bool inputChecked = false;
@@ -397,13 +395,16 @@ bool ORGVolumetricShadows::Setup()
 	}
 	auto state = std::make_unique<Impl>();
 	state->resources = resources;
-	*state->observed = Observe();
-	// The client follows the engine's shadow map (one event a session, when the engine's targets are made) and the imports the
-	// last EarlyPrepass found. Its first evaluation is at the next revision.
-	auto observed = state->observed;
+	// The client follows the engine's cascades (one event a session, when the engine's targets are made). Its first evaluation is
+	// at the next revision.
+	auto imported = state->imported;
 	state->client = RenderGraph::Frame::DeclareClient<CascadeInputs>(
-		kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::EngineShadowMap()),
-		[observed](const RenderGraph::Frame::Inputs&) -> std::optional<CascadeInputs> { return *observed; },
+		kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::ShadowCascades()),
+		[imported](const RenderGraph::Frame::Inputs& a_values) -> std::optional<CascadeInputs> {
+			auto inputs = CascadesAt(a_values);
+			*imported = static_cast<bool>(inputs.cascades);
+			return inputs;
+		},
 		[resources](const CascadeInputs& a_inputs, FrameAnchors::ClientDesc& a_client) { return MakeClient(resources, a_inputs, a_client); });
 	if (!state->client) {
 		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its client could not be declared");
@@ -424,17 +425,11 @@ bool ORGVolumetricShadows::Setup()
 
 void ORGVolumetricShadows::UpdateImports()
 {
-	if (!IsActive())
+	if (!IsActive() || !*impl->imported)
 		return;
-	// The engine makes its shadow maps once a session, so this changes when they first appear. They are not variables yet:
-	// the next revision makes the client for them.
-	auto observed = Observe();
-	if (observed == *impl->observed)
-		return;
-	if (impl->observed->cascades && !observed.cascades)
+	// The engine makes its shadow maps once a session, so a lost map is an error, not a change to follow.
+	if (!globals::game::renderer->GetDepthStencilData().depthStencils[kCascades].depthSRV)
 		FailVolumetricShadows("the engine's cascade shadow map could no longer be imported");
-	*impl->observed = std::move(observed);
-	impl->client.Invalidate();
 }
 
 bool ORGVolumetricShadows::IsActive() const

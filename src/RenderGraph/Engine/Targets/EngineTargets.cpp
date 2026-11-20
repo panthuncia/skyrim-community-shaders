@@ -1002,6 +1002,10 @@ namespace RenderGraph::Engine::Targets
 				shadows->GetDesc(&desc);
 				Frame::Vars::SetEngineShadowMap({ { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format), desc.ArraySize }, writer);
 			}
+			if (auto* cascades = DepthData(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM)).texture) {
+				cascades->GetDesc(&desc);
+				Frame::Vars::SetShadowCascades({ { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format), desc.ArraySize }, writer);
+			}
 			if (auto* cube = CubeData(static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS)).texture) {
 				cube->GetDesc(&desc);
 				Frame::Vars::SetReflectionCubemap({ desc.Width }, writer);

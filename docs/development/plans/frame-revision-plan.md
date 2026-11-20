@@ -873,6 +873,11 @@ revisions.
   spec's `permutation`, which is part of the ImageSpace program key, and `DefinesOf` sets `ENABLESSR` from it in place of the live
   define. So the revision that switches the clients in also switches the program. The engine's own shader-cache clear stays for
   plain D3D11.
+- **Volumetric Shadows follows a new frame variable, `ShadowCascades`** (`Vars::ShadowMapShape` of `kSHADOWMAPS_ESRAM`, raised
+  with the engine's other targets in `RaiseTargetVariables`), 6.18's open item. The client is declared on it, and its key imports
+  the cascades and the volumetric copy when a revision carries the change, with the width from the variable. `Observe`, the
+  EarlyPrepass compare and `Invalidate` are gone. `UpdateImports` only checks that the cascades' view is still there (fatal if
+  not), without importing.
 
 ---
 
@@ -1872,6 +1877,9 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **The new SSR permutation compiles at the world clients' build**, on first use, as any ImageSpace program not built before
   (`GetNow`, logged as built at the graph's build). Setup builds neither permutation ahead. `DeclareProgram` would move the compile
   before the revision starts; it was not used, since the ImageSpace program cache keys every pass shape, not only defines.
+- **Volumetric Shadows imports in its key function**, at the start of a revision on the render thread, not at EarlyPrepass. The
+  engine makes the maps once a session, before the variable's event. Cascades the engine has but that cannot be imported then are
+  fatal, since no later event would register the client again (before, the passes stayed out until an EarlyPrepass found them).
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

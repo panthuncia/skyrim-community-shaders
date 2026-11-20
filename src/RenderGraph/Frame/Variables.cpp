@@ -50,6 +50,7 @@ namespace RenderGraph::Frame::Vars
 			Variable<bool> hdrEnabled = set.Declare("HdrEnabled", false);
 			Variable<TargetIdentity> hdrOutputTarget = set.Declare("HdrOutputTarget", TargetIdentity{});
 			Variable<ShadowMapShape> engineShadowMap = set.Declare("EngineShadowMap", ShadowMapShape{});
+			Variable<ShadowMapShape> shadowCascades = set.Declare("ShadowCascades", ShadowMapShape{});
 			Variable<CubemapShape> reflectionCubemap = set.Declare("ReflectionCubemap", CubemapShape{});
 			Variable<HeightMapIdentity> heightMap = set.Declare("HeightMap", HeightMapIdentity{});
 			Variable<SurfaceFormat> presenterFormat = set.Declare("PresenterFormat", SurfaceFormat{});
@@ -144,6 +145,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetHdrEnabled(bool a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().hdrEnabled, a_value, "HdrEnabled", a_writer); }
 	bool SetHdrOutputTarget(TargetIdentity a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().hdrOutputTarget, a_value, "HdrOutputTarget", a_writer); }
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().engineShadowMap, a_value, "EngineShadowMap", a_writer); }
+	bool SetShadowCascades(ShadowMapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().shadowCascades, a_value, "ShadowCascades", a_writer); }
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().reflectionCubemap, a_value, "ReflectionCubemap", a_writer); }
 	bool SetHeightMap(HeightMapIdentity a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().heightMap, a_value, "HeightMap", a_writer); }
 	bool SetPresenterFormat(SurfaceFormat a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().presenterFormat, a_value, "PresenterFormat", a_writer); }
@@ -351,6 +353,7 @@ namespace RenderGraph::Frame::Vars
 	bool SetHdrEnabled(bool a_value, std::string_view) { return g_stubHdrEnabled.exchange(a_value) != a_value; }
 	bool SetHdrOutputTarget(TargetIdentity, std::string_view) { return false; }
 	bool SetEngineShadowMap(ShadowMapShape, std::string_view) { return false; }
+	bool SetShadowCascades(ShadowMapShape, std::string_view) { return false; }
 	bool SetReflectionCubemap(CubemapShape, std::string_view) { return false; }
 	bool SetHeightMap(HeightMapIdentity, std::string_view) { return false; }
 	bool SetPresenterFormat(SurfaceFormat, std::string_view) { return false; }
