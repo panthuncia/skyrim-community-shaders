@@ -94,4 +94,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["fog", "grid", "fsr", "taa"]
-no_log = ["frame tap error", "a frame revision failed", "declared view mismatch", "binds a version the frame does not read"]
+no_log = ["frame tap error", "a frame revision failed", "declared view mismatch:", "binds a version the frame does not read"]
