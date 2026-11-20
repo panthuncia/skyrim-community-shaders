@@ -4,6 +4,8 @@
 
 #include "CSEditor/EditorWindow.h"
 #include "Feature.h"
+#include "Features/Effects11.h"
+#include "Features/Effects11/SettingManager.h"
 #include "Features/HDRDisplay.h"
 #include "Features/PostProcessing.h"
 #include "Features/ScreenshotFeature.h"
@@ -749,6 +751,56 @@ namespace Testing
 				if (!found)
 					a_error = fmt::format("no Post Processing effect '{}'", type);
 				return found;
+			});
+			// "e11": <CATEGORY>.<Key>=<value>, an Effects11 setting as its editor writes it (a bool as true|false|1|0, else a float),
+			// "EFFECT.EnableBloom=false". "e11": clear-shader-cache, the menu's shader cache clear for Effects11.
+			RegisterCommand("e11", [](const std::string& a_arg, std::string& a_error) {
+				auto& effects11 = globals::features::effects11;
+				if (!effects11.loaded) {
+					a_error = "Effects11 is not loaded";
+					return false;
+				}
+				if (a_arg == "clear-shader-cache") {
+					effects11.ClearShaderCache();
+					logger::info("[TEST] e11 clear-shader-cache");
+					return true;
+				}
+				const auto dot = a_arg.find('.');
+				const auto equals = a_arg.find('=');
+				if (dot == std::string::npos || equals == std::string::npos || equals < dot) {
+					a_error = fmt::format("'{}' is not <CATEGORY>.<Key>=<value> or clear-shader-cache", a_arg);
+					return false;
+				}
+				const auto category = a_arg.substr(0, dot);
+				const auto key = a_arg.substr(dot + 1, equals - dot - 1);
+				const auto value = a_arg.substr(equals + 1);
+				auto& settings = SettingManager::GetSingleton();
+				const auto* info = settings.GetSettingInfo(key, category);
+				if (!info) {
+					a_error = fmt::format("Effects11 has no setting {}.{}", category, key);
+					return false;
+				}
+				const auto id = info->id;
+				if (info->type == SettingType::Bool) {
+					if (value != "true" && value != "false" && value != "1" && value != "0") {
+						a_error = fmt::format("'{}' is not true, false, 1 or 0", value);
+						return false;
+					}
+					settings.SetValue<bool>(id, value == "true" || value == "1");
+				} else if (info->type == SettingType::Float) {
+					float number = 0.0f;
+					const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+					if (error != std::errc{} || end != value.data() + value.size()) {
+						a_error = fmt::format("'{}' is not a number", value);
+						return false;
+					}
+					settings.SetValue<float>(id, number);
+				} else {
+					a_error = fmt::format("{}.{} is a time-of-day setting, which e11 does not write", category, key);
+					return false;
+				}
+				logger::info("[TEST] e11 {}.{} = {}", category, key, value);
+				return true;
 			});
 			// "hdr": 0|1, HDR Display's Enable HDR as its Advanced override sets it.
 			RegisterCommand("hdr", [](const std::string& a_arg, std::string& a_error) {

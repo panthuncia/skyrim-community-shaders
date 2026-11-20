@@ -559,7 +559,8 @@ void Effects11::ClearShaderCache()
 			*shader = nullptr;
 		}
 	}
-	ORGSunRays::Get().Release();
+	// The rays' graph programs are a function of this count: the next revision builds them again off the render thread.
+	shaderCacheClears = shaderCacheClears.Get() + 1u;
 
 	auto& effectManager = EffectManager::GetSingleton();
 	effectManager.enbAdaptation.ClearShaderCache();

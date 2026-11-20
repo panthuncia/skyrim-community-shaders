@@ -1,0 +1,146 @@
+# Effects11's ORG FX chain and its rays changed mid-session (frame revision plan, 6.10 and 6.11). Effects11 settings written as
+# its editor writes them (the e11 step): the volumetric and sun rays on (the rays' textures take half the display size and their
+# client registers), bloom and adaptation off and on (a new FX chain plan with each), a window resize (in native modes a new
+# display size: every display-size texture of the chain and the rays gets a new version), a shader cache clear (the rays' programs
+# are built again off the render thread, FX11 reloads its effects) and the rays off again. Each change switches in with a frame
+# revision.
+# It needs an Effects11 preset in the instance and "Post Processing Mode": "Effects11" in the saved settings for the run, and
+# a save outdoors by day for the sun rays. Guest's display size does not follow the window, so the resize changes nothing there.
+# Compose it: native-vulkan+effects11, native-d3d12+effects11, guest+effects11.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+Effects11 = true
+
+[[steps]]
+at = "world-ready"
+frames = 120
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableVolumetricRays=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableSunRays=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "rays-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableBloom=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "no-bloom"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableBloom=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableAdaptation=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "no-adaptation"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableAdaptation=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fx-back"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1600x900"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "resized"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "restored"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "clear-shader-cache"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "shaders-cleared"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableSunRays=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableVolumetricRays=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "rays-off"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "rays-on", "no-bloom", "no-adaptation", "fx-back", "resized", "restored", "shaders-cleared", "rays-off"]
+no_log = ["frame tap error", "a frame declaration failed", "Effects11 returns to FX11 for the session", "Effects11 rays: a program could not be built"]

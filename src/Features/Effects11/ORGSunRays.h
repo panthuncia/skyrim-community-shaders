@@ -12,7 +12,10 @@
 *
 * The D3D11 path's passes at the PostComposite anchor. A run gate holds each effect's draws, so an effect that is off this
 * frame does no work and the recordings are kept. Effects11's Draw* functions decide the frame, then hand it here.
-* A frame whose inputs the graph cannot read runs on D3D11. A failed program or registration returns to D3D11 for good.
+* The five half-size textures are declared on the display size and the rays' toggles, the programs on kMAIN's format and the
+* shader cache clears, and the client on its inputs (frame revision plan, 6.10). So a new size, toggle or program switches in
+* with a frame revision. A frame whose inputs the graph cannot read, or whose graph does not hold the effect yet, runs on D3D11.
+* A failed setup returns to D3D11 for good.
 * Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGSunRays
@@ -27,7 +30,7 @@ public:
 	static void Reserve();
 
 	/**
-	* @brief Effects11's SetupResources. The passes are built at the first frame the graph takes.
+	* @brief Effects11's SetupResources. Declares the textures, the programs and the client.
 	* @return False when the rays stay on D3D11.
 	*/
 	bool Setup();
@@ -41,18 +44,20 @@ public:
 		std::uint32_t halfTexWidth = 0, halfTexHeight = 0;
 		std::uint32_t halfWidth = 0, halfHeight = 0;
 		std::uint32_t width = 0, height = 0;
+
+		bool operator==(const Sizes&) const = default;
 	};
 
 	static constexpr std::uint32_t kSunRaysPasses = 5;
 
-	/** @brief @return False means the D3D11 path draws them. */
+	/**
+	* @brief @return False means the D3D11 path draws them. The graph draws at the sizes of the revision it adopted, which a_sizes
+	* only matches once that revision carries this frame's size.
+	*/
 	bool VolumetricRays(const Sizes& a_sizes);
 
-	/** @brief @return False means the D3D11 path draws them. */
+	/** @brief @return False means the D3D11 path draws them. a_passes' areas are replaced by the adopted revision's. */
 	bool SunRays(const Sizes& a_sizes, const std::array<Effects11::SunRaysData, kSunRaysPasses>& a_passes);
-
-	/** @brief For a shader cache clear. The next frame builds again. */
-	void Release();
 
 	~ORGSunRays();
 
@@ -61,8 +66,8 @@ public:
 private:
 	ORGSunRays() = default;
 
-	/** @brief False means the frame runs on D3D11. */
-	bool PrepareFrame(const Sizes& a_sizes);
+	/** @brief Observes the frame's inputs once per frame. False means the frame runs on D3D11. */
+	bool PrepareFrame();
 
 	std::unique_ptr<Impl> impl;
 	bool failed = false;
