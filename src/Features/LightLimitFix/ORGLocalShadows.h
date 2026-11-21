@@ -18,10 +18,10 @@
 * Per-frame values go through the latch and each possible copy is gated, so the recordings stay the same.
 *
 * The cache follows the frame revisions (frame revision plan, 6.13). It is declared once at setup on EnableLocalShadows,
-* LocalShadowResolution and the engine's shadow map (EngineShadowMap): a new resolution is a new version, adopted with its revision,
-* and it is one texel while the cache is off. A new slot count is a new slice count, so another shape class: the client's next
-* registration takes a new texture, and the revision that adopts it publishes it under the same id. The data buffer holds every
-* slot the setting allows, so it never changes.
+* LocalShadowResolution, LocalShadowSlots and the engine's shadow map (EngineShadowMap): a new resolution is a new version, adopted
+* with its revision, and it is one texel per slot while the cache is off. A new slot count is a new slice count, a version too (ORG
+* array-size versions): its revision waits for graphs built for the new count, then switches them in with it, so it takes a few
+* frames longer. The data buffer holds every slot the setting allows, so it never changes.
 * Render thread only. Free of ORG/Vulkan includes.
 */
 class ORGLocalShadows : public RenderGraph::Port<ORGLocalShadows>

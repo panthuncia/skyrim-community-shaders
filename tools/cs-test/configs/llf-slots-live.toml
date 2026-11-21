@@ -1,0 +1,154 @@
+# Light Limit Fix's local shadow cache slot count changed live (ORG array-size versions, lib-arrays) in Dragonsreach, whose fires
+# cast shadows. A new slot count is a new slice count of the cache's one versioned texture. Its frame revision asks for new
+# graphs of every epoch that declares the cache (LLF's copy, the fog, DCLF's colour passes), lowered for the new count, and
+# adopts the version with them at one frame boundary. Frames keep the old count meanwhile, and nothing waits.
+# Steps: the cache at 1024 (so 32 slots stay small), then 8 slots, 32 slots, two changes two frames apart (the second takes the
+# first's pending count back or supersedes it), and 16 again. Each shot waits for the revision that carries the change.
+# The log should show "[ORG] frame revision N: new slice counts (LightLimitFix::LocalShadowCache (cache) 16 to 8)" and later
+# "[LLF] Local shadow cache: 8 slots at 1024x1024", once per change.
+# Compose it: native-vulkan+llf-slots-live, native-d3d12+llf-slots-live, guest+llf-slots-live.
+extends = ["base"]
+
+[run]
+timeout_s = 480
+
+# Local shadows on in the saved settings: their hooks install only at startup.
+[saved_settings."Light Limit Fix"]
+EnableLocalShadows = true
+
+[features]
+LightLimitFix = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "LightLimitFix.EnableLocalShadows=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowResolution=1024"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+await = "adopted"
+wait_s = 60
+arg = "start16"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=8"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+wait_s = 60
+arg = "slots8-adopted"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "slots8"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=32"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+wait_s = 60
+arg = "slots32-adopted"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "slots32"
+
+# Two changes two frames apart: the second may meet the first's revision still waiting for its graphs.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=4"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=24"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+wait_s = 60
+arg = "slots24-adopted"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "slots24"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=16"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowResolution=0"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+wait_s = 60
+arg = "restored-adopted"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "restored"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start16", "slots8-adopted", "slots8", "slots32-adopted", "slots32", "slots24-adopted", "slots24", "restored-adopted", "restored"]
+no_log = ["frame tap error", "fatal: frame revision:", "fatal: frame declaration:", "fatal: LLF local shadows:", "selected a version of"]
+
+# The cache's copies ran on the render graph through every change (skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.llf.local-shadows" = 1000 }
