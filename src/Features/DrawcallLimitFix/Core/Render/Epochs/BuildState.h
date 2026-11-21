@@ -17,6 +17,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
 
+#include <ORGModuleServices/BuildInputs.h>
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -86,6 +88,11 @@ namespace DCLF::Draws
 	 * from it. Null, with a warning logged with a_who, outside a build.
 	 */
 	std::shared_ptr<const BuildState> BuildingState(const char* a_who);
+
+	/** @brief The build states' serials, the built one and the attached one (OMS BuildInputs). */
+	using BuildStates = org::services::BuildInputs<BuildState>;
+	/** @brief DCLF's one BuildStates. */
+	BuildStates& BuildStateInputs();
 
 	/**
 	 * @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions.

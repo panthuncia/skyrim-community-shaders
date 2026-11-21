@@ -7,9 +7,12 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		std::atomic<std::shared_ptr<const BuildState>> attached;
-		std::atomic<std::uint64_t> attachedSerial{ 0 };
-		std::atomic<std::uint64_t> builtSerial{ 0 };
+		BuildStates inputs;
+	}
+
+	BuildStates& BuildStateInputs()
+	{
+		return inputs;
 	}
 
 	ShadowSlotBuffers MakeShadowSlotBuffers(const ShadowResources& a_shadow)
@@ -62,31 +65,29 @@ namespace DCLF::Draws
 	{
 		if (!a_state)
 			return;
-		const auto serial = a_state->serial;
 		const auto conditions = a_state->conditions;
-		attached.store(std::move(a_state), std::memory_order_release);
-		attachedSerial.store(serial, std::memory_order_release);
+		inputs.PublishAttached(std::move(a_state));
 		if (conditions)
 			AttachGraphConditions(conditions);
 	}
 
 	std::shared_ptr<const BuildState> AttachedBuildState()
 	{
-		return attached.load(std::memory_order_acquire);
+		return inputs.Attached();
 	}
 
 	std::uint64_t AttachedBuildSerial()
 	{
-		return attachedSerial.load(std::memory_order_acquire);
+		return inputs.AttachedSerial();
 	}
 
 	void PublishBuiltBuildState(std::uint64_t a_serial)
 	{
-		builtSerial.store(a_serial, std::memory_order_release);
+		inputs.PublishBuilt(a_serial);
 	}
 
 	std::uint64_t BuiltBuildSerial()
 	{
-		return builtSerial.load(std::memory_order_acquire);
+		return inputs.BuiltSerial();
 	}
 }

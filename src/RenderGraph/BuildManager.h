@@ -9,103 +9,26 @@
 // Staged epochs' builds are staged, not attached: a frame revision, or a fragment adoption, attaches them with the
 // recordings made on them (frame revision plan step 10a).
 
+#include <ORGModuleServices/StagedBuilds.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <source_location>
-#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-namespace org
-{
-	class GraphHost;
-}
-
 namespace RenderGraph
 {
-	class BuildManager
-	{
-	public:
-		struct Desc
-		{
-			org::GraphHost* host = nullptr;
-			// Epochs whose finished builds are staged, not attached. Frame revisions (and fragment adoptions) record them and
-			// attach them with AttachStaged.
-			std::vector<std::uint32_t> staged;
-			// Staged epochs that are never built at a submission (fragment sources'). Once SetBuildInput gave an input, their first build runs on
-			// the build lane too, and attaches when it is staged, since there is no graph to keep. They form their own group at each
-			// poll, and Settled() reads them. They must be in staged.
-			std::vector<std::uint32_t> laneOnly;
-			// An epoch's name in the log lines.
-			std::function<std::string(std::uint32_t)> label;
-			// A failed build with no handler of its own goes to the epoch's owner like any epoch failure. kept means the old graph still runs.
-			std::function<void(std::uint32_t, bool, const std::string&)> onFailed;
-		};
+	/** @brief CS's build manager is OMS's staged builds. */
+	using BuildManager = org::services::StagedBuilds;
 
-		explicit BuildManager(Desc a_desc);
-		~BuildManager();
-		BuildManager(const BuildManager&) = delete;
-		BuildManager& operator=(const BuildManager&) = delete;
-
-		/** @brief Stops the build thread (it finishes the build it is in) and drops every build not attached. Owner thread. */
-		void Shutdown();
-
-		/** @brief Any thread: the epoch's graph is built again. Off the owner thread the request is applied at the next poll. */
-		void Request(std::uint32_t a_epoch, std::string_view a_reason);
-		/** @brief Any thread: every epoch's graph is built again. */
-		void RequestAll(std::string_view a_reason);
-		/** @brief Any thread: the graphs that looked a_id up are built again (GraphHost::RequestRebuildFor). */
-		void RequestFor(std::string_view a_id, std::string_view a_reason);
-		/** @brief Any thread. Runs a_change on the owner thread at the next poll while no build runs, then rebuilds every epoch.
-		*  For changes to what a graph captures at its build, which must not race a build in progress. */
-		void Change(std::function<void()> a_change, std::string_view a_reason);
-
-		/**
-		* @brief Owner thread, inside a frame revision's adoption. Attaches the staged graphs of a_epochs as one step
-		* (GraphHost::AttachStagedEpochGraphs) and runs their deferred work. Empty when attached, else the refused epoch and why.
-		*/
-		std::string AttachStaged(std::span<const std::uint32_t> a_epochs);
-
-		/**
-		* @brief Owner thread: runs after every poll, with the epochs it staged or attached (a fragment source settles its build state there).
-		* Replaces the last one.
-		*/
-		void SetPollListener(std::function<void(std::span<const std::uint32_t> a_changed)> a_listener);
-
-		/**
-		* @brief Owner thread: what builds are made from (a fragment source's build state). a_input runs on the owner thread when a build is handed
-		* out, and the build carries the value to whatever thread runs it (Builds::Input). Replaces the last one.
-		*/
-		void SetBuildInput(std::function<std::shared_ptr<const void>()> a_input);
-		/** @brief The input a build made on the calling thread now reads: SetBuildInput's value on the owner thread, else null. */
-		std::shared_ptr<const void> OwnerInput() const;
-
-		/** @brief Owner thread, at a frame boundary. Attaches or stages finished builds and hands every other request to its builder.
-		*  Returns whether a graph was attached, staged or built. */
-		bool Poll(std::string_view a_point);
-		/**
-		* @brief Owner thread. Whether no lane-only epoch is requested or building, and each has a graph once there is a build input.
-		* Staged ones are settled.
-		*/
-		bool Settled() const;
-		/** @brief Owner thread. Whether a rebuild was asked for an epoch whose builds attach at once. Staged epochs never leave a frame without a graph. */
-		bool UnstagedRebuildRequested() const;
-		/** @brief Owner thread, at setup. Builds every request now before the first world frame, else acts as Poll. */
-		bool BuildSetupGraphs(std::string_view a_caller);
-
-		/** @brief Owner thread: no build queued, running or waiting to be attached. */
-		bool Idle() const;
-		/** @brief Owner thread, at every frame's end: the first-world-frame latch and the periodic statistics line. */
-		void NoteFrameEnd();
-		/** @brief Logs a render-thread build after the first world frame, rate-limited. */
-		void WarnSynchronous(std::string_view a_what, std::string_view a_caller);
-
-	private:
-		struct Impl;
-		std::unique_ptr<Impl> impl;
-	};
+	/**
+	* @brief Makes the build manager from a_desc's host, epochs, labels and failure handler. Adds what CS gives every build: the
+	* shared executor's preparation lane, the frame boundary census, the recipe trace, the world window as the steady state, and the log.
+	*/
+	std::unique_ptr<BuildManager> MakeBuildManager(BuildManager::Desc a_desc);
 
 	/** Requests routed through the build manager, no-ops while the graph is inactive. Use these instead of the host's RequestRebuild. */
 	namespace Builds
