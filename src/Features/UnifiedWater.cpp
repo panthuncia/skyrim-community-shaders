@@ -445,6 +445,12 @@ void UnifiedWater::SetFlowmapTex() const
 		return;
 	}
 
+	// The render graph publishes the first flow map it sees once, so a new one would be a second texture under that id.
+	// A regenerated flowmap is saved and loads at the next start.
+	if (*gFlowMapSourceTex && *gFlowMapSourceTex != tex) {
+		logger::warn("[Unified Water] [Flowmap] A flowmap is already in use; the new one loads at the next start");
+		return;
+	}
 	*gFlowMapSourceTex = tex;
 	*gFlowMapSize = flowmap->GetWidth();
 
