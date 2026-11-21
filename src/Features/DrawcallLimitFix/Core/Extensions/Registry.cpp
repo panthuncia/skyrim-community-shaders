@@ -87,6 +87,7 @@ namespace DCLF::Extensions
 			ParentsTaken parents{};
 			ObjectClassesTaken objectClasses{};
 			CategoryRoots categoryRoots{};
+			CategoryRootGathers categoryRootGathers{};
 			Api::UnheldRootsContribution unheldRoots{};
 			std::vector<ShadingContributionEntry> shadingContributions;
 			std::vector<FrameGlobalsEntry> frameGlobals;
@@ -838,6 +839,7 @@ namespace DCLF::Extensions
 						static_cast<std::uint32_t>(a_class.objectClass)));
 				taken = true;
 				lists.categoryRoots[static_cast<std::size_t>(a_class.objectClass)] = a_class.categoryRoot;
+				lists.categoryRootGathers[static_cast<std::size_t>(a_class.objectClass)] = a_class.categoryRoots;
 			}
 
 			void RegisterUnheldRoots(const Api::UnheldRootsContribution& a_roots) override
@@ -1263,6 +1265,7 @@ namespace DCLF::Extensions
 	std::string_view OwnedEntriesLabel(bool a_withoutRecord) { return a_withoutRecord ? Registered().ownedWithoutRecordLabel : Registered().ownedLabel; }
 	std::span<const PropertyFlagRule> PropertyFlagRules() { return std::span(Registered().propertyFlagRules).first(Registered().propertyFlagRuleCount); }
 	const CategoryRoots& RegisteredCategoryRoots() { return Registered().categoryRoots; }
+	const CategoryRootGathers& RegisteredCategoryRootGathers() { return Registered().categoryRootGathers; }
 	const Api::UnheldRootsContribution& RegisteredUnheldRoots() { return Registered().unheldRoots; }
 	const ParentsTaken& RegisteredParents() { return Registered().parents; }
 	const ObjectClassesTaken& RegisteredObjectClasses() { return Registered().objectClasses; }

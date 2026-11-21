@@ -243,7 +243,7 @@ namespace DCLF::SceneCapture
 		const void* emissive = nullptr;
 		bool controllers = false;
 		float alpha = 1.0f;
-		std::array<float, 8> projected{};
+		std::array<float, 8> projected{};  // a Lighting property's projected UV, or a material port's own values
 		std::array<float, 4> landBlend{};
 		bool shadowPasses = false;
 

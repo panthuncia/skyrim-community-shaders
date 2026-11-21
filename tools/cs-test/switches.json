@@ -395,6 +395,16 @@
 			"description": "1: effect meshes with a skin instance whose pass has no Skinned bit (the property without kSkinned: dog eyes) drawn by DCLF, each partition with the unskinned vertex stage and the geometry's world, as the engine draws them; 0 (default) they stay native (effect-variant (skinned))"
 		},
 		{
+			"name": "CS_DCLF_WATER",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 0 (default) nothing of it is registered"
+		},
+		{
 			"name": "CS_DCLF_EMPTY_FADE_NODE",
 			"key": "",
 			"type": "bool",

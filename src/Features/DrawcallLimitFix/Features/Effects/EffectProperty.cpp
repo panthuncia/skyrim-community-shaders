@@ -45,7 +45,7 @@ namespace DCLF::Features::Effects
 		shading.emitColor[2] = emittance ? emittance->blue : 1.0f;
 		shading.ssrSpecular = 0.0f;
 		row.written = 4u | 0x70u;  // MaterialData.w is DCLF-only, with no engine write to compare
-		row.padding[0] = row.padding[1] = 0u;
+		row.padding = 0u;
 		std::fill(std::begin(row.featureBlock), std::end(row.featureBlock), 0.0f);
 	}
 }

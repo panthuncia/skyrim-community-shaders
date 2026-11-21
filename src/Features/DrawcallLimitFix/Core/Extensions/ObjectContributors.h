@@ -227,6 +227,9 @@ namespace DCLF::Extensions
 	using CategoryRoots = std::array<RE::NiNode* (*)(), static_cast<std::size_t>(Api::ObjectClass::Count)>;
 	/** @brief Any thread, after InstallFeatures. */
 	const CategoryRoots& RegisteredCategoryRoots();
+	using CategoryRootGathers = std::array<void (*)(Api::CategoryRootSink&), static_cast<std::size_t>(Api::ObjectClass::Count)>;
+	/** @brief Any thread, after InstallFeatures. A null entry means the class lists no roots this way. */
+	const CategoryRootGathers& RegisteredCategoryRootGathers();
 	/** @brief Any thread, after InstallFeatures. A null gather means none. */
 	const Api::UnheldRootsContribution& RegisteredUnheldRoots();
 

@@ -154,7 +154,20 @@ namespace DCLF::Api
 		Refraction,
 		// Grass instance shapes, drawn from mirrored instance records as the Grass draw family.
 		Grass,
+		// BSWaterShaderProperty objects, drawn by the water port.
+		Water,
 		Count,
+	};
+
+	/** @brief Receives the roots listed by ObjectClassContribution::categoryRoots. */
+	class CategoryRootSink
+	{
+	public:
+		/** @brief Adds one root. The engine keeps it alive while it is listed, as it does a cell's category nodes. */
+		virtual void Add(RE::NiNode* a_root) = 0;
+
+	protected:
+		~CategoryRootSink() = default;
 	};
 
 	/**
@@ -162,11 +175,14 @@ namespace DCLF::Api
 	 *
 	 * - categoryRoot: the engine root the class's objects live under, or null for none yet. Called once per frame on the render thread.
 	 *   Two classes may share a root.
+	 * - categoryRoots: several such roots, listed into the sink. Called where categoryRoot is, so keep it to a few reads.
+	 *   Edits under a listed root are structural events like a cell's. A root that moves or goes away must also move the list.
 	 */
 	struct ObjectClassContribution
 	{
 		ObjectClass objectClass = ObjectClass::Count;
 		RE::NiNode* (*categoryRoot)() = nullptr;
+		void (*categoryRoots)(CategoryRootSink& a_sink) = nullptr;
 	};
 
 	/** @brief Receives the roots listed by UnheldRootsContribution::gather. */
