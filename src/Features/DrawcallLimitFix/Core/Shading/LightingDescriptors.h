@@ -44,6 +44,8 @@ namespace DCLF
 		MultiIndex,          // BSMultiIndexTriShape: its main pass is the engine's (the snow layer), its shadow a tri-shape's
 		EffectOpaque,        // an effect without a blending alpha property
 		EffectVariant,       // an effect permutation not ported
+		WaterUnclaimed,      // water the port classifies but its claim is off (CS_DCLF_WATER=1, phase 1)
+		WaterVariant,        // water the port does not draw: wading, a bad stencil bit, lights without Light Limit Fix
 		Count
 	};
 
@@ -69,6 +71,8 @@ namespace DCLF
 		"multi-index",
 		"effect-opaque",
 		"effect-variant",
+		"water-unclaimed",
+		"water-variant",
 	};
 
 	struct LightingDescriptors
@@ -103,6 +107,9 @@ namespace DCLF
 		bool refractionFalloff = false, refractionClamp = false;
 		// A material port's object kind, 0 for Lighting. Pass and descriptors come from its shader, and technique is 0.
 		std::uint8_t port = 0;
+		// A port's own key bits, put in its program family's spare bits (kProgramFamilySpareBits of them), such as water's stencil
+		// bit index. Only for a family without turnedKeyBits, which use the same bits.
+		std::uint8_t familyKeyBits = 0;
 		// ProjectedUV needs the per-object texture matrix, pixel parameters and projected textures.
 		bool projectedUV = false;
 	};

@@ -213,7 +213,9 @@ namespace DCLF
 		std::uint32_t written;
 		// Advanced Skin's row in its material table (Integrations/AdvancedSkin/SkinMaterials.cpp), zero for the disabled profile.
 		std::uint32_t skinMaterial;
-		std::uint32_t padding[2];
+		// The water material pool's row (Features/Water/Scene/WaterRows.cpp), zero for none. A shading field, so samples leave it.
+		std::uint32_t waterMaterial;
+		std::uint32_t padding;
 		// The feature block. The shading contribution that claims it derives the first blockWords, such as TreeWind's TreeParams and WindTimers.xy,
 		// which a member draws with until TreeWindCS has an entry for its tree. The rest is zero.
 		float featureBlock[8];

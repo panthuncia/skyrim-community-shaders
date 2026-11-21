@@ -1820,6 +1820,7 @@ namespace DCLF
 			{ offsetof(BindlessShading, skinPerGeometry), sizeof(BindlessShading::skinPerGeometry) },
 			{ offsetof(BindlessShading, landscapeSeams), sizeof(BindlessShading::landscapeSeams) },
 			{ offsetof(BindlessShading, skinMaterial), sizeof(BindlessShading::skinMaterial) },
+			{ offsetof(BindlessShading, waterMaterial), sizeof(BindlessShading::waterMaterial) },
 		} };
 		static_assert(sizeof(BindlessShading::skinPerGeometry) <= sizeof(ShadingFieldValue::value));
 	}
