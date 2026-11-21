@@ -139,7 +139,7 @@ Not part of this plan unless a phase touches them:
 | Phase | State | Branches | Notes |
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
-| 1 Small containers and async pieces | not started | | EventQueue already done. |
+| 1 Small containers and async pieces | in progress | `org-native/extract-p1-async`, OMS `extract/p1-async` | EventQueue already done. p1-async (code only, not built): LatestSlot, PublicationLog, SlotTable, KeptState in OMS `Async/`, RetirementChain and `Retired` in OMS `RetirementChain.h`; tests in OMS `tests/Async` (ORGKeptStateTests, ORGRetirementChainTests). |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
@@ -446,3 +446,24 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p1-async decisions
+
+Decided by the agent, to confirm:
+
+- **Where they went.** LatestSlot, PublicationLog, SlotTable and KeptState are std-only, so they are in `Async/` (namespace
+  `org::async`, the header-only `AsyncPrimitives` target). RetirementChain and `Retired` include ORG's `EventQueue`, so they are
+  in `ORGModuleServices/RetirementChain.h` (namespace `org::services`), beside `RetirementClock` in the main target.
+- **`Retired` teardown.** It takes the queue's `QueueTeardown` (default `Free`) and capacity (default 64). DCLF's `Retired<T>`
+  alias in `Core/Scene/Channels.h` passes `Leak`, which is what it used before.
+- **The storage-reuse option is process-wide** (`org::async::keptStorageOptions.reuseStorage`), not per array. The journal's
+  run path is static and a snapshot carries no array, so a per-array option would mean new plumbing. It still also picks the
+  bitmap run path, as before. CS's two readers (`MainBuild.cpp`, `KeptStores.cpp`) read it directly.
+- **CS headers.** `RenderGraph/Async/LatestSlot.h` is an alias (11 users). DCLF `Core/Runtime/KeptState.h` is a list of using
+  declarations (22 users). PublicationLog, Retirement and SlotTable had two users each: those include OMS, and their uses
+  are qualified.
+- **Tests.** `KeptStateTests.cpp` moved to OMS without the AdvancedSkin `OwnerValues` test, which is DCLF's. That one stays in
+  CS as `tests/DrawcallLimitFixCPU/OwnerValuesTests.cpp` (`DclfOwnerValuesTests`). A short multi-thread `Retired` test was
+  added. `ORGRetirementChainTests` needs ORG's headers (`ORG_ASYNC_TEST_ORG_INCLUDE`, the sibling submodule by default).
+- **Style.** The moved headers are reformatted to OMS's layout (4 spaces, attached braces). Member names keep their old
+  spelling, without OMS's `m_` prefix, so the move stays a move.

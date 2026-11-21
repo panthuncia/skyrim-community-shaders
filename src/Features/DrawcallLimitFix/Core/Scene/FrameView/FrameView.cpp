@@ -91,7 +91,7 @@ namespace DCLF::Scene
 		auto adopted = std::static_pointer_cast<const ScenePublication>(std::move(a_adopted));
 		const bool fresh = adopted && (!installed || adopted->sequence > installed->sequence);
 		// The log also holds publications the builder skipped.
-		using Log = PublicationLog<PublicationDeltas>;
+		using Log = org::async::PublicationLog<PublicationDeltas>;
 		Log::Node* at = deltasCursor ? deltasCursor : channels.publicationLog.First();
 		const std::uint64_t upTo = fresh ? adopted->sequence : (installed ? installed->sequence : 0);
 		auto append = [](auto& a_to, auto& a_from) {
@@ -261,7 +261,7 @@ namespace DCLF::Scene
 	std::vector<ShadingItem> FrameView::PeekShadingItems() const
 	{
 		std::vector<ShadingItem> items;
-		using Log = PublicationLog<PublicationDeltas>;
+		using Log = org::async::PublicationLog<PublicationDeltas>;
 		for (const Log::Node* next = Log::Next(deltasCursor ? deltasCursor : channels.publicationLog.First()); next; next = Log::Next(const_cast<Log::Node*>(next)))
 			items.insert(items.end(), next->value.shading.begin(), next->value.shading.end());
 		return items;

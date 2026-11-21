@@ -301,8 +301,8 @@ namespace DCLF::Scene
 		std::vector<std::vector<std::shared_ptr<const void>>> frameComponentDeltas;
 		std::shared_ptr<const ScenePublication> installed;
 		// Cursors into the log. The notes cursor never passes the deltas cursor. Null means the log's first node.
-		PublicationLog<PublicationDeltas>::Node* deltasCursor = nullptr;
-		PublicationLog<PublicationDeltas>::Node* notesCursor = nullptr;
+		org::async::PublicationLog<PublicationDeltas>::Node* deltasCursor = nullptr;
+		org::async::PublicationLog<PublicationDeltas>::Node* notesCursor = nullptr;
 		std::vector<std::pair<std::vector<const RE::BSGeometry*>, std::vector<const RE::BSGeometry*>>> installNotes;
 		bool installPending = false;
 		std::shared_ptr<const SetSnapshot> notedClaims;
