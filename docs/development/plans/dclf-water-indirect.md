@@ -533,3 +533,13 @@ water), so a verdict never depends on the camera.
   textures (SE 100604): t3 the material's +0x38 unless its +0x17D byte picks the global cube, t4-t6 +0x40, +0x48 and +0x50,
   t9 +0x58 with the Flowmap bit. The flow normals' fallback (a global default normal map) is not bound.
 - **No cell category 6 root.** The census found no drawn water there. Interiors without a portal graph are unverified.
+
+### 8.4 Runtime probe (2026-11-21)
+
+A probe in Linear Lighting's WaterMaterialUpload (before its writes and the Unmap, SetupMaterial +0x626) logged, for every
+water material: material +0x170 = 0.1, the mapped FresnelRI = (0, 0.4, 543, 1), the timer global 390953 = 46800.
+The bound pixel shader's table maps FresnelRI to float 12 of PS b1 and no other PS b1 variable shares it (indices 8 and 14 share
+offsets 8 and 12, but they are PS b0 variables). So FresnelRI.x is 0 by the time SetupMaterial reaches +0x626, against the
+store from +0x170 that Ghidra shows. ReflectionColor.w (latched 28800, global 46800) is the same kind of mismatch. Not
+explained yet: another plugin patching SetupMaterial is possible. The DCLF path uses the port's values (the engine's sources);
+compare the water's fresnel in phase 3's shots.
