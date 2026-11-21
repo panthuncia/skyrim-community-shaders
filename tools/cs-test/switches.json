@@ -485,6 +485,16 @@
 			"description": "1: nothing is withheld from the engine, which draws everything while DCLF draws its set as well (capture parity compares the two; it double-draws)"
 		},
 		{
+			"name": "CS_DCLF_WATER_PARITY",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: every water draw the latch path takes is checked against the water port (VS and PS b0-b2 bit for bit, its pass id), and a census logs where drawn water hangs in the scene graph (dclf-water-indirect.md, Phase 0)"
+		},
+		{
 			"name": "CS_DCLF_PASS_STATS",
 			"key": "dclf.pass_stats",
 			"type": "bool",
