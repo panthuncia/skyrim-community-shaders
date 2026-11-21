@@ -140,7 +140,7 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
+| 2 Services with clean cuts | in progress | `org-native/extract-p2-executor`, OMS `extract/p2-executor` | Executor and lanes moved (code only, not built): OMS `Async/Executor.h`, `Async/Lanes.h`, `Async/ExecutorTaskService.h`; CS keeps `SharedExecutor()`, `OrgTaskService()` and forwarding headers. Needs its A/B perf run. Retirement join needs one too. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
@@ -446,3 +446,24 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p2-executor decisions
+
+Decided by the agent, to confirm:
+
+- **Names.** `org::async::Executor` (`Async/Executor.h`), `org::async::Lane`/`JobLane`/`MakeLane` (`Async/Lanes.h`) and
+  `org::async::CreateExecutorTaskService` (`Async/ExecutorTaskService.h`). The executor and lanes are a CPU-only target,
+  `ORGModuleServices::AsyncExecutor` (needs TBB); the task service is in `ORGModuleServices`, since it needs ORG.
+- **Layout as a default.** `Executor::Desc` takes worker counts per domain, the parallel domain (ParallelFor helpers and
+  frame-critical jobs) and the frame-critical thread count. The old constants (`Coordinator`, `Preparation`, `Scene`,
+  `Streaming`, `FrameCriticalThread`, `Layout`) stay as the default layout's, so CS's 30-odd users need no edit.
+  `SchedulingLayout()` gives an executor's own layout.
+- **`Statistics` per-domain arrays became vectors**, since the domain count is the host's. Only the DCLF capture reads them.
+- **Throw report.** With `onTaskError` set, a throwing ORG task is reported with "<name> threw: <what>" and counts as
+  finished. Without it, the exception goes to the executor, which counts a failed task. CS passes `RenderGraph::Fatal`
+  under "ORG task", as before.
+- **Lanes.** An empty `LaneDesc::refused` stops an OMS lane silently. CS's `Frame::Lane`, `Frame::JobLane` and
+  `Frame::MakeLane` fill it with the old fatal ("the <name> lane stopped ...") through `FatalOnRefusal`.
+- **Tests.** `tests/DrawcallLimitFixCPU/SceneExecutorTests.cpp` moved to OMS `tests/Async/ExecutorTests.cpp`, with layout
+  and lane tests added. `tests/Async/ExecutorTaskServiceTests.cpp` compiles the service against ORG's `ITaskService.h`
+  from the sibling checkout, so it stays standalone.
