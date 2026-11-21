@@ -27,6 +27,8 @@ namespace DCLF::Schedule
 			{ .id = "shadow-maps.after", .owner = "Features/Shadows/Engine", .where = "Main::RenderShadowMaps returned, the shadow views drawn and the occlusion maps set up before it (Deferred's Main_RenderShadowMaps hook)" },
 			{ .id = "depth.committed", .owner = "Core", .where = "Main::RenderDepth's world draw done (the shell's Main_RenderDepth_WorldDrawn hook), the views' work there with it" },
 			{ .id = "opaque.after", .owner = "Features/MainView", .where = "the main pass's opaque batches done (Deferred's Main_RenderWorld_BlendedDecals hook)" },
+			{ .id = "water.mask-batch", .owner = "Features/Water", .where = "the main pass's water mask batch, before the engine runs it (WaterCapture.cpp's WaterBatch, FinishAccumulating)" },
+			{ .id = "water.surface-batch", .owner = "Features/Water", .where = "the main pass's water batch, before the engine runs it (WaterCapture.cpp's WaterBatch, FinishAccumulatingPostResolveDepth)" },
 			{ .id = "blended.draw", .owner = "Features/Forward", .where = "the main pass's blended draw for the main accumulator (both its call sites, ForwardHooks.cpp)" },
 			{ .id = "fp.colour-render", .owner = "Features/FirstPerson", .where = "Main::RenderFirstPersonView's accumulator render (FirstPersonHooks.cpp)" },
 		};
@@ -89,6 +91,13 @@ namespace DCLF::Schedule
 			"diag.after-colour",
 			"core.direct",
 		};
+		// The water epochs: the deferred ranges the colour segment culled. Range 0 is the water mask, range 1 the water surface.
+		constexpr std::string_view kWaterMask[] = {
+			"core.deferred-range0",
+		};
+		constexpr std::string_view kWaterSurface[] = {
+			"core.deferred-range1",
+		};
 		// The forward epoch: the CPU pipeline's forward site sorts and draws the blended draws and the refraction normals, in either pipeline.
 		constexpr std::string_view kForward[] = {
 			"core.forward-direct",
@@ -124,14 +133,22 @@ namespace DCLF::Schedule
 			// That saves an epoch per first-person frame. Its colour epoch keeps sharing its shape.
 			{ .id = "fp.depth", .label = "first-person depth", .trigger = "depth.committed", .segment = SegmentOf(Segment::ZPrepass), .shape = Api::EpochShape::View, .shapeIndex = ViewOf(Api::EngineView::FirstPerson), .hostedBy = "main.depth" },
 			{ .id = "fp.colour", .label = "first-person colour", .trigger = "fp.colour-render", .segment = SegmentOf(Segment::FirstPerson), .shape = Api::EpochShape::View, .shapeIndex = ViewOf(Api::EngineView::FirstPerson), .sharesWith = "fp.depth", .passes = kFirstPersonColour },
+			// The water's mask and surface. They draw what the colour commit culled, and only they draw their members, so they decide
+			// the frame's claims too. Without CS_DCLF_WATER their passes are absent, so they are dormant.
+			{ .id = "water.mask", .label = "water mask", .trigger = "water.mask-batch", .segment = SegmentOf(Segment::WaterMask), .shape = Api::EpochShape::Main, .shapeIndex = MainOf(Api::MainShape::Colour), .sharesWith = "main.colour", .claims = true, .passes = kWaterMask },
+			{ .id = "water.surface", .label = "water surface", .trigger = "water.surface-batch", .segment = SegmentOf(Segment::WaterSurface), .shape = Api::EpochShape::Main, .shapeIndex = MainOf(Api::MainShape::Colour), .sharesWith = "main.colour", .claims = true, .passes = kWaterSurface },
 		};
 
 		// The order a frame runs them, and the host's async ticket loop's: shadows at AfterShadowMaps, the Z-prepass at the depth pass,
-		// colour where the opaque batches end, forward at the blended draw after the composite, then first person's colour. Hosted epochs are not in it.
+		// colour where the opaque batches end, the water mask and surface at their batches, forward at the blended draw after the
+		// composite, then first person's colour. Under water the blended draw comes before the water surface; the order stays this one.
+		// Hosted epochs are not in it.
 		constexpr std::string_view kFrameOrder[] = {
 			"shadow",
 			"main.depth",
 			"main.colour",
+			"water.mask",
+			"water.surface",
 			"forward",
 			"fp.colour",
 		};

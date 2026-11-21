@@ -36,8 +36,13 @@ namespace RenderGraph::Frame::Recipes
 		PreMain,      // CS: the depth copy, Terrain Blending, the shadow mask, light culling, the Prepass clients and the main pass's sky
 		Opaque,       // Drawcall Limit Fix's main opaque pass
 		Deferred,     // CS: deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the water and its blend
+		WaterMask,    // Drawcall Limit Fix's water mask
+		Water,        // CS: water, the deferred+water stage's steps after DCLF's water mask
+		WaterSurface, // Drawcall Limit Fix's water surface. Under water it comes after the sun stage's first steps
+		PostWater,    // CS: post-water, the water stage's steps after DCLF's water surface
 		Forward,      // Drawcall Limit Fix's forward pass
 		Sun,          // CS: the precipitation, under water the water, the sun's occlusion query (the first person's query is the post stage's)
+		SunWater,     // CS: sun water, under water the sun stage's steps after DCLF's water surface
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
 		Ui, // CS: the UI stage, in every frame kind. HDR output keeps its own ticket

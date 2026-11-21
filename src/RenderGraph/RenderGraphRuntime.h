@@ -82,6 +82,8 @@ public:
 		Forward, // Drawcall Limit Fix's forward epoch: blended Lighting, at the engine's blended draw after the composite
 		FirstPersonDepth, // Drawcall Limit Fix's first-person depth, at RenderDepth's first-person draw, before kPOST_ZPREPASS_COPY
 		FirstPerson, // Drawcall Limit Fix's first-person colour, at Main::RenderFirstPersonView's accumulator render
+		WaterMask,     // Drawcall Limit Fix's water mask, at the engine's water mask batch in FinishAccumulating
+		WaterSurface,  // Drawcall Limit Fix's water surface, at the engine's water batch in FinishAccumulatingPostResolveDepth
 		// The CS stages' epochs, one per RenderGraph::Frame::SegmentId in that order.
 		Declared,
 		Count = Declared + RenderGraph::Frame::kSegments

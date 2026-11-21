@@ -193,8 +193,9 @@ namespace RenderGraph::Frame::PostChain
 				const bool owner = FrameAnchors::IsRenderOwner();
 				if (owner) {
 					state.inChain = true;
-					// End the sun stage here at the latest, before the chain's D3D11 work reaches the GPU.
+					// End the sun stages here at the latest, before the chain's D3D11 work reaches the GPU. Sun water follows sun.
 					(void)FrameAnchors::TapPoint(SegmentId::Sun);
+					(void)FrameAnchors::TapPoint(SegmentId::SunWater);
 				}
 				func(a_target);
 				if (owner)

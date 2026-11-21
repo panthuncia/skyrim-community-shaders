@@ -154,6 +154,7 @@ namespace FrameAnchors
 			bool opensLast = false;
 			bool switchesEverySlot = false;
 			Table::SegmentList commitBefore{};
+			Table::SegmentList commitBeforeIfStaged{};
 		};
 
 		constexpr std::array<DeclaredInfo, kDeclared> DeclaredFromTable()
@@ -162,7 +163,7 @@ namespace FrameAnchors
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
 				const auto& stage = Table::CsStage(d);
 				out[d] = { RenderGraphRuntime::StageSegment(d), stage.steps.data(), Table::StepCount(stage), stage.names, stage.opensLast, stage.switchesEverySlot,
-					stage.commitBefore };
+					stage.commitBefore, stage.commitBeforeIfStaged };
 			}
 			return out;
 		}
@@ -1943,10 +1944,15 @@ namespace FrameAnchors
 		auto& state = Anchors();
 		// A point-ended stage commits just before the next GPU work in its table entry's commitBefore list.
 		// These are frames where its usual commit point, the blended draw or the present, did not come first.
+		// A stage that commits before the epoch only while it holds work stays open when it staged nothing this frame.
 		if (a_segment != UINT32_MAX && state.host && IsRenderOwner())
-			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (std::ranges::find(declaredInfo[d].commitBefore, static_cast<Segment>(a_segment)) != declaredInfo[d].commitBefore.end())
+			for (std::uint32_t d = 0; d < kDeclared; ++d) {
+				const auto segment = static_cast<Segment>(a_segment);
+				const bool always = std::ranges::find(declaredInfo[d].commitBefore, segment) != declaredInfo[d].commitBefore.end();
+				const bool ifStaged = std::ranges::find(declaredInfo[d].commitBeforeIfStaged, segment) != declaredInfo[d].commitBeforeIfStaged.end();
+				if (always || (ifStaged && state.stagedFrame[d] == RenderGraph::Frame::Driver::Current().frame))
 					(void)TapPoint(static_cast<RenderGraph::Frame::SegmentId>(d));
+			}
 		// While a stage holds its ticket, other GPU work submitted now runs ahead of the stage's work. Counted by reason for the census.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
 			auto lock = Guard();
