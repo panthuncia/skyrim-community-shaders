@@ -26,6 +26,22 @@ struct UnifiedWater : OverlayFeature
 
 	virtual inline bool HasShaderDefine(RE::BSShader::Type) override { return true; }
 
+	/** @brief The flowmap values BSWaterShader_SetupGeometry rewrites a water draw's constants from. */
+	struct FlowRewrite
+	{
+		bool active = false;  // the hook rewrites: an exterior worldspace is active and the flowmap exists
+		int32_t width = 0;
+		int32_t height = 0;
+		int32_t offsetX = 0;
+		int32_t offsetY = 0;
+	};
+
+	/** @brief What the SetupGeometry hook would apply to a water draw now. DCLF's water port computes the same values from it. */
+	FlowRewrite GetFlowRewrite() const;
+
+	/** @brief The LOD water root (BGSTerrainManager's "WaterLOD" node) the tiles hang under, or null. */
+	RE::NiNode* GetWaterLODRoot() const;
+
 	/** @brief Hook that overrides water shader material parameters during water initialization. */
 	struct TESWaterSystem_InitializeWater_SetWaterShaderMaterialParams
 	{
