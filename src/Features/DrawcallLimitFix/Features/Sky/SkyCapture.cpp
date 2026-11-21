@@ -57,6 +57,16 @@ namespace DCLF::Features::Sky
 			return log;
 		}
 
+		// TryLatchDraw's reason for a draw whose program is still building. Compared by address.
+		constexpr char kProgramBuilding[] = "its ORG program is still building";
+
+		/** @brief Draws left out while their program builds, each logged once by view and technique. */
+		Family::RefusalLog& LeftOut()
+		{
+			static Family::RefusalLog log("[DCLF] sky: a draw is left out until its program is built (the engine's draw would bypass the graph)");
+			return log;
+		}
+
 		/**
 		 * @brief The batch being latched, on the render thread.
 		 * After a refused draw the latched part runs, and the rest of the batch goes to D3D11 where the census counts it.
@@ -361,9 +371,10 @@ namespace DCLF::Features::Sky
 				draw.key.colourFormats = { a_capture.colourFormats[0], occlusion ? static_cast<std::uint32_t>(rhi::helpers::ToRHI(DXGI_FORMAT_R8_UNORM)) : 0u, 0u, 0u };
 				draw.key.depthFormat = occlusion ? 0u : a_capture.depthFormat;
 			}
-			draw.program = SkyDraws::Program(draw.key, *state->currentShader);
+			bool building = false;
+			draw.program = SkyDraws::Program(draw.key, *state->currentShader, &building);
 			if (!draw.program)
-				return "its ORG program cannot be built";
+				return building ? kProgramBuilding : "its ORG program cannot be built";
 			if (occlusion) {
 				// Each face layer once, in engine order, so a later layer holds every earlier layer's occlusion.
 				draw.occlusion = true;
@@ -372,9 +383,9 @@ namespace DCLF::Features::Sky
 					return "its cloud layer is out of order";
 				auto occlusionKey = draw.key;
 				occlusionKey.maskedTargets = 1;
-				draw.occlusionProgram = SkyDraws::Program(occlusionKey, *state->currentShader);
+				draw.occlusionProgram = SkyDraws::Program(occlusionKey, *state->currentShader, &building);
 				if (!draw.occlusionProgram)
-					return "its occlusion program cannot be built";
+					return building ? kProgramBuilding : "its occlusion program cannot be built";
 			}
 
 			// The geometry is read by device address. The run holds its leases until the GPU is done.
@@ -683,7 +694,19 @@ namespace DCLF::Features::Sky
 				return false;
 			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
 				const auto* state = globals::state;
-				Refuse(capture, reason, state ? state->currentPixelDescriptor & 0xFF : 0xFF);
+				const std::uint32_t technique = state ? state->currentPixelDescriptor & 0xFF : 0xFF;
+				// A program first seen in this draw builds on the program service. Until then the draw is left out and the batch
+				// stays the graph's. Handed to the engine, the draw and the rest of its batch would reach D3D11, where Cloud Shadows'
+				// layer draws are fatal in graph mode.
+				if (reason == kProgramBuilding) {
+					LeftOut().Report(std::format("a {} draw of technique {}", NameOf(capture.view), technique));
+					// SkyShaderHacks never runs for a draw the engine does not make, so its flags are cleared as for a latched draw.
+					auto& cloudShadows = globals::features::cloudShadows;
+					cloudShadows.overrideSky = false;
+					cloudShadows.bindLayerSelfShadow = false;
+					return true;
+				}
+				Refuse(capture, reason, technique);
 				return false;
 			}
 			return true;

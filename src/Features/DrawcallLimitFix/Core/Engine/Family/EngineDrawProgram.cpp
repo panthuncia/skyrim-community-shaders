@@ -13,6 +13,7 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
 #include "Utils/Logging.h"
+#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <atomic>
@@ -480,8 +481,10 @@ namespace DCLF::Family
 		}));
 	}
 
-	std::shared_ptr<const RasterProgram> EngineDrawPrograms::Get(const ProgramKey& a_key, const RE::BSShader&)
+	std::shared_ptr<const RasterProgram> EngineDrawPrograms::Get(const ProgramKey& a_key, const RE::BSShader&, bool* a_building)
 	{
+		if (a_building)
+			*a_building = false;
 		{
 			std::scoped_lock lock(impl->mutex);
 			if (const auto found = impl->entries.find(a_key); found != impl->entries.end()) {
@@ -492,6 +495,8 @@ namespace DCLF::Family
 				if (slot->done.load(std::memory_order_acquire))
 					return std::static_pointer_cast<const RasterProgram>(slot->program);
 				// Never waited for. The setup batch builds the manifest's keys, so only a key first seen after setup gets here.
+				if (a_building)
+					*a_building = true;
 				if (impl->stillBuilding.fetch_add(1, std::memory_order_relaxed) == 0)
 					logger::info("[DCLF] {}: a draw found its program for descriptor {:#x} still building on the program service; such draws stay the engine's "
 								 "until it is built (counted)",
@@ -518,6 +523,8 @@ namespace DCLF::Family
 					 "the engine's until then; the manifest lists it from now on",
 			impl->family, a_key.descriptor, a_key.variant, HashOf(a_key));
 		impl->Remember(a_key);
+		if (a_building)
+			*a_building = true;
 		return nullptr;
 	}
 
@@ -525,6 +532,12 @@ namespace DCLF::Family
 	{
 		if (!ProgramsDetail::Available())
 			return;
+		// A test switch for a cold shader store's first run. The manifest is still read and saved, so it keeps its keys.
+		static const bool prebuild = Util::SwitchFile::Value("CS_DCLF_PROGRAM_MANIFEST") != "0";
+		if (!prebuild) {
+			logger::info("[DCLF] {}: the manifest's programs are not queued (CS_DCLF_PROGRAM_MANIFEST=0); each builds at its first draw", impl->family);
+			return;
+		}
 		const auto keys = Manifest::Get().Of(impl->tag);
 		std::size_t queued = 0, refused = 0;
 		for (const auto& key : keys) {
