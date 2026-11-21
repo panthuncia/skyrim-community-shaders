@@ -3,7 +3,6 @@
 #include <d3d11.h>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <source_location>
 #include <memory>

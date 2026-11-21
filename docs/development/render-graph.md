@@ -849,12 +849,12 @@ lanes; new code uses them from the start.
 
 ## Raster programs
 
-`RasterProgram` (`src/RenderGraph/RasterProgram.h`) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
+`RasterProgram` (OMS `Programs/RasterProgram.h`; CS's `src/RenderGraph/RasterProgram.h` forwards to it) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
 passes on ORG render passes. It replaces `PostProcessing/RasterPass` and the pixel-shader passes in Upscaling and Effects11 as
 they are ported.
 
--   **Compile.** Both stages compile with DXC through the same path (`ProgramBuild.{h,cpp}`, shared with `ComputeProgram`):
-    ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `RenderGraph/FullscreenVS.hlsl`,
+-   **Compile.** Both stages compile with DXC through the same path (OMS `Programs/ProgramBuild.h`, shared with `ComputeProgram`; CS sets its environment in `Programs::InstallEnvironment`, `src/RenderGraph/ProgramService.cpp`):
+    ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `ORGModuleServices/FullscreenVS.hlsl`,
     a three-vertex triangle with `TEXCOORD0` as in PostProcessing's `fullscreen.hlsli`.
 -   **Defines.** Compute and raster programs get the defines `Util::CompileShader` gives the D3D11 build, after their own:
     CS's common shader defines (`Util::GetCommonShaderDefines`), the stage's (`COMPUTESHADER`, `VSHADER`, `PSHADER`), `WINPC`
@@ -907,7 +907,7 @@ list into register declarations under FXC, and into push-block handles and descr
 (`CS_ORG_BINDLESS`, which `ProgramBuild` defines for every ORG compile). How to write one, the limits and the checks are in
 [shader-workflow.md](./shader-workflow.md), "Dual-target shaders".
 
-On the C++ side (`src/RenderGraph/ShaderBindings.h`):
+On the C++ side (`src/RenderGraph/ShaderBindings.h`, over ORG's `Render/ShaderBindings.h`):
 
 -   **The block.** A struct that mirrors the shader's push block: one `ShaderBindings::Handle` per resource entry in list order,
     then the `PUSH` structs as `alignas(16)` members. `ShaderBindings::Words<Block>()` is its size for `constantWords`, checked

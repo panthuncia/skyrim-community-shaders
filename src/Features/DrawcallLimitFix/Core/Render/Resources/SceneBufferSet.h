@@ -8,11 +8,9 @@
 #include <ORGModuleServices/GrowableBufferSet.h>
 #include <Render/Runtime/IUploadService.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace DCLF::Draws
 {
