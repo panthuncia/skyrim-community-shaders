@@ -211,6 +211,11 @@ namespace DCLF
 
 		// CS compilation workers request the same stages the runtime uses. Requests before ORG initialization wait for StartPrecompile.
 		void Precompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+		/**
+		 * @brief Any thread. The engine shader of a program family's shader type, as Community Shaders' compile workers last handed it to
+		 * Precompile. Null before the first. For a family whose engine shader has no known global (ProgramFamilyContribution::programSource).
+		 */
+		static const RE::BSShader* FamilyShader(Api::ProgramFamily a_family);
 		void StartPrecompile();
 
 		/** @brief Any thread. The pipeline lane's counters, read relaxed. */
