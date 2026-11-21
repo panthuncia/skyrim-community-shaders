@@ -67,4 +67,11 @@ namespace DCLF::Features::Water::Indirect
 	 * for the main camera's batch. Returns whether it was submitted. The latch path draws the rest of the batch after it.
 	 */
 	bool ReachBatch(View a_view, const void* a_accumulator);
+
+	/**
+	 * @brief Render thread, at FinishAccumulating's check for water mask passes. Whether the mask batch must run for DCLF even though the
+	 * engine holds no mask pass: the main camera's batch renderer while the mask epoch is live. The engine skips the whole mask block
+	 * (the stencil clear, the targets, the batch that triggers the epoch) when every water shape is DCLF's.
+	 */
+	bool MaskBatchWanted(const void* a_batchRenderer);
 }

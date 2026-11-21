@@ -452,6 +452,19 @@ namespace DCLF::Features::Water
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
 				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
+
+		/**
+		 * @brief FinishAccumulating's check for water mask passes. When DCLF draws every water shape, the engine holds none and would skip
+		 * the mask block, and with it DCLF's mask epoch. The block then runs with an empty engine batch.
+		 */
+		struct MaskPassesCheck
+		{
+			static bool thunk(void* a_batchRenderer, std::uint32_t a_first, std::uint32_t a_last)
+			{
+				return func(a_batchRenderer, a_first, a_last) || Indirect::MaskBatchWanted(a_batchRenderer);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 	}
 
 	void PreflightHooks()
@@ -465,6 +478,8 @@ namespace DCLF::Features::Water
 		HookSites::RequireCall("the water mask batch (FinishAccumulating's RenderBatches of the Stencil technique)", REL::Offset(Address::kMaskBatch).address());
 		HookSites::RequireCall("the water batch (FinishAccumulatingPostResolveDepth's RenderBatches of the water techniques)",
 			REL::Offset(Address::kSurfaceBatch).address());
+		if (Address::kMaskPassesCheck.Known())
+			HookSites::RequireCall("the water mask passes check (FinishAccumulating, before the mask block)", REL::Offset(Address::kMaskPassesCheck).address());
 		if (Address::kGroup10Batch.Known())
 			HookSites::RequireCall("geometry group 10's batch (FinishAccumulatingPostResolveDepth, before the water)", REL::Offset(Address::kGroup10Batch).address());
 	}
@@ -476,12 +491,14 @@ namespace DCLF::Features::Water
 			return false;
 		}
 		stl::write_thunk_call<WaterBatch<View::Mask, kMaskSite>>(REL::Offset(Address::kMaskBatch).address());
+		if (Address::kMaskPassesCheck.Known())
+			stl::write_thunk_call<MaskPassesCheck>(REL::Offset(Address::kMaskPassesCheck).address());
 		stl::write_thunk_call<WaterBatch<View::Surface, kSurfaceSite>>(REL::Offset(Address::kSurfaceBatch).address());
 		if (Address::kGroup10Batch.Known())
 			stl::write_thunk_call<WaterBatch<View::Surface, kGroup10Site>>(REL::Offset(Address::kGroup10Batch).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Water>(RE::VTABLE_BSWaterShader[0], &OnSetupGeometry);
 		Family::AddSetup("water", [] { return WaterDraws::Setup(); });
-		logger::info("[DCLF] water: hooks installed (the water mask, geometry group 10 and water batches, BSWaterShader::SetupGeometry)");
+		logger::info("[DCLF] water: hooks installed (the water mask check and batch, geometry group 10 and water batches, BSWaterShader::SetupGeometry)");
 		return true;
 	}
 }

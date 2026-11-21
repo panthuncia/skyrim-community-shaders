@@ -30,6 +30,8 @@ namespace DCLF::Features::Water
 	{
 		// FinishAccumulating's RenderBatches for the water mask (SE 99938, AE 106583).
 		inline constexpr Engine::Offset kMaskBatch{ { 106583, 0x492 }, { 99938, 0x4A6 } };
+		// FinishAccumulating's check that the batch renderer holds mask passes (0x5C00006D..70), which guards the whole mask block.
+		inline constexpr Engine::Offset kMaskPassesCheck{ { 106583, 0x3B4 }, { 99938, 0x3C5 } };
 		// FinishAccumulatingPostResolveDepth's RenderBatches for the water (SE 99939, AE 106584).
 		inline constexpr Engine::Offset kSurfaceBatch{ { 106584, 0x161 }, { 99939, 0x164 } };
 		// Geometry group 10 just before it (fades and LOD cross-fades). The surface view takes its water passes. The rest are Lighting
