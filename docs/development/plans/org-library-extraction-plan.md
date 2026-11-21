@@ -401,7 +401,9 @@ regression.
 
 ## Library work CS needs but does not own
 
-- **ORG array-size versions.** LLF's slot count can't change in a session (decision 88).
+- **ORG array-size versions.** Done in lib-arrays. A texture version may change its slice count; the revision that carries it
+  switches in graphs built for the new count (`VersionedResource`, "Array-size versions"; `GraphHost::EpochsAwaitingSlices`).
+  LLF's slot count now changes in a session, and the restart note is gone (decision 88's open part). See "lib-arrays decisions".
 - **ORG keyed recording tags**, so more than one extension can tag a graph. Done in p3-pins: `RecordingTagKey`,
   `RecordingTags` (`Render/RecordingTags.h`), `RenderGraph::SetRecordingTag(key, tag)`, `RecordingContext::Tag(key)`.
   The single-tag API is gone; its one user was the pipeline pins.
@@ -1060,3 +1062,41 @@ Decided by the agent, to confirm:
   stages and attaches both epochs eight times, with frames between. A torn pair shows up as a lost staged build, a staged
   build no newer than the attached one, or an attached build that goes back. It also checks `SetOwnerThread` and
   `IsOwnerThread`.
+
+### lib-arrays decisions
+
+Decided by the agent, to confirm:
+
+- **The slice count left the shape class, not the slot.** A version may have another slice count, as it may another extent.
+  Format and mip count stay. A graph slot keeps its slice count, though: barriers, the state ledgers and the committed states all
+  index (mip, slice) cells. Lowering a whole-array use symbolically would touch every one of them, so a new count needs graphs
+  lowered for it. A graph that binds a version of another count than its slot's still throws.
+- **Builds lower for the pending count.** A version of a new count is the resource's reshaped version (`Reshaped`) while it is
+  pending. Every detached build (`GraphHost::BuildEpochGraph`) captures resolvers with a context that names it, and its
+  preparations bind it until it is current. Running graphs keep binding the current version. Without a pending reshape the
+  context names nothing, so builds are as before. This avoids carrying a version set through OMS `StagedBuilds` jobs.
+- **The frame revision gates on the builds.** A revision whose plans change a 2D slice count asks `Builds::Ask` for every epoch
+  that declares the slot, once its versions are made. It records and adopts only when `EpochsAwaitingSlices` is empty (every such
+  epoch's staged graph, else attached one, is lowered for the new count). Frames keep the adopted revision meanwhile; nothing
+  waits. A fragment source's fragment must be on those staged builds, and a fragment adopted alone that would attach one of them
+  is dropped while the revision is pending.
+- **Taking a count back is a reshape too.** When a setting returns to the current count while a new one is pending, the extent
+  is planned again at the current count, so its version clears the pending one and the graphs staged for it are built again.
+- **Buffers needed nothing.** A buffer's element count was already a version (`VersionedBuffer::MakeStructured`,
+  `Frame::DeclareBuffer`); its size is not part of its slot.
+- **What keeps the old rule.** FrameAnchors imports (`SameShapeClass`) and a twin joining a slot (`GraphResources::JoinSlot`)
+  publish at once, so another slice count there is still a new slot. A CS twin's version may not change a cube's faces or whether
+  its views are arrays (`Texture2D::ShapeAt`). A declared 2D texture's extent is (width, height, slices).
+- **LLF.** The cache is one declaration on resolution, slot count and the engine's shadow map; the client key is on or off only.
+  The restart note (`local_shadow_slots_restart`) and its string are removed. The twin is "LightLimitFix::LocalShadowCache
+  (cache)", published as `LightLimitFix::LocalShadowCache`. A new count takes a few frames longer than a new resolution, since
+  its graphs are built first.
+
+Open, to check in a run:
+
+- A pass that redeclares (`IDynamicDeclaredResources`) on a staged graph built for a pending count, before its adoption, captures
+  the current count and is relowered for it. The gate would then wait until a later build. No such pass declares the LLF cache
+  that I found; a "[ORG] frame revision: a new slice count waits for graphs built for it" line that never clears is this.
+- An epoch the build manager does not stage would attach a graph built for a pending count before the version. It binds the
+  pending version, so it does not stop, but D3D11 and bindless readers see the current one. Every epoch that declares the LLF
+  cache is staged.
