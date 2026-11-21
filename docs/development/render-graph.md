@@ -876,7 +876,8 @@ they are ported.
 ## ImGui on the graph
 
 In graph mode, CS's ImGui frames are drawn by a render-graph pass instead of `imgui_impl_dx11`
-(`src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in `src/Menu/ImGuiRenderer.{h,cpp}`).
+(OMS's `ORGModuleServices/ImGui/ImGuiBackend.h`, behind CS's adapter `src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in
+`src/Menu/ImGuiRenderer.{h,cpp}`).
 
 -   **When.** `imgui_impl_dx11` draws the first frames: the graph starts after the menu. Once the runtime is active with the
     `Overlay` anchor's epoch (reserved in `Menu::Init`), the next `NewFrame` shuts the D3D11 backend down and installs the
@@ -893,7 +894,7 @@ In graph mode, CS's ImGui frames are drawn by a render-graph pass instead of `im
 -   **Per frame.** The client's commit copies the vertices, indices and texture rows into one host-visible staging buffer, a
     `LatchBlock` from a small pool. It stores the frame for the host's current run. The pass takes its run's frame at record time
     and keeps it, with its textures and descriptors, until the recording's GPU work retires (`RecordingContext::Retain`). The
-    staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`RenderGraph/ImGui.hlsl`). Each
+    staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`ORGModuleServices/ImGui.hlsl`). Each
     command gets its own scissor (`SetScissors`) and push block.
 -   **Not drawn.** Draw callbacks (`ImDrawList::AddCallback`), which are D3D11 code. `ImDrawCallback_ResetRenderState` needs
     nothing. The screenshot editor's opaque preview blend is the one callback CS has: its preview is alpha-blended on this
