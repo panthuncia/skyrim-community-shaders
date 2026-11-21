@@ -166,6 +166,8 @@ Not part of this plan unless a phase touches them:
 
 | 3 Programs and GPU primitives | in progress | `org-native/extract-p3-latched` (ORG `extract/p3-latched`) | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 7 and 8 (p3-latched): ORG `Render/LatchedCopies.h` (types, copy joining, `RecordLatchedCopies`) and `RenderPasses/LatchedCopiesPass.h` (`MakeLatchedCopiesPass`); `IDescriptorService::Null(owner, NullViewKind)` over `NullSrvDesc` (`Render/Runtime/NullViews.h`). DCLF's `Latched.h` is aliases, its pass factory a wrapper, `GpuTextures` null indices use `Null`. ORG test `OpenRenderGraphLatchedCopiesTests`. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
+
+| 4 Build and upload services | in progress | p4-uploads: CS `org-native/extract-p4-uploads`, OMS `extract/p4-uploads` | Needs phase 2's executor. Commit uploads (p4-uploads, code only, not built): OMS `CommitUploads.h` (`CommitUploads`, `LatchedUploads`, `AcquireStagedBatch`, `CommitUploadHooks` with `onError` and an `IUploadBytesSink`), `OwnedRows.h` (`OwnedRow<Row, Binding>`, `DescriptorIndex`), `ContentOwners.h` (`Snapshot(seal)`); tests in OMS `tests/Uploads` (`ORGUploadsTests`, CPU only). DCLF keeps thin subclasses and aliases with its hooks (`RenderGraph::FatalHandler`, FrameData) and the frame-constants names. See "p4-uploads decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -721,3 +723,25 @@ Decided by the agent, to confirm:
 - DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
   descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
   is left for a separate change.
+
+### p4-uploads decisions
+
+Decided by the agent, to confirm:
+
+- **The binding type is the parameter, not the owner type.** `OwnedRow<Row, Binding>` takes the host's binding (an index, an
+  owner and an `explicit operator bool`, checked by the `DescriptorBinding` concept). Owners stay `shared_ptr<const void>`,
+  since `ContentOwners` and the uploads hold them type-erased. DCLF's `OwnedRow<Row>` is an alias over `GpuTextures::Binding`.
+  The old test was `index == GpuTextures::kInvalid`; `Binding`'s `operator bool` is the same test.
+- **The seal is a `Snapshot` argument**, not a constructor one, so `SceneBuffers` keeps a plain member. Its one caller
+  (`ExecutionOwners::Seal`) passes `GpuTextures::Seal`.
+- **Hooks are held by reference** (`CommitUploadHooks`, a static in DCLF's `Uploads.cpp`), so a commit builds no
+  `std::function`. The byte sink is an interface with `Enabled()` asked before each write, as `FrameData::Enabled()` was, so
+  names are still looked up only when counting. A missing `onError` drops the owners silently, as `ViolationPolicy` does.
+- **DCLF's `CommitUploads` and `LatchedUploads` are subclasses**, not aliases, because `Commits.h` and `VertexStreams.h`
+  forward-declare them as classes, and so the commits' constructors don't change. DCLF acquires the batch itself
+  (`AcquireCommitBatch`) to keep its `CS.DCLF.Stage.AcquireBatch` zone.
+- **Stayed in DCLF:** `FrameConstantsPart` and the route-and-name strings (they know the `cs.dclf.frame-constants` buffer), the
+  FrameData sink, the fatal area name, and the rest of `Uploads.cpp`, which is DCLF's main commit (scene streams, buckets,
+  shadow and class latches, frame textures). Only `CommitUploads::Stage(Versioned)` moved out of it.
+- **No OMS test for `CommitUploads`/`LatchedUploads`**: they need staged pages and latch blocks, so a device. The CPU test
+  covers `OwnedRow` (default and host bindings) and `ContentOwners` (overlaps, replaced owners, unchanged snapshots, counts).
