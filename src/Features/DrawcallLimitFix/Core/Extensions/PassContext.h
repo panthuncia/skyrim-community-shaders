@@ -126,8 +126,8 @@ namespace DCLF::Api
 		PassOut(std::vector<org::RenderGraph::ExternalPassDesc>& a_out, std::uint32_t a_epoch) :
 			out(a_out), epoch(a_epoch) {}
 
-		/** @brief Adds a_pass to the anchor's epoch. A null pass is added as given. */
-		void Add(std::string a_name, PassKind a_kind, std::shared_ptr<org::RenderPass> a_pass, PassQueue a_queue = PassQueue::Default);
+		/** @brief Adds a_pass to the anchor's epoch. A null pass is added as given. a_recordAtExecution records it in the epoch's late batch. */
+		void Add(std::string a_name, PassKind a_kind, std::shared_ptr<org::RenderPass> a_pass, PassQueue a_queue = PassQueue::Default, bool a_recordAtExecution = false);
 		// Diagnostics observers append finished descs here, and the executor keeps their order.
 		std::vector<org::RenderGraph::ExternalPassDesc>& Descs() { return out; }
 

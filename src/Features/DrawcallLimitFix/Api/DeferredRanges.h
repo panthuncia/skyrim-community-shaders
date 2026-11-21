@@ -9,7 +9,10 @@
 // - The draws: plain indexed indirect draws from the index pool, one per bucket of (set index, stencil reference), in the Z-prepass
 //   layout and the plain draw signature. Not device-generated commands, since the stencil reference cannot change per sequence.
 // - The epoch: an epoch of the schedule that shares main.colour's shape and lists the range's pass key ("core.deferred-range0" or
-//   "core.deferred-range1"). Its owner submits it at its trigger with Draws::SubmitDeferredEpoch.
+//   "core.deferred-range1"). Its owner submits it at its trigger with Draws::SubmitDeferredEpoch. While nobody registers the range,
+//   the pass is absent and such an epoch is dormant.
+// - Targets that change by frame: a range may have several target sets. Core makes one pass per set, recorded at execution and
+//   keyed by its skip answer, and each frame draws only the set the range's variant picks at the submission.
 
 #include "Features/DrawcallLimitFix/Api/DrawFamilies.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -30,6 +33,8 @@ namespace DCLF::Api
 	inline constexpr std::size_t kDeferredRanges = static_cast<std::size_t>(DeferredRangeSlot::Count);
 	/** @brief The most colour targets a deferred range's pass binds. */
 	inline constexpr std::uint32_t kDeferredRangeTargets = 4;
+	/** @brief The most target sets a deferred range chooses between by frame. */
+	inline constexpr std::uint32_t kDeferredRangeVariants = 2;
 
 	/** @brief A pipeline key as a deferred range sees it. The same fields as Core's PipelineKey. */
 	struct DeferredKey
@@ -64,8 +69,11 @@ namespace DCLF::Api
 	 * - name: the nvperf range "cs.dclf.deferred.<name>" and the report name.
 	 * - draws: snapshot builder, once per key slot per plan. Whether a key draws in this range, and its stencil reference there.
 	 *   A pure function of the key. Core groups the range's draws into buckets by set index, ordered by stencil reference.
-	 * - target: render thread, at the graph's build and when the pipelines read the targets' formats. The pass's colour target a_index,
-	 *   or a null texture past the last one. The pass loads and stores them. Depth and stencil are the main depth, loaded and stored.
+	 * - target: render thread, at the graph's build and when the pipelines read the targets' formats. Target set a_variant's colour
+	 *   target a_index, or a null texture past the last one. The pass loads and stores them. Depth and stencil are the main depth, loaded
+	 *   and stored. Every set must have set 0's formats, since the pipelines are built for set 0.
+	 * - variants: the target sets, 1 to kDeferredRangeVariants. Past 1, each set is a pass of its own recorded at execution.
+	 * - variant: render thread, inside the epoch's trigger, at its submission. This frame's target set. Null always picks set 0.
 	 * - programKey: the pipeline lane, pure. The key whose program draws this range, such as another technique of the same shape.
 	 *   Null draws the key's own program.
 	 * - state: the pipeline lane, pure. The range pipeline's state for a key. False keeps the key native.
@@ -76,7 +84,9 @@ namespace DCLF::Api
 		std::string_view name;
 		ProgramFamily family = ProgramFamily::Count;
 		bool (*draws)(const DeferredKey& a_key, std::uint8_t& a_stencilRef) = nullptr;
-		FrameAnchors::Texture (*target)(std::uint32_t a_index) = nullptr;
+		FrameAnchors::Texture (*target)(std::uint32_t a_variant, std::uint32_t a_index) = nullptr;
+		std::uint32_t variants = 1;
+		std::uint32_t (*variant)() = nullptr;
 		DeferredKey (*programKey)(const DeferredKey& a_key) = nullptr;
 		bool (*state)(const DeferredKey& a_key, DeferredRangeState& a_state) = nullptr;
 	};

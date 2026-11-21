@@ -72,6 +72,8 @@ namespace DCLF
 		bool (*empty)(const Draws::PassFrame& a_shape) = nullptr;
 		// The epoch holds the CPU pipeline's forward site, so the frame's forward run is handed to it (Direct::ForwardReached).
 		bool forwardSite = false;
+		// Runs first inside the epoch's commit, where the host's current run is the run its passes recorded at execution see.
+		void (*commit)(void* a_context) = nullptr;
 	};
 	/** @brief Whether a shared epoch was submitted, and whether its optional part draws. */
 	struct SharedEpochResult

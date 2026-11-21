@@ -727,7 +727,7 @@ namespace DCLF
 				changed = true;
 			}
 		}
-		// Each range's target formats, read until every target has one. They are the engine's targets, made once.
+		// Each range's target formats, read until every target has one. They are the engine's targets, made once. Set 0's stand for all.
 		for (std::size_t r = 0; r < Extensions::kDeferredRanges; ++r) {
 			const auto& entry = Extensions::DeferredRanges()[r];
 			auto& rangeTargets = renderInput.deferredTargets[r];
@@ -736,7 +736,7 @@ namespace DCLF
 			DeferredTargets read{};
 			bool formats = true;
 			for (std::uint32_t i = 0; i < Api::kDeferredRangeTargets && formats; ++i) {
-				const auto target = entry.contribution.target(i);
+				const auto target = entry.contribution.target(0, i);
 				if (!target)
 					break;
 				read.formats[i] = target.Format();
@@ -745,6 +745,20 @@ namespace DCLF
 			}
 			if (!formats || !read.count)
 				continue;
+			// The other target sets draw with set 0's pipelines, so they must match it. A set that does not keeps the range's keys native.
+			bool sameSets = true;
+			for (std::uint32_t v = 1; v < entry.contribution.variants && sameSets; ++v)
+				for (std::uint32_t i = 0; i < Api::kDeferredRangeTargets && sameSets; ++i) {
+					const auto target = entry.contribution.target(v, i);
+					const auto format = target ? target.Format() : rhi::Format::Unknown;
+					sameSets = i < read.count ? format == read.formats[i] : !target;
+				}
+			if (!sameSets) {
+				static std::array<bool, Extensions::kDeferredRanges> mismatchLogged{};
+				if (!std::exchange(mismatchLogged[r], true))
+					logger::warn("[DCLF] deferred range {}: a target set's formats differ from set 0's (or are not known yet); its keys stay native", entry.name);
+				continue;
+			}
 			read.read = true;
 			rangeTargets = read;
 			changed = true;
