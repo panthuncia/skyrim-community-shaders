@@ -2402,10 +2402,13 @@ std::vector<std::function<void()>> RenderGraphRuntime::TakePresentWaits()
 
 void RenderGraphRuntime::MoveOwnerThread()
 {
-	// The host needs no other move. ExecuteEpoch takes the calling thread as DXVK's stream thread at each epoch.
-	if (impl && impl->host)
+	// ExecuteEpoch takes the calling thread as DXVK's stream thread at each epoch. The host's owner-thread checks and the upload
+	// service follow the new owner.
+	if (impl && impl->host) {
+		impl->host->SetOwnerThread();
 		if (auto* uploads = impl->host->Uploads())
 			uploads->SetOwnerThread();
+	}
 }
 
 void RenderGraphRuntime::WaitFramePace()
