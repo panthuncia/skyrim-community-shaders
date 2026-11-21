@@ -42,6 +42,7 @@ namespace DCLF::Draws
 		LoadScreen,  // a load screen is up
 		NoShape,     // the adopted scene has no shape for the epoch, so nothing of it is in the scene
 		HostEngine,  // a hosted epoch whose host is the engine's
+		Dormant,     // no pass of the epoch is made in this install, so it has nothing to draw (EpochTraits::dormant)
 	};
 
 	constexpr const char* EngineStateName(EngineState a_state)
@@ -57,6 +58,8 @@ namespace DCLF::Draws
 			return "no shape";
 		case EngineState::HostEngine:
 			return "host is the engine's";
+		case EngineState::Dormant:
+			return "dormant";
 		}
 		return "?";
 	}
@@ -82,6 +85,9 @@ namespace DCLF::Draws
 		bool claims = false;
 		std::uint32_t hostedBy = kNoEpoch;
 		std::uint32_t hostsMask = 0;
+		// Every pass the epoch lists says it is not made in this install (Api::PassDef::present), such as the deferred ranges with
+		// nobody registering them. The epoch then gets no recording and is never submitted, so it costs nothing.
+		bool dormant = false;
 	};
 	static_assert(kMaxEpochs <= 32, "EpochTraits::hostsMask (and a host commit's drawn bits) hold an epoch a bit");
 	/** @brief The number of epochs. Zero before InstallFeatures. Any thread. */

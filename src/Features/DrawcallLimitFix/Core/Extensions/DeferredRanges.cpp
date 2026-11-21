@@ -23,6 +23,9 @@ namespace DCLF::Extensions
 			if (family.taken && family.contribution.build != Api::ProgramBuild::DeferredRanges)
 				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("deferred range {} draws program family {}, which is not built for the deferred ranges",
 					registered.name, family.name));
+			if (!registered.target || registered.variants == 0 || registered.variants > Api::kDeferredRangeVariants)
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("deferred range {} has no targets, or {} target sets (1 to {})", registered.name,
+					registered.variants, Api::kDeferredRangeVariants));
 			auto& entry = rangeTable[r];
 			entry.taken = true;
 			entry.name = registered.name;

@@ -397,12 +397,12 @@
 		{
 			"name": "CS_DCLF_WATER",
 			"key": "",
-			"type": "bool",
-			"default": "0",
+			"type": "string",
+			"default": "",
 			"choices": [],
 			"kind": "feature",
 			"family": "dclf",
-			"description": "1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 0 (default) nothing of it is registered"
+			"description": "0 (default): nothing of it is registered; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2: as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)"
 		},
 		{
 			"name": "CS_DCLF_EMPTY_FADE_NODE",

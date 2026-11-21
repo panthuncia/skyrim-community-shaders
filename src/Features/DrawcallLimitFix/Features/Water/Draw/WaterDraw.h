@@ -5,19 +5,22 @@
 // - The family's keys come from the water port (Features/Water/Scene). Each key gets one plain pipeline per range, with the engine's
 //   blend, depth and stencil state (DrawPipelines' TryRequestDeferred and BuildDeferred).
 // - A key DCLF cannot draw in both ranges fails its build, so its objects stay the latch path's.
-// - The ranges are culled in the colour segment. Nothing draws them yet: see DrawnInput.
+// - The ranges are culled in the colour segment and drawn by the water.mask and water.surface epochs (WaterEpochs.cpp), triggered
+//   at the engine's two water batches. Each range picks its targets by frame: the normals mask or its swap, kMAIN or kRAW_WATER.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 #include <array>
 #include <cstdint>
 
+namespace DCLF::Features::Water
+{
+	enum class View : std::uint8_t;
+}
+
 namespace DCLF::Features::Water::Indirect
 {
-	/**
-	 * @brief The water object rows' register (Water.hlsl's kDCLFWaterObjectsRegister). The rows' table family has no GPU buffer yet,
-	 * so no frame binding serves this register.
-	 */
+	/** @brief The water object rows' register (Water.hlsl's kDCLFWaterObjectsRegister), served by WaterSceneRows.cpp's frame binding. */
 	inline constexpr std::uint32_t kObjectRowsRegister = 42;
 
 	/** @brief The frame textures Water.hlsl's DCLF path reads in place of the engine's per-draw slots. */
@@ -53,6 +56,15 @@ namespace DCLF::Features::Water::Indirect
 	 */
 	Api::ClassifyInputId DrawnInput();
 
-	/** @brief Any thread. Whether something draws the deferred ranges. Off until a client or an epoch is wired. */
+	/** @brief Any thread. Whether something draws the deferred ranges. Set once the water epochs' triggers are hooked. */
 	void SetDrawer(bool a_drawer);
+
+	/** @brief Install time. Finds the water epochs' triggers and registers their report lines. Only with Register. */
+	void RegisterEpochs(Api::InstallContext& a_context);
+
+	/**
+	 * @brief Render thread, at the engine's mask or water batch, before the engine runs it. Submits the view's epoch inside its trigger
+	 * for the main camera's batch. Returns whether it was submitted. The latch path draws the rest of the batch after it.
+	 */
+	bool ReachBatch(View a_view, const void* a_accumulator);
 }

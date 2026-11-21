@@ -100,6 +100,10 @@ namespace DCLF
 				return { "CS DCLF: first-person depth", "CS DCLF: first-person depth inputs" };
 			case S::FirstPerson:
 				return { "CS DCLF: first person", "CS DCLF: first-person inputs" };
+			case S::WaterMask:
+				return { "CS DCLF: water mask", "CS DCLF: water mask inputs" };
+			case S::WaterSurface:
+				return { "CS DCLF: water surface", "CS DCLF: water surface inputs" };
 			default:
 				return { "CS DCLF", "CS DCLF: inputs" };
 			}

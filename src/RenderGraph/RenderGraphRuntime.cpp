@@ -1183,6 +1183,10 @@ struct RenderGraphRuntime::Impl
 			return "DrawcallLimitFix::First-person depth / " + a_pass;
 		case Segment::FirstPerson:
 			return "DrawcallLimitFix::First person / " + a_pass;
+		case Segment::WaterMask:
+			return "DrawcallLimitFix::Water mask / " + a_pass;
+		case Segment::WaterSurface:
+			return "DrawcallLimitFix::Water surface / " + a_pass;
 		default:
 			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment))) {
 				// "FrameAnchors::Tonemap / " becomes "PostProcessing::Tonemap / " for a Post Processing pass.

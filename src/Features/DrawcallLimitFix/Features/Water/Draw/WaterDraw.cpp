@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/FrameAnchors.h"
 
@@ -23,8 +24,8 @@ namespace DCLF::Features::Water::Indirect
 		// The adopted Interior variable, which the drawn input may read off the render thread.
 		std::atomic<bool> waterInterior{ false };
 
-		// The engine targets the ranges draw into (RE::RENDER_TARGET values).
-		constexpr std::uint32_t kMainTarget = 1, kNormalMaskTarget = 4, kMotionVectorTarget = 7;
+		// The engine targets the ranges draw into (RE::RENDER_TARGET values, Water.h's kMaskTargets and kSurfaceTargets).
+		constexpr std::uint32_t kMainTarget = 1, kNormalMaskTarget = 4, kNormalMaskSwapTarget = 5, kMotionVectorTarget = 7, kRawWaterTarget = 88;
 
 		/** @brief The engine's BSWaterShader, as Community Shaders' compile workers handed it over. */
 		const void* WaterShaderSource() { return ShaderPrograms::FamilyShader(Api::ProgramFamily::Water); }
@@ -81,18 +82,39 @@ namespace DCLF::Features::Water::Indirect
 			return true;
 		}
 
-		/** @brief The mask writes the normals mask and the motion vectors. The normals target alternates with its swap by frame. */
-		FrameAnchors::Texture MaskTarget(std::uint32_t a_index)
+		/**
+		 * @brief The mask writes the normals mask and the motion vectors. The normals target alternates with its swap by frame, so set 0
+		 * has kNORMAL_TAAMASK_SSRMASK and set 1 its swap.
+		 */
+		FrameAnchors::Texture MaskTarget(std::uint32_t a_variant, std::uint32_t a_index)
 		{
 			if (a_index > 1)
 				return nullptr;
-			return FrameAnchors::EngineTexture(FrameAnchors::Colour(a_index == 0 ? kNormalMaskTarget : kMotionVectorTarget));
+			const std::uint32_t normals = a_variant ? kNormalMaskSwapTarget : kNormalMaskTarget;
+			return FrameAnchors::EngineTexture(FrameAnchors::Colour(a_index == 0 ? normals : kMotionVectorTarget));
 		}
 
-		/** @brief The surface writes kMAIN, or kRAW_WATER when ISWaterBlend composites it (the same format). */
-		FrameAnchors::Texture SurfaceTarget(std::uint32_t a_index)
+		/**
+		 * @brief This frame's normals target: GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP (100460), which the mask's SetupTechnique
+		 * binds. It is the swap on every other frame while SSR is on. Render thread.
+		 */
+		std::uint32_t MaskVariant()
 		{
-			return a_index == 0 ? FrameAnchors::EngineTexture(FrameAnchors::Colour(kMainTarget)) : nullptr;
+			const auto world = ::RenderGraph::Frame::PostChain::ReadWorld(::RenderGraph::Frame::PostChain::Scope::None, {});
+			return world.normals == kNormalMaskSwapTarget ? 1u : 0u;
+		}
+
+		/** @brief The surface writes kMAIN (set 0), or kRAW_WATER (set 1) when ISWaterBlend composites it. The two share a format. */
+		FrameAnchors::Texture SurfaceTarget(std::uint32_t a_variant, std::uint32_t a_index)
+		{
+			return a_index == 0 ? FrameAnchors::EngineTexture(FrameAnchors::Colour(a_variant ? kRawWaterTarget : kMainTarget)) : nullptr;
+		}
+
+		/** @brief The global SetupTechnique reads (528167 / 415112): set, the surface draws into kRAW_WATER. Render thread. */
+		std::uint32_t SurfaceVariant()
+		{
+			const auto offset = Port::Address::kRawWater.Get();
+			return offset && *reinterpret_cast<const bool*>(REL::Module::get().base() + offset) ? 1u : 0u;
 		}
 
 		bool SampleDrawn()
@@ -141,6 +163,8 @@ namespace DCLF::Features::Water::Indirect
 			.family = Api::ProgramFamily::Water,
 			.draws = &DrawsMask,
 			.target = &MaskTarget,
+			.variants = 2,
+			.variant = &MaskVariant,
 			.programKey = &MaskProgramKey,
 			.state = &MaskState });
 		a_context.RegisterDeferredRange({ .slot = Api::DeferredRangeSlot::Range1,
@@ -148,6 +172,8 @@ namespace DCLF::Features::Water::Indirect
 			.family = Api::ProgramFamily::Water,
 			.draws = &DrawsSurface,
 			.target = &SurfaceTarget,
+			.variants = 2,
+			.variant = &SurfaceVariant,
 			.state = &SurfaceState });
 		a_context.RegisterFrameTexture({ .name = "water refraction", .textureRegister = kRefractionRegister, .view = &RefractionView });
 		a_context.RegisterFrameTexture({ .name = "water displacement", .textureRegister = kDisplacementRegister, .view = &DisplacementView });

@@ -1,6 +1,8 @@
 // Water's rows beside Core's (plan section 3.2, items 3 and 4):
 // - the water row: a table family with one WaterObjectRow per resident water object, named by the object record's
 //   kWaterRecordWord as tree wind's slot is. Written on the scene lane from the property record, so only on events.
+//   Its GPU table is a scene resource read at t42 (Indirect::kObjectRowsRegister), as tree wind's tree rows are: the commits
+//   upload the adopted publication's rows whenever they changed, and the fit holds back an object whose row is past the table.
 // - the water material pool: a frame-value pool of one WaterMaterialRow per water material, read at t58. The WaterMaterial
 //   shading field names each slot's row. Each row is Port::EvaluateMaterial with this frame's inputs, since fog, the water
 //   lighting and the timer move every frame.
@@ -11,17 +13,26 @@
 
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameValuePools.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/TableFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
+#include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
+#include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneMirror.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
+#include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+
+#include <ORGModuleServices/GrowableBufferTypes.h>
 
 #include <algorithm>
 #include <bit>
@@ -40,12 +51,16 @@ namespace DCLF::Features::Water::WaterScene
 		Api::TableFamilyId rowFamily;           // install
 		Api::CoordinatorComponentId component;  // install
 
-		/** @brief The family's columns: the rows, their free list and the generation counter the tags come from. */
+		/**
+		 * @brief The family's columns: the rows, their free list and the generation counter the tags come from. contentEpoch moves at
+		 * every row write, so a commit knows when the GPU table must be uploaded again.
+		 */
 		struct WaterRows
 		{
 			std::vector<WaterObjectRow> rows;
 			std::vector<std::uint32_t> free;
 			std::uint32_t generations = 0;
+			std::uint64_t contentEpoch = 0;
 		};
 
 		std::shared_ptr<void> MakeRows() { return std::make_shared<WaterRows>(); }
@@ -138,6 +153,7 @@ namespace DCLF::Features::Water::WaterScene
 				if (std::memcmp(&row, &rows.rows[current], sizeof(row)) == 0)
 					return;
 				rows.rows[current] = row;
+				++rows.contentEpoch;
 				family.NoteWrite();
 				return;
 			}
@@ -152,10 +168,78 @@ namespace DCLF::Features::Water::WaterScene
 			}
 			row.generation = ++rows.generations;
 			rows.rows[at] = row;
+			++rows.contentEpoch;
 			family.rowTag[at] = row.generation;
 			current = at;
 			family.NoteWrite();
 			a_context.NoteTouched(a_slot);
+		}
+
+		// ---- The rows' GPU table at t42. Setup and the commits on the render thread, the requirement on the snapshot builder.
+
+		Api::SceneResourcesId rowsScene;  // install
+		constexpr std::uint32_t kInitialWaterRows = 256;
+
+		/** @brief The rows' table, made once at setup. Commits write it on the render thread. */
+		struct WaterRowsScene
+		{
+			Draws::Versioned rows;
+			org::services::FilledContents<> filled;  // WaterRows::contentEpoch of the version last uploaded
+		};
+
+		const WaterRows* AdoptedRowsOf(const SceneTables& a_tables) { return a_tables.families.Columns<WaterRows>(rowFamily); }
+
+		std::shared_ptr<void> SetupRowsScene(const Api::SceneResourcesSetup& a_setup)
+		{
+			auto scene = std::make_shared<WaterRowsScene>();
+			const std::uint32_t rows = a_setup.smallStart ? 4u : kInitialWaterRows;
+			scene->rows = Draws::MakeVersioned(a_setup.StructuredBuffer(rows, sizeof(WaterObjectRow), "cs.dclf.water-rows"),
+				{ .extent = { 0, sizeof(WaterObjectRow), sizeof(WaterObjectRow) } });
+			return scene;
+		}
+
+		void RegisterRowsGraph(const Api::SceneResourcesGraph& a_graph)
+		{
+			if (const auto& scene = a_graph.State<WaterRowsScene>(); scene.rows)
+				Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.water-rows"), scene.rows);
+		}
+
+		void RequireRows(const Api::SceneResourcesRequirements& a_requirements)
+		{
+			const auto& scene = a_requirements.State<WaterRowsScene>();
+			const auto* rows = AdoptedRowsOf(a_requirements.tables);
+			if (scene.rows && rows)
+				Draws::UnitGroup{}.Add(scene.rows).Require(a_requirements.build, rows->rows.size());
+		}
+
+		void FitRows(Api::SceneResourcesFit& a_fit)
+		{
+			const auto& scene = a_fit.State<WaterRowsScene>();
+			if (scene.rows)
+				a_fit.fit.familyRows[rowFamily.index] = static_cast<std::uint32_t>(std::min<std::uint64_t>(Draws::NamedUnits(a_fit.sealed, scene.rows), UINT32_MAX));
+		}
+
+		WaterRowsScene* RowsSceneOf(const Draws::SceneBuffers& a_scene) { return Extensions::SceneResourcesOf<WaterRowsScene>(a_scene, rowsScene); }
+
+		/** @brief Every commit uploads the adopted rows into the version it writes, once per change of their contents. */
+		void CommitRows(const Api::CommitContext& a_commit)
+		{
+			auto* scene = RowsSceneOf(a_commit.scene);
+			const auto* rows = AdoptedRowsOf(a_commit.tables);
+			if (!scene || !scene->rows || !rows)
+				return;
+			const auto& version = a_commit.adopted.Of(scene->rows);
+			if (scene->filled.Since(version) == rows->contentEpoch || rows->rows.size() > version.units)
+				return;
+			if (!rows->rows.empty())
+				a_commit.uploads(scene->rows, rows->rows.data(), rows->rows.size() * sizeof(WaterObjectRow), 0);
+			scene->filled.Filled(version, rows->contentEpoch);
+		}
+
+		void SelectRows(Api::FrameBindingSelect& a_select)
+		{
+			if (const auto* scene = RowsSceneOf(a_select.scene); scene && scene->rows)
+				a_select.buffer = &scene->rows;
 		}
 
 		// ---- The frame inputs, the material pool and the frame row. Render thread, apart from the producers.
@@ -432,6 +516,9 @@ namespace DCLF::Features::Water::WaterScene
 		rowFamily = a_context.RegisterTableFamily({ .name = "water rows", .make = &MakeRows, .assign = &AssignRows, .same = &SameRows, .clear = &ClearRows,
 			.recycle = &RecycleRow, .recordWord = kWaterRecordWord, .rows = &RowCount });
 		component = a_context.RegisterCoordinatorComponent({ .name = "water-rows", .make = &MakeRowsComponent, .residency = { .resident = &ListWater, .left = &UnlistWater } });
+		rowsScene = a_context.RegisterSceneResources({ .name = "water-rows", .setup = &SetupRowsScene, .registerGraph = &RegisterRowsGraph, .require = &RequireRows, .fit = &FitRows });
+		a_context.RegisterCommitHook({ .name = "water-rows", .commit = &CommitRows });
+		a_context.RegisterFrameBinding({ .name = "water object rows SRV", .textureRegister = Indirect::kObjectRowsRegister, .select = &SelectRows });
 		framePool = a_context.RegisterFrameValuePool({ .name = "water-frame", .stride = sizeof(WaterFrameRow), .kick = &KickFrame, .sample = &SampleFrame, .send = &SendFrame });
 		materialPool = a_context.RegisterFrameValuePool(
 			{ .name = "water-materials", .stride = sizeof(WaterMaterialRow), .kick = &KickMaterials, .sample = &SampleMaterials, .send = &SendMaterials });

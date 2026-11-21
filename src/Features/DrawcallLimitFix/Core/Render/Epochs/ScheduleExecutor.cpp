@@ -35,6 +35,7 @@ namespace DCLF::Draws
 			bool recordAtExecution = false;
 			bool gpuLate = false;
 			bool viewName = false;  // passName contains "{view}"
+			decltype(Api::PassDef::present) present = nullptr;
 		};
 
 		/**
@@ -272,7 +273,7 @@ namespace DCLF::Draws
 				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered pass {}, which {} has", a_who, a_pass.key, entry.who));
 		state.passes.push_back({ std::string(a_pass.key), std::string(a_pass.passName), std::string(a_who), a_pass.kind, a_pass.queue, a_pass.make, a_pass.emit,
 			a_pass.setup, a_pass.latchWord, a_pass.animatedRows, a_pass.frameRows, a_pass.cpuPipeline, a_pass.recordAtExecution, a_pass.gpuLate,
-			a_pass.passName.find(kViewToken) != std::string_view::npos });
+			a_pass.passName.find(kViewToken) != std::string_view::npos, a_pass.present });
 	}
 
 	Api::TriggerId FindTrigger(const Api::FrameSchedule& a_schedule, std::string_view a_id, std::string_view a_who)
@@ -364,6 +365,15 @@ namespace DCLF::Draws
 					frameRowsScheduled |= found == frameRowsPass;
 				}
 				resolved.passes.push_back({ found, hosted });
+			}
+			// An epoch whose every pass is absent in this install has nothing to record or submit.
+			const bool dormant = !resolved.passes.empty() && std::ranges::all_of(resolved.passes, [&](const ResolvedPass& a_pass) {
+				const auto present = state.passes[a_pass.pass].present;
+				return present && !present();
+			});
+			if (dormant) {
+				state.traits[row].dormant = true;
+				logger::info("[DCLF] schedule: the {} epoch is dormant (none of its passes is made in this install); it is never recorded or submitted", epoch.id);
 			}
 			state.epochs[shape].push_back(std::move(resolved));
 		}
@@ -626,8 +636,8 @@ namespace DCLF::Api
 		return Conditions().interior;
 	}
 
-	void PassOut::Add(std::string a_name, PassKind a_kind, std::shared_ptr<org::RenderPass> a_pass, PassQueue a_queue)
+	void PassOut::Add(std::string a_name, PassKind a_kind, std::shared_ptr<org::RenderPass> a_pass, PassQueue a_queue, bool a_recordAtExecution)
 	{
-		Draws::AddPass(out, a_kind, std::move(a_name), std::move(a_pass), epoch, a_queue);
+		Draws::AddPass(out, a_kind, std::move(a_name), std::move(a_pass), epoch, a_queue, a_recordAtExecution);
 	}
 }

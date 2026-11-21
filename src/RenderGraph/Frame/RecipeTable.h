@@ -98,6 +98,9 @@ namespace RenderGraph::Frame::Recipes::Table
 		bool switchesEverySlot = false;
 		// A point-ended stage commits just before any of these epochs is submitted (FrameAnchors::BeforeGpuWork), if it has not ended yet.
 		SegmentList commitBefore = Segments({});
+		// The same, but only while the stage holds staged work. A stage that staged nothing stays open, so its later steps take what
+		// follows. For an epoch that comes before the stage in some frames and inside it in others.
+		SegmentList commitBeforeIfStaged = Segments({});
 		std::string_view commit;      // where it commits, for the recipe print
 		std::string_view commitSite;  // the engine call that commits it
 		std::array<Epoch, kMaxEpochs> epochs{};
@@ -111,6 +114,8 @@ namespace RenderGraph::Frame::Recipes::Table
 
 	// Epochs whose submission commits the point-ended world stages when their usual next GPU work does not come.
 	inline constexpr Segment kEndsWorld[] = { Segment::Forward, Segment::FirstPerson, StageSegment(SegmentId::Post) };
+	// The epochs around the water: DCLF's water mask, the water stage, DCLF's water surface and the post-water stage.
+	inline constexpr Segment kWaterEpochs[] = { Segment::WaterMask, StageSegment(SegmentId::Water), Segment::WaterSurface, StageSegment(SegmentId::PostWater) };
 
 	/** @brief The world's stages in frame order. Recipe order is pass order. Each CS stage's comment names its commit point. */
 	inline constexpr std::array<Stage, kStages> kStageTable{ {
@@ -131,7 +136,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .point = true },
 			} },
 			.commitBefore = Segments({ Segment::ShadowView, Segment::SkyOcclusion, Segment::ZPrepass, Segment::FirstPersonDepth, Segment::MainOpaque,
-				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
+				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kWaterEpochs[0], kWaterEpochs[1], kWaterEpochs[2],
+				kWaterEpochs[3], kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's shadow view epoch, or Main::RenderShadowMaps' return",
 			.commitSite = "BeforeGpuWork, before DCLF's shadow view epoch or later GPU work; at the latest the EarlyPrepass hook's start (Deferred::EarlyPrepasses)",
 			.epochs = { Own(StageSegment(SegmentId::Start)) } },
@@ -156,7 +162,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .point = true },
 			} },
 			.commitBefore = Segments({ Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection, Segment::MainOpaque, StageSegment(SegmentId::PreMain),
-				StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
+				StageSegment(SegmentId::Deferred), kWaterEpochs[0], kWaterEpochs[1], kWaterEpochs[2], kWaterEpochs[3], kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy",
 			.commitSite = "BeforeGpuWork, before DCLF's Z-prepass or later GPU work; at the latest Main::RenderDepth's depth copy (Engine/Skeleton, RunCopy)",
 			.epochs = { Own(StageSegment(SegmentId::PreDepth)) } },
@@ -184,13 +190,15 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ Segment::MainOpaque, StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
+			.commitBefore = Segments({ Segment::MainOpaque, StageSegment(SegmentId::Deferred), kWaterEpochs[0], kWaterEpochs[1], kWaterEpochs[2], kWaterEpochs[3],
+				kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's main opaque epoch (the main pass's sky)",
 			.commitSite = "BeforeGpuWork, before DCLF's main opaque epoch or later GPU work; at the latest CS's depth copy in Deferred::DeferredPasses (Engine/Skeleton, RunCopy)",
 			.epochs = { Own(StageSegment(SegmentId::PreMain)) } },
 		{ .id = StageId::Opaque, .owner = Owner::Fragment, .name = "opaque", .commit = "the main pass's opaque batches", .epochs = { Covered(Segment::MainOpaque) } },
 		// Deferred+water: the deferred passes, composite, water mask, reflections, SSAO, kMAIN copy and water, after DCLF's main opaque.
-		// Commits just before DCLF's forward epoch. The water steps are gated and do nothing when no water is in view.
+		// Commits just before DCLF's water mask epoch, else just before DCLF's forward epoch. The water steps are gated and do nothing
+		// when no water is in view. It keeps every step to the water's end, for the frames DCLF submits no water epoch.
 		{ .id = StageId::Deferred,
 			.owner = Owner::Cs,
 			.name = "deferred+water",
@@ -212,13 +220,56 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
 				{ .point = true },
 			} },
+			.commitBefore = Segments({ kWaterEpochs[0], kWaterEpochs[2], kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
+			.commit = "just before DCLF's water mask epoch, else the engine's blended draw (just before DCLF's forward epoch)",
+			.commitSite = "BeforeGpuWork before DCLF's water mask epoch, else the engine's blended draw for the main accumulator (Features/Forward's ForwardHooks.cpp)",
+			.epochs = { Own(StageSegment(SegmentId::Deferred)) } },
+		// DCLF's water mask, at the engine's mask batch, in frames where DCLF has water to draw.
+		{ .id = StageId::WaterMask, .owner = Owner::Fragment, .name = "water mask", .commit = "the engine's water mask batch", .epochs = { Covered(Segment::WaterMask) } },
+		// Water: the deferred+water stage's steps after the mask, once DCLF's mask epoch ended that stage. The engine's mask of the water
+		// DCLF does not claim comes first. Commits just before DCLF's water surface epoch, else at the blended draw.
+		{ .id = StageId::Water,
+			.owner = Owner::Cs,
+			.name = "water",
+			.segment = SegmentId::Water,
+			.names = { "CS stage: water", "CS stage: water inputs", "FrameSegments::Water / " },
+			.steps = { {
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
+				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.world.scopes" } },
+				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
+				// Geometry group 10's water, which the engine draws just before the water batch, then the rest if no surface epoch comes.
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
+				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
+				{ .point = true },
+			} },
+			.commitBefore = Segments({ kWaterEpochs[2], kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
+			.commit = "just before DCLF's water surface epoch, else the engine's blended draw",
+			.commitSite = "BeforeGpuWork before DCLF's water surface epoch, else the engine's blended draw (ForwardHooks.cpp)",
+			.epochs = { Own(StageSegment(SegmentId::Water)) } },
+		// DCLF's water surface, at the engine's water batch. Under water that batch comes after the blended draw, inside the sun stage.
+		{ .id = StageId::WaterSurface, .owner = Owner::Fragment, .name = "water surface", .commit = "the engine's water batch", .epochs = { Covered(Segment::WaterSurface) } },
+		// Post-water: the steps after the water surface, once DCLF's surface epoch ended the stage before. The engine's water of the water
+		// DCLF does not claim comes first. Commits at the blended draw.
+		{ .id = StageId::PostWater,
+			.owner = Owner::Cs,
+			.name = "post-water",
+			.segment = SegmentId::PostWater,
+			.names = { "CS stage: post-water", "CS stage: post-water inputs", "FrameSegments::PostWater / " },
+			.steps = { {
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
+				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
+				{ .point = true },
+			} },
 			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "the engine's blended draw (just before DCLF's forward epoch)",
-			.commitSite = "the engine's blended draw for the main accumulator (Features/Forward's ForwardHooks.cpp), else BeforeGpuWork",
-			.epochs = { Own(StageSegment(SegmentId::Deferred)) } },
+			.commitSite = "the engine's blended draw for the main accumulator (ForwardHooks.cpp), else BeforeGpuWork",
+			.epochs = { Own(StageSegment(SegmentId::PostWater)) } },
 		{ .id = StageId::Forward, .owner = Owner::Fragment, .name = "forward", .commit = "the engine's blended draw", .epochs = { Covered(Segment::Forward) } },
 		// Sun: precipitation draws, then the sun occlusion query, which must reach the GPU before first-person geometry occludes the sun.
 		// Commits before the first-person epoch. Under water the engine's blended draw comes first, so the water steps land here instead.
+		// Under water DCLF's water surface epoch ends it if it holds work, and the sun water stage takes the rest.
 		{ .id = StageId::Sun,
 			.owner = Owner::Cs,
 			.name = "sun",
@@ -235,9 +286,28 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .point = true },
 			} },
 			.commitBefore = Segments({ Segment::FirstPerson, StageSegment(SegmentId::Post) }),
+			// Above water the surface epoch comes before this stage opens, so the stage must not end there while it holds nothing.
+			.commitBeforeIfStaged = Segments({ kWaterEpochs[2] }),
 			.commit = "just before DCLF's first-person epoch, or RenderWorldPostProcess' entry",
 			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work; at the latest RenderWorldPostProcess' entry (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Sun)) } },
+		// Sun water: under water, the sun stage's steps after DCLF's water surface epoch ended it. Commits as the sun stage does.
+		{ .id = StageId::SunWater,
+			.owner = Owner::Cs,
+			.name = "sun water",
+			.segment = SegmentId::SunWater,
+			.names = { "CS stage: sun water", "CS stage: sun water inputs", "FrameSegments::SunWater / " },
+			.steps = { {
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
+				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
+				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
+				{ .point = true },
+			} },
+			.commitBefore = Segments({ Segment::FirstPerson, StageSegment(SegmentId::Post) }),
+			.commit = "just before DCLF's first-person epoch, or RenderWorldPostProcess' entry",
+			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work; at the latest RenderWorldPostProcess' entry (Frame/PostChain.cpp)",
+			.epochs = { Own(StageSegment(SegmentId::SunWater)) } },
 		{ .id = StageId::FirstPerson, .owner = Owner::Fragment, .name = "first person", .commit = "Main::RenderFirstPersonView", .epochs = { Covered(Segment::FirstPerson) } },
 		// Post: RenderWorldPostProcess (SE 100430, AE 107148). First person's sun query, VL, the pre-tonemap composite, upscale and tonemap.
 		// Ends at a point at RenderEndOfFrameEffects' return. The upscaler's evaluate is recorded at execution in both modes.
@@ -322,7 +392,8 @@ namespace RenderGraph::Frame::Recipes::Table
 	};
 
 	inline constexpr std::array<StageId, kStages> kWorldStages{ StageId::Start, StageId::Shadows, StageId::PreDepth, StageId::Depth, StageId::PreMain, StageId::Opaque,
-		StageId::Deferred, StageId::Forward, StageId::Sun, StageId::FirstPerson, StageId::Post, StageId::Ui };
+		StageId::Deferred, StageId::WaterMask, StageId::Water, StageId::WaterSurface, StageId::PostWater, StageId::Forward, StageId::Sun, StageId::SunWater,
+		StageId::FirstPerson, StageId::Post, StageId::Ui };
 
 	/** @brief The frame kinds' recipes. A world frame and a frozen world's capture frame have every stage.
 	*  Every other kind has the UI stage alone. A stage a kind does not list is absent from its frames. */
