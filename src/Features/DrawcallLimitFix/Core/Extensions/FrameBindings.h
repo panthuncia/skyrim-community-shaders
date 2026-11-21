@@ -51,7 +51,7 @@ namespace DCLF::Api
 namespace DCLF::Extensions
 {
 	/** @brief Most frame bindings, because a build embeds their values. Grow this before registering more. */
-	inline constexpr std::size_t kFrameBindingSlots = 8;
+	inline constexpr std::size_t kFrameBindingSlots = 10;
 	/** @brief A binding value meaning select gave nothing, so the register keeps what the record set. */
 	inline constexpr std::uint32_t kNoFrameBinding = ~0u;
 	/** @brief The bindings' values for one frame, in registration order. */

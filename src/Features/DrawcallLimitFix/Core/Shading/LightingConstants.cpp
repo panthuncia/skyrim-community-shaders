@@ -420,7 +420,7 @@ namespace DCLF
 		shading.emitColor[1] = emissive ? emissive->green * mult : 0.0f;
 		shading.emitColor[2] = emissive ? emissive->blue * mult : 0.0f;
 		shading.ssrSpecular = ((GeometryPort::kMainPassRenderFlags & 2) ? 0.0f : 1.0f) * (specular ? a_property.specularLODFade : 0.0f);
-		a_out.padding[0] = a_out.padding[1] = 0u;
+		a_out.padding = 0u;
 		// The feature block as its contribution derives it now. The rest is zero.
 		float block[Api::kShadingBlockWords]{};
 		Extensions::DeriveShading(a_property, block);

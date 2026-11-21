@@ -27,6 +27,7 @@
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
+#include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/AdvancedSkin.h"
 #include "Features/DrawcallLimitFix/Integrations/CloudShadows/CloudShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/DynamicCubemaps/DynamicCubemaps.h"
@@ -63,6 +64,8 @@ namespace DCLF::Features
 			kPixelObjectsRegister,
 			Integrations::AdvancedSkin::kMaterialTableRegister,
 			Landscape::kSeamQuadsRegister,
+			Water::WaterScene::kMaterialPoolRegister,
+			Water::WaterScene::kFrameRowRegister,
 		};
 
 		constexpr bool FrameBindingRegistersValid()
@@ -314,6 +317,7 @@ namespace DCLF::Features
 		// Every record word a table family's reference uses. Within the record, none another's.
 		constexpr std::uint32_t kRecordWords[] = {
 			TreeWind::kTreeRecordWord,
+			Water::WaterScene::kWaterRecordWord,
 		};
 		// Every ancestor value's record word. Within the record, none a family's or another's.
 		constexpr std::uint32_t kAncestorRecordWords[] = {
@@ -447,6 +451,10 @@ namespace DCLF::Features
 	static_assert(TreeWind::kTreeRecordWord >= TreeWind::kRecordBlockWord && TreeWind::kTreeRecordWord + 2 <= TreeWind::kRecordBlockWord + Api::kShadingBlockWords,
 		"TreeWind's record word is outside the record's feature block");
 	static_assert(TreeWind::kTreeRecordWord == TreeWind::kRecordBlockWord + TreeWind::kBlockWindTimers + 2, "TreeWind's record word is not DCLFWindTimers.z");
+	// The water row's reference and tag sit in DCLFTreeParams.xy, inside the record block and clear of the tree's words.
+	static_assert(Water::WaterScene::kWaterRecordWord >= TreeWind::kRecordBlockWord &&
+	                  Water::WaterScene::kWaterRecordWord + 2 <= TreeWind::kRecordBlockWord + Api::kShadingBlockWords,
+		"the water row's record words are outside the record's feature block");
 	// The main range slots are BuildDrawsCS's ranges: the decal groups' (count words 19, 20, 27) and the terrain groups' (28, 29).
 	static_assert(Draws::kMainRangeSlotCount == static_cast<std::uint32_t>(Api::MainRangeSlot::Count) && Draws::kDecalGroups == Api::kFixedMainRanges,
 		"Api::MainRangeSlot is not GpuLayouts.h's range slots");

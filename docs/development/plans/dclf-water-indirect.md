@@ -447,3 +447,89 @@ Ids are Address Library ids, SE / AE.
   port reads. The next step is a runtime probe in Linear Lighting's WaterMaterialUpload, before its Unmap: log material +0x170
   and the mapped float at table[4]. If they agree with the port, the capture path (EnginePools' two copies, BufferContents)
   loses the value. If they show 0, something writes the material outside the code searched here.
+
+## 9. Phase 1 notes
+
+Written with phase 1's code (branch `dclf/water-p1`, 2026-11-21). Nothing was built or run when this was written. Ghidra reads are
+SE 1.5.97 and AE 1.6.1170; ids are Address Library ids, SE / AE.
+
+### 9.1 The code
+
+- `DCLF/Features/Water/Scene/`: `WaterSceneFeature.cpp` (the switch, `ObjectClass::Water`, its roots), `WaterScenePort.cpp` (the
+  material port), `WaterSceneCensus.cpp` (the census), `WaterSceneRows.cpp` (the water row family, the material pool, the frame
+  row). `WaterScene.h` holds the constants and the GPU row layouts. `WaterFeature.cpp` calls `WaterScene::Install` before its
+  graph-mode test, so the scene side does not need graph mode.
+- The switch: `CS_DCLF_WATER`. 0 (default) registers nothing. 1 registers the class, the port, the census, the family and the
+  pools, and claims nothing: the derive returns `Ineligible::WaterUnclaimed` for plain water and `WaterVariant` for the rest.
+- Log lines: `[DCLF] water scene: '<shape>' under '<parent>' (reference '<ref>', geometry <ptr>): <placement>, flags ..., stencil
+  bit ..., surface ... hint ..., stencil pass ..., <refusal>` once per shape (at most 1,024 a session), and at the report
+  schedule `[DCLF] water scene: N shapes tracked: ... tiles, ... LOD, ... procedural, ... cell or static; wading ..., hint 13 ...,
+  vertex colours ..., flowmap ...; plain ... (claimed from phase 2), refused: ...; verdicts now: ...; camera under water ...;
+  material pool ... rows for ... members`. The schedule is 300 frames with any parity or diagnostic switch set, 18,000 without.
+
+### 9.2 Roots and events
+
+- **WaterLOD** is `TES::objLODWaterRoot` (TES +0x90). The TES constructor (SE 0x140150ca0) takes it from the global SE 516930,
+  which holds the same node as `BGSTerrainManager`'s water node (516171 / 402322). It hangs under "LODRoot" (SE 516928), a
+  `BSClearZNode`, beside "LandLOD" (`TES::lodLandRoot`) and "DistantRefLOD". SE 35555 builds all three.
+  - Vanilla: `BGSTerrainChunk::Attach` (30934 / 31737) calls `TESWaterSystem::AddLODWater` (31404 / 32209) per water shape:
+    `AddWater`, then `WaterLOD->AttachChild` of the chunk's 'Water' `BSMultiBoundNode`.
+  - Unified Water: `BGSTerrainBlock_Attach` builds its tiles under the detached 'Water' node, runs `AddWater` and writes the
+    water flags, then attaches the node under WaterLOD. `_Detach` detaches the tiles by index and the node from WaterLOD.
+  - Each of these is `NiNode::AttachChild` or a detach, so SceneWriterFramework's child events cover them. No new hook.
+- **The water system's root** is `TESWaterSystem::waterRoot` (+0x90), a plain `NiNode` that the constructor (31381 / 32172,
+  SE 0x1404c5050) attaches under `TES::objRoot` ("ObjectLODRoot", SE 516929). `AddWater` (31388 / 32179) attaches
+  `BGSAutoWater`'s procedural clones under it with `AttachChild`. It is not a `BSMultiBoundNode`, so Core's gather never took it.
+- **Cell water and water in statics** hang under `objRoot`'s `BSMultiBoundNode` children (the census's
+  `ObjectLODRoot -> '' BSMultiBoundNode -> '' NiNode -> 'Water1024'`). Core already gathers those as category nodes, so these
+  shapes were tracked all along and refused as `not-lighting-shader`. With the port they take the port's verdict. No root needed.
+- **No double tracking.** An entry is keyed by its geometry and filed under its nearest category node, so a shape is never
+  tracked twice. The horse trough's Lighting shapes and its water shape are each one entry under the same multibound. WaterLOD
+  and the water system's root are under no other category node.
+- **AddWater attaches no shape** it is given. It writes the property's plane (+0xA0) and flag bit 0, then calls
+  `BSShaderProperty::SetMaterial`, a property event, so the record is captured again after both writes.
+- The roots come from a new `Api::ObjectClassContribution::categoryRoots`, a gather into `Api::CategoryRootSink`, read where
+  `categoryRoot` is read: every frame in the category inputs, and in each signature read and category capture.
+
+### 9.3 Classification
+
+The derive runs `Port::DeriveRenderPasses` on the record's capture with a frame-free input (water on, no interior, camera above
+water), so a verdict never depends on the camera.
+- **Placement** (the census, from the mirror's parents): under WaterLOD with the LOD bit (0x2) is LOD; under WaterLOD without it
+  is a tile (Unified Water never sets the bit); under the water system's root is procedural; anything else is cell or static.
+- **Attributes**: wading (flag bit 0, the Wading descriptor bit), hint 13 (the surface pass's hint), vertex colours (stencil pass
+  6E or 70), flowmap (0x8000), skinned. In the port, wading and hint 13 come from the same bit.
+- **Refusals** (`WaterVariant`): skinned, no single water-type bit at +0x8C, wading or hint 13, or Light Limit Fix not loaded.
+  Plain water is `WaterUnclaimed` until phase 2 returns `None` there.
+- **Underwater** is the frame's: GetRenderPasses writes `kUnderwater` from the camera. So the capture clears bit 5 and the census
+  reports the camera's state instead.
+- **The key**: the surface descriptor (raw in `rawVertex`/`rawPixel`, CS's lookup in `vertex`/`pixel`), and the stencil index
+  (1-7) in `LightingDescriptors::familyKeyBits`, which `KeyJoin` puts in the family's spare bits 21-23.
+  `WaterScene::MaskStencilRefOfKey` reads it back. `kRasterWater` comes from the program family's registration, as for Effect.
+
+### 9.4 Rows and registers
+
+- **Water row**: table family "water rows", `WaterObjectRow` (48 bytes: the cell and flow offsets as the property holds them, the
+  plane, the flags, the stencil bit, the surface descriptor, the generation). Record word 4 with the tag in 5
+  (`DCLFTreeParams.xy`, which only a tree's shading block fills). The "water-rows" component writes it on residency.
+  `Port::ObjectRow` is this row with the frame's flowmap values and Unified Water's rewrite from the world translate applied
+  (`Port::EvaluateObject`), so the shader computes it from this row, the frame row and the placement row.
+- **Material pool**: t58, `WaterMaterialRow` (320 bytes: VS b1 c0-c5 and PS b1 c0-c13 of `Port::EvaluateMaterial` with this
+  frame's inputs, unwritten components 0). Row 0 is none. `ShadingRowField::WaterMaterial` (`BindlessShading::waterMaterial`,
+  the old first padding word; `DCLFShadingRow.WaterMaterial` in HLSL) names each slot's row.
+- **Frame row**: t59, one `WaterFrameRow` (18 float4 rows, `WaterScene::FrameRowEntry`): `Port::TechniqueRows` with the Depth
+  bit, ProjData, the previous eye offset, the eye and timer, the flowmap and Unified Water values, the displacement offset, the
+  water lighting, flags and the view-projection.
+- The frame inputs are `Port::CaptureFrame` in the shading field's capture at the frame start. Both pools evaluate at the kick.
+- `kFrameBindingSlots` grew from 8 to 10, and `kMaterialKinds` from 2 to 3 (water is kind 2).
+
+### 9.5 Not settled
+
+- **Frame inputs at the frame start.** The camera rows (posAdjust, the view-projection, the eye) may be the previous frame's
+  there. The colour commit may be the right point; phase 0's parity observer can tell.
+- **The local scale** (`ObjectUV.z` under Unified Water) is not in the row, because the capture sees only the property. Under
+  WaterLOD the world scale is the local scale when the 'Water' node's scale is 1 (unverified).
+- **The material record** holds `Port::EvaluateMaterial` with a neutral frame (no fog, unit water lighting), plus SetupMaterial's
+  textures (SE 100604): t3 the material's +0x38 unless its +0x17D byte picks the global cube, t4-t6 +0x40, +0x48 and +0x50,
+  t9 +0x58 with the Flowmap bit. The flow normals' fallback (a global default normal map) is not bound.
+- **No cell category 6 root.** The census found no drawn water there. Interiors without a portal graph are unverified.

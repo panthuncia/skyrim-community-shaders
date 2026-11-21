@@ -136,9 +136,9 @@ namespace DCLF::Extensions
 		return false;
 	}
 
-	void CapturePort(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, const void*& a_emissive, std::uint32_t& a_feature)
+	void CapturePort(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, const void*& a_emissive, std::uint32_t& a_feature, std::array<float, 8>& a_values)
 	{
-		PortTable()[a_kind].capture({ a_property, a_emissive, a_feature });
+		PortTable()[a_kind].capture({ a_property, a_emissive, a_feature, a_values });
 	}
 
 	Ineligible DerivePort(std::uint8_t a_kind, const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf, LightingDescriptors& a_out)

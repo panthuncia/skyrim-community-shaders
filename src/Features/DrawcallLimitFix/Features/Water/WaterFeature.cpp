@@ -2,6 +2,7 @@
 // The engine side is WaterCapture.cpp and the graph side WaterDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterParity.h"
+#include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
@@ -17,6 +18,8 @@ namespace DCLF::Features::Water
 		void Install(Api::InstallContext& a_context)
 		{
 			Port::RegisterSwitches(a_context);
+			// The scene side does not need graph mode. In phase 1 it claims nothing, so the latch path below still draws all water.
+			WaterScene::Install(a_context);
 			if (!Enabled())
 				return;
 			InstallHooks();
