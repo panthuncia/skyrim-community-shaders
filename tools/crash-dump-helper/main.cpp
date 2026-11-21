@@ -14,6 +14,8 @@
 // lives in the suspended process. The stacks are walked the same way: each thread is suspended, read and resumed from here.
 //
 // Usage: CommunityShadersCrashDump.exe <process> <request event> <done event> <section> <crash dump path> (handles in decimal).
+//    or: CommunityShadersCrashDump.exe --pid <process id> <stacks text path> <minidump path>
+// The second form writes a hang report of a running game once, for the test harness before it kills a game.
 
 #include <Windows.h>
 
@@ -206,7 +208,8 @@ namespace
 					threads.push_back(entry.th32ThreadID);
 			CloseHandle(snapshot);
 		}
-		WriteThread(out, a_process, a_shared->threadId, true);
+		if (a_shared->threadId)
+			WriteThread(out, a_process, a_shared->threadId, true);
 		for (const auto thread : threads)
 			WriteThread(out, a_process, thread, false);
 		std::fclose(out);
@@ -217,6 +220,21 @@ namespace
 
 int wmain(int a_argc, wchar_t** a_argv)
 {
+	// The harness's form: every thread's stack, then a minidump, of a process it is about to kill.
+	if (a_argc == 5 && std::wcscmp(a_argv[1], L"--pid") == 0) {
+		const auto processId = static_cast<DWORD>(std::wcstoul(a_argv[2], nullptr, 10));
+		const HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
+		if (!process)
+			return 2;
+		Shared shared{};
+		shared.kind = RequestKind::kHang;
+		wcsncpy_s(shared.textPath, a_argv[3], _TRUNCATE);
+		wcsncpy_s(shared.dumpPath, a_argv[4], _TRUNCATE);
+		WriteStacks(process, &shared);
+		WriteMinidump(process, shared.dumpPath, &shared, false);
+		CloseHandle(process);
+		return shared.written ? 0 : 3;
+	}
 	if (a_argc != 6)
 		return 1;
 	const HANDLE process = HandleArg(a_argv[1]);

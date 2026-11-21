@@ -14,7 +14,7 @@ autoload_mod = "Start On Save"   # the MO2 mod that loads a save at the main men
 mods_off = ["Skyrim Engine Telemetry"]
 
 [expect]
-live_frames = 30             # at the exit, two shots 30 frames apart must differ: a frozen final target fails the run (0: off)
+live_frames = 0              # the two-shot frozen-image check: off (2026-11-21, its D3D11 fallback shots read black in guest). N: shots N frames apart must differ
 
 [dxvk]
 debug = "hang"               # DXVK's hang markers (DRED on D3D12); on for every run, timing runs too

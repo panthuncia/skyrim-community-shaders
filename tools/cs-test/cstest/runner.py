@@ -341,6 +341,10 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         if journal.owned():
             data = journal.load()
             if any(e.get("do") == "launch" for e in data.get("entries", [])):
+                # A game still running here is one the harness ends: its stacks first, beside the run's other files.
+                if run_dir is not None:
+                    helper = paths.mods / mo2.mod_for(paths, stage) / "SKSE" / "Plugins" / "CommunityShadersCrashDump.exe"
+                    procs.dump_before_kill(GAME_EXE, helper, run_dir, log=log)
                 procs.stop_game_and_mo2(GAME_EXE, MO2_EXE, log=log)
             journal_mod.undo(paths, data, log=log)
         if own_lock:

@@ -3,6 +3,7 @@
 import csv
 import io
 import subprocess
+from pathlib import Path
 import sys
 import time
 
@@ -150,6 +151,27 @@ def wait_gone(pids, seconds):
             return True
         time.sleep(0.5)
     return not any(alive(p) for p in pids)
+
+
+def dump_before_kill(game_image, helper, out_dir, log=print, timeout_s=180):
+    """Writes every thread's stack and a minidump of each running game (CommunityShadersCrashDump.exe --pid) before it is killed,
+    so a run the harness ends still leaves a hang report. Returns the files written."""
+    written = []
+    games = find(game_image)
+    if not games or not helper or not Path(helper).exists() or not out_dir:
+        return written
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    for pid in games:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        text = Path(out_dir) / f"CommunityShaders-Kill-{stamp}-{pid}.txt"
+        dump = Path(out_dir) / f"CommunityShaders-Kill-{stamp}-{pid}.dmp"
+        log(f"Writing the game's stacks and a minidump before the kill: {text.name}")
+        try:
+            subprocess.run([str(helper), "--pid", str(pid), str(text), str(dump)], capture_output=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            log(f"The dump of {pid} did not finish in {timeout_s} s; killing anyway")
+        written += [p.name for p in (text, dump) if p.exists()]
+    return written
 
 
 def stop_game_and_mo2(game_image, mo2_image, log=print, close_s=10):

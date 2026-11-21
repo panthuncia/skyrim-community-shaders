@@ -187,7 +187,7 @@ def test_every_shipped_config_resolves():
         resolve(name, ["build.stage=x"], schema=schema)
     contract, _ = resolve("native-vulkan+quick", (), schema=schema)
     assert contract["env"]["CS_ORG_NATIVE"] == "1" and contract["features_disabled"] == []
-    assert contract["expect"]["live_frames"] == 30
+    assert contract["expect"]["live_frames"] == 0
     contract, _ = resolve("native-d3d12-quick", (), schema=schema)
     assert contract["env"]["CS_ORG_NATIVE_BACKEND"] == "d3d12"
 
